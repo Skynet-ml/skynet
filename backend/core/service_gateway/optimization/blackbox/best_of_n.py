@@ -35,8 +35,11 @@ _BRIEF_MAX_READS = 256
 # literal ``<<`` is doubled, so file text that looks like a token stays text
 # and the round trip is exact. Both patterns share one run bound, so each
 # token the encoder writes decodes; a longer run splits into several tokens.
-_ESCAPE = re.compile("<<|`{3,9999}")
-_UNESCAPE = re.compile(r"<<<<|<<(\d{1,4}) backticks>>")
+# The reply is untrusted: the bound keeps a token of 16 bytes from decoding to
+# more than 99, so the decoded diff stays a few times the reply's size, and a
+# token above the bound stays text.
+_ESCAPE = re.compile("<<|`{3,99}")
+_UNESCAPE = re.compile(r"<<<<|<<(\d{1,2}) backticks>>")
 # The model writes the hunk header, so its counts are untrusted: the digits are
 # bounded, and a gap larger than a few stripped lines gets no padding at all.
 _HUNK_HEADER = re.compile(r"^@@ -\d{1,9}(?:,(\d{1,9}))? \+\d{1,9}(?:,(\d{1,9}))? @@", re.MULTILINE)
@@ -263,8 +266,9 @@ def _repository_brief(
         "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
         "repository root; an empty diff keeps the repository as it is.",
         "Inside the diff, write each run of three or more backticks as `<<N backticks>>`, where N is the "
-        "length of the run, and write each literal `<<` as `<<<<`, as the file contents below do. Skynet "
-        "turns each token back into backticks and each `<<<<` back into `<<`.",
+        "length of the run and at most 99 (split a longer run into several tokens), and write each literal "
+        "`<<` as `<<<<`, as the file contents below do. Skynet turns each token back into backticks and each "
+        "`<<<<` back into `<<`.",
         f"You may change: {editable or 'nothing'}.",
     ]
     if fixed:
@@ -291,21 +295,28 @@ def _repository_brief(
         data = read_file(seed.tree_id, path)
         if data is None:
             continue
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = None
-        # A NUL byte is valid UTF-8, but it marks a binary file.
-        if text is None or "\x00" in text:
-            notice = f"`{path}` is not text, so it is not shown."
+        no_room = f"`{path}` is not shown: the brief has no room for it."
+        # Escaping never shortens the text, so a file larger than the room
+        # cannot fit, and the brief does not decode or escape it.
+        if len(data) > room:
+            notice = no_room
         else:
-            # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
-            block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
-            if len(block.encode()) <= room:
-                room -= len(block.encode())
-                lines.append(block)
-                continue
-            notice = f"`{path}` is not shown: the brief has no room for it."
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            # A NUL byte is valid UTF-8, but it marks a binary file.
+            if text is None or "\x00" in text:
+                notice = f"`{path}` is not text, so it is not shown."
+            else:
+                # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
+                block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
+                size = len(block.encode())
+                if size <= room:
+                    room -= size
+                    lines.append(block)
+                    continue
+                notice = no_room
         room -= len(notice.encode())
         lines.append(notice)
     return "\n".join(lines)

@@ -6,6 +6,7 @@ subprocess boxes and a fake model: no network and no paid call.
 
 from __future__ import annotations
 
+import re
 import shlex
 import threading
 from collections import Counter
@@ -831,6 +832,41 @@ def test_a_repository_brief_reads_no_file_past_its_read_cap(
     assert text.endswith("\n1 more files are not shown.")
 
 
+class _UndecodableBytes(bytes):
+    """File bytes that fail the test when the brief decodes them."""
+
+    def decode(self, *args: Any, **kwargs: Any) -> str:
+        """Fail the test: the brief must not decode a file that has no room.
+
+        Args:
+            *args: The decode arguments.
+            **kwargs: The decode keyword arguments.
+
+        Returns:
+            Never returns.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("The brief decoded a file that has no room.")
+
+
+def test_a_repository_brief_does_not_decode_a_file_larger_than_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file larger than the room left gets the "no room" line before any decode or escape.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 100)
+    files: dict[str, bytes] = {"big.txt": _UndecodableBytes(b"x" * 101), "small.txt": b"ok"}
+    seed = RepoSeed("tree", editable_paths=("big.txt", "small.txt"))
+
+    text = _repository_brief(seed, lambda _tree, path: files.get(path), lambda _tree, _path: None)
+
+    assert "`big.txt` is not shown: the brief has no room for it." in text
+    assert "Current content of `small.txt`:\n```\nok\n```" in text
+
+
 def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_fence(
     brief: Callable[..., str],
 ) -> None:
@@ -967,6 +1003,30 @@ def test_a_hunk_header_with_a_huge_count_gets_no_padding(count: str, padding: in
     assert _as_patch(sample) == sample + "\n" + "\n" * padding
 
 
+_HEAD = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        _HEAD + "@@ -1,3 +1,4 @@\n a\n",
+        _HEAD + "@@ -1,4 +1,3 @@\n a\n",
+        _HEAD + "@@ -1,3 +1,3 @@\n a\ndiff --git a/x b/x\n",
+        _HEAD + "@@ -1,3 +1,3 @@\n a\n" + _HEAD + "@@ -1,3 +1,3 @@\n a\n-b\n+B\nnot a diff line\n",
+    ],
+)
+def test_a_hunk_that_empty_lines_cannot_complete_gets_no_padding(patch: str) -> None:
+    """A last hunk short of its header by unequal counts, or followed by a non-hunk line, stays as it is.
+
+    Only empty context lines lower both counts by one, so unequal gaps or a line that no hunk holds
+    mean that the strip did not cause the gap.
+
+    Args:
+        patch: A diff that ends with a newline.
+    """
+    assert _as_patch(patch) == patch
+
+
 def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -1079,9 +1139,36 @@ def test_backtick_escaping_round_trips_exactly(text: str) -> None:
 
 
 def test_a_backtick_run_longer_than_one_token_splits_into_tokens_that_decode() -> None:
-    """A run of more than 9,999 backticks becomes several tokens within the bound, never a raw fence."""
-    assert _escape_backticks("`" * 10_002) == "<<9999 backticks>><<3 backticks>>"
-    assert _escape_backticks("`" * 10_001) == "<<9999 backticks>>``"
+    """A run of more than 99 backticks becomes several tokens within the bound, never a raw fence."""
+    assert _escape_backticks("`" * 99) == "<<99 backticks>>"
+    assert _escape_backticks("`" * 102) == "<<99 backticks>><<3 backticks>>"
+    assert _escape_backticks("`" * 101) == "<<99 backticks>>``"
+
+
+@pytest.mark.parametrize("length", [98, 99, 100, 101, 102, 198, 199, 200, 1_000, 30_001])
+def test_a_long_backtick_run_round_trips_exactly_in_tokens_of_at_most_99(length: int) -> None:
+    """A long run of backticks comes back exactly, and no token the encoder writes is above the bound.
+
+    Args:
+        length: The run's length.
+    """
+    text = "a" + "`" * length + "b"
+    escaped = _escape_backticks(text)
+
+    assert "```" not in escaped
+    assert all(int(count) <= 99 for count in re.findall(r"<<(\d+) backticks>>", escaped))
+    assert _unescape_backticks(escaped) == text
+
+
+@pytest.mark.parametrize("token", ["<<100 backticks>>", "<<9999 backticks>>", "<<099 backticks>>"])
+def test_a_reply_token_above_the_bound_stays_text(token: str) -> None:
+    """A model token for more than 99 backticks is not expanded, so a short reply cannot decode to a huge diff.
+
+    Args:
+        token: A token above the bound.
+    """
+    assert _unescape_backticks(token) == token
+    assert _as_patch(token * 3) == token * 3 + "\n"
 
 
 def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
