@@ -1644,6 +1644,33 @@ def test_a_folder_with_only_hidden_files_looks_like_a_missing_folder(
     assert listed.exit_code != 0
 
 
+def test_listing_a_partly_hidden_folder_writes_no_object_and_works_after_the_step_log_closes(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing only reads: a folder that the filter thins out puts no tree object in the step log."""
+    hidden = hidden_hashes(["eval/metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    tree = _store(trees, {"eval/metric.py": b"secret", "eval/README.md": b"r", "src/a.py": b"a"})
+    put: list[str] = []
+    real_put = step_log.put_object
+
+    def spy(run_id: str, object_id: str, data: bytes) -> None:
+        put.append(object_id)
+        real_put(run_id, object_id, data)
+
+    monkeypatch.setattr(step_log, "put_object", spy)
+
+    assert loop.list_files(tree, "eval") == ["eval/README.md"]
+    assert put == []
+    step_log.close()
+    assert loop.list_files(tree, "eval") == ["eval/README.md"]
+
+
 def test_a_scorer_of_the_eval_server_cannot_read_a_hidden_path(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

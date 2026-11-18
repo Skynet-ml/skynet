@@ -536,7 +536,7 @@ class EngineLoop:
         folder = self._folder(tree_id, parts)
         prefix = "".join(f"{part}/" for part in parts)
         # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
-        if folder is None or (parts and self._visible(folder, prefix) is None):
+        if folder is None or (parts and not self._has_visible(folder, prefix)):
             return None
         files = self._files(folder, prefix)
         return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
@@ -799,6 +799,33 @@ class EngineLoop:
         if not kept:
             return None
         return self._trees.put_tree(self._run.run_id, kept)
+
+    def _has_visible(self, tree_id: str, prefix: str) -> bool:
+        """Tell whether a folder stays after the filter of ``_visible``, and write nothing.
+
+        A read must not put tree objects in the step log: they are rows nobody uses, and the write fails once
+        the step log is closed.
+
+        Args:
+            tree_id: The folder.
+            prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+
+        Returns:
+            ``False`` when the folder has entries and the filter leaves none of them; else ``True``.
+
+        Raises:
+            LookupError: When the run cannot see the tree or one of its folders.
+        """
+        entries = self._entries(tree_id)
+        if not entries:
+            return True
+        for name, entry in entries.items():
+            path = f"{prefix}{name}"
+            if hashed_kind(self._hidden, path) is not None:
+                continue
+            if entry.mode != "tree" or self._has_visible(entry.object_id, f"{path}/"):
+                return True
+        return False
 
     def _check_links(self, tree_id: str) -> str:
         """Stop the loop when a symlink of a tree that can hold hidden content could show a hidden path.
