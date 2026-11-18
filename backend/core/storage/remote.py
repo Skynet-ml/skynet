@@ -2043,11 +2043,26 @@ class RemoteDBJobStore:
                     )
                     return None
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
+                    if automatic:
+                        # A user's stop can close admission after the reads above, and it
+                        # wins over the budget stop (SKY-814). This read holds the budget
+                        # row lock until the commit below.
+                        budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                        if budget.blocked_reason in USER_STOP_REASONS:
+                            _end_user_stopped_requeue(
+                                session,
+                                optimization_id,
+                                int(job.execution_generation or 0),
+                                _interrupted_recovery(job.recovery, interrupted),
+                                budget.blocked_reason,
+                            )
+                            return None
                     if budget.blocked_reason is None:
                         budget_service.stop_admission(
                             job.execution_budget_id,
                             job.username,
                             reason="budget_reached",
+                            session=session,
                         )
                     _mark_resume_budget_stop(job)
                     ended_generation = int(job.execution_generation or 0)
@@ -2788,19 +2803,7 @@ class RemoteDBJobStore:
                         "interrupted_budget_generation": int(interrupted),
                         **({"cause": cause} if cause else {}),
                     }
-            if self.update_job_if_status(
-                identifier,
-                ("running", "validating"),
-                expected_generation=generation,
-                status="failed",
-                stop_reason="interrupted",
-                completed_at=now.isoformat(),
-                message=message,
-                recovery=ended_recovery,
-                claimed_by=None,
-                claimed_at=None,
-                lease_expires_at=None,
-            ):
+            if self._fail_orphan(identifier, generation, message, ended_recovery, now):
                 if ended_recovery is not None:
                     logger.warning(
                         "Orphaned run %s had no usage settlement progress for %s; it stopped as interrupted",
@@ -2810,6 +2813,84 @@ class RemoteDBJobStore:
                 self._note_ended_orphan(identifier, generation)
                 handled += 1
         return handled
+
+    def _fail_orphan(
+        self, optimization_id: str, generation: int, message: str, recovery: dict[str, Any] | None, now: datetime
+    ) -> bool:
+        """Fail an orphaned run that the sweep cannot recover, unless the user stopped it.
+
+        The user's cancel or pause closes admission before its status write,
+        and the API can stop between the two. The user's stop wins over the
+        sweep, so the sweep then writes the user's status and does not fail the
+        run (SKY-814). The job row lock, then the budget row lock, keep a later
+        stop from landing between the check and the failure.
+
+        Args:
+            optimization_id: The orphaned run.
+            generation: The execution generation that the sweep read.
+            message: The failure message.
+            recovery: The marker that the failed run keeps.
+            now: Time of the current sweep.
+
+        Returns:
+            Whether the sweep failed the run.
+        """
+        session = self._get_session()
+        try:
+            job = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .with_for_update()
+                .one_or_none()
+            )
+            if job is None:
+                return False
+            if job.execution_budget_id is not None:
+                try:
+                    budget = BudgetService(engine=self._engine).get(
+                        job.execution_budget_id, job.username, session=session
+                    )
+                except BudgetError:
+                    # The requeue can fail on the same budget error; the run still fails.
+                    budget = None
+                if budget is not None and budget.blocked_reason in USER_STOP_REASONS:
+                    _end_user_stopped_requeue(
+                        session,
+                        optimization_id,
+                        generation,
+                        recovery if recovery is not None else _interrupted_recovery(job.recovery),
+                        budget.blocked_reason,
+                    )
+                    return False
+            ended = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .update(
+                    {
+                        JobModel.status: "failed",
+                        JobModel.stop_reason: "interrupted",
+                        JobModel.completed_at: now,
+                        JobModel.message: message,
+                        JobModel.recovery: recovery,
+                        JobModel.claimed_by: None,
+                        JobModel.claimed_at: None,
+                        JobModel.lease_expires_at: None,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return ended > 0
+        finally:
+            session.close()
 
     def _wake_waiting_runs(self) -> int:
         """Move each paused run whose ``wake_at`` passed back to ``pending``, so a worker claims it.

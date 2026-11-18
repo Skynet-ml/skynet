@@ -9,6 +9,7 @@ lease runs out, and its buffered steps never flush in its own generation.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import pickle
 import time
 import uuid
@@ -1833,5 +1834,185 @@ def test_a_user_stop_that_the_sweep_wrote_first_reports_success(
     job = store.get_job(RUN)
     assert job["status"] == status
     assert job["recovery"] == INTERRUPTED
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", reason)
+
+
+@pytest.mark.parametrize("raises", ["resume_cap", "checkpoint"])
+@pytest.mark.parametrize(("reason", "expected", "status"), USER_STOPS, ids=["cancel", "pause"])
+def test_a_user_stop_wins_over_a_requeue_that_cannot_go_on(
+    store: StepJobStore,
+    step_logs: Any,
+    raises: str,
+    reason: str,
+    expected: tuple[str, ...],
+    status: str,
+) -> None:
+    """A stop whose status write never lands ends the run as the user asked, when the requeue raises (SKY-814).
+
+    The requeue raises before it reads the budget, so only the sweep's failure
+    write can see the user's closed admission.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        raises: Why the requeue cannot go on: the resume cap, or a checkpoint of a gone worker version.
+        reason: The reason the user's route closes admission with.
+        expected: The statuses that the route's status write requires; unused here.
+        status: The status that the sweep must write for the user.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    if raises == "resume_cap":
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+    else:
+        _set_job(store, code_version="old-version")
+        with Session(store.engine) as session:
+            session.add(GepaCheckpointModel(optimization_id=RUN, data=b"state"))
+            session.commit()
+    job = store.get_job(RUN)
+    BudgetService(engine=store.engine).stop_admission(job["execution_budget_id"], "owner", reason=reason)
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 0
+
+    job = store.get_job(RUN)
+    assert job["status"] == status
+    assert job["execution_generation"] == generation
+    assert store.take_ended_orphans() == []
+    budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", reason)
+
+
+@pytest.mark.parametrize(("reason", "expected", "status"), USER_STOPS, ids=["cancel", "pause"])
+def test_a_user_stop_wins_over_an_expired_usage_wait(
+    store: StepJobStore,
+    step_logs: Any,
+    reason: str,
+    expected: tuple[str, ...],
+    status: str,
+) -> None:
+    """A stop whose status write never lands ends the run as the user asked, when its usage wait expires (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        reason: The reason the user's route closes admission with.
+        expected: The statuses that the route's status write requires; unused here.
+        status: The status that the sweep must write for the user.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    service = BudgetService(engine=store.engine)
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    operation = service.reserve(
+        budget_id,
+        "owner",
+        operation_key="in-flight",
+        generation=0,
+        phase="run",
+        cost_kind="model",
+        request_fingerprint="in-flight",
+        price_snapshot={"version": "fixture-v1"},
+        max_cents=3,
+    )
+    service.mark_dispatched(operation.id, "owner")
+    _kill(store)
+    assert store.recover_orphaned_jobs() == 0
+    job = store.get_job(RUN)
+    assert (job["status"], job["recovery"]["phase"]) == ("running", "waiting_for_usage")
+    service.stop_admission(budget_id, "owner", reason=reason)
+    expired = datetime.now(UTC) - remote_mod.ORPHANED_USAGE_WAIT - timedelta(minutes=1)
+    _set_job(store, recovery={**job["recovery"], "waiting_since": expired.isoformat()})
+    _kill(store)
+
+    assert store.recover_orphaned_jobs() == 0
+
+    job = store.get_job(RUN)
+    assert job["status"] == status
+    assert job["recovery"] == INTERRUPTED
+    assert store.take_ended_orphans() == []
+    budget = service.get(budget_id, "owner")
+    assert (budget.state, budget.blocked_reason) == ("closed", reason)
+
+
+@pytest.mark.parametrize(("reason", "expected", "status"), USER_STOPS, ids=["cancel", "pause"])
+def test_a_user_stop_wins_over_a_budget_stop_of_the_requeue(
+    store: StepJobStore,
+    step_logs: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected: tuple[str, ...],
+    status: str,
+) -> None:
+    """A stop that lands after the sweep read a spent budget ends the run as the user asked (SKY-814).
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        monkeypatch: The pytest monkeypatch fixture.
+        reason: The reason the user's route closes admission with.
+        expected: The statuses that the route's status write requires; unused here.
+        status: The status that the sweep must write for the user.
+    """
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+    read = BudgetService.get
+    held: dict[str, int] = {}
+
+    def waived(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Note that this sweep waived the interrupted work, so its next budget read is the last unlocked one.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        held["waived"] = 1
+        return waive(self, *args, **kwargs)
+
+    def spent_then_stopped(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Show a spent budget to this sweep, then close admission as the user's route does.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The read's positional arguments.
+            **kwargs: The read's keyword arguments.
+
+        Returns:
+            The budget as this sweep read it, before the stop, with nothing left.
+        """
+        result = read(self, *args, **kwargs)
+        if held.pop("waived", None) is None:
+            return result
+        BudgetService(engine=store.engine).stop_admission(
+            store.get_job(RUN)["execution_budget_id"], "owner", reason=reason
+        )
+        return dataclasses.replace(result, available_cents=0)
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", waived)
+    monkeypatch.setattr(BudgetService, "get", spent_then_stopped)
+
+    assert store.recover_orphaned_jobs() == 0
+    monkeypatch.undo()
+
+    job = store.get_job(RUN)
+    assert job["status"] == status
+    assert job["recovery"] == INTERRUPTED
+    assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
     assert (budget.state, budget.blocked_reason) == ("closed", reason)
