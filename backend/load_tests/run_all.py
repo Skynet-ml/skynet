@@ -10,6 +10,12 @@ Knobs (env or flag):
     --no-down          keep the stack up after the run (debug failures)
     --scenarios=A,B    run a subset, in the listed order
 
+The SKY-727 scenarios (reference_shapes, chaos_gate, swarm_10k) run in
+process with a mock model and local or fake boxes. When only they are
+selected, the orchestrator starts no stack:
+
+    .venv/bin/python -m load_tests.run_all --scenarios=chaos_gate,swarm_10k --swarm-agents=10000
+
 Reports land in ``load_tests/results/<timestamp>.{json,md}`` and the
 console renders one block per scenario as it finishes so a long run does
 not feel silent.
@@ -28,10 +34,23 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+# The in-process scenarios import ``core``, and litellm fetches its price map over HTTPS at import unless this
+# is set. The Dockerfile sets the same value. It must come before the scenario imports.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 from .lib.metrics import ScenarioResult
 from .lib.reporter import print_result, write_json_report, write_markdown_report
 from .lib.warmup import warm_validation_cache
-from .scenarios import dashboard_read, failure_injection, full_lifecycle, mixed_realistic, submission_burst
+from .scenarios import (
+    chaos_gate,
+    dashboard_read,
+    failure_injection,
+    full_lifecycle,
+    mixed_realistic,
+    reference_shapes,
+    submission_burst,
+    swarm_10k,
+)
 
 _DEFAULT_COMPOSE_FILE = str(Path(__file__).resolve().parent / "docker-compose.loadtest.yml")
 _DEFAULT_API_URL = "http://127.0.0.1:58000"
@@ -51,7 +70,38 @@ _SCENARIOS: dict[str, ScenarioFn] = {
     "full_lifecycle": full_lifecycle.main,
     "dashboard_read": dashboard_read.main,
     "failure_injection": failure_injection.main,
+    "reference_shapes": reference_shapes.main,
+    "chaos_gate": chaos_gate.main,
+    "swarm_10k": swarm_10k.main,
 }
+
+# These scenarios need no compose stack: they run the new path in process and spend no money (SKY-727).
+_IN_PROCESS_SCENARIOS = frozenset({"reference_shapes", "chaos_gate", "swarm_10k"})
+
+# Each flag sets the environment variable that its scenario reads, so the scenario also runs alone.
+_SCENARIO_KNOBS = (
+    (
+        "--shape-rounds",
+        "LOAD_TEST_SHAPE_ROUNDS",
+        "model rounds of each shape run, for reference_shapes and for chaos_gate"
+        " (default: 2 for reference_shapes, 4 for chaos_gate)",
+    ),
+    ("--box-image", "LOAD_TEST_BOX_IMAGE", "local Docker image id for the shape boxes (default: local subprocesses)"),
+    ("--chaos-runs-per-shape", "LOAD_TEST_CHAOS_RUNS_PER_SHAPE", "chaos gate runs of each shape (default: 3)"),
+    ("--chaos-seed", "LOAD_TEST_CHAOS_SEED", "chaos job random seed (default: 727)"),
+    ("--swarm-agents", "LOAD_TEST_SWARM_AGENTS", "swarm agents (default: 1000; the capacity target is 10000)"),
+    (
+        "--swarm-steps-per-agent",
+        "LOAD_TEST_SWARM_STEPS_PER_AGENT",
+        "swarm steps of each agent, at least 2 (default: 10)",
+    ),
+    (
+        "--swarm-shards",
+        "LOAD_TEST_SWARM_SHARDS",
+        "step-log shards of the swarm's second pass, one OS process each (default: one for each 800 agents, 2 to 32)",
+    ),
+    ("--swarm-db-url", "LOAD_TEST_SWARM_DB_URL", "throwaway Postgres URL for the swarm (default: SQLite files)"),
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -79,7 +129,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenarios",
         default=",".join(_SCENARIOS),
-        help="Comma-separated scenario list (default: all, in submit→read→failure order)",
+        help=f"Comma-separated scenario list from: {', '.join(_SCENARIOS)} (default: all, in this order)",
     )
     parser.add_argument(
         "--compose-file",
@@ -111,6 +161,8 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Leave the stack running after the report (useful for triage)",
     )
+    for flag, env_name, text in _SCENARIO_KNOBS:
+        parser.add_argument(flag, dest=env_name, metavar="VALUE", default=None, help=f"{text}; sets {env_name}")
     return parser.parse_args()
 
 
@@ -204,6 +256,10 @@ def _ensure_env(args: argparse.Namespace) -> None:
     os.environ.setdefault("LOAD_TEST_MOCK_LM_URL", args.mock_lm_url)
     os.environ.setdefault("LOAD_TEST_COMPOSE_FILE", args.compose_file)
     os.environ.setdefault("LOAD_TEST_COMPOSE_PROJECT", args.compose_project)
+    for _, env_name, _ in _SCENARIO_KNOBS:
+        value = getattr(args, env_name)
+        if value is not None:
+            os.environ[env_name] = value
 
 
 async def _run_scenarios(names: list[str], api_url: str, mock_lm_url: str) -> list[ScenarioResult]:
@@ -253,23 +309,25 @@ async def _async_main() -> int:
     """
     args = _parse_args()
     _ensure_env(args)
+    names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+    needs_stack = any(name not in _IN_PROCESS_SCENARIOS for name in names)
 
-    if not args.skip_stack:
+    if needs_stack and not args.skip_stack:
         _bring_up(args)
 
     try:
-        _wait_for_http(f"{args.api_url}/health")
-        _wait_for_http(f"{args.frontend_url}/login")
-        warm = await warm_validation_cache(args.api_url)
-        print(
-            f"[loadtest] warmed validation cache: {warm['calls']} calls, "
-            f"{warm['failures']} failures, {warm['elapsed_seconds']:.1f}s "
-            f"(latencies_ms={[f'{ms:.0f}' for ms in warm['latencies_ms']]})"
-        )
-        names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+        if needs_stack:
+            _wait_for_http(f"{args.api_url}/health")
+            _wait_for_http(f"{args.frontend_url}/login")
+            warm = await warm_validation_cache(args.api_url)
+            print(
+                f"[loadtest] warmed validation cache: {warm['calls']} calls, "
+                f"{warm['failures']} failures, {warm['elapsed_seconds']:.1f}s "
+                f"(latencies_ms={[f'{ms:.0f}' for ms in warm['latencies_ms']]})"
+            )
         results = await _run_scenarios(names, args.api_url, args.mock_lm_url)
     finally:
-        if not args.skip_stack and not args.no_down:
+        if needs_stack and not args.skip_stack and not args.no_down:
             _bring_down(args)
 
     if not results:
