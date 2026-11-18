@@ -19,9 +19,11 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-Nothing here makes a live call to Stripe, OpenRouter, or any other provider;
-severing the local link is the whole of the operation. Deprovisioning the
-upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
+The only outside call is the tree purge, which deletes the account's step log
+packs from the tree bucket (SKY-733). Nothing here calls Stripe, OpenRouter,
+or any other provider; severing the local link is the whole of the operation.
+Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
+to a follow-up.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
     AgentEnginePreferenceModel,
@@ -526,6 +529,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     Returns:
         Counts of hard-deleted and anonymized rows.
+
+    Raises:
+        TreePurgeError: When a tree pack of the account cannot be deleted.
     """
     deleted = 0
     anonymized = 0
@@ -551,6 +557,8 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         anonymized += result.rowcount or 0
 
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
+    # Before the jobs go: their cascade would delete the steps without their pack keys.
+    deleted += tree_purge.purge_user(session, username, job_ids).deleted_rows
     if job_ids:
         _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
         _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))

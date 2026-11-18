@@ -55,11 +55,15 @@ from ...storage.models import (
     PushSubscriptionModel,
     SetupDraftModel,
     SlackConnectionModel,
+    StoragePackModel,
     TelemetryEventModel,
+    TreeObjectModel,
     UserConnectorModel,
     UserModel,
     WalletLedgerModel,
+    WorkspaceModel,
 )
+from ...storage.tree_purge import TreePurgeError
 from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -895,3 +899,45 @@ def test_refund_that_resolved_the_email_before_deletion_reverses_the_closure(ful
             ("closure", 300, None),
             ("refund", -300, 200),
         ]
+
+
+def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_schema_engine: Engine) -> None:
+    """Account deletion purges the trees, workspaces and own packs; a failed pack delete fails it (SKY-733)."""
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(WorkspaceModel(id="ws-1", username=_EMAIL))
+        session.add(StoragePackModel(pack_key="packs/w1/p1", worker_id="w1", byte_size=10))
+        session.add(
+            TreeObjectModel(
+                username=_EMAIL, object_id="o1", byte_size=10, pack_key="packs/w1/p1", pack_offset=0, pack_length=10
+            )
+        )
+        session.commit()
+
+    def _fail(key: str) -> None:
+        """Fail like an S3 outage.
+
+        Args:
+            key: The object key.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("S3 is down")
+
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=_fail), pytest.raises(TreePurgeError):
+        _delete(full_schema_engine)
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.scalars(select(TreeObjectModel)).one().pack_key == "packs/w1/p1"
+
+    deleted: list[str] = []
+    with patch("core.storage.tree_purge.bucket_deleter", return_value=deleted.append):
+        _delete(full_schema_engine)
+
+    assert deleted == ["packs/w1/p1"]
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+        assert session.scalars(select(TreeObjectModel)).all() == []
+        assert session.scalars(select(WorkspaceModel)).all() == []
+        assert session.scalars(select(StoragePackModel)).all() == []
