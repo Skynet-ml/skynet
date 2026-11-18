@@ -1968,10 +1968,11 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         loop.run(tree, f"cat {secret}")
     assert boxes.opened == 0
+    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks each listing.
+    lister, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
-        loop.list_files(tree)
-    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks ``file_ids``.
-    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
+        lister.list_files(tree)
+    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=3, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         fresh.file_ids(tree)
 
