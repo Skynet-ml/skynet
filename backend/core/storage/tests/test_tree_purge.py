@@ -229,7 +229,14 @@ def _rows(engine: Engine, username: str, run_ids: list[str]) -> tuple[int, int, 
 def test_purge_deletes_the_account_rows_and_its_own_pack(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
-    """The purge deletes the account's rows and the pack it alone used; the other account keeps all."""
+    """The purge deletes the account's rows and the pack it alone used; the other account keeps all.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
     bob_before = _rows(engine, "bob", [BOB_RUN])
     deleted: list[str] = []
 
@@ -253,7 +260,13 @@ def test_purge_deletes_the_account_rows_and_its_own_pack(
 
 
 def test_a_second_purge_deletes_nothing(engine: Engine, packs: dict[str, str], tmp_path: Path) -> None:
-    """The purge is idempotent: a second call succeeds and deletes nothing."""
+    """The purge is idempotent: a second call succeeds and deletes nothing.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
     deleted: list[str] = []
     _purge(engine, _deleter(tmp_path / "objects", deleted))
 
@@ -264,7 +277,13 @@ def test_a_second_purge_deletes_nothing(engine: Engine, packs: dict[str, str], t
 def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str]
 ) -> None:
-    """A failed S3 delete raises, and the rollback keeps every row of the account."""
+    """A failed S3 delete raises, and the rollback keeps every row of the account.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+    """
     before = _rows(engine, "ada", ADA_RUNS)
 
     def fail(keys: list[str]) -> None:
@@ -289,7 +308,13 @@ def test_a_failed_pack_delete_fails_the_purge_and_keeps_the_rows(
 def test_a_purge_with_packs_and_no_bucket_fails(
     engine: Engine, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no bucket set, a pack that must go fails the purge instead of staying behind."""
+    """With no bucket set, a pack that must go fails the purge instead of staying behind.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(settings, "tree_bucket", None)
 
     with pytest.raises(TreePurgeError, match="SKYNET_TREE_BUCKET"):
@@ -297,7 +322,12 @@ def test_a_purge_with_packs_and_no_bucket_fails(
 
 
 def test_a_purge_with_no_trees_needs_no_bucket(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An account with no packs purges its workspace with no bucket set."""
+    """An account with no packs purges its workspace with no bucket set.
+
+    Args:
+        engine: The test engine.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(settings, "tree_bucket", None)
 
     assert _purge(engine, None) == TreePurgeSummary(deleted_rows=1, deleted_packs=0)
@@ -310,6 +340,12 @@ def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
     """The second of two pack deletes fails; the retry deletes the rows, both packs and their rows.
 
     The first pack object is already gone when the retry deletes it again, and that is no error.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
     """
     step_log = StepLogStore(engine, objects, "w3", flush_window_seconds=60.0)
     try:
@@ -350,7 +386,14 @@ def test_a_retry_after_a_partial_pack_delete_deletes_the_rest(
 def test_the_compactor_rewrites_a_marked_full_pack_without_the_deleted_bytes(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
-    """A shared pack that the purge marks is rewritten alone, at any size, with only the live entries."""
+    """A shared pack that the purge marks is rewritten alone, at any size, with only the live entries.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
     root = tmp_path / "objects"
     assert b"job-1 a" in objects.get(packs["shared"])
     _purge(engine, _deleter(root, []))
@@ -417,7 +460,12 @@ def _compact(engine: Engine, objects: LocalObjectStore, root: Path) -> int:
 
 
 def test_a_pack_where_every_entry_lands_is_not_marked(engine: Engine, packs: dict[str, str]) -> None:
-    """Each step and object of both packs gets its row, so no pack gets ``needs_rewrite``."""
+    """Each step and object of both packs gets its row, so no pack gets ``needs_rewrite``.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+    """
     assert _marked(engine) == set()
 
 
@@ -427,6 +475,11 @@ def test_a_mixed_pack_applied_after_an_account_is_gone_is_marked_and_rewritten(
     """A pack written before the account deletion and applied after it loses the deleted account's bytes.
 
     The deleted account's entries get no row, so only the mark makes the compactor drop their bytes.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        tmp_path: Pytest's temporary folder.
     """
     step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
@@ -457,7 +510,13 @@ def test_a_mixed_pack_applied_after_an_account_is_gone_is_marked_and_rewritten(
 def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
     engine: Engine, objects: LocalObjectStore, tmp_path: Path
 ) -> None:
-    """A second run stores the same blob again: the copy gets no row, the pack gets the mark, and a rewrite drops it."""
+    """A second run stores the same blob again: the copy gets no row, the pack gets the mark, and a rewrite drops it.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        tmp_path: Pytest's temporary folder.
+    """
     step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
         trees = TreeStore(step_log)
@@ -486,7 +545,13 @@ def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
 def test_a_pack_with_a_stale_step_is_marked_and_rewritten_without_it(
     engine: Engine, objects: LocalObjectStore, tmp_path: Path
 ) -> None:
-    """A step with an old generation gets no row, so its pack gets the mark and a rewrite drops its bytes."""
+    """A step with an old generation gets no row, so its pack gets the mark and a rewrite drops its bytes.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        tmp_path: Pytest's temporary folder.
+    """
     step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
         for generation, output in ((0, "stale bytes"), (1, "live bytes")):
@@ -516,7 +581,12 @@ def test_a_pack_with_a_stale_step_is_marked_and_rewritten_without_it(
 
 
 def test_a_pack_with_a_step_that_already_has_a_row_is_marked(engine: Engine, objects: LocalObjectStore) -> None:
-    """A second store commits a step id that already landed: the first commit wins and the copy marks its pack."""
+    """A second store commits a step id that already landed: the first commit wins and the copy marks its pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+    """
     step = {
         "run_id": BOB_RUN,
         "agent_id": "agent-a",
@@ -549,6 +619,12 @@ def test_the_purge_keeps_a_young_unused_pack_until_the_grace_time_ends(
     """After a merge moves bob's rows off the shared pack, a reader may still GET it inside the grace time.
 
     The purge leaves the young unused packs; the compactor deletes them once the grace time ends.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
     """
     shared = packs["shared"]
     new = f"{tree_compactor.COMPACTED_PREFIX}/{uuid4().hex}.pack"
@@ -594,7 +670,12 @@ def test_the_purge_keeps_a_young_unused_pack_until_the_grace_time_ends(
 
 
 def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engine, packs: dict[str, str]) -> None:
-    """The first statement locks the account's jobs in key order; the packs are locked before any delete."""
+    """The first statement locks the account's jobs in key order; the packs are locked before any delete.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+    """
     statements: list[str] = []
 
     def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
@@ -656,7 +737,12 @@ def _record_with_parameters(engine: Engine) -> tuple[list[tuple[str, list[Any]]]
 def test_the_pack_lock_takes_each_chunk_in_key_order_for_update(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pack lock sorts the keys over the chunks, and each lock statement orders by key FOR UPDATE."""
+    """The pack lock sorts the keys over the chunks, and each lock statement orders by key FOR UPDATE.
+
+    Args:
+        engine: The test engine.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     keys = {f"packs/w1/{index:02d}" for index in range(12)}
     with Session(engine) as session:
         for key in keys:
@@ -776,7 +862,14 @@ def _purge_after_a_merge_moves_ada(
 def test_a_merge_between_the_key_read_and_the_lock_makes_the_purge_lock_the_union_in_order(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The purge finds the new pack after its lock, locks the union again in key order, and never locks after a delete."""
+    """The purge finds the new pack after its lock, locks the union again in key order, and never locks after a delete.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     new, locks, deleted = _purge_after_a_merge_moves_ada(engine, objects, packs, monkeypatch)
 
     assert locks == [
@@ -790,7 +883,14 @@ def test_a_merge_between_the_key_read_and_the_lock_makes_the_purge_lock_the_unio
 def test_the_purge_keeps_a_pack_that_a_merge_retired(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pack that the purge locked but whose rows a merge moved away stays for the compactor's grace time."""
+    """A pack that the purge locked but whose rows a merge moved away stays for the compactor's grace time.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     _, _, deleted = _purge_after_a_merge_moves_ada(engine, objects, packs, monkeypatch)
 
     assert packs["ada"] not in deleted
@@ -801,9 +901,19 @@ def test_the_purge_keeps_a_pack_that_a_merge_retired(
 
 
 def test_a_purge_whose_packs_keep_moving_fails_and_can_be_retried(
-    engine: Engine, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When the keys change on each read, the purge gives up after a few tries and deletes nothing."""
+    """When the keys change on each read, the purge gives up after a few tries and deletes nothing.
+
+    A retry when the keys stay still deletes the rows and the pack.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
     read = tree_purge._read_pack_keys
     before = _rows(engine, "ada", ADA_RUNS)
     reads: list[int] = []
@@ -829,9 +939,23 @@ def test_a_purge_whose_packs_keep_moving_fails_and_can_be_retried(
     assert len(reads) == tree_purge.PACK_LOCK_TRIES + 1
     assert _rows(engine, "ada", ADA_RUNS) == before
 
+    monkeypatch.setattr(tree_purge, "_read_pack_keys", read)
+    deleted: list[str] = []
+    _purge(engine, _deleter(tmp_path / "objects", deleted))
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
+    assert deleted == [packs["ada"]]
+    assert objects.list("") == [packs["shared"]]
+    with Session(engine) as session:
+        assert set(session.scalars(select(StoragePackModel.pack_key))) == {packs["shared"]}
+
 
 def test_an_open_purge_holds_the_account_job_and_pack_locks(engine: Engine, packs: dict[str, str]) -> None:
-    """Until it commits, the purge holds the account's job rows and the pack rows; a flush or merge waits or gives up."""
+    """Until it commits, the purge holds the account's job rows and the pack rows; a flush or merge waits or gives up.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+    """
     if engine.dialect.name != "postgresql":
         pytest.skip("Row locks need PostgreSQL.")
     with Session(engine) as purge, engine.connect() as other:
@@ -856,7 +980,11 @@ def test_an_open_purge_holds_the_account_job_and_pack_locks(engine: Engine, pack
 
 
 def test_bucket_deleter_deletes_from_the_tree_bucket_in_batches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default delete function sends DeleteObjects batches of at most 1000 keys to the tree bucket."""
+    """The default delete function sends DeleteObjects batches of at most 1000 keys to the tree bucket.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     calls: list[dict[str, Any]] = []
 
     def delete_objects(**kwargs: Any) -> dict[str, Any]:
@@ -884,7 +1012,11 @@ def test_bucket_deleter_deletes_from_the_tree_bucket_in_batches(monkeypatch: pyt
 
 
 def test_bucket_deleter_names_the_keys_that_s3_did_not_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A DeleteObjects response with Errors raises TreePurgeError with the failed keys."""
+    """A DeleteObjects response with Errors raises TreePurgeError with the failed keys.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     response = {
         "Errors": [{"Key": "packs/w1/b", "Code": "AccessDenied"}, {"Key": "packs/w1/a", "Code": "InternalError"}]
     }
@@ -899,7 +1031,13 @@ def test_bucket_deleter_names_the_keys_that_s3_did_not_delete(monkeypatch: pytes
 def test_a_bucket_that_cannot_open_fails_the_purge(
     engine: Engine, packs: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bucket with no boto3 fails the purge with TreePurgeError, not a bare RuntimeError."""
+    """A bucket with no boto3 fails the purge with TreePurgeError, not a bare RuntimeError.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(settings, "tree_bucket", "trees")
     monkeypatch.setattr(tree_compactor, "boto3", None)
 
@@ -909,7 +1047,13 @@ def test_a_bucket_that_cannot_open_fails_the_purge(
 
 
 def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: dict[str, str], tmp_path: Path) -> None:
-    """The row deletes return no pack key for each row; the counts come from the row counts."""
+    """The row deletes return no pack key for each row; the counts come from the row counts.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
     statements, stop = _record_with_parameters(engine)
     try:
         summary = _purge(engine, _deleter(tmp_path / "objects", []))
@@ -923,7 +1067,11 @@ def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: di
 
 
 def test_the_error_names_the_first_keys_and_the_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A DeleteObjects response with many Errors names the count and only the first few keys."""
+    """A DeleteObjects response with many Errors names the count and only the first few keys.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
     failed = [f"packs/w1/{index:02d}" for index in range(12)]
     response = {"Errors": [{"Key": key, "Code": "InternalError"} for key in reversed(failed)]}
     client = type("Client", (), {"delete_objects": lambda self, **kwargs: response})()
@@ -940,7 +1088,12 @@ def test_the_error_names_the_first_keys_and_the_count(monkeypatch: pytest.Monkey
 
 
 def test_a_job_delete_marks_the_packs_of_its_steps(engine: Engine, packs: dict[str, str]) -> None:
-    """Marking the packs of one deleted run marks both packs that hold its steps, before the steps go."""
+    """Marking the packs of one deleted run marks both packs that hold its steps, before the steps go.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+    """
     with Session(engine) as session:
         assert _marked(engine) == set()
         tree_purge.mark_run_packs(session, [ADA_RUNS[0], ADA_RUNS[0], "no-such-job"])
@@ -954,7 +1107,14 @@ def test_a_job_delete_marks_the_packs_of_its_steps(engine: Engine, packs: dict[s
 def test_a_job_delete_rewrites_the_shared_pack_without_the_run(
     engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
 ) -> None:
-    """After a run is deleted, the compactor rewrites the shared pack with only the entries that rows still use."""
+    """After a run is deleted, the compactor rewrites the shared pack with only the entries that rows still use.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+    """
     with Session(engine) as session:
         tree_purge.mark_run_packs(session, [BOB_RUN])
         session.execute(delete(AgentStepModel).where(AgentStepModel.run_id == BOB_RUN))
@@ -977,7 +1137,12 @@ def test_a_job_delete_rewrites_the_shared_pack_without_the_run(
 
 
 def test_a_job_delete_locks_the_jobs_then_the_packs_in_key_order(engine: Engine, packs: dict[str, str]) -> None:
-    """The mark locks the run's job first, then its packs ordered by key, before it marks any pack."""
+    """The mark locks the run's job first, then its packs ordered by key, before it marks any pack.
+
+    Args:
+        engine: The test engine.
+        packs: The shared pack and the pack of ``ada``.
+    """
     statements, stop = _record_with_parameters(engine)
     try:
         with Session(engine) as session:
