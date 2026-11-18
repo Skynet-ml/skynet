@@ -118,6 +118,8 @@ class _UpstreamServer:
         self.budget = loop_tools.Budget(server)
         self.eval_log: list[dict[str, Any]] = []
         self._candidate_registry: dict[str, int] = {}
+        # The versions with a NaN or infinite case score: a crash, as a metric error is (SKY-751).
+        self._non_finite: set[str] = set()
         # ``None`` until a finite score, so a run that scored nothing has no incumbent and fails loudly.
         self.best_score: float | None = None
         self.best_candidate: Any = None
@@ -161,6 +163,8 @@ class _UpstreamServer:
                 score, info = self._server.evaluate(candidate, case)
         except BudgetExhaustedError as error:
             raise BudgetExhausted(str(error)) from error
+        if score is not None and not math.isfinite(score):
+            self._non_finite.add(candidate_key(candidate))
         if score is not None and math.isfinite(score) and isinstance(info, dict) and candidate_id is not None:
             emit_scorer_feedback(
                 self._progress,
@@ -198,7 +202,12 @@ class _UpstreamServer:
             BudgetExhausted: When the budget cannot score every case.
         """
         del split
-        ids = list(self._cases) if example_ids is None else [eid for eid in example_ids if eid in self._cases]
+        # A repeated case is scored once, so the mean is over distinct cases, as the ranking and the log read it.
+        ids = (
+            list(self._cases)
+            if example_ids is None
+            else list(dict.fromkeys(e for e in example_ids if e in self._cases))
+        )
         if self.budget.remaining < len(ids):
             raise BudgetExhausted(f"Not enough budget to evaluate all examples: {self.budget.remaining} remaining")
         full = set(ids) == set(self._cases)
@@ -261,7 +270,7 @@ class _UpstreamServer:
         if isinstance(candidate, str) and math.isfinite(val_score):
             sweep = self._sweeps.pop(candidate_key(candidate), [])
             # A version with a crashed case shows no score (SKY-350, SKY-367).
-            shown = None if self._server.metric_error(candidate) is not None else val_score
+            shown = None if self.crashed(candidate) else val_score
             emit_candidate(
                 self._progress,
                 candidate_id=str(entry["candidate_id"]),
@@ -274,6 +283,17 @@ class _UpstreamServer:
                 iteration=None,
             )
         return {"val_score": val_score, "best_val_score": self._best_val_score}
+
+    def crashed(self, candidate: str) -> bool:
+        """Tell whether a version crashed on a case: a metric error, or a NaN or infinite score.
+
+        Args:
+            candidate: The version.
+
+        Returns:
+            ``True`` when the version must get no score.
+        """
+        return self._server.metric_error(candidate) is not None or candidate_key(candidate) in self._non_finite
 
     def _register(self, candidate: str) -> int:
         """Give a candidate its id: its place in the order of first registrations.
@@ -587,12 +607,13 @@ class AutoResearchEngine:
             sandbox=False,
             engine_config=engine_config,
         )
+        adapter = _UpstreamServer(server, task, ctx)
         upstream = _WorkerAutoResearch(config, ctx, max_tool_calls=proposer.max_tool_calls).run(
-            UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, task, ctx)
+            UpstreamTask(**native_task_payload(self.name, task)), adapter
         )
         # The incumbent always has a finite mean: the adapter keeps no non-finite best, and the ranking skips one.
         # A best version with a crashed case still has no score (SKY-350, SKY-367).
-        crashed = server.metric_error(upstream.best_candidate) is not None
+        crashed = adapter.crashed(upstream.best_candidate)
         return Result(
             best_candidate=upstream.best_candidate,
             best_score=None if crashed else upstream.best_score,

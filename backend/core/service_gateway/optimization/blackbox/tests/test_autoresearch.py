@@ -1105,12 +1105,16 @@ def test_a_run_with_no_finite_score_fails_and_reports_no_minus_infinity(
         _run(loop, cases=[], max_evals=2, score=lambda _loop, _candidate, _case: (None, {}))
 
 
+@pytest.mark.parametrize("bad", [None, math.nan, math.inf])
 def test_a_best_version_with_a_crashed_case_has_no_score(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    bad: float | None, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """Every version crashes on one case: the result keeps the best filled mean's version, with no score.
 
+    A NaN or infinite case score is a crash, as a metric error is (SKY-751).
+
     Args:
+        bad: The crashed case's score: a metric error, NaN or infinity.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -1127,17 +1131,62 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
             case: The case.
 
         Returns:
-            The score, or ``None`` for a crash, and no side information.
+            The score, or ``bad`` for a crash, and no side information.
         """
         del loop
-        return (None if case == _CASES[1] else float(len(str(candidate)))), {}
+        return (bad if case == _CASES[1] else float(len(str(candidate)))), {}
 
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
 
-    result = _run(loop, max_evals=4, stop_at_score=None, score=score)
+    result = _run(loop, events=events, max_evals=4, stop_at_score=None, score=score)
 
     assert result.best_candidate == "seedxx"
     assert result.best_score is None
+    assert [(data["score"], data["per_example"]) for kind, data in events if kind == PROGRESS_CANDIDATE] == [
+        (None, []),
+        (None, []),
+    ]
+
+
+def test_a_repeated_case_id_is_scored_once_and_the_mean_is_over_distinct_cases(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A sweep that names a case twice spends one call on it, and logs the mean that the ranking reads.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case by length and the second as zero.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        del loop
+        return (0.0 if case == _CASES[1] else float(len(str(candidate)))), {}
+
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0", "0", "1"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, max_evals=4, stop_at_score=None, score=score)
+
+    first = _tool_result(model, 2)
+    assert (first["average_score"], first["scores"], first["num_evaluated"]) == (2.5, {"0": 5.0, "1": 0.0}, 2)
+    assert first["budget"] == {"used": 2, "remaining": 2}
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [2.5, 3.0]
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedxx", 3.0, 4)
 
 
 def test_a_file_the_agent_deletes_does_not_come_back_from_an_earlier_round(
