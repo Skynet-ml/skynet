@@ -252,6 +252,7 @@
     "notifier.title.new": "Nuova ottimizzazione",
     "optimization.already_terminal": "L'ottimizzazione è già nello stato terminale '{status}'.",
     "optimization.cannot_delete": "Impossibile eliminare un'ottimizzazione nello stato '{status}'. Annullala prima.",
+    "optimization.deletion_storage_unavailable": "L'ottimizzazione non è stata eliminata: al momento non è stato possibile rimuovere i dati delle esecuzioni salvati. Riprova tra qualche minuto.",
     "optimization.cannot_resubmit_payload": "Impossibile reinviare il payload salvato: {error}",
     "optimization.clone_no_payload": "L'ottimizzazione di origine non ha alcun payload salvato da clonare.",
     "optimization.dataset_unavailable": "Il dataset dell'ottimizzazione non è disponibile.",

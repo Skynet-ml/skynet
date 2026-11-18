@@ -123,6 +123,7 @@
     "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
     "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
+    "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
     "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",
     "optimization.retry_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות להרצה חוזרת.",
     "optimization.retry_wrong_status": "אפשר להריץ מחדש רק {term.optimizationPlural} במצב 'נכשלה' או 'בוטלה' — זו במצב '{status}'. ניתן לשכפל אותה במקום.",

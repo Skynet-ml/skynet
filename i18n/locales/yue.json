@@ -242,6 +242,7 @@
     "notifier.title.new": "新嘅優化",
     "optimization.already_terminal": "優化已經處於終止狀態「{status}」。",
     "optimization.cannot_delete": "無法刪除處於「{status}」狀態嘅優化。請先取消佢。",
+    "optimization.deletion_storage_unavailable": "優化未刪除：而家刪除唔到佢儲存咗嘅運行數據。請過幾分鐘再試。",
     "optimization.cannot_resubmit_payload": "無法重新提交已儲存嘅 payload：{error}",
     "optimization.clone_no_payload": "來源優化冇已儲存嘅 payload 可以複製。",
     "optimization.dataset_unavailable": "優化嘅資料集無法使用。",

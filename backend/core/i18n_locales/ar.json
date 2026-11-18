@@ -252,6 +252,7 @@
     "notifier.title.new": "تحسين جديد",
     "optimization.already_terminal": "التحسين في حالة نهائية بالفعل '{status}'.",
     "optimization.cannot_delete": "لا يمكن حذف تحسين في الحالة '{status}'. ألغِه أولاً.",
+    "optimization.deletion_storage_unavailable": "لم يُحذف التحسين: تعذّر حذف بيانات التشغيل المخزّنة الخاصة به الآن. حاول مرة أخرى بعد بضع دقائق.",
     "optimization.cannot_resubmit_payload": "تعذّرت إعادة إرسال الحمولة المحفوظة: {error}",
     "optimization.clone_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لاستنساخها.",
     "optimization.dataset_unavailable": "مجموعة بيانات التحسين غير متاحة.",

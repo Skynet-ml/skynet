@@ -252,6 +252,7 @@
     "notifier.title.new": "بهینه‌سازی جدید",
     "optimization.already_terminal": "بهینه‌سازی هم‌اکنون در وضعیت پایانی '{status}' است.",
     "optimization.cannot_delete": "نمی‌توان بهینه‌سازی را در وضعیت '{status}' حذف کرد. ابتدا آن را لغو کنید.",
+    "optimization.deletion_storage_unavailable": "بهینه‌سازی حذف نشد: اکنون امکان حذف داده‌های ذخیره‌شدهٔ اجرای آن نبود. چند دقیقهٔ دیگر دوباره تلاش کنید.",
     "optimization.cannot_resubmit_payload": "نمی‌توان بار ذخیره‌شده را دوباره ارسال کرد: {error}",
     "optimization.clone_no_payload": "بهینه‌سازی مبدأ هیچ بار ذخیره‌شده‌ای برای کلون کردن ندارد.",
     "optimization.dataset_unavailable": "مجموعه‌داده‌ی بهینه‌سازی در دسترس نیست.",

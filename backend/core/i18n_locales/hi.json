@@ -252,6 +252,7 @@
     "notifier.title.new": "नया ऑप्टिमाइज़ेशन",
     "optimization.already_terminal": "ऑप्टिमाइज़ेशन पहले से ही टर्मिनल स्थिति '{status}' में है।",
     "optimization.cannot_delete": "'{status}' स्थिति में किसी ऑप्टिमाइज़ेशन को हटाया नहीं जा सकता। पहले इसे रद्द करें।",
+    "optimization.deletion_storage_unavailable": "ऑप्टिमाइज़ेशन नहीं हटाया गया: इसका सहेजा गया रन डेटा अभी नहीं हटाया जा सका। कुछ मिनट बाद फिर से कोशिश करें।",
     "optimization.cannot_resubmit_payload": "सहेजे गए पेलोड को पुनः सबमिट नहीं किया जा सकता: {error}",
     "optimization.clone_no_payload": "स्रोत ऑप्टिमाइज़ेशन में क्लोन करने के लिए कोई सहेजा गया पेलोड नहीं है।",
     "optimization.dataset_unavailable": "ऑप्टिमाइज़ेशन का डेटासेट अनुपलब्ध है।",

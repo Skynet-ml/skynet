@@ -20,6 +20,7 @@ from ....models import (
     BulkDeleteSkipped,
     JobDeleteResponse,
 )
+from ....storage.tree_purge import TreePurgeError
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import status_to_job_status
 from ...errors import DomainError
@@ -63,7 +64,8 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
         Raises:
             DomainError: 404 if unknown or inaccessible, 403 if the caller is
                 not an ``owner`` (admins and the creator qualify), 409 if still
-                active.
+                active, 503 if the run's stored tree data cannot be deleted now
+                (the run stays, so a retry can delete it).
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.owner)
 
@@ -75,7 +77,11 @@ def register_deletion_routes(router: APIRouter, *, job_store) -> None:
                 params={"status": status.value},
             )
 
-        job_store.delete_job(optimization_id)
+        try:
+            job_store.delete_job(optimization_id)
+        except TreePurgeError as exc:
+            logger.exception("Optimization %s not deleted: its stored tree data was not deleted", optimization_id)
+            raise DomainError("optimization.deletion_storage_unavailable", status=503) from exc
         logger.info("Optimization %s deleted", optimization_id)
         return JobDeleteResponse(optimization_id=optimization_id, deleted=True)
 

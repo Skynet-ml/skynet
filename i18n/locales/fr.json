@@ -252,6 +252,7 @@
     "notifier.title.new": "Nouvelle optimisation",
     "optimization.already_terminal": "L'optimisation est déjà dans l'état terminal '{status}'.",
     "optimization.cannot_delete": "Impossible de supprimer une optimisation dans l'état '{status}'. Annulez-la d'abord.",
+    "optimization.deletion_storage_unavailable": "L'optimisation n'a pas été supprimée : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
     "optimization.cannot_resubmit_payload": "Impossible de resoumettre la charge utile enregistrée : {error}",
     "optimization.clone_no_payload": "L'optimisation source n'a aucune charge utile enregistrée à cloner.",
     "optimization.dataset_unavailable": "Le jeu de données de l'optimisation est indisponible.",

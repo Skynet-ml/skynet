@@ -252,6 +252,7 @@
     "notifier.title.new": "Neue Optimierung",
     "optimization.already_terminal": "Die Optimierung befindet sich bereits im Endzustand '{status}'.",
     "optimization.cannot_delete": "Eine Optimierung im Zustand '{status}' kann nicht gelöscht werden. Brechen Sie sie zuerst ab.",
+    "optimization.deletion_storage_unavailable": "Die Optimierung wurde nicht gelöscht: Die gespeicherten Laufdaten konnten gerade nicht entfernt werden. Versuchen Sie es in einigen Minuten erneut.",
     "optimization.cannot_resubmit_payload": "Die gespeicherte Nutzlast kann nicht erneut übermittelt werden: {error}",
     "optimization.clone_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast zum Klonen.",
     "optimization.dataset_unavailable": "Der Datensatz der Optimierung ist nicht verfügbar.",

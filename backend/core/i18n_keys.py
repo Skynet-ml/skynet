@@ -291,6 +291,7 @@ class I18nKey(StrEnum):
     OPTIMIZATION_CANNOT_RESUBMIT_PAYLOAD = 'optimization.cannot_resubmit_payload'
     OPTIMIZATION_CLONE_NO_PAYLOAD = 'optimization.clone_no_payload'
     OPTIMIZATION_DATASET_UNAVAILABLE = 'optimization.dataset_unavailable'
+    OPTIMIZATION_DELETION_STORAGE_UNAVAILABLE = 'optimization.deletion_storage_unavailable'
     OPTIMIZATION_DSPY_RUN_RETIRED = 'optimization.dspy_run_retired'
     OPTIMIZATION_INSUFFICIENT_ROLE = 'optimization.insufficient_role'
     OPTIMIZATION_NO_RESULT_PENDING = 'optimization.no_result_pending'

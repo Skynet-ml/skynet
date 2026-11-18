@@ -252,6 +252,7 @@
     "notifier.title.new": "Yeni optimizasyon",
     "optimization.already_terminal": "Optimizasyon zaten '{status}' nihai durumunda.",
     "optimization.cannot_delete": "'{status}' durumundaki bir optimizasyon silinemez. Önce iptal edin.",
+    "optimization.deletion_storage_unavailable": "Optimizasyon silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
     "optimization.cannot_resubmit_payload": "Kaydedilen yük yeniden gönderilemez: {error}",
     "optimization.clone_no_payload": "Kaynak optimizasyonun kopyalanacak kayıtlı bir yükü yok.",
     "optimization.dataset_unavailable": "Optimizasyonun veri kümesi kullanılamıyor.",

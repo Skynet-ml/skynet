@@ -252,6 +252,7 @@
     "notifier.title.new": "新优化",
     "optimization.already_terminal": "优化已处于终止状态 '{status}'。",
     "optimization.cannot_delete": "无法删除处于 '{status}' 状态的优化。请先取消它。",
+    "optimization.deletion_storage_unavailable": "优化未删除：目前无法删除其存储的运行数据。请几分钟后重试。",
     "optimization.cannot_resubmit_payload": "无法重新提交已保存的载荷：{error}",
     "optimization.clone_no_payload": "源优化没有可克隆的已保存载荷。",
     "optimization.dataset_unavailable": "该优化的数据集不可用。",

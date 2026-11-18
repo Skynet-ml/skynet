@@ -252,6 +252,7 @@
     "notifier.title.new": "新規最適化",
     "optimization.already_terminal": "最適化はすでに終了状態 '{status}' です。",
     "optimization.cannot_delete": "状態 '{status}' の最適化は削除できません。先にキャンセルしてください。",
+    "optimization.deletion_storage_unavailable": "最適化は削除されませんでした。保存された実行データを今は削除できませんでした。数分後にもう一度お試しください。",
     "optimization.cannot_resubmit_payload": "保存されたペイロードを再送信できません: {error}",
     "optimization.clone_no_payload": "複製元の最適化に、複製できる保存済みペイロードがありません。",
     "optimization.dataset_unavailable": "最適化のデータセットが利用できません。",
