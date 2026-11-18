@@ -13,6 +13,7 @@ from ..protocol import (
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
+    ModelReplyTooDeepError,
     ScorerAbortError,
     Task,
     candidate_key,
@@ -454,6 +455,36 @@ def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, ex
     }
 
     assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
+
+
+def _deep_list(levels: int) -> list[Any]:
+    """Build a list nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested lists.
+
+    Returns:
+        ``[[...[]...]]``, ``levels`` lists deep.
+    """
+    value: list[Any] = []
+    for _ in range(levels - 1):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize("arguments", ["[" * 5000 + "]" * 5000, _deep_list(5000)], ids=["text", "value"])
+def test_tool_calls_from_openai_gives_a_clear_error_for_arguments_that_nest_too_deep(arguments: Any) -> None:
+    """Arguments past Python's recursion limit, as text or as a value, raise a named error, not RecursionError.
+
+    Args:
+        arguments: The deep arguments, as JSON text to read or as a value to write as JSON text.
+    """
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    with pytest.raises(ModelReplyTooDeepError, match="'call_x' nest too deep"):
+        tool_calls_from_openai(message)
 
 
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
