@@ -1471,12 +1471,35 @@ def _nested(levels: int) -> dict[str, Any]:
     return value
 
 
+def _nested_tuples(levels: int) -> dict[str, Any]:
+    """Build tool call arguments that hold tuples nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested tuples.
+
+    Returns:
+        ``{"a": ((... (),),)}``, with ``levels`` tuples under the outer object.
+    """
+    value: tuple[Any, ...] = ()
+    for _ in range(levels - 1):
+        value = (value,)
+    return {"a": value}
+
+
+# An in-process model client can give tool calls that hold tuples, which the JSON encoder also walks recursively.
+@pytest.mark.parametrize("arguments", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
 def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    arguments: dict[str, Any],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
 ) -> None:
     """A reply too deep for the commit's JSON encoder gives the engine a failed call, not a stop, and keeps its cost.
 
     Args:
+        arguments: Tool call arguments nested 2000 levels, in objects or in tuples.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -1485,7 +1508,7 @@ def test_a_reply_nested_past_the_bound_is_a_failed_model_call_with_its_cost_and_
     """
     first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     # 2000 levels is past Python's default recursion limit, so the commit's JSON encoder raised RecursionError.
-    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": _nested(2000)}]
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
     with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
         first.call_model("improve seed", _TOOLS)
     assert live.value.cost_cents == Decimal(1)

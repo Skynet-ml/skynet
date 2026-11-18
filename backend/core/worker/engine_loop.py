@@ -277,7 +277,7 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
         else:
             continue
         if depth > _MAX_REPLY_DEPTH:
-            raise ModelReplyTooDeepError(f"The model reply nests more than {_MAX_REPLY_DEPTH} levels.")
+            raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
         stack.extend((child, depth + 1) for child in children)
     # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
     # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
