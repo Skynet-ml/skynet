@@ -27,6 +27,12 @@ flush. The step id holds no generation, so the buffer and each verdict are
 kept by step id and generation. The store keeps only the newest
 ``FENCE_VERDICT_MAX`` verdicts of a step and of an agent in memory. A kept
 verdict is the step id, not an error: each raise makes a new error.
+
+Shards (SKY-731): every read and write of the step tables goes to the run's
+shard from :class:`~core.storage.shard_map.ShardMap`. A flush writes one
+pack for each shard in its batch, and the manifest names the shard, so
+recovery applies the pack there. The fence still locks the ``jobs`` rows on
+the main database, and holds the locks until the shard transaction commits.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from .base import ObjectStore
 from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
+from .shard_map import MAIN, ShardMap
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +144,18 @@ def _check_run_id(run_id: str) -> None:
         raise ValueError(f"run_id must not hold a ':': {run_id!r}")
 
 
+def _run_of(step_id: str) -> str:
+    """Return the run id of a step id.
+
+    Args:
+        step_id: ``<run_id>:<agent_id>:<seq>``.
+
+    Returns:
+        The run id: the part before the first ``:``.
+    """
+    return step_id.split(":", 1)[0]
+
+
 def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
     """Keep a fence verdict as the newest one and drop the oldest one above ``FENCE_VERDICT_MAX``.
 
@@ -195,11 +214,12 @@ def _encode_body(body: dict[str, Any]) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def _build_pack(worker_id: str, batch: list[tuple[_Step | _Object, bytes]]) -> tuple[bytes, dict[str, Any]]:
+def _build_pack(worker_id: str, shard: str, batch: list[tuple[_Step | _Object, bytes]]) -> tuple[bytes, dict[str, Any]]:
     """Lay out a batch as one pack.
 
     Args:
         worker_id: The worker that writes the pack.
+        shard: The shard that records the pack.
         batch: The buffered entries with their bytes, in commit order.
 
     Returns:
@@ -217,7 +237,7 @@ def _build_pack(worker_id: str, batch: list[tuple[_Step | _Object, bytes]]) -> t
             objects.append({"run_id": item.run_id, "object_id": item.object_id, **location})
         parts.append(data)
         offset += len(data)
-    manifest = {"version": PACK_VERSION, "worker_id": worker_id, "steps": steps, "objects": objects}
+    manifest = {"version": PACK_VERSION, "worker_id": worker_id, "shard": shard, "steps": steps, "objects": objects}
     footer = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
     return b"".join(parts) + footer + _FOOTER.pack(len(footer)), manifest
 
@@ -246,6 +266,7 @@ class StepLogStore:
         *,
         flush_window_seconds: float | None = None,
         flush_max_bytes: int | None = None,
+        shards: ShardMap | None = None,
     ) -> None:
         """Bind the store and start its flusher thread.
 
@@ -258,12 +279,13 @@ class StepLogStore:
             flush_window_seconds: The buffer window, above 0 and at most
                 ``threading.TIMEOUT_MAX``; ``None`` reads the setting.
             flush_max_bytes: The buffer size cap, at least 1; ``None`` reads the setting.
+            shards: The shard map over ``engine``; ``None`` reads ``STEP_LOG_SHARDS``.
 
         Raises:
             ValueError: When ``worker_id`` is empty, too long, not printable
                 ASCII, has a ``/``, or is ``.`` or ``..``; or when the window is
                 not above 0 or is above ``threading.TIMEOUT_MAX``, or the size
-                cap is below 1.
+                cap is below 1; or when the shard map is over another main engine.
         """
         # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
         if (
@@ -273,7 +295,11 @@ class StepLogStore:
             or worker_id in {".", ".."}
         ):
             raise ValueError(f"bad worker id: {worker_id!r}")
+        shards = ShardMap.from_settings(engine) if shards is None else shards
+        if shards.main is not engine:
+            raise ValueError("the shard map is over another main engine")
         self._engine = engine
+        self._shards = shards
         self._objects = objects
         self._worker_id = worker_id
         window = settings.step_log_flush_window_seconds if flush_window_seconds is None else flush_window_seconds
@@ -289,9 +315,9 @@ class StepLogStore:
         self._pending: list[tuple[_Step | _Object, bytes]] = []
         self._pending_bytes = 0
         self._first_at: float | None = None
-        # A pack in the object store whose transaction failed: its key, size, manifest and batch.
+        # A pack in the object store whose transaction failed: its shard, key, size, manifest and batch.
         # Its entries stay in the memtable and its waiters stay open until a flush records it.
-        self._unapplied: tuple[str, int, dict[str, Any], list[tuple[_Step | _Object, bytes]]] | None = None
+        self._unapplied: tuple[str, str, int, dict[str, Any], list[tuple[_Step | _Object, bytes]]] | None = None
         # The memtable: buffered and in-flight entries by step id, then by generation, until their flush commits.
         self._steps: dict[str, dict[int, tuple[_Step, bytes]]] = {}
         # Keyed by run, so an unflushed object never reaches another account and each owner counts its own bytes.
@@ -468,12 +494,14 @@ class StepLogStore:
                 raise RuntimeError(f"the step log closed before step {step_id} was durable")
             failure = waiter.failure
         elif failure is None:
-            with Session(self._engine) as session:
+            with self._shards.for_run(_run_of(step_id)) as session:
                 row = session.get(AgentStepModel, step_id)
                 if row is None:
                     raise KeyError(step_id)
+                run_id = row.run_id
+            with Session(self._engine) as session:
                 current = session.scalar(
-                    select(JobModel.execution_generation).where(JobModel.optimization_id == row.run_id)
+                    select(JobModel.execution_generation).where(JobModel.optimization_id == run_id)
                 )
             if current != execution_generation:
                 failure = step_id
@@ -493,11 +521,12 @@ class StepLogStore:
         Returns:
             The step fields and ``body``, or ``None`` when no live step has the id.
         """
+        engine = self._shards.engine_for(_run_of(step_id))
         # Read the buffer before the row: the flush drops a step from the buffer only after its row commits.
         with self._cond:
             versions = self._steps.get(step_id)
             buffered = versions[max(versions)] if versions else None
-        with Session(self._engine) as session:
+        with Session(engine) as session:
             row = session.get(AgentStepModel, step_id)
             if row is not None:
                 record = {name: getattr(row, name) for name in _STEP_FIELDS}
@@ -528,28 +557,40 @@ class StepLogStore:
         if buffered is not None:
             return buffered
         # The same ``or ""`` as the flush, so a job without a username reads what the flush stored for it.
-        owner = select(func.coalesce(JobModel.username, "")).where(JobModel.optimization_id == run_id).scalar_subquery()
         with Session(self._engine) as session:
-            row = session.scalars(
-                select(TreeObjectModel).where(TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner)
-            ).first()
-            if row is None:
-                return None
-            location = (row.pack_key, row.pack_offset, row.pack_length)
-        return self._objects.get(*location)
+            owner = session.scalar(
+                select(func.coalesce(JobModel.username, "")).where(JobModel.optimization_id == run_id)
+            )
+        if owner is None:
+            return None
+        # The run's own shard first; another run of the account can have stored the object on another shard.
+        first = self._shards.shard_of(run_id)
+        for name in (first, *(name for name in self._shards.names() if name != first)):
+            with Session(self._shards.engine(name)) as session:
+                row = session.scalars(
+                    select(TreeObjectModel).where(
+                        TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner
+                    )
+                ).first()
+                location = None if row is None else (row.pack_key, row.pack_offset, row.pack_length)
+            if location is not None:
+                return self._objects.get(*location)
+        return None
 
     def flush(self) -> None:
-        """Write the pending batch now: one pack PUT, then one Postgres transaction.
+        """Write the pending batch now: for each shard in it, one pack PUT, then one transaction.
 
-        When the PUT fails, the batch goes back to the front of the buffer.
-        When the transaction fails after the PUT, the store keeps the written
-        pack, and the next flush records that pack first, with no new PUT.
-        Until then, the next flush writes no new pack.
+        When a PUT fails, that shard's entries and the entries of the shards
+        after it go back to the front of the buffer. When a transaction fails
+        after its PUT, the store keeps the written pack, and the entries of
+        the shards after it go back to the buffer. The next flush records
+        the kept pack first, with no new PUT. Until then, the next flush
+        writes no new pack.
         """
         with self._flush_lock:
             if self._unapplied is not None:
-                key, size, manifest, batch = self._unapplied
-                _, stale = self._apply(key, size, manifest)
+                shard, key, size, manifest, batch = self._unapplied
+                _, stale = self._apply(shard, key, size, manifest)
                 with self._cond:
                     self._unapplied = None
                 self._settle(batch, stale)
@@ -559,26 +600,61 @@ class StepLogStore:
             if not batch:
                 return
             try:
-                pack, manifest = _build_pack(self._worker_id, batch)
-                key = f"{PACK_PREFIX}/{self._worker_id}/{time.time_ns():020d}-{uuid4().hex}.pack"
-                self._objects.put(key, pack)
+                groups = self._by_shard(batch)
             except Exception:
-                with self._cond:
-                    self._pending = batch + self._pending
-                    self._pending_bytes += sum(len(data) for _, data in batch)
-                    self._first_at = first_at
-                    # An outside flush took the batch while the flusher slept on an empty buffer with no deadline.
-                    self._cond.notify_all()
+                self._requeue(batch, first_at)
                 raise
-            try:
-                _, stale = self._apply(key, len(pack), manifest)
-            except Exception:
-                # A new pack of the same batch on each retry makes the PUT bytes grow with each failed window.
-                with self._cond:
-                    self._unapplied = (key, len(pack), manifest, batch)
-                    self._cond.notify_all()
-                raise
-            self._settle(batch, stale)
+            for index, (shard, entries) in enumerate(groups):
+                rest = [entry for _, later in groups[index + 1 :] for entry in later]
+                try:
+                    pack, manifest = _build_pack(self._worker_id, shard, entries)
+                    key = f"{PACK_PREFIX}/{self._worker_id}/{time.time_ns():020d}-{uuid4().hex}.pack"
+                    self._objects.put(key, pack)
+                except Exception:
+                    self._requeue(entries + rest, first_at)
+                    raise
+                try:
+                    _, stale = self._apply(shard, key, len(pack), manifest)
+                except Exception:
+                    # A new pack of the same batch on each retry makes the PUT bytes grow with each failed window.
+                    with self._cond:
+                        self._unapplied = (shard, key, len(pack), manifest, entries)
+                    self._requeue(rest, first_at)
+                    raise
+                self._settle(entries, stale)
+
+    def _by_shard(
+        self, batch: list[tuple[_Step | _Object, bytes]]
+    ) -> list[tuple[str, list[tuple[_Step | _Object, bytes]]]]:
+        """Split a batch by the shard of each entry's run, in commit order inside each shard.
+
+        Args:
+            batch: The buffered entries with their bytes.
+
+        Returns:
+            The shard names, sorted, each with its entries.
+        """
+        if self._shards.single:
+            return [(MAIN, batch)]
+        groups: dict[str, list[tuple[_Step | _Object, bytes]]] = {}
+        for item, data in batch:
+            groups.setdefault(self._shards.shard_of(item.run_id), []).append((item, data))
+        return sorted(groups.items())
+
+    def _requeue(self, entries: list[tuple[_Step | _Object, bytes]], first_at: float | None) -> None:
+        """Put entries that no pack recorded back at the front of the buffer, and wake the flusher.
+
+        Args:
+            entries: The entries, in commit order.
+            first_at: When the oldest of them was buffered.
+        """
+        with self._cond:
+            if entries:
+                self._pending = entries + self._pending
+                self._pending_bytes += sum(len(data) for _, data in entries)
+                self._first_at = first_at
+            # An outside flush took the batch while the flusher slept on an empty buffer with no deadline.
+            self._cond.notify_all()
 
     def _settle(self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]]) -> None:
         """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
@@ -615,25 +691,29 @@ class StepLogStore:
         """Apply this worker's packs that a crash left without their Postgres transaction.
 
         A recovered step still passes the fence: it lands only when its
-        generation is current.
+        generation is current. Each pack goes to the shard its manifest names.
 
         Returns:
             The number of packs that this call applied; a pack that another
             store applied first does not count.
         """
         with self._flush_lock:
-            with Session(self._engine) as session:
-                recorded = set(
-                    session.scalars(
-                        select(StoragePackModel.pack_key).where(StoragePackModel.worker_id == self._worker_id)
+            recorded: set[str] = set()
+            for name in self._shards.names():
+                with Session(self._shards.engine(name)) as session:
+                    recorded.update(
+                        session.scalars(
+                            select(StoragePackModel.pack_key).where(StoragePackModel.worker_id == self._worker_id)
+                        )
                     )
-                )
             applied = 0
             for key in self._objects.list(f"{PACK_PREFIX}/{self._worker_id}/"):
                 if key in recorded:
                     continue
                 pack = self._objects.get(key)
-                claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
+                manifest = _read_manifest(pack)
+                # A pack from before the shard map has no shard: it was the main database's.
+                claimed, _ = self._apply(manifest.get("shard", MAIN), key, len(pack), manifest)
                 applied += claimed
             return applied
 
@@ -656,8 +736,10 @@ class StepLogStore:
                     waiter.set()
             raise
 
-    def _apply(self, pack_key: str, byte_size: int, manifest: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
-        """Record one pack's steps and objects in one transaction, behind the fence.
+    def _apply(
+        self, shard: str, pack_key: str, byte_size: int, manifest: dict[str, Any]
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """Record one pack's steps and objects in one shard transaction, behind the fence.
 
         The ``storage_packs`` row makes the apply happen once: a second apply
         of the same pack, by recovery or a retry, finds the row and stops.
@@ -666,7 +748,13 @@ class StepLogStore:
         whose id has a row is done and not inserted again, so the first
         commit of a step id wins.
 
+        The ``jobs`` row locks are on the main database. For another shard
+        they are held until the shard transaction ends, so a generation bump
+        waits for the shard commit. The main transaction only reads, so no
+        two-phase commit is needed.
+
         Args:
+            shard: The shard that records the pack.
             pack_key: The pack's object key.
             byte_size: The pack's size.
             manifest: The pack's manifest.
@@ -679,8 +767,7 @@ class StepLogStore:
             with a stale generation and the current steps with no row: the
             other store fenced them.
         """
-        insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
-        now = datetime.now(UTC)
+        engine = self._shards.engine(shard)
         steps, objects = manifest["steps"], manifest["objects"]
         run_ids = sorted({entry["run_id"] for entry in steps + objects})
         with Session(self._engine) as session:
@@ -694,68 +781,94 @@ class StepLogStore:
                     .with_for_update()
                 )
             }
-            claimed = session.execute(
-                insert(StoragePackModel)
-                .values(pack_key=pack_key, worker_id=manifest["worker_id"], byte_size=byte_size, created_at=now)
-                .on_conflict_do_nothing()
-            ).rowcount
-            ids = [entry["step_id"] for entry in steps]
-            stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
-            current = {(job.optimization_id, job.execution_generation) for job in jobs.values()}
-            fresh, stale = [], []
-            for entry in steps:
-                if (entry["run_id"], entry["execution_generation"]) not in current:
-                    stale.append(entry)
-                # A current step with a row is a retry of an applied step: it is done.
-                elif entry["step_id"] not in stored:
-                    fresh.append(entry)
-            if not claimed:
-                session.rollback()
-                # The store that applied this pack inserted every current step that had no row.
-                return False, stale + fresh
-            if fresh:
-                session.execute(
-                    insert(AgentStepModel)
-                    .values(
-                        [
-                            {
-                                **{name: entry[name] for name in _STEP_FIELDS},
-                                "pack_key": pack_key,
-                                "pack_offset": entry["offset"],
-                                "pack_length": entry["length"],
-                                "created_at": now,
-                            }
-                            for entry in fresh
-                        ]
-                    )
-                    .on_conflict_do_nothing()
-                )
-            owned = {
-                (jobs[entry["run_id"]].username or "", entry["object_id"]): entry
-                for entry in objects
-                if entry["run_id"] in jobs
-            }
-            if owned:
-                # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
-                session.execute(
-                    insert(TreeObjectModel)
-                    .values(
-                        [
-                            {
-                                "username": username,
-                                "object_id": object_id,
-                                "byte_size": entry["length"],
-                                "pack_key": pack_key,
-                                "pack_offset": entry["offset"],
-                                "pack_length": entry["length"],
-                                "created_at": now,
-                            }
-                            for (username, object_id), entry in sorted(owned.items())
-                        ]
-                    )
-                    .on_conflict_do_nothing()
-                )
+            if engine is self._engine:
+                return self._record(session, jobs, pack_key, byte_size, manifest)
+            with Session(engine) as shard_session:
+                result = self._record(shard_session, jobs, pack_key, byte_size, manifest)
             session.commit()
+        return result
+
+    def _record(
+        self, session: Session, jobs: dict[str, Any], pack_key: str, byte_size: int, manifest: dict[str, Any]
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """Claim the pack and insert its current steps and owned objects, then commit.
+
+        Args:
+            session: A session on the pack's shard.
+            jobs: The locked ``jobs`` rows of the pack's runs, by run id.
+            pack_key: The pack's object key.
+            byte_size: The pack's size.
+            manifest: The pack's manifest.
+
+        Returns:
+            The same as :meth:`_apply`.
+        """
+        dialect = session.get_bind().dialect.name
+        insert = postgres_insert if dialect == "postgresql" else sqlite_insert
+        now = datetime.now(UTC)
+        steps, objects = manifest["steps"], manifest["objects"]
+        claimed = session.execute(
+            insert(StoragePackModel)
+            .values(pack_key=pack_key, worker_id=manifest["worker_id"], byte_size=byte_size, created_at=now)
+            .on_conflict_do_nothing()
+        ).rowcount
+        ids = [entry["step_id"] for entry in steps]
+        stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
+        current = {(job.optimization_id, job.execution_generation) for job in jobs.values()}
+        fresh, stale = [], []
+        for entry in steps:
+            if (entry["run_id"], entry["execution_generation"]) not in current:
+                stale.append(entry)
+            # A current step with a row is a retry of an applied step: it is done.
+            elif entry["step_id"] not in stored:
+                fresh.append(entry)
+        if not claimed:
+            session.rollback()
+            # The store that applied this pack inserted every current step that had no row.
+            return False, stale + fresh
+        if fresh:
+            session.execute(
+                insert(AgentStepModel)
+                .values(
+                    [
+                        {
+                            **{name: entry[name] for name in _STEP_FIELDS},
+                            "pack_key": pack_key,
+                            "pack_offset": entry["offset"],
+                            "pack_length": entry["length"],
+                            "created_at": now,
+                        }
+                        for entry in fresh
+                    ]
+                )
+                .on_conflict_do_nothing()
+            )
+        owned = {
+            (jobs[entry["run_id"]].username or "", entry["object_id"]): entry
+            for entry in objects
+            if entry["run_id"] in jobs
+        }
+        if owned:
+            # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
+            session.execute(
+                insert(TreeObjectModel)
+                .values(
+                    [
+                        {
+                            "username": username,
+                            "object_id": object_id,
+                            "byte_size": entry["length"],
+                            "pack_key": pack_key,
+                            "pack_offset": entry["offset"],
+                            "pack_length": entry["length"],
+                            "created_at": now,
+                        }
+                        for (username, object_id), entry in sorted(owned.items())
+                    ]
+                )
+                .on_conflict_do_nothing()
+            )
+        session.commit()
         return True, stale
 
     def _due(self) -> bool:

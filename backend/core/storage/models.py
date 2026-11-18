@@ -1302,6 +1302,10 @@ class JobModel(Base):
         String(36), ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # The step log shard of the run (SKY-731). The shard map sets it once, on the run's
+    # first step log use, and never changes it, so a new shard never moves a run.
+    # NULL means the main database.
+    step_log_shard: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
