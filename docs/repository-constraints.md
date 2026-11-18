@@ -89,7 +89,9 @@ metric lives with the judge.
 command that prepares the repository for it. Write each one as a list of strings, for
 example `["node", "agent/my-agent.js"]`. A plain string, an empty list, an
 empty part or a part with a control character fails the setup check, and the
-message names the key.
+message names the key. Control characters include the C1 controls and the
+bidirectional text controls (U+061C, U+200E, U+200F, U+202A to U+202E and
+U+2066 to U+2069), because they can hide what a command does.
 
 - The run's own proposer wins. When the run request names a proposer, the
   run ignores `entry` and `setup`, and the run record shows the note "The

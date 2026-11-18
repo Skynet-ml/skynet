@@ -93,8 +93,10 @@ _MAX_COMMAND_PARTS = 50
 # proposer's relay key in its text, so the file's own commands cannot name them.
 _KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
 # Popen raises ValueError on a NUL byte, outside the setup check's clear error, and
-# other control characters only hide what the command does.
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# other control characters only hide what the command does. That covers the C1
+# controls and the bidi embeddings, overrides, isolates and marks, which reorder the
+# shown text. Other format characters stay legal: a ZWJ or ZWNJ is part of real names.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"

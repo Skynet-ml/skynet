@@ -208,9 +208,23 @@ def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value:
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
-@pytest.mark.parametrize("part", [r'"agent\u0000.js"', r'"agent.js\n"', r'"\u001fagent.js"', r'"agent\u007f.js"'])
+@pytest.mark.parametrize(
+    "part",
+    [
+        r'"agent\u0000.js"',
+        r'"agent.js\n"',
+        r'"\u001fagent.js"',
+        r'"agent\u007f.js"',
+        r'"agent\u0085.js"',
+        r'"agent\u202e.js"',
+        r'"agent\u2066.js"',
+        r'"agent\u200f.js"',
+    ],
+)
 def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) -> None:
-    """A NUL or other control character fails the setup check, not ``Popen`` later (SKY-753).
+    """A NUL, C1 or bidi control fails the setup check, not ``Popen`` later (SKY-753).
+
+    A bidi control can make a shown command differ from the one that runs.
 
     Args:
         key: The ``[proposer]`` key under test.
