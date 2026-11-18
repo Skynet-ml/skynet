@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from core.exceptions import ServiceError
+from core.sandbox.snapshots import refuse_secrets
 
 from .. import sandbox, sandbox_runtime
 from ..remote_sandbox import RemoteSandboxRuntime
@@ -235,3 +236,10 @@ def test_the_remote_and_parent_runtimes_refuse_a_gpu() -> None:
     parent = _ParentSandboxRuntime(_NoBroker(), ())  # type: ignore[arg-type]
     with pytest.raises(ServiceError, match="parent's box cannot start with GPU type 'a100'"):
         parent.open(_GPU_SPEC)
+
+
+def test_async_spec_adds_no_env_so_a_box_can_become_a_snapshot() -> None:
+    """``_async_spec`` adds no env, so ``refuse_secrets`` accepts a box with none (SKY-812)."""
+    spec = sandbox_runtime._async_spec(sandbox_runtime.SandboxSpec(lifetime_seconds=60))
+    assert spec.env == {}
+    refuse_secrets(spec)

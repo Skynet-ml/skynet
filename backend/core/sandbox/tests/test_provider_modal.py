@@ -30,6 +30,7 @@ from core.sandbox.capabilities import VERCEL_CAPABILITIES, EnvironmentCapabiliti
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import modal as modal_provider
+from core.sandbox.providers.ec2 import EC2_CAPABILITIES
 from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resource_kwargs
 from core.sandbox.providers.smol import SmolEnvironment
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
@@ -408,10 +409,16 @@ async def test_create_starts_the_sandbox_with_the_gpu_type(fake_modal: FakeModal
 
 
 @pytest.mark.parametrize(
-    "caps", [VERCEL_CAPABILITIES, SmolEnvironment.capabilities], ids=["vercel", "smol-with-gpu-counts"]
+    "caps",
+    [VERCEL_CAPABILITIES, SmolEnvironment.capabilities, EC2_CAPABILITIES],
+    ids=["vercel", "smol-with-gpu-counts", "ec2"],
 )
 def test_every_other_provider_refuses_a_gpu_type(caps: EnvironmentCapabilities) -> None:
-    """Refuse a GPU type on a provider without GPU types, also one that takes a GPU count."""
+    """Refuse a GPU type on a provider without GPU types, also one that takes a GPU count or picks an instance type.
+
+    Args:
+        caps: The capabilities of a provider that is not Modal.
+    """
     with pytest.raises(SandboxSpecError, match=f"The {caps.name} sandbox cannot start a box with GPU type 'a100'"):
         validate_spec(SandboxSpec(lifetime_seconds=60, gpu_type="a100"), caps)
 
