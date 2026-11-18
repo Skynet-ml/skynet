@@ -852,6 +852,30 @@ def test_a_repository_brief_with_thousands_of_read_only_paths_stays_within_its_c
     assert "print('app')" in text
 
 
+def test_a_repository_brief_stops_a_rule_of_long_paths_at_its_byte_budget(brief: Callable[..., str]) -> None:
+    """A rule of fewer paths than the count cap still stops at its byte budget, separators included.
+
+    Each label is 1,000 bytes with its backticks. With the two-byte separator
+    each label costs 1,002 bytes, so 7 fit the 8,000-byte budget; without it, 8 would.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
+    budget = best_of_n._BRIEF_MAX_PATH_BYTES
+    readonly = tuple(f"lfs/{index:02}-{'x' * 991}" for index in range(40))
+    assert len(readonly) < best_of_n._BRIEF_MAX_PATHS
+    assert all(len(f"`{path}`".encode()) == 1_000 for path in readonly)
+
+    text = brief({"src/app.py": b"print('app')"}, ("src",), readonly=readonly)
+
+    rule = next(line for line in text.split("\n") if line.startswith("Do not change: "))
+    shown = [path for path in readonly if f"`{path}`" in rule]
+    assert shown == list(readonly[:7])
+    assert rule.endswith(f", and {40 - 7} more.")
+    assert sum(len(f"`{path}`".encode()) + 2 for path in shown) <= budget
+    assert len(text.encode()) <= best_of_n._BRIEF_MAX_BYTES
+
+
 def test_a_repository_brief_counts_the_rule_lines_and_line_breaks_against_its_cap(
     brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
