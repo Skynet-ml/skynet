@@ -557,14 +557,17 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         anonymized += result.rowcount or 0
 
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
-    # Before the jobs go: their cascade would delete the steps without their pack keys.
-    deleted += tree_purge.purge_user(session, username, job_ids).deleted_rows
     if job_ids:
-        _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
+        # Log rows, then progress rows, then the job lock, as in a run delete; another order deadlocks
+        # with a concurrent delete of one of these runs (SKY-733).
         _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
+        _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
         _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
+    # Before the jobs go: their cascade would delete the steps without their pack keys.
+    deleted += tree_purge.purge_user(session, username, job_ids).deleted_rows
+    if job_ids:
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))
     _run_delete(delete(JobEmbeddingModel).where(JobEmbeddingModel.user_id == username))
     _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.created_by == username))

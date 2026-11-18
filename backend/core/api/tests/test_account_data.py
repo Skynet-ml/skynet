@@ -14,6 +14,7 @@ import io
 import json
 import pickle
 import runpy
+import threading
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -32,8 +33,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import Engine, create_engine, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, create_engine, event, select, text
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ...billing.budgets import BudgetService
@@ -50,8 +51,10 @@ from ...storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     JobModel,
+    LogEntryModel,
     NotificationModel,
     NotificationPreferenceModel,
+    ProgressEventModel,
     PushSubscriptionModel,
     SetupDraftModel,
     SlackConnectionModel,
@@ -63,7 +66,8 @@ from ...storage.models import (
     WalletLedgerModel,
     WorkspaceModel,
 )
-from ...storage.tree_purge import TreePurgeError
+from ...storage.remote import RemoteDBJobStore
+from ...storage.tree_purge import TreePurgeError, mark_run_packs
 from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -961,3 +965,99 @@ def test_deletion_purges_the_tree_rows_and_fails_when_a_pack_delete_fails(full_s
         assert session.scalars(select(TreeObjectModel)).all() == []
         assert session.scalars(select(WorkspaceModel)).all() == []
         assert session.scalars(select(StoragePackModel)).all() == []
+
+
+def test_an_account_delete_and_a_run_delete_at_once_do_not_deadlock(full_schema_engine: Engine) -> None:
+    """A run delete paused between its log rows and its job lock lets a concurrent account delete finish (SKY-733).
+
+    The run delete deletes its log and progress rows, then waits until the
+    account delete is about to delete those rows. If the account delete locked
+    the job first, each would wait for the other and PostgreSQL would abort one.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
+    if full_schema_engine.dialect.name != "postgresql":
+        pytest.skip("Row locks need PostgreSQL.")
+    run_id = "job-race"
+    with Session(full_schema_engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(JobModel(optimization_id=run_id, username=_EMAIL))
+        session.add(LogEntryModel(optimization_id=run_id, level="INFO", logger="x", message="m"))
+        session.add(ProgressEventModel(optimization_id=run_id, event="e", metrics={}))
+        session.commit()
+    # The full constructor opens its own engine from a URL; delete_job needs only the session factory and engine.
+    store = object.__new__(RemoteDBJobStore)
+    store._engine = full_schema_engine
+    store._session_factory = sessionmaker(bind=full_schema_engine)
+
+    run_rows_deleted = threading.Event()
+    account_at_child_rows = threading.Event()
+    errors: list[BaseException] = []
+    account_thread_name = "account-delete"
+    real_mark = mark_run_packs
+
+    def _mark_after_the_account_delete_starts(session: Session, run_ids: list[str]) -> None:
+        """Hold the run delete after its child row deletes until the account delete reaches its own.
+
+        Args:
+            session: The run delete's open session.
+            run_ids: The runs being deleted.
+
+        Raises:
+            AssertionError: When the account delete never reaches its child row deletes.
+        """
+        run_rows_deleted.set()
+        if not account_at_child_rows.wait(timeout=30):
+            raise AssertionError("the account delete never reached the run's child rows")
+        real_mark(session, run_ids)
+
+    def _flag_child_row_delete(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        """Set the event when the account delete sends its first log or progress row delete.
+
+        Args:
+            conn: The connection.
+            cursor: The DBAPI cursor.
+            statement: The SQL text.
+            *args: The other listener arguments.
+        """
+        if threading.current_thread().name == account_thread_name and statement.startswith(
+            ("DELETE FROM job_logs", "DELETE FROM job_progress_events")
+        ):
+            account_at_child_rows.set()
+
+    def _delete_run() -> None:
+        """Delete the run and keep any error."""
+        try:
+            store.delete_job(run_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def _delete_owner() -> None:
+        """Delete the account and keep any error."""
+        try:
+            _delete(full_schema_engine)
+        except BaseException as exc:
+            errors.append(exc)
+
+    event.listen(full_schema_engine, "before_cursor_execute", _flag_child_row_delete)
+    try:
+        with patch("core.storage.remote.mark_run_packs", _mark_after_the_account_delete_starts):
+            run = threading.Thread(target=_delete_run)
+            run.start()
+            assert run_rows_deleted.wait(timeout=30)
+            owner = threading.Thread(target=_delete_owner, name=account_thread_name)
+            owner.start()
+            run.join(timeout=60)
+            owner.join(timeout=60)
+    finally:
+        event.remove(full_schema_engine, "before_cursor_execute", _flag_child_row_delete)
+
+    assert not run.is_alive()
+    assert not owner.is_alive()
+    assert errors == []
+    with Session(full_schema_engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+        assert session.get(JobModel, run_id) is None
+        assert session.scalars(select(LogEntryModel)).all() == []
+        assert session.scalars(select(ProgressEventModel)).all() == []
