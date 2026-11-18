@@ -45,8 +45,8 @@ from .shard_map import shard_engine
 _ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 # The chain of the step log shard databases. It is not in ``versions`` so the main chain keeps one head.
 _STEP_LOG_VERSIONS = _ALEMBIC_INI.parent / "alembic" / "step_log_versions"
-# Continues the 7421370000xx advisory-lock series (core/billing/service.py uses ...08).
-STEP_LOG_SHARD_MIGRATION_LOCK_KEY = 742137000009
+# Continues the 7421370000xx advisory-lock series; SKY-733's tree compactor sweep takes ...09.
+STEP_LOG_SHARD_MIGRATION_LOCK_KEY = 742137000010
 # The shard engine's 30-second runtime statement limit is too short for DDL that waits on the lock of another pod.
 SHARD_MIGRATION_STATEMENT_TIMEOUT_MS = 600_000
 # A DDL statement that waits on a table lock blocks each later query of that table, so the wait has a short limit.
