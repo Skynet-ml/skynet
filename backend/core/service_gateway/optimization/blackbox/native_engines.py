@@ -409,23 +409,71 @@ def visible_example_ids(server: EvalServer) -> list[str]:
 # that must not rank a partly crashed version can tell it apart (SKY-367).
 UNSCORED_CASES_KEY = "unscored_cases"
 TEXT_CANDIDATE_KEY = "current_candidate"
+# Mirrors protocol.RUN_FAILED_STATUS: guest modules import no app code. The
+# status marks a case whose [run] entry failed (SKY-751).
+RUN_FAILED_STATUS = "run_failed"
+# Mirrors the parent's and shinka_runner's warning, so every engine says the same (SKY-751).
+NO_VERSION_SCORED_MESSAGE = (
+    "No version has a score: each one failed on at least one case. The run keeps the starting version."
+)
 
 
-def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
+def run_failed(info: Any) -> bool:
+    """Tell whether a case's side info marks a failed ``[run]`` entry.
+
+    Args:
+        info: The side info the parent sent with the case's score.
+
+    Returns:
+        Whether its ``status`` is the run-failed status.
+    """
+    return isinstance(info, dict) and info.get("status") == RUN_FAILED_STATUS
+
+
+def _sample_run_failed(info: Any) -> bool:
+    """Tell whether a scored sample has a failed ``[run]`` entry on any case.
+
+    Args:
+        info: The side info of one sample: a single case's, or a sweep's with ``infos`` by case.
+
+    Returns:
+        Whether that side info, or the side info of a case with no score, marks a failed ``[run]`` entry.
+    """
+    if not isinstance(info, dict):
+        return False
+    scores = info.get("scores") if isinstance(info.get("scores"), dict) else {}
+    infos = info.get("infos") if isinstance(info.get("infos"), dict) else {}
+    return run_failed(info) or any(
+        run_failed(infos.get(case)) and not (isinstance(score, int | float) and math.isfinite(score))
+        for case, score in scores.items()
+    )
+
+
+def fill_unscored(keys: list[str], scores: list[float], infos: list[Any] | None = None) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
     In the sandbox a null score arrives as negative infinity. Upstream engines
     average a version's cases, so one case that always crashes would make every
-    version negative infinity and hide which one is better (SKY-367).
+    version negative infinity and hide which one is better (SKY-367). A failed
+    ``[run]`` entry is the version's own fault, so it gets no fill: that version
+    is negative infinity on every case of the batch and never ranks (SKY-751).
 
     Args:
         keys: The version scored on each case, as a stable key.
         scores: Each case's score, negative infinity for a null case.
+        infos: Each case's side info, when known; it tells a failed ``[run]`` entry apart.
 
     Returns:
         A number for every case: the score, or the same version's scored mean
-        for a null case, or negative infinity when the version has no scored case.
+        for a null case, or negative infinity when the version has no scored
+        case or a failed ``[run]`` entry.
     """
+    # A scorer's own run_failed status with a real score is not a failed [run] entry.
+    failed = {
+        key
+        for key, score, info in zip(keys, scores, infos or [None] * len(keys), strict=True)
+        if not math.isfinite(score) and run_failed(info)
+    }
     scored: dict[str, list[float]] = {}
     for key, score in zip(keys, scores, strict=True):
         if math.isfinite(score):
@@ -433,7 +481,9 @@ def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
     filled: list[float] = []
     for key, score in zip(keys, scores, strict=True):
         values = scored.get(key)
-        if not math.isfinite(score):
+        if key in failed:
+            score = float("-inf")
+        elif not math.isfinite(score):
             score = sum(values) / len(values) if values else float("-inf")
         filled.append(score)
     return filled
@@ -2115,12 +2165,17 @@ class MetaHarnessEngine:
                 continue
             text = (self.work_dir / str(spec["file"])).read_text(encoding="utf-8")
             avg = self._benchmark(server, name, text)
-            delta = None if previous_best is None else round(avg - previous_best, 4)
+            # SKY-751: a version with a failed [run] entry, or no scored case, has no score, never -Infinity.
+            scored = math.isfinite(avg)
+            # A seed with a failed [run] entry can lead at -inf, so check the leader too.
+            delta = None
+            if scored and previous_best is not None and math.isfinite(previous_best):
+                delta = round(avg - previous_best, 4)
             row.update(
                 {
-                    "avg_val": avg,
+                    "avg_val": avg if scored else None,
                     "delta": delta,
-                    "outcome": f"{avg:.4f}" + ("" if delta is None else f" ({delta:+.4f})"),
+                    "outcome": (f"{avg:.4f}" + ("" if delta is None else f" ({delta:+.4f})")) if scored else "no score",
                 }
             )
             if "components" in spec:
@@ -2237,10 +2292,14 @@ class MetaHarnessEngine:
         server.log_progress(avg, candidate=candidate)
         infos = info.get("infos", {})
         named, named_feedback = named_score_columns(list(infos.values()) if isinstance(infos, dict) else [info])
+        # SKY-751: the agent reads these files, so a case or version with no score shows null, never -Infinity.
         record = {
             "system": name,
-            "avg_val": avg,
-            "scores": info.get("scores", {}),
+            "avg_val": avg if math.isfinite(avg) else None,
+            "scores": {
+                case: score if not isinstance(score, float) or math.isfinite(score) else None
+                for case, score in (info.get("scores") or {}).items()
+            },
             "infos": infos,
             "named_scores": {
                 column.removeprefix(NAMED_PREFIX): {"score": value, "feedback": named_feedback[column]}
@@ -2487,6 +2546,10 @@ class GepaRepoEngine:
         def batch_evaluate(pairs: list[tuple[Any, Any]]) -> list[tuple[float, Any]]:
             """Score one GEPA batch in order and fill each null case with its version's scored mean.
 
+            A version with a failed ``[run]`` entry gets no fill (SKY-751), so its
+            batch average is negative infinity: GEPA never accepts it, keeps it
+            on its front, or makes it the incumbent.
+
             Args:
                 pairs: The ``(candidate, case)`` pairs of one GEPA batch.
 
@@ -2496,7 +2559,7 @@ class GepaRepoEngine:
             results = [evaluate(candidate, example) for candidate, example in pairs]
             keys = [_key(candidate) for candidate, _ in pairs]
             crashed.update(key for key, (score, _) in zip(keys, results, strict=True) if not math.isfinite(score))
-            filled = fill_unscored(keys, [score for score, _ in results])
+            filled = fill_unscored(keys, [score for score, _ in results], [info for _, info in results])
             return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {
@@ -2742,10 +2805,11 @@ class BestOfNRepoEngine:
             server: Evaluation server that scores each version through the parent.
 
         Returns:
-            The best fully scored sample.
+            The best fully scored sample, or the seed with no score when every
+            scored sample failed a case.
 
         Raises:
-            RuntimeError: When no sample was fully scored.
+            RuntimeError: When the loop stopped before any sample finished scoring.
         """
         self.proposer.objective = task.objective
         self.proposer.background = task.background
@@ -2774,7 +2838,7 @@ class BestOfNRepoEngine:
             if not math.isfinite(score) or info.get(UNSCORED_CASES_KEY):
                 # SKY-367: a sample with a crashed case has no score, so it is
                 # never best and cannot reach stop_at_score on its filled mean.
-                sample["outcome"] = "metric_error"
+                sample["outcome"] = RUN_FAILED_STATUS if _sample_run_failed(info) else "metric_error"
                 continue
             server.log_progress(score, candidate=patch["candidate"])
             sample["score"] = score
@@ -2783,10 +2847,16 @@ class BestOfNRepoEngine:
             if _reached(self.stop_at_score, self.best[1]):
                 break
         if self.best is None:
-            raise RuntimeError("Best-of-N stopped before any repository version was fully scored.")
+            # SKY-751: samples that ran but failed a case have no score. The
+            # run keeps the seed with no score, as the other engines do.
+            if task.seed_candidate is None or not any(
+                sample.get("outcome") in (RUN_FAILED_STATUS, "metric_error") for sample in self.samples
+            ):
+                raise RuntimeError("Best-of-N stopped before any repository version was fully scored.")
+            log_event("search.no_score", NO_VERSION_SCORED_MESSAGE, level=logging.WARNING)
         return Result(
-            best_candidate=self.best[0],
-            best_score=self.best[1],
+            best_candidate=seed if self.best is None else self.best[0],
+            best_score=None if self.best is None else self.best[1],
             total_evals=server.budget.used,
             eval_log=list(server.eval_log),
             metadata={

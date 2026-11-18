@@ -99,6 +99,15 @@ except ImportError:  # In the sandbox this file runs as a script beside its sibl
 _RPC_PREFIX = "APP_NATIVE_RPC "
 _PROGRESS_PREFIX = "APP_NATIVE_PROGRESS "
 _LOG_PREFIX = "APP_NATIVE_LOG "
+# SKY-751: the parent's side-info status of a case whose [run] entry failed.
+# This module imports no Skynet code, so it repeats ``protocol.RUN_FAILED_STATUS``.
+_RUN_FAILED_STATUS = "run_failed"
+_NO_VERSION_SCORED_RECORD = {
+    "level": "WARNING",
+    "logger": "app.engine",
+    "message": "No version has a score: each one failed on at least one case. The run keeps the starting version.",
+    "source": "engine",
+}
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _TOKEN_NAMES = ("prompt_tokens", "completion_tokens")
 _LANGUAGE = "markdown"
@@ -360,7 +369,7 @@ class EvaluatorMailbox:
             candidate_id: Version number the worker files the scorer's logs under.
 
         Returns:
-            Worker score and feedback.
+            Worker score, negative infinity when the case has no score, and feedback.
 
         Raises:
             EvaluationStopped: When the worker rejects evaluation or does not reply.
@@ -373,7 +382,11 @@ class EvaluatorMailbox:
             raise self.error
         with self._write_lock:
             self.total_evals += 1
-        return float(response["score"]), dict(response.get("info") or {})
+        score = response.get("score")
+        # SKY-751: the worker sends null for a case with no score (a failed
+        # [run] entry or a metric error); ``score_program`` fails the program
+        # on a failed [run] entry, with its feedback.
+        return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
 
     def complete(self, messages: list[dict[str, Any]]) -> str:
         """Ask the worker's model for one reply.
@@ -1975,29 +1988,39 @@ def _named_scores(info: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 def summarize_scores(results: Sequence[tuple[float, Mapping[str, Any]]]) -> dict[str, Any]:
     """Turn per-case scores into upstream's metrics document.
 
+    A case with no score (a metric error) stays out of the mean, so it gets
+    the program's mean over its scored cases, as ``fill_unscored`` gives
+    the other engines (SKY-367). At least one case must have a score.
+
     Args:
-        results: Score and side info per case, in case order.
+        results: Score and side info per case, in case order; a case with no
+            score has a non-finite score.
 
     Returns:
-        ``combined_score`` (the mean), ``public`` (mean named scores),
-        ``private`` (per-case scores) and ``text_feedback``.
+        ``combined_score`` (the mean over the scored cases), ``public`` (mean
+        named scores), ``private`` (per-case scores of the scored cases) and
+        ``text_feedback``.
     """
-    scores = [score for score, _ in results]
+    scored = {index: score for index, (score, _) in enumerate(results) if math.isfinite(score)}
     named: dict[str, list[float]] = {}
     texts = []
     for index, (score, info) in enumerate(results):
         for name, entry in _named_scores(info).items():
             named.setdefault(name, []).append(entry["score"])
-        text = _feedback_text(info)
         label = f"Case {index}" if len(results) > 1 else "Result"
-        texts.append(f"{label} scored {score:.4g}" + (f":\n{text}" if text else "."))
+        if index in scored:
+            text = _feedback_text(info)
+            texts.append(f"{label} scored {score:.4g}" + (f":\n{text}" if text else "."))
+        else:
+            text = _feedback_text(info) or str(info.get("error") or "")
+            texts.append(f"{label} has no score: the metric failed" + (f":\n{text}" if text else "."))
     feedback = "\n\n".join(texts)
     if len(feedback) > _FEEDBACK_CHARS:
         feedback = feedback[:_FEEDBACK_CHARS] + "\n[feedback truncated]"
     return {
-        "combined_score": sum(scores) / len(scores),
+        "combined_score": sum(scored.values()) / len(scored),
         "public": {name: sum(values) / len(values) for name, values in named.items()},
-        "private": {f"case_{index}": score for index, score in enumerate(scores)},
+        "private": {f"case_{index}": score for index, score in scored.items()},
         "text_feedback": feedback,
     }
 
@@ -2037,6 +2060,10 @@ class ProgramScorer:
         self.target_reached = threading.Event()
         self.scored: dict[int, dict[str, Any]] = {}
         self.best: dict[str, Any] | None = None
+        # SKY-751: programs the parent scored that failed a case or hit a metric
+        # error. It tells a run where every version failed from one where
+        # nothing was scored.
+        self.failed_versions = 0
         self._lock = threading.Lock()
         self._seen: set[str] = set()
         self._cases = ThreadPoolExecutor(max_workers=max(1, max_concurrency))
@@ -2148,16 +2175,49 @@ class ProgramScorer:
                         "total": len(self.examples),
                     },
                 )
-        if not all(math.isfinite(score) for score, _ in results):
-            return {"correct": False, "error": "The scorer returned a non-numeric score.", "metrics": {}}
+        unscored = [(index, info) for index, (score, info) in enumerate(results) if not math.isfinite(score)]
+        # SKY-751: a failed [run] case fails the program. A metric error is the
+        # metric's fault, so it keeps the program's mean over its scored cases
+        # (SKY-367); only a program the metric failed on every case fails too.
+        failed = [(index, info) for index, info in unscored if info.get("status") == _RUN_FAILED_STATUS]
+        if not failed and len(unscored) == len(results):
+            failed = unscored
+        if failed:
+            # Upstream shows an incorrect program's text feedback to the agent
+            # that fixes it, so the failure text (for example "Run failed:
+            # <traceback>") reaches the proposer (SKY-751).
+            texts = []
+            for index, info in failed:
+                text = _feedback_text(info)
+                label = f"Case {index}" if len(results) > 1 else "Result"
+                texts.append(f"{label} has no score" + (f":\n{text}" if text else "."))
+            feedback = "\n\n".join(texts)
+            if len(feedback) > _FEEDBACK_CHARS:
+                feedback = feedback[:_FEEDBACK_CHARS] + "\n[feedback truncated]"
+            with self._lock:
+                self.failed_versions += 1
+            return {
+                "correct": False,
+                "error": f"{len(failed)} of {len(results)} case(s) have no score.",
+                "metrics": {"combined_score": 0.0, "text_feedback": feedback},
+            }
         metrics = summarize_scores(results)
         with self._lock:
             self.scored[generation] = {
                 "candidate": value,
                 "score": metrics["combined_score"],
-                "per_example": [(str(index), score) for index, (score, _) in enumerate(results)],
+                "per_example": [
+                    (str(index), score) for index, (score, _) in enumerate(results) if math.isfinite(score)
+                ],
                 "total_evals": self.mailbox.total_evals,
             }
+            if unscored:
+                # The version stays in the tree, so its children keep a parent;
+                # the parent shows it with no score. Its filled mean still guides
+                # parent selection, but it cannot become best or stop the run, as
+                # in Best-of-N and AutoSaddler (SKY-751).
+                self.failed_versions += 1
+                return {"correct": True, "error": None, "metrics": metrics}
             if self.best is None or metrics["combined_score"] > self.best["best_score"]:
                 self.best = {"best_candidate": value, "best_score": metrics["combined_score"], "generation": generation}
         if self.stop_at_score is not None and metrics["combined_score"] >= self.stop_at_score:
@@ -2437,9 +2497,15 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         document.update(incumbent)
     elif document.get("error"):
         document["interrupted_incumbent"] = {**incumbent, "total_evals": mailbox.total_evals}
-    elif best is None:
+    elif best is None and not scorer.failed_versions:
+        # Upstream scored nothing at all (a rejected decode, a layout mismatch
+        # or no generation), so no version failed a case either.
         document["error"] = "ShinkaEvolve finished without scoring any version."
     else:
+        if best is None:
+            # SKY-751: every scored version, the seed included, failed a case.
+            # The run keeps the seed with no score and says why.
+            mailbox.emit(_LOG_PREFIX, _NO_VERSION_SCORED_RECORD)
         document.update(incumbent)
     document["metadata"] = {
         **document.get("metadata", {}),

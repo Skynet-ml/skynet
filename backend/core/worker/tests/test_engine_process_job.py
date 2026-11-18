@@ -1148,7 +1148,7 @@ def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWor
 
 
 _MAPS_TOML = (
-    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[run]\nentry = "run.py:main"\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 _MAPS_SECRET = {"name": "GOOGLE_MAPS_KEY", "credential_ref": "ref-maps", "credential_revision": 1}
@@ -1257,7 +1257,7 @@ def test_the_run_gate_reads_a_started_run_file_with_no_version(
         store: Its job store.
         tmp_path: The folder for the packed tree.
     """
-    raw = b"[paths]\neditable = ['src']\n"
+    raw = b"[paths]\neditable = ['src']\n[run]\nentry = 'run.py:main'\n"
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
         info = tarfile.TarInfo("optimize.toml")
