@@ -1140,6 +1140,67 @@ def test_a_score_that_is_not_finite_never_becomes_the_best(
     assert (adapter.best_candidate, adapter.best_score) == ("second", 1.0)
 
 
+@pytest.mark.parametrize("bad", [math.inf, math.nan])
+def test_a_score_that_is_not_finite_neither_stops_the_run_nor_leads_it(
+    bad: float, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no cases, an infinite or NaN first score does not reach ``stop_at_score``; the next finite score wins.
+
+    Args:
+        bad: The score that is not finite.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    def score(_loop: EngineLoop, candidate: Any, _case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score the first round's candidate as not finite, and any other by its length.
+
+        Args:
+            _loop: The engine loop.
+            candidate: The candidate text.
+            _case: Not used.
+
+        Returns:
+            The score and no side information.
+        """
+        return (bad if candidate == "seedx" else float(len(candidate))), {}
+
+    result = _run(loop, cases=[], score=score)
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedxx", 6.0, 2)
+
+
+def test_an_evaluate_result_keeps_hebrew_with_no_escapes(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Hebrew scorer feedback reaches the model as is, so it uses two bytes a letter and not a ``\\u`` escape.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(
+        loop,
+        cases=[],
+        score=lambda _loop, candidate, _case: (float(len(candidate)), {"note": "\u05e9\u05dc\u05d5\u05dd"}),
+    )
+
+    content = model.calls[2][-1]["content"]
+    assert "\u05e9\u05dc\u05d5\u05dd" in content
+    assert "\\u05e9" not in content
+    assert _tool_result(model, 2)["info"]["note"] == "\u05e9\u05dc\u05d5\u05dd"
+
+
 def test_a_run_with_no_finite_score_fails_and_reports_no_minus_infinity(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

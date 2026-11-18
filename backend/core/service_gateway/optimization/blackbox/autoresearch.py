@@ -185,7 +185,8 @@ class _UpstreamServer:
                 side_info=info,
                 candidate_id=str(candidate_id),
             )
-        value = float("-inf") if score is None else float(score)
+        # A non-finite score would lead the native ranking and its stop check, so it records as a crash (SKY-725).
+        value = float(score) if score is not None and math.isfinite(score) else float("-inf")
         self.eval_log.append({"eval": self._server.used, "score": value, "candidate_len": len(candidate)})
         if math.isfinite(value) and (self.best_score is None or value > self.best_score):
             self.best_score = value
@@ -519,26 +520,27 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         example_ids = arguments.get("example_ids") or None
         path = posixpath.normpath(file) if isinstance(file, str) and file else ""
         if not path or path == ".." or path.startswith(("../", "/")):
-            return json.dumps({"error": "Give `file` as a path inside the lab."})
+            return json.dumps({"error": "Give `file` as a path inside the lab."}, ensure_ascii=False)
         if example_ids is not None and not (
             isinstance(example_ids, list) and all(isinstance(eid, str) for eid in example_ids)
         ):
-            return json.dumps({"error": "Give `example_ids` as a list of example id strings."})
+            return json.dumps({"error": "Give `example_ids` as a list of example id strings."}, ensure_ascii=False)
         # The candidate is copied into the observations, the archive and the frontier, so its size is bounded. A lab
         # file may hold up to ``MAX_TREE_BYTES``, so the cap refuses a larger file before it loads.
         try:
             data = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
         except FileTooLargeError:
             return json.dumps(
-                {"error": f"{path} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."}
+                {"error": f"{path} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."},
+                ensure_ascii=False,
             )
         if data is None:
-            return json.dumps({"error": f"No file {path} in the lab."})
+            return json.dumps({"error": f"No file {path} in the lab."}, ensure_ascii=False)
         try:
             candidate = data.decode("utf-8")
         except UnicodeDecodeError:
-            return json.dumps({"error": f"{path} is not UTF-8 text."})
-        marker = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER})
+            return json.dumps({"error": f"{path} is not UTF-8 text."}, ensure_ascii=False)
+        marker = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER}, ensure_ascii=False)
         if server.budget.remaining <= 0:
             return marker
         budget = server.budget
@@ -550,7 +552,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 visible = set(self.example_ids)
                 unknown = [eid for eid in example_ids or () if eid not in visible]
                 if unknown:
-                    return json.dumps({"error": f"Unknown or sealed example_ids: {unknown[:5]}"})
+                    return json.dumps({"error": f"Unknown or sealed example_ids: {unknown[:5]}"}, ensure_ascii=False)
                 targets = list(example_ids or self.example_ids)
                 average, info = server.evaluate_examples(candidate, example_ids=targets)
                 if set(targets) == visible:
@@ -566,7 +568,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             # round can spend the rest on probes, as in the native run.
             return marker
         body["budget"] = {"used": budget.used, "remaining": budget.remaining}
-        return loop_tools.clip(json.dumps(body))
+        return loop_tools.clip(json.dumps(body, ensure_ascii=False))
 
     def _pull(self, tree: str) -> None:
         """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
