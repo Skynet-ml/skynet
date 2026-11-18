@@ -1265,7 +1265,7 @@ print(ranking.select(metric)[0])
 
 
 def test_upstream_policies_handle_the_no_score_floor(tmp_path: Path) -> None:
-    """With upstream's own policies and the floor, crashed versions never win and the search still compares scores (SKY-751).
+    """Check that crashed versions never win under upstream's policies and the floor (SKY-751).
 
     Args:
         tmp_path: Folder with the runner files and the probe script.
