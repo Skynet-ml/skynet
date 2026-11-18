@@ -2779,7 +2779,44 @@ def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(
 
     assert not holder.is_alive()
     assert isinstance(error, RuntimeError)
+    assert re.search(r"did not finish within 0\.\d+ seconds", str(error))
     assert elapsed < 3.0 + 1.5
+
+
+def test_a_setup_with_no_time_left_after_the_lock_never_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the checks before the setup use up the limit, the session fails and does not run the setup.
+
+    Args:
+        tmp_path: The checkout and the setup's marker file.
+        monkeypatch: Slows the tracked-file check past the limit and spies on ``run_setup``.
+    """
+    checkout = _git_checkout(tmp_path / "checkout")
+    marker = tmp_path / "setup-ran"
+    tracked_changes = harness_bridge._tracked_changes
+    calls: list[float] = []
+
+    def slow_tracked_changes(path: Path) -> dict[str, str]:
+        """Use up the session's limit, then list the tracked changes.
+
+        Args:
+            path: The checkout.
+
+        Returns:
+            The real tracked changes.
+        """
+        time.sleep(0.5)
+        return tracked_changes(path)
+
+    monkeypatch.setattr(harness_bridge, "_tracked_changes", slow_tracked_changes)
+    monkeypatch.setattr(harness_bridge, "run_setup", lambda command, path, timeout: calls.append(timeout))
+
+    with pytest.raises(RuntimeError, match=r"no time was left within 0\.2 seconds"):
+        harness_bridge.ensure_setup(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"], checkout, timeout_seconds=0.2
+        )
+
+    assert calls == []
+    assert not marker.exists()
 
 
 def _run_and_keep_error(call: Any, errors: list[BaseException]) -> None:
