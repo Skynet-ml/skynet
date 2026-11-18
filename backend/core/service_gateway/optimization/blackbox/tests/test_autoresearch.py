@@ -43,6 +43,7 @@ from core.worker.tests.test_engine_loop import (
     _CountingSource,
     _new_generation,
     _steps,
+    _tree,
     _WorkerDiedError,
 )
 
@@ -536,7 +537,7 @@ def test_a_repository_run_is_refused(
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
     with pytest.raises(ServiceError, match="repository"):
-        _run(loop, repo_seed=RepoSeed(tree_id="tree"))
+        _run(loop, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
     assert model.calls == []
 
 
