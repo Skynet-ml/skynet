@@ -2268,7 +2268,7 @@ def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
     "arguments", [{"command": "echo \ud800"}, '{"command": "echo \ud800"}'], ids=["mapping", "raw-text"]
 )
 def test_arguments_with_a_raw_lone_surrogate_get_the_bound_error_and_an_empty_transcript(arguments: Any) -> None:
-    """The step commit refuses such a reply first (SKY-821); the tool loop still refuses it with no crash.
+    """``_parse`` refuses such arguments, so the tool loop gives the bound error with no crash.
 
     Args:
         arguments: The arguments with a raw lone surrogate, as a mapping or as JSON text.
