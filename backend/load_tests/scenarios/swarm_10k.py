@@ -1236,8 +1236,6 @@ def run(config: SwarmConfig) -> ScenarioResult:
             figures = run_pass(config, shard_count, Path(folder) / f"pass-{shard_count}")
             metrics.record(status_code=200, latency_seconds=figures["seconds_to_durable"])
             passes.append(figures)
-    if not_compared is None and any(count == 0 for figures in passes for count in figures["runs_per_shard"]):
-        not_compared = "a shard got no run"
     same_step_log: bool | str = (
         f"not compared: {not_compared}" if not_compared else len({figures["digest"] for figures in passes}) == 1
     )
