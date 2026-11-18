@@ -1,6 +1,7 @@
 """The SKY-727 load-test harness: thread caps, the swarm gate, shard failures and the resume check."""
 
 import asyncio
+import os
 import queue
 import sys
 import threading
@@ -12,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -271,7 +273,6 @@ def test_swarm_gate_fails_a_short_steady_part(monkeypatch: pytest.MonkeyPatch) -
         ({"commit_call_ms": {"p50": 400.0, "p99": 500.0, "max": 510.0}}, "commit call p99"),
         ({"digest": "other"}, "different step logs"),
         ({"steps_stored": 99_999}, "stored 99999 of 100000"),
-        ({"runs_per_shard": [100, 0]}, "a shard got no run"),
     ],
 )
 def test_swarm_gate_fails_each_broken_limit(
@@ -1117,8 +1118,9 @@ def test_gpu_check_fails_a_run_that_is_ok_otherwise() -> None:
 
 
 def test_run_with_a_seq_gap_is_not_ok() -> None:
-    """Check that a step log with a seq gap fails the run, also when every other check passes."""
+    """Check that a step log with a seq gap or with no step fails the run, also when every other check passes."""
     assert not reference_shapes._gapless([("a", 0, "model", 1), ("a", 2, "command", 1)])
+    assert not reference_shapes._gapless([])
     outcome = _passing_outcome(reference_shapes.SHAPES[0])
     assert outcome.ok
     outcome.gapless = False
@@ -2646,6 +2648,9 @@ def test_swarm_driver_fails_a_step_that_did_not_land(
 def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a knob flag sets its environment variable and a knob with no flag keeps its value.
 
+    ``_ensure_env`` writes ``os.environ`` directly, and ``monkeypatch.delenv`` records nothing for an unset
+    name, so ``mock.patch.dict`` restores the environment that the call changes.
+
     Args:
         monkeypatch: Sets the command line and the environment.
     """
@@ -2662,11 +2667,14 @@ def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.Monke
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LOAD_TEST_CHAOS_RUNS_PER_SHAPE", "7")
     monkeypatch.setattr(sys, "argv", ["run_all", "--swarm-agents=10000", "--chaos-seed=5"])
-    run_all._ensure_env(run_all._parse_args())
-    assert run_all.os.environ["LOAD_TEST_SWARM_AGENTS"] == "10000"
-    assert run_all.os.environ["LOAD_TEST_CHAOS_SEED"] == "5"
-    assert run_all.os.environ["LOAD_TEST_CHAOS_RUNS_PER_SHAPE"] == "7"
-    assert "LOAD_TEST_SWARM_SHARDS" not in run_all.os.environ
+    before = dict(os.environ)
+    with mock.patch.dict(os.environ):
+        run_all._ensure_env(run_all._parse_args())
+        assert os.environ["LOAD_TEST_SWARM_AGENTS"] == "10000"
+        assert os.environ["LOAD_TEST_CHAOS_SEED"] == "5"
+        assert os.environ["LOAD_TEST_CHAOS_RUNS_PER_SHAPE"] == "7"
+        assert "LOAD_TEST_SWARM_SHARDS" not in os.environ
+    assert dict(os.environ) == before
 
 
 class _KillEveryWorker(reference_shapes.ChaosSwitch):
@@ -2715,3 +2723,362 @@ def test_run_stops_after_too_many_restarts(tmp_path: Path) -> None:
     assert outcome.error == "more than 2 restarts"
     assert not outcome.finished
     assert not outcome.ok
+
+
+def test_replay_that_stores_only_a_pack_object_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a replay fails when it adds only a pack object, with no new step, pack row or tree object row.
+
+    Args:
+        tmp_path: The folder for the harness.
+        monkeypatch: Adds one pack object before the footprint after the replay.
+    """
+    shape = reference_shapes.SHAPES[0]
+    harness = reference_shapes.Harness(tmp_path, LocalSubprocessRuntime())
+    try:
+        outcome = reference_shapes.run_shape(harness, shape, "obj-0", rounds=1)
+        assert outcome.ok, outcome.error
+        footprint = harness.footprint
+        before = footprint("obj-0")
+        calls: list[str] = []
+
+        def grow(run_id: str) -> tuple[int, int, int, int]:
+            """Count the footprint, with one more pack object from the second call on.
+
+            Args:
+                run_id: The job id.
+
+            Returns:
+                The real footprint.
+            """
+            if calls:
+                harness.objects.put(f"packs/{run_id}-leak/extra", b"x")
+            calls.append(run_id)
+            return footprint(run_id)
+
+        monkeypatch.setattr(harness, "footprint", grow)
+        assert not reference_shapes._replays(harness, shape, "obj-0", 1, outcome.result)
+        after = footprint("obj-0")
+    finally:
+        harness.close()
+    assert after[:3] == before[:3]
+    assert after[3] == before[3] + 1
+
+
+def test_fake_modal_runtime_refuses_an_unknown_gpu() -> None:
+    """Check that the fake Modal runtime refuses a ``gpu:<type>`` placement whose type has no price."""
+    meter = reference_shapes.BoxMeter()
+    runtime = reference_shapes.FakeModalRuntime(SimpleNamespace(open=_no_start), meter)
+    spec = reference_shapes.SandboxSpec(
+        lifetime_seconds=60, vcpus=1, operation_key="loadtest-gpu", tags={"placement": "gpu:NOPE"}
+    )
+    with pytest.raises(ValueError, match="gpu:<type> placement, got 'gpu:NOPE'"):
+        runtime.open(spec)
+    assert not meter.placements
+
+
+class _FakeClock:
+    """A clock that moves only when the code under test waits, so a pacing test needs no real time."""
+
+    def __init__(self, limit: float) -> None:
+        """Start at 0.
+
+        Args:
+            limit: The time past which a wait fails the test, so a broken loop cannot hang it.
+        """
+        self.now = 0.0
+        self._limit = limit
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Move the clock by the wait's timeout.
+
+        Args:
+            timeout: The seconds to wait.
+
+        Returns:
+            ``False``: the wait ends by its timeout.
+
+        Raises:
+            AssertionError: When the clock passes the limit.
+        """
+        self.now += 1.0 if timeout is None else timeout
+        if self.now > self._limit:
+            raise AssertionError(f"the loop is still waiting at {self.now} s")
+        return False
+
+    def is_set(self) -> bool:
+        """Return that no stop came.
+
+        Returns:
+            ``False``.
+        """
+        return False
+
+
+class _ClockWaiter:
+    """A durable barrier stand-in that is set from a moment on the fake clock, or never."""
+
+    closed = False
+    failure = None
+
+    def __init__(self, clock: _FakeClock, durable_at: float | None) -> None:
+        """Bind the barrier to the clock.
+
+        Args:
+            clock: The fake clock.
+            durable_at: The moment the step is durable, or ``None`` for never.
+        """
+        self._clock = clock
+        self._durable_at = durable_at
+
+    def is_set(self) -> bool:
+        """Return whether the step is durable on the fake clock.
+
+        Returns:
+            Whether the clock reached the durable moment.
+        """
+        return self._durable_at is not None and self._clock.now >= self._durable_at
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Move the fake clock by the timeout.
+
+        Args:
+            timeout: The seconds to wait.
+
+        Returns:
+            Whether the step is durable after the wait.
+        """
+        self._clock.wait(timeout)
+        return self.is_set()
+
+
+def _fake_drive(
+    monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, steps: int, durable_after: float | None, late: float
+) -> list[list[tuple[float, float, float, float]]]:
+    """Run ``_drive`` for one agent on the fake clock, with a step interval of 10 s and no start offset.
+
+    Args:
+        monkeypatch: Replaces the clock, the pace, the commit and the barrier.
+        clock: The fake clock.
+        steps: The agent's steps.
+        durable_after: The seconds from a commit to its durable moment, or ``None`` for never.
+        late: The seconds that the first commit starts after its ready moment.
+
+    Returns:
+        What ``_drive`` returns.
+    """
+
+    def commit(run_id: str, agent_id: str, seq: int, *args: Any) -> tuple[str, float, float]:
+        """Start the commit late for seq 0, and return at once.
+
+        Args:
+            run_id: The job id.
+            agent_id: The agent id.
+            seq: The step's seq.
+            *args: Not used.
+
+        Returns:
+            The step id, the start of the commit and its end.
+        """
+        if seq == 0:
+            clock.now += late
+        return f"step-{seq}", clock.now, clock.now
+
+    monkeypatch.setattr(swarm_10k, "_now", lambda: clock.now)
+    monkeypatch.setattr(swarm_10k, "step_interval", lambda agents: 10.0)
+    monkeypatch.setattr(swarm_10k, "start_offset", lambda agent_id, interval: 0.0)
+    monkeypatch.setattr(swarm_10k, "_commit_step", commit)
+    monkeypatch.setattr(
+        swarm_10k,
+        "_waiter",
+        lambda store, step_id: _ClockWaiter(clock, None if durable_after is None else clock.now + durable_after),
+    )
+    config = _swarm_config(agents=1, steps_per_agent=steps)
+    return swarm_10k._drive([("run-0", "agent-00000")], config, None, None, 0.0, clock)
+
+
+def test_swarm_late_step_does_not_push_back_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a step that starts late and lands before the next due moment keeps the agent's schedule.
+
+    Args:
+        monkeypatch: Replaces the clock, the pace, the commit and the barrier.
+    """
+    clock = _FakeClock(limit=100.0)
+    steps = _fake_drive(monkeypatch, clock, steps=3, durable_after=1.0, late=4.0)
+    assert [ready for ready, _, _, _ in steps[0]] == [0.0, 10.0, 20.0]
+    assert [begun for _, begun, _, _ in steps[0]] == [4.0, 10.0, 20.0]
+
+
+def test_swarm_driver_times_out_a_step_that_never_lands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a driver raises when a step is not durable in ``DURABLE_TIMEOUT_SECONDS``.
+
+    Args:
+        monkeypatch: Replaces the clock, the pace, the commit and the barrier.
+    """
+    clock = _FakeClock(limit=2 * swarm_10k.DURABLE_TIMEOUT_SECONDS)
+    with pytest.raises(TimeoutError, match="step step-0 is not durable yet"):
+        _fake_drive(monkeypatch, clock, steps=1, durable_after=None, late=0.0)
+    assert swarm_10k.DURABLE_TIMEOUT_SECONDS < clock.now <= swarm_10k.DURABLE_TIMEOUT_SECONDS + 1
+
+
+class _LiveProcess:
+    """A stand-in for a shard process that is still running."""
+
+    exitcode = None
+
+    def is_alive(self) -> bool:
+        """Return that the process runs.
+
+        Returns:
+            ``True``.
+        """
+        return True
+
+
+class _ScriptedQueue:
+    """A report queue that gives a fixed list of replies, one for each poll, with no real wait."""
+
+    def __init__(self, replies: list[dict[str, Any] | None]) -> None:
+        """Keep the replies.
+
+        Args:
+            replies: For each poll, a report, or ``None`` for an empty poll.
+        """
+        self._replies = list(replies)
+
+    def get(self, timeout: float | None = None) -> dict[str, Any]:
+        """Give the next reply.
+
+        Args:
+            timeout: Not used.
+
+        Returns:
+            The next report.
+
+        Raises:
+            queue.Empty: For an empty poll.
+            AssertionError: When the polls go on past the script, so a broken loop cannot hang the test.
+        """
+        if not self._replies:
+            raise AssertionError("collect_reports polled past the script")
+        reply = self._replies.pop(0)
+        if reply is None:
+            raise queue.Empty
+        return reply
+
+
+def test_swarm_parent_gives_a_dead_shard_one_poll_for_its_report() -> None:
+    """Check that a report that comes one poll after its process exits still counts."""
+    report = {"worker_id": "swarm-a", "waits": []}
+    assert swarm_10k.collect_reports(_ScriptedQueue([None, report]), {"swarm-a": _Process()}, timeout=60) == [report]
+
+
+def test_swarm_parent_fails_a_live_shard_that_does_not_report_in_time() -> None:
+    """Check that the parent stops waiting for a live shard process at the deadline."""
+    with pytest.raises(RuntimeError, match="1 shard process\\(es\\) did not report in time"):
+        swarm_10k.collect_reports(_ScriptedQueue([None, None]), {"swarm-a": _LiveProcess()}, timeout=0)
+
+
+def test_swarm_shard_stops_its_drivers_on_ctrl_c(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a Ctrl-C in the shard's wait for its drivers sets the stop, so the pool's exit does not hang.
+
+    Args:
+        monkeypatch: Replaces ``_drive_or_stop`` with a driver that gets Ctrl-C and a driver that waits for the stop.
+        tmp_path: The folder for the shard's database and objects.
+    """
+    stopped: list[bool] = []
+    # ``pool.map`` cancels a driver that has not started when another one fails, so Ctrl-C waits for it.
+    waiting = threading.Event()
+
+    def drive(agents: list[tuple[str, str]], *args: Any) -> list[Any]:
+        """Get Ctrl-C, or wait for the stop as a long driver does.
+
+        Args:
+            agents: The driver's agents; agent 0 gets Ctrl-C and the other one waits.
+            *args: The other ``_drive_or_stop`` arguments; the last one is the stop.
+
+        Returns:
+            No steps.
+
+        Raises:
+            KeyboardInterrupt: For agent 0, which ``pool.map`` gives first.
+        """
+        if agents[0][1] == "agent-0":
+            waiting.wait(5)
+            raise KeyboardInterrupt
+        waiting.set()
+        stopped.append(args[-1].wait(5))
+        return [[]]
+
+    monkeypatch.setattr(swarm_10k, "_drive_or_stop", drive)
+    results: queue.Queue[dict[str, Any]] = queue.Queue()
+    shard = {
+        "url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+        "folder": str(tmp_path),
+        "worker_id": "swarm-w",
+        "flush_max_bytes": swarm_10k.SQLITE_FLUSH_MAX_BYTES,
+    }
+    swarm_10k._shard_process(
+        _swarm_config(agents=2), shard, [("run", "agent-0"), ("run", "agent-1")], threading.Barrier(1), results
+    )
+    assert stopped == [True]
+    assert "KeyboardInterrupt" in results.get_nowait()["error"]
+
+
+def test_swarm_percentile_takes_the_nearest_rank() -> None:
+    """Check that p99 of 1 to 100 ms is 99 ms, the 99th of 100 values."""
+    assert swarm_10k._percentile_ms([i / 1000 for i in range(1, 101)], 0.99) == 99.0
+
+
+def test_swarm_gate_fails_when_a_shard_gets_no_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a swarm with fewer runs than shards runs one pass and fails as not compared.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
+    """
+    violations = _gate(monkeypatch, _swarm_config(agents=swarm_10k.AGENTS_PER_RUN, shards=2))
+    assert violations == ["the shard layouts were not compared: 1 run(s) for 2 shards: each shard needs a run"]
+
+
+def test_swarm_with_one_shard_runs_one_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a swarm with 1 shard runs only the 1-shard pass.
+
+    Args:
+        monkeypatch: Replaces ``run_pass``.
+    """
+    shard_counts: list[int] = []
+
+    def fake_pass(config: swarm_10k.SwarmConfig, shard_count: int, folder: Path) -> dict[str, Any]:
+        """Record the shard count and return made-up figures.
+
+        Args:
+            config: The swarm config.
+            shard_count: The pass's shard count.
+            folder: Not used.
+
+        Returns:
+            The figures.
+        """
+        shard_counts.append(shard_count)
+        return _pass_figures(shard_count)
+
+    monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
+    swarm_10k.run(_swarm_config(shards=1))
+    assert shard_counts == [1]
+
+
+@pytest.mark.parametrize("limit", ["rate", "step_wait", "commit_call"])
+def test_swarm_gate_passes_a_figure_at_its_limit(monkeypatch: pytest.MonkeyPatch, limit: str) -> None:
+    """Check that a figure equal to its limit passes the gate: each limit is inclusive.
+
+    Args:
+        monkeypatch: Replaces ``run_pass``.
+        limit: The figure that sits at its limit.
+    """
+    config = _swarm_config()
+    max_wait_ms = round(1000 * swarm_10k.MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds, 2)
+    sharded = {
+        "rate": {"commits_per_second": float(swarm_10k.TARGET_COMMITS_PER_SECOND)},
+        "step_wait": {"step_wait_ms": {"mean": 500.0, "p50": 500.0, "p99": max_wait_ms, "max": max_wait_ms}},
+        "commit_call": {"commit_call_ms": {"p50": 0.05, "p99": swarm_10k.MAX_COMMIT_CALL_P99_MS, "max": 5.0}},
+    }[limit]
+    assert _gate(monkeypatch, config, **sharded) == []
