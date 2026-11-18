@@ -22,25 +22,21 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, delete, make_url, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from alembic import command
 from core.config import app_env, settings
 from core.notifications.catalog import MACOS
 from core.notifications.dispatch import notify, release_held
 from core.notifications.native import CLAIM_BATCH, CLAIM_LEASE, EXPIRE_BATCH, claim_native, confirm_native
 from core.notifications.preferences import configure_notification_preferences
 from core.storage.models import NotificationModel, NotificationPreferenceModel
-from core.storage.tests.test_remote_jobstore_postgres import _reset_legacy_schema
+from core.storage.tests.test_remote_jobstore_postgres import _reset_legacy_schema, _upgrade_to_head
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
-BACKEND_DIR = Path(__file__).resolve().parents[3]
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -48,25 +44,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 _T0 = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
-
-
-def _upgrade_to_head(db_url: str) -> None:
-    """Upgrade ``db_url`` to Alembic head, and never touch the ``REMOTE_DB_URL`` database.
-
-    ``alembic/env.py`` replaces ``sqlalchemy.url`` with ``REMOTE_DB_URL`` when
-    that variable is set, and ``tests/conftest.py`` loads a developer's
-    ``backend/.env`` (which points it at the dev database). So the variable
-    is set to the test URL for the length of the upgrade only (SKY-824).
-
-    Args:
-        db_url: SQLAlchemy URL of the live Postgres test target.
-    """
-    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
-    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("REMOTE_DB_URL", db_url)
-        command.upgrade(alembic_cfg, "head")
 
 
 @pytest.fixture(scope="module")
