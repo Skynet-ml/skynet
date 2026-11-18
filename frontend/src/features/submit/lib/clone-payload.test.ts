@@ -8,8 +8,8 @@ registerHooks({
     if (specifier.startsWith("@/")) {
       return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
     }
-    if (specifier === "./run-floor") {
-      return { shortCircuit: true, url: new URL("./run-floor.ts", context.parentURL).href };
+    if (specifier === "./run-floor" || specifier === "./engine-contract") {
+      return { shortCircuit: true, url: new URL(`${specifier}.ts`, context.parentURL).href };
     }
     return nextResolve(specifier, context);
   },
@@ -208,6 +208,13 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
     setupCommand: "npm ci && npm run build",
   });
   assert.deepEqual(slices.inputs, { mode: "single" });
+});
+
+test("a clone of a run without a stored harness gets a new run's default harness", () => {
+  const { harness: _harness, ...proposer } = LEGACY_REPO_RUN.proposer;
+  const slices = cloneToSlices({ ...LEGACY_REPO_RUN, proposer });
+  assert.equal(slices.optimizer.proposer?.harness, "codex");
+  assert.equal(slices.optimizer.proposer?.max_tool_calls, 100);
 });
 
 test("a repository run clone keeps the setup draft's files", () => {

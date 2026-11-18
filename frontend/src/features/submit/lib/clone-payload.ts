@@ -8,6 +8,7 @@ import type {
   TaskSlice,
   WorkspaceSlice,
 } from "./wizard-v2";
+import { DEFAULT_PROPOSER } from "./engine-contract";
 import { scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
 
 /**
@@ -110,8 +111,13 @@ const modelConfigs = (value: unknown): ModelConfig[] =>
 function engineKnobs(source: Record<string, unknown>): Partial<OptimizerSlice> {
   const knobs: Partial<OptimizerSlice> = {};
   if (isRecord(source.budget)) knobs.budget = source.budget as unknown as OptimizerSlice["budget"];
+  // A stored proposer has no harness when the run used its contract file's
+  // [proposer] entry, and the harness picker needs one: use a new run's default.
   if (isRecord(source.proposer))
-    knobs.proposer = source.proposer as unknown as OptimizerSlice["proposer"];
+    knobs.proposer = {
+      harness: DEFAULT_PROPOSER.harness,
+      ...source.proposer,
+    } as unknown as OptimizerSlice["proposer"];
   if (isRecord(source.shinka)) knobs.shinka = source.shinka as unknown as OptimizerSlice["shinka"];
   return knobs;
 }
