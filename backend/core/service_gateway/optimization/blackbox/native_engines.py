@@ -179,6 +179,8 @@ _WRITE_UP_GRACE_SECONDS = 90
 # is refused before it is read. A pending list of a few candidates is far smaller than its cap.
 MAX_PENDING_BYTES = 1024 * 1024
 MAX_CANDIDATE_BYTES = repo_tree.MAX_PATCH_BYTES
+CANDIDATE_MISSING = "candidate file must exist under agents/"
+CANDIDATE_TOO_LARGE = "candidate file is larger than a version may be"
 
 # With no example ids the call is a full evaluation over the whole visible pool,
 # which is what the server logs as progress; with ids it is a probe. HTTP 429
@@ -2262,11 +2264,11 @@ class MetaHarnessEngine:
         try:
             path = (self.work_dir / file).resolve()
             if not path.is_relative_to(agents) or not path.is_file():
-                return "candidate file must exist under agents/"
+                return CANDIDATE_MISSING
             if path.stat().st_size > MAX_CANDIDATE_BYTES:
-                return "candidate file is larger than a version may be"
+                return CANDIDATE_TOO_LARGE
         except (OSError, RuntimeError):
-            return "candidate file must exist under agents/"
+            return CANDIDATE_MISSING
         if self.repo and path.suffix != self.suffix:
             return "candidate file must be a patch saved by save.sh"
         try:

@@ -401,6 +401,10 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         super().__init__(config)
         self._ctx = ctx
         self._tree: str | None = None
+        # The tree holds the agent's candidate files: the local copies serve only ``_validate`` and the benchmark,
+        # so they never go back up over the tree, where the agent may have changed or deleted them since.
+        self._pulled: set[str] = set()
+        self._oversize: set[str] = set()
         self._max_tool_calls = BlackboxProposer().max_tool_calls if max_tool_calls is None else max_tool_calls
 
     def skill(self) -> str:
@@ -434,7 +438,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         files = {
             path.relative_to(self.work_dir).as_posix(): path.read_bytes()
             for path in sorted(self.work_dir.rglob("*"))
-            if path.is_file()
+            if path.is_file() and path.relative_to(self.work_dir).as_posix() not in self._pulled
         }
         # A tree holds only files, so an empty folder of the layout (such as ``logs/run/reports``) gets a marker
         # file; without it, the folder is missing and the agent's first write into it fails.
@@ -463,8 +467,11 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             if commands >= self._max_tool_calls or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
                 exhausted = True
                 break
-            reply, failed_cents = self._call_model(messages)
+            reply, failed_cents = self._call_model(messages, spent, remaining_cost)
             spent += failed_cents
+            if reply is None:
+                exhausted = True
+                break
             if isinstance(reply, ModelCallFailedError):
                 failed = True
                 text = str(reply)
@@ -498,20 +505,24 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             killed=False,
         )
 
-    def _call_model(self, messages: list[dict[str, Any]]) -> tuple[ModelReply | ModelCallFailedError, Decimal]:
+    def _call_model(
+        self, messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
+    ) -> tuple[ModelReply | ModelCallFailedError | None, Decimal]:
         """Call the model with the bash tool, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
 
         Each attempt is one ``model`` step, so a resume replays the same failures and the same retries. A live
         failure waits ``MODEL_RETRY_WAIT_SECONDS`` before the next attempt; a replayed failure made no call, so it
         does not wait. A failed attempt that the provider billed carries its committed cost, live and on a replay,
-        so the proposer cap counts it the same way both times.
+        so the proposer cap counts it the same way both times, and no retry starts once the cap is reached.
 
         Args:
             messages: The session's messages.
+            spent: The session's committed spend before this call, in cents.
+            remaining_cost: Proposer spend still allowed, in dollars, or ``None``.
 
         Returns:
-            The reply, or the last :class:`ModelCallFailedError` when every attempt failed, and the summed cost of
-            the failed attempts, in cents.
+            The reply, the last :class:`ModelCallFailedError` when every attempt failed, or ``None`` when the
+            billed failures reached the proposer cap; and the summed cost of the failed attempts, in cents.
         """
         assert self._ctx.call_model is not None
         failure = ModelCallFailedError("unknown")
@@ -522,6 +533,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             except ModelCallFailedError as error:
                 failure = error
                 failed_cents += error.cost_cents
+            if remaining_cost is not None and float(spent + failed_cents) / 100 >= remaining_cost:
+                return None, failed_cents
             # The loop raises a live failure from the model's own error, and a replayed failure with no cause.
             if failure.__cause__ is not None and attempt < MODEL_ATTEMPTS - 1:
                 _sleep(MODEL_RETRY_WAIT_SECONDS)
@@ -588,6 +601,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
     def _pull(self, tree: str) -> None:
         """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
 
+        A candidate file past ``MAX_CANDIDATE_BYTES`` gets no local copy: ``_validate`` refuses it by its size.
+
         Args:
             tree: The tree after the session.
         """
@@ -595,6 +610,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         logs = self.logs_dir.relative_to(self.work_dir).as_posix()
         pending = self.logs_dir / "pending_eval.json"
         data = self._ctx.read_file(tree, f"{logs}/pending_eval.json")
+        self._oversize = set()
         if data is None:
             pending.unlink(missing_ok=True)
             return
@@ -615,12 +631,34 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             # An entry that names a local folder, or a path under a local file, cannot be a candidate
             # file; ``_validate`` refuses it.
             with contextlib.suppress(OSError):
-                if content is None:
+                if content is None or len(content) > native_engines.MAX_CANDIDATE_BYTES:
                     local.unlink(missing_ok=True)
+                    if content is not None:
+                        self._oversize.add(path)
                 else:
                     local.parent.mkdir(parents=True, exist_ok=True)
-                    # One byte past the cap is enough for ``_validate`` to refuse the file by its size.
-                    local.write_bytes(content[: native_engines.MAX_CANDIDATE_BYTES + 1])
+                    local.write_bytes(content)
+                    self._pulled.add(path)
+
+    def _validate(self, spec: dict[str, Any]) -> str | None:
+        """Check a candidate spec as the native engine does, with the size reason for a file left in the tree.
+
+        Args:
+            spec: One ``pending_eval.json`` candidate entry.
+
+        Returns:
+            A failure reason, or ``None`` when the candidate can be benchmarked.
+        """
+        failure = super()._validate(spec)
+        file = spec.get("file")
+        # ``_pull`` writes no local copy of an over-cap file, so the native check finds no file.
+        if (
+            failure == native_engines.CANDIDATE_MISSING
+            and isinstance(file, str)
+            and posixpath.normpath(file) in self._oversize
+        ):
+            return native_engines.CANDIDATE_TOO_LARGE
+        return failure
 
 
 class MetaHarnessEngine:

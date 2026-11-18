@@ -1153,7 +1153,7 @@ def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
     worker._max_tool_calls = 2
     call = {"id": "c", "name": "bash", "arguments": {"command": "true"}}
     replies = iter([ModelReply("", Decimal(1), [call, call, call])])
-    worker._call_model = lambda messages: (next(replies), Decimal(0))
+    worker._call_model = lambda messages, spent, remaining_cost: (next(replies), Decimal(0))
 
     outcome = worker._propose(1, None)
 
@@ -1429,15 +1429,20 @@ def test_the_workspace_tree_holds_the_empty_layout_folders(
     )
     prompts: list[list[dict[str, Any]]] = []
 
-    def call(messages: list[dict[str, Any]]) -> tuple[ModelReply, Decimal]:
+    def call(
+        messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
+    ) -> tuple[ModelReply, Decimal]:
         """Keep the prompt and give the next scripted reply.
 
         Args:
             messages: The session's messages.
+            spent: Not used.
+            remaining_cost: Not used.
 
         Returns:
             The reply and no failed cost.
         """
+        del spent, remaining_cost
         prompts.append(list(messages))
         return next(replies), Decimal(0)
 
@@ -1692,7 +1697,7 @@ def test_a_candidate_file_over_its_cap_is_refused_with_a_failed_row(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A candidate file past ``MAX_CANDIDATE_BYTES`` comes back cut to one byte past the cap and gets a failed row.
+    """A candidate file past ``MAX_CANDIDATE_BYTES`` gets no local copy and gets a failed row for its size.
 
     Args:
         monkeypatch: Pytest's monkeypatch.
@@ -1719,4 +1724,140 @@ def test_a_candidate_file_over_its_cap_is_refused_with_a_failed_row(
         for line in summary.read_text().splitlines()
     ]
     assert [row["outcome"] for row in rows] == ["failed: candidate file is larger than a version may be"] * 2
-    assert [path.stat().st_size for path in tmp_path.rglob("agents/big.txt")] == [101]
+    assert list(tmp_path.rglob("agents/big.txt")) == []
+
+
+def test_an_over_cap_candidate_file_replaces_no_stale_local_copy_and_is_refused_by_size(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """An over-cap file in the tree removes the local copy of an earlier pull, and ``_validate`` names its size.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 10)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    (worker.work_dir / "agents" / "big.txt").write_text("stale")
+    tree = loop.put_files({"logs/run/pending_eval.json": _pending("agents/big.txt"), "agents/big.txt": b"x" * 11})
+
+    worker._pull(tree)
+
+    assert not (worker.work_dir / "agents" / "big.txt").exists()
+    assert worker._validate({"name": "c0", "file": "agents/./big.txt"}) == native_engines.CANDIDATE_TOO_LARGE
+    assert worker._validate({"name": "c1", "file": "agents/other.txt"}) == native_engines.CANDIDATE_MISSING
+
+
+def test_a_later_session_sees_the_tree_and_not_the_pulled_copies(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A pulled candidate that the agent edits or deletes, and an over-cap one, keep their tree state next session.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 10)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    pending = _pending("agents/a.txt", "agents/b.txt", "agents/big.txt").decode()
+    commands = [
+        f"printf one > agents/a.txt && printf b > agents/b.txt && printf %011d 0 > agents/big.txt"
+        f" && printf '%s' '{pending}' > logs/run/pending_eval.json",
+        "printf two > agents/a.txt && rm agents/b.txt",
+        "cat agents/a.txt; test -e agents/b.txt && echo ' b'; echo; wc -c < agents/big.txt",
+    ]
+    outputs: list[str] = []
+
+    def call(
+        messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
+    ) -> tuple[ModelReply, Decimal]:
+        """Send the session's one command, then end the session after its result.
+
+        Args:
+            messages: The session's messages.
+            spent: Not used.
+            remaining_cost: Not used.
+
+        Returns:
+            The reply and no failed cost.
+        """
+        del spent, remaining_cost
+        if messages[-1]["role"] == "tool":
+            outputs.append(json.loads(messages[-1]["content"])["stdout"])
+            return ModelReply("done", Decimal(0), []), Decimal(0)
+        tool_call = {"id": "c", "name": "bash", "arguments": {"command": commands.pop(0)}}
+        return ModelReply("", Decimal(0), [tool_call]), Decimal(0)
+
+    worker._call_model = call
+
+    for iteration in (1, 2, 3):
+        worker._propose(iteration, None)
+
+    assert outputs[2].split() == ["two", "11"]
+
+
+@pytest.mark.parametrize(
+    ("cap", "billed_at", "kinds", "best"),
+    [(0.01, 0, ["model"], "seed"), (0.02, 1, ["model", "command", "model"], "seedx")],
+)
+def test_a_billed_failure_at_the_proposer_cap_is_not_tried_again(
+    cap: float,
+    billed_at: int,
+    kinds: list[str],
+    best: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A billed failed call that reaches the cap ends the session out of budget with no retry, live and on a resume.
+
+    Args:
+        cap: The proposer cost cap, in dollars.
+        billed_at: The index of the attempt that fails after the provider billed one cent; the replies before it
+            cost one cent each and count toward the cap.
+        kinds: The committed step kinds.
+        best: The run's best candidate.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _options(max_token_cost=cap)
+    model = _Proposer(billed_at=frozenset({billed_at}))
+    first, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    live = _run(first, native_options=options)
+
+    _new_generation(engine)
+    again = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, again, generation=2)
+    replayed = _run(loop, native_options=options)
+
+    assert model.attempts == billed_at + 1
+    assert again.calls == []
+    assert [kind for _, kind, _ in _steps(engine)] == kinds
+    assert live.best_candidate == replayed.best_candidate == best
+    assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == cap
+    assert live.metadata["stop_reason"] == replayed.metadata["stop_reason"] == "proposer_budget"
