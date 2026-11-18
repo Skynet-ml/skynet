@@ -146,59 +146,69 @@ _TOOL_OUTPUT_CHARS = 16_000
 _WORK_ROOT = "/work"
 _CLOCK_START = datetime(2000, 1, 1, tzinfo=UTC)
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+# The engine loop's flat tool form; its model client converts the tools to the provider's form.
 _TOOLS = [
     {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List the files below a workspace folder.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Workspace-relative folder."}},
-                "required": [],
-            },
+        "name": "list_files",
+        "description": "List the files below a workspace folder.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Workspace-relative folder."}},
+            "required": [],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read one workspace file as text.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Workspace-relative file."}},
-                "required": ["path"],
-            },
+        "name": "read_file",
+        "description": "Read one workspace file as text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Workspace-relative file."}},
+            "required": ["path"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write one workspace file, and make its folders.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                "required": ["path", "content"],
-            },
+        "name": "write_file",
+        "description": "Write one workspace file, and make its folders.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "description": (
-                "Run a shell command in a fresh box over a copy of the workspace, with no network. "
-                "Its file changes do not come back to the workspace."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
+        "name": "run_command",
+        "description": (
+            "Run a shell command in a fresh box over a copy of the workspace, with no network. "
+            "Its file changes do not come back to the workspace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
         },
     },
 ]
+
+
+def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    """Give one flat tool call of the engine loop in the OpenAI form that the next prompt's history holds.
+
+    Args:
+        call: The flat ``{"id", "name", "arguments"}`` call.
+
+    Returns:
+        ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
+    """
+    arguments = call.get("arguments")
+    # Sorted keys give the same text for a live reply and for its replay from the step log.
+    return {
+        "id": call.get("id"),
+        "type": "function",
+        "function": {
+            "name": call.get("name"),
+            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True),
+        },
+    }
 
 
 class EvaluationStopped(BaseException):
@@ -1587,14 +1597,14 @@ class StepTransport:
             calls = list(reply.get("tool_calls") or [])
             if not calls:
                 return self._outcome(str(reply["text"]), cost_cents, failed=False)
-            messages.append({"role": "assistant", "content": reply["text"], "tool_calls": calls})
+            messages.append(
+                {"role": "assistant", "content": reply["text"], "tool_calls": [_openai_call(call) for call in calls]}
+            )
             messages.extend(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": clip(
-                        (call.get("function") or {}).get("name"), scrub(self.tool(workspace, call), self.root)
-                    ),
+                    "content": clip(call.get("name"), scrub(self.tool(workspace, call), self.root)),
                 }
                 for call in calls
             )
@@ -1605,17 +1615,15 @@ class StepTransport:
 
         Args:
             workspace: The session workspace.
-            call: ``{"id", "function": {"name", "arguments"}}``, the arguments as JSON text or an object.
+            call: The engine loop's flat ``{"id", "name", "arguments"}``; the arguments are an object, or the raw
+                text of arguments that are no JSON object.
 
         Returns:
             The tool's output.
         """
-        function = call.get("function") or {}
-        name = function.get("name")
+        name = call.get("name")
         try:
-            arguments = function.get("arguments") or {}
-            if isinstance(arguments, str):
-                arguments = json.loads(arguments)
+            arguments = call.get("arguments")
             if not isinstance(arguments, dict):
                 raise TypeError("the tool arguments must be a JSON object")
             if name == "list_files":

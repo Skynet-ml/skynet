@@ -37,6 +37,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
     RepoSeed,
     Result,
     Task,
+    ToolCall,
 )
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
@@ -225,25 +226,24 @@ class _Model:
         self.tools.append(tools)
         turn = len(prompt)
         if turn == 2:
-            arguments = json.dumps({"path": "answer.txt", "content": "seedx"})
-            return ModelReply("", Decimal(1), [_call("c1", "write_file", arguments)])
+            return ModelReply("", Decimal(1), [_call("c1", "write_file", {"path": "answer.txt", "content": "seedx"})])
         if turn == 4:
-            return ModelReply("", Decimal(1), [_call("c2", "run_command", json.dumps({"command": "cat answer.txt"}))])
+            return ModelReply("", Decimal(1), [_call("c2", "run_command", {"command": "cat answer.txt"})])
         return ModelReply("seedx", Decimal(1), [])
 
 
-def _call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
-    """Build one tool call in the OpenAI shape.
+def _call(call_id: str, name: str, arguments: dict[str, Any]) -> ToolCall:
+    """Build one tool call in the engine loop's flat shape.
 
     Args:
         call_id: The call id.
         name: The tool name.
-        arguments: The arguments as JSON text.
+        arguments: The arguments.
 
     Returns:
         The tool call.
     """
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+    return {"id": call_id, "name": name, "arguments": arguments}
 
 
 def _tree(trees: TreeStore, name: str, text: str) -> str:
@@ -502,7 +502,15 @@ def test_a_hidden_path_is_not_visible_to_the_engine(
     """
     hidden = hidden_hashes(["eval", "optimize.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
-    tree = loop.put_files({"eval/metric.py": b"secret", "optimize.toml": b"secret", "src/a.py": b"a"})
+    # put_files refuses a hidden path, so the test stores the seed straight in the tree store, as the run does.
+    tree = trees.put_tree(
+        RUN_ID,
+        [
+            TreeEntry("eval", "tree", _tree(trees, "metric.py", "secret")),
+            TreeEntry("optimize.toml", "file", trees.put_blob(RUN_ID, b"secret")),
+            TreeEntry("src", "tree", _tree(trees, "a.py", "a")),
+        ],
+    )
     seed = RepoSeed(tree, editable_paths=("src",), hidden_hashes=hidden)
     child = _runner(tmp_path, _CHECKOUT_RUNNER.format(runner=str(autosaddler.RUNNER)))
 

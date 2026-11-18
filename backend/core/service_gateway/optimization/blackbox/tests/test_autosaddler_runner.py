@@ -811,7 +811,7 @@ def _plain_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _call(name: str, **arguments: Any) -> dict[str, Any]:
-    """Build one tool call in the OpenAI shape.
+    """Build one tool call in the engine loop's flat shape.
 
     Args:
         name: The tool name.
@@ -820,7 +820,7 @@ def _call(name: str, **arguments: Any) -> dict[str, Any]:
     Returns:
         The tool call.
     """
-    return {"id": name, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+    return {"id": name, "name": name, "arguments": arguments}
 
 
 def test_a_call_sends_one_sorted_line_and_reads_one_reply() -> None:
@@ -1084,18 +1084,18 @@ def test_a_tool_path_outside_the_workspace_is_refused(tmp_path: Path, path: str)
     assert sorted(tmp_path.rglob("*")) == [workspace]
 
 
-@pytest.mark.parametrize("arguments", ["[]", '"x"', "1", "null", [1]])
+@pytest.mark.parametrize("arguments", ["[]", '"x"', "1", "null", "{bad", [1]])
 def test_tool_arguments_that_are_no_json_object_give_the_model_an_error(tmp_path: Path, arguments: Any) -> None:
     """The model gets an error text, and the session goes on, when its tool arguments are no JSON object.
 
     Args:
         tmp_path: The session workspace.
-        arguments: The model's arguments, as JSON text or as a decoded value.
+        arguments: The raw text of arguments that are no JSON object, as the flat tool call keeps it, or a value.
     """
     channel, writer = _channel()
     transport = autosaddler_runner.StepTransport(channel, tmp_path, None, None)
 
-    output = transport.tool(tmp_path, {"id": "c1", "function": {"name": "list_files", "arguments": arguments}})
+    output = transport.tool(tmp_path, {"id": "c1", "name": "list_files", "arguments": arguments})
 
     assert output.startswith("Error: TypeError"), output
     assert writer.getvalue() == ""
