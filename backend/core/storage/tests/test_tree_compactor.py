@@ -41,7 +41,7 @@ from core.storage.models import (
     TreeObjectModel,
 )
 from core.storage.object_store import LocalObjectStore, S3ObjectStore
-from core.storage.shard_map import MAIN
+from core.storage.shard_map import MAIN, ShardMap
 from core.storage.step_log_store import (
     PACK_PREFIX,
     SWEEP_AGE_MARGIN_SECONDS,
@@ -65,6 +65,9 @@ needs_postgres = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
     reason="Set APP_TEST_DB_URL to a disposable PostgreSQL database.",
 )
+SHARD_TABLES = [AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
+# job-1 stays on the main database; job-2 and job-3 are on shard s2 (SKY-811).
+SHARD_OF_RUN = {"job-1": MAIN, "job-2": "s2", "job-3": "s2"}
 
 
 class FlakyObjectStore(LocalObjectStore):
@@ -2847,3 +2850,372 @@ def test_postgres_a_failed_unlock_closes_the_connection_and_frees_the_lock(
         "Could not free the tree pack sweep lock; closing its connection"
     ]
     assert _sweep_lock_free(postgres_engine)
+
+
+def _record_shards(engine: Engine) -> None:
+    """Record the shard of each test run on the main database, as the shard map does on a run's first use.
+
+    Args:
+        engine: The main database.
+    """
+    with Session(engine) as session:
+        for run_id, name in SHARD_OF_RUN.items():
+            session.execute(update(JobModel).where(JobModel.optimization_id == run_id).values(step_log_shard=name))
+        session.commit()
+
+
+@pytest.fixture
+def shard(tmp_path: Path) -> Engine:
+    """Return the SQLite shard database ``s2``, with only the step log tables.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The engine.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(engine, tables=SHARD_TABLES)
+    return engine
+
+
+@pytest.fixture
+def shards(engine: Engine, shard: Engine) -> ShardMap:
+    """Return the map of the main database and shard ``s2``, with the runs' shards recorded.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+
+    Returns:
+        The map.
+    """
+    _record_shards(engine)
+    return ShardMap(engine, {"s2": shard})
+
+
+@pytest.fixture
+def shard_store(engine: Engine, objects: FlakyObjectStore, shards: ShardMap) -> Iterator[StepLogStore]:
+    """Yield a step log store of worker ``w1`` over both shards that the test flushes by hand.
+
+    Args:
+        engine: The main database.
+        objects: The test object store.
+        shards: The map of both shards.
+
+    Yields:
+        The store.
+    """
+    step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0, shards=shards)
+    yield step_log
+    step_log.close()
+
+
+def _mark(engine: Engine, keys: list[str] | None = None) -> None:
+    """Set ``needs_rewrite`` on packs of one database.
+
+    Args:
+        engine: The database.
+        keys: The pack keys; ``None`` marks every pack.
+    """
+    statement = update(StoragePackModel).values(needs_rewrite=True)
+    if keys is not None:
+        statement = statement.where(StoragePackModel.pack_key.in_(keys))
+    with Session(engine) as session:
+        session.execute(statement)
+        session.commit()
+
+
+def test_a_pass_merges_and_deletes_the_packs_of_each_shard_on_that_shard(
+    engine, shard, objects, shard_store, shards, make_compactor
+) -> None:
+    """Each shard's packs merge on that shard; old packs stay for the grace time and the merged ones stay in use.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+    """
+    written = _fill(shard_store)
+    old = {name: _pack_rows(database) for name, database in ((MAIN, engine), ("s2", shard))}
+    assert len(old[MAIN]) == len(old["s2"]) == 3
+    with Session(shard) as session:
+        assert set(session.scalars(select(AgentStepModel.run_id))) == {"job-2", "job-3"}
+
+    assert make_compactor(shards=shards).run_once() == (6, 0)
+
+    (main_pack,) = _pack_keys_of_rows(engine)
+    (shard_pack,) = _pack_keys_of_rows(shard)
+    assert main_pack != shard_pack
+    assert _pack_rows(engine) == old[MAIN] | {main_pack}
+    assert _pack_rows(shard) == old["s2"] | {shard_pack}
+    assert make_compactor(shards=shards).run_once() == (0, 0)
+    _assert_all_readable(shard_store, written)
+
+    assert make_compactor(shards=shards, grace_seconds=0.0).run_once() == (0, 6)
+
+    assert _pack_rows(engine) == {main_pack}
+    assert _pack_rows(shard) == {shard_pack}
+    assert set(objects.list("")) == {main_pack, shard_pack}
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_marked_pack_on_a_shard_comes_before_a_full_window_of_older_packs(
+    engine, shard, objects, shard_store, shards, make_compactor, monkeypatch
+) -> None:
+    """On a shard, a newer marked pack enters a pass whose window older small packs would fill.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    written = _fill(shard_store, flushes=4)
+    monkeypatch.setattr(tree_compactor, "MAX_PACKS_PER_PASS", 2)
+    with Session(shard) as session:
+        *older, marked = session.scalars(
+            select(StoragePackModel.pack_key).order_by(StoragePackModel.created_at, StoragePackModel.pack_key)
+        ).all()
+        session.execute(
+            update(StoragePackModel)
+            .where(StoragePackModel.pack_key.in_(older))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        session.commit()
+    _mark(shard, [marked])
+
+    assert make_compactor(shards=shards).merge(shard) == 2
+
+    assert marked not in _pack_keys_of_rows(shard)
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_marked_pack_on_a_shard_over_the_row_cap_moves_in_parts(
+    engine, shard, objects, shard_store, shards, make_compactor, monkeypatch
+) -> None:
+    """A marked shard pack with more rows than the cap moves cap - 1 rows per pass, on its shard, until empty.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    written = _fill(shard_store, flushes=1)
+    (marked,) = _pack_rows(shard)
+    offsets = _offsets_on(shard, marked)
+    assert len(offsets) == 6
+    monkeypatch.setattr(tree_compactor, "MAX_ROWS_PER_PASS", 4)
+    _mark(shard)
+
+    assert make_compactor(shards=shards).run_once() == (1, 0)
+    assert _offsets_on(shard, marked) == offsets[3:]
+    with Session(shard) as session:
+        assert session.get(StoragePackModel, marked).needs_rewrite
+
+    assert make_compactor(shards=shards).run_once() == (1, 0)
+    assert marked not in _pack_keys_of_rows(shard)
+    assert make_compactor(shards=shards, grace_seconds=0.0).run_once() == (0, 1)
+    assert marked not in objects.list("")
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_shard_that_cannot_connect_does_not_stop_the_others(
+    tmp_path, engine, shard, objects, shard_store, make_compactor, caplog
+) -> None:
+    """A shard whose database cannot open is logged on each step; the main database and s2 still compact.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    written = _fill(shard_store)
+    down = create_engine(f"sqlite:///{tmp_path / 'missing' / 'down.sqlite'}")
+    shards = ShardMap(engine, {"down": down, "s2": shard})
+    assert shards.names() == ("down", "main", "s2")
+
+    with caplog.at_level(logging.WARNING, logger=tree_compactor.__name__):
+        assert make_compactor(shards=shards).run_once() == (6, 0)
+
+    failed = [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
+    assert failed == [
+        "Tree compaction step remove_retired on shard down failed; the next pass tries again",
+        "Tree compaction step merge on shard down failed; the next pass tries again",
+    ]
+    assert len(_pack_keys_of_rows(engine)) == len(_pack_keys_of_rows(shard)) == 1
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_shard_that_a_job_records_and_the_map_lacks_is_logged_as_an_error(
+    engine, shard, objects, shard_store, shards, make_compactor, caplog
+) -> None:
+    """A job on a shard that the map does not have gets an error on each pass; the known shards still compact.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    written = _fill(shard_store)
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id="job-9", username="ada", execution_generation=1, step_log_shard="s9"))
+        session.commit()
+    compactor = make_compactor(shards=shards)
+
+    with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
+        assert compactor.run_once() == (6, 0)
+        assert compactor.run_once() == (0, 0)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == ["Jobs record step log shards s9, which this map does not have; their packs are not compacted"] * 2
+    _assert_all_readable(shard_store, written)
+
+
+def test_a_map_with_every_recorded_shard_logs_no_error(
+    engine, shard, objects, shard_store, shards, make_compactor, caplog
+) -> None:
+    """When the map has every shard that a job records, a pass logs no error.
+
+    Args:
+        engine: The main database.
+        shard: The shard database ``s2``.
+        objects: The test object store.
+        shard_store: The step log store over both shards.
+        shards: The map of both shards.
+        make_compactor: The factory of compactors.
+        caplog: Pytest's log capture fixture.
+    """
+    _fill(shard_store)
+
+    with caplog.at_level(logging.ERROR, logger=tree_compactor.__name__):
+        assert make_compactor(shards=shards).run_once() == (6, 0)
+
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@pytest.fixture
+def postgres_shard(postgres_engine: Engine) -> Iterator[ShardMap]:
+    """Yield a map of the PostgreSQL main schema and a shard ``s2`` in a second schema, with the runs' shards recorded.
+
+    Args:
+        postgres_engine: The engine on the main schema.
+
+    Yields:
+        The map.
+    """
+    schema = f"compactor_s2_{uuid.uuid4().hex[:10]}"
+    admin = create_engine(TEST_DB_URL)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    shard = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"})
+    try:
+        # A shard database has no jobs table, so its step log tables have no foreign key, as the shard
+        # migration makes them. The tables they refer to are made only to create them, then dropped.
+        referred = [AgentConversationModel.__table__, JobModel.__table__]
+        Base.metadata.create_all(shard, tables=[*referred, *SHARD_TABLES], checkfirst=False)
+        with shard.begin() as connection:
+            connection.execute(text("DROP TABLE agent_conversations, jobs CASCADE"))
+        _record_shards(postgres_engine)
+        yield ShardMap(postgres_engine, {"s2": shard})
+    finally:
+        shard.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+@needs_postgres
+def test_postgres_a_shard_merge_locks_jobs_on_main_and_packs_on_the_shard_with_nowait(
+    tmp_path, postgres_engine, objects, postgres_shard
+) -> None:
+    """On PostgreSQL a pass merges each shard; the shard merge locks its jobs on main and its packs on the shard.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the main schema.
+        objects: The test object store.
+        postgres_shard: The map of the main schema and shard ``s2``.
+    """
+    shard = postgres_shard.engine("s2")
+    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shard)
+    try:
+        written = _fill(store)
+        main_statements = _record_statements(postgres_engine)
+        shard_statements = _record_statements(shard)
+        compactor = TreeCompactor(
+            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shard
+        )
+
+        assert compactor.merge(shard) == 3
+
+        main_locks = [statement for statement, _ in main_statements if "NOWAIT" in statement]
+        shard_locks = [statement for statement, _ in shard_statements if "NOWAIT" in statement]
+        assert len(main_locks) == len(shard_locks) == 1
+        assert "ORDER BY jobs.optimization_id FOR KEY SHARE NOWAIT" in main_locks[0]
+        assert "ORDER BY storage_packs.pack_key FOR UPDATE NOWAIT" in shard_locks[0]
+        assert compactor.run_once() == (3, 0)
+        assert len(_pack_keys_of_rows(postgres_engine)) == len(_pack_keys_of_rows(shard)) == 1
+        _assert_all_readable(store, written)
+    finally:
+        store.close()
+
+
+@needs_postgres
+def test_postgres_a_shard_merge_does_not_wait_for_a_job_locked_on_main(
+    tmp_path, postgres_engine, objects, postgres_shard, caplog
+) -> None:
+    """A shard merge whose job a main transaction locks gives up at once; the shard keeps every row.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        postgres_engine: The engine on the main schema.
+        objects: The test object store.
+        postgres_shard: The map of the main schema and shard ``s2``.
+        caplog: Pytest's log capture fixture.
+    """
+    shard = postgres_shard.engine("s2")
+    store = StepLogStore(postgres_engine, objects, "w1", flush_window_seconds=60.0, shards=postgres_shard)
+    try:
+        written = _fill(store)
+        old = _pack_keys_of_rows(shard)
+        results: list[int] = []
+        compactor = TreeCompactor(
+            postgres_engine, objects, _deleter(tmp_path / "objects", []), min_age_seconds=0.0, shards=postgres_shard
+        )
+        with postgres_engine.connect() as holder:
+            holder.execute(
+                select(JobModel.optimization_id).where(JobModel.optimization_id == "job-2").with_for_update()
+            )
+            thread = threading.Thread(target=lambda: results.append(compactor.merge(shard)))
+            thread.start()
+            thread.join(10)
+            waited = thread.is_alive()
+            holder.rollback()
+        thread.join(30)
+
+        assert not waited
+        assert results == [0]
+        assert any("another transaction holds a lock" in r.getMessage() for r in caplog.records)
+        assert _pack_keys_of_rows(shard) == old
+        _assert_all_readable(store, written)
+    finally:
+        store.close()

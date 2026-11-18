@@ -73,9 +73,11 @@ holds the locks until the shard commits, as a flush does. The sweep of the
 packs with no row reads the rows of every shard, so it never deletes a pack
 that another shard records. It claims an unrecorded flush pack on the shard
 that the pack's manifest names, the same database where an apply of the
-pack would insert its row. A shard that fails to answer stops the sweep. A
-job that records a shard that this map does not have also stops the sweep:
-the packs of that shard have their rows there, so they would look unrecorded.
+pack would insert its row. A shard that fails to answer stops the sweep, but
+not the merges and deletes of the other shards. A job that records a shard
+that this map does not have is logged as an error on each pass. It also
+stops the sweep: the packs of that shard have their rows there, so they would
+look unrecorded.
 """
 
 from __future__ import annotations
@@ -272,6 +274,7 @@ class TreeCompactor:
         Returns:
             The number of packs merged and the number of packs deleted.
         """
+        self._attempt(self._report_unknown_shards, "check of the step log shards")
         shards = [(name, self._shards.engine(name)) for name in self._shards.names()]
         removed = sum(
             self._attempt(partial(self.remove_retired, engine), f"remove_retired on shard {name}")
@@ -283,6 +286,23 @@ class TreeCompactor:
             removed += self._attempt(self.remove_unrecorded, "remove_unrecorded")
         merged = sum(self._attempt(partial(self.merge, engine), f"merge on shard {name}") for name, engine in shards)
         return merged, removed
+
+    def _report_unknown_shards(self) -> int:
+        """Log an error for each step log shard that jobs record and this map does not have.
+
+        The packs of such a shard are in a database that this pass cannot reach, so they stay uncompacted
+        until every pod has the same ``STEP_LOG_SHARDS``.
+
+        Returns:
+            The number of unknown shards.
+        """
+        unknown = self._unknown_shards()
+        if unknown:
+            logger.error(
+                "Jobs record step log shards %s, which this map does not have; their packs are not compacted",
+                ", ".join(unknown),
+            )
+        return len(unknown)
 
     def _attempt(self, step: Callable[[], int], name: str) -> int:
         """Run one step of a pass, and log a failure instead of raising it.
