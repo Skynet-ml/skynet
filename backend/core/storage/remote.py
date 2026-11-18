@@ -2021,11 +2021,11 @@ class RemoteDBJobStore:
                 if not counted:
                     budget_id, username = job.execution_budget_id, job.username
                     session.rollback()
-                    # The fence above already moved the generation, so the sweep's own
-                    # failure write would miss the row and leave the run running with
-                    # no kept error. End the run here, as the sweep would. The guard on
-                    # the generation and the status leaves alone a run that another
-                    # sweep requeued or a worker claimed since.
+                    # After the rollback the sweep sees a moved generation, or a usage
+                    # wait that has not expired, so it would not end the run and the run
+                    # would stay running with no kept error. End it here, as the sweep
+                    # would. The guard on the generation and the status leaves alone a
+                    # run that another sweep requeued or a worker claimed since.
                     ended = (
                         session.query(JobModel)
                         .filter(

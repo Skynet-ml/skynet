@@ -1053,7 +1053,7 @@ def test_a_rerun_resets_the_automatic_resume_count(store: StepJobStore, monkeypa
 def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
     store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
 ) -> None:
-    """A sweep whose read of the count is stale fails the run with the cap error when another sweep used the last resume."""
+    """A stale sweep fails the run with the cap error when another sweep used the last resume."""
     if "postgres" in request.node.callspec.id:
         pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
     _funded_run(store)
