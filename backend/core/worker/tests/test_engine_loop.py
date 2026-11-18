@@ -2796,8 +2796,10 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
 
 
 class _Loads:
-    """Record each blob and object that loads, each pack lookup and each range read, so a test can show that a
-    large file never loads and that a read finds its object once."""
+    """Record the blob, object, pack-lookup and range loads of a capped read.
+
+    A test uses the record to show that a large file never loads and that a read finds its object once.
+    """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Wrap the blob read, the step log's object read and pack lookup, and the object store's range read.
