@@ -1057,3 +1057,61 @@ def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
     assert store.take_ended_orphans() == []
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], "owner")
     assert budget.blocked_reason is None
+
+
+def test_a_stale_sweep_leaves_alone_a_run_that_the_user_cancelled(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that cannot count its resume does not fail a run that the user cancelled at the same generation.
+
+    Args:
+        store: The job store.
+        step_logs: The factory of step logs for a pod.
+        request: The pytest request, to read the store backend.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the cancel wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES - 1)
+    _kill(store)
+    waive = BudgetService.waive_interrupted_work
+    held = {}
+
+    def user_cancels(self: BudgetService, *args: Any, **kwargs: Any) -> Any:
+        """Cancel the run as the cancel route does, after this sweep fenced it.
+
+        Args:
+            self: The budget service of this sweep.
+            *args: The waiver's positional arguments.
+            **kwargs: The waiver's keyword arguments.
+
+        Returns:
+            The waiver's result.
+        """
+        result = waive(self, *args, **kwargs)
+        job = store.get_job(RUN)
+        held["generation"] = int(job["execution_generation"])
+        self.stop_admission(job["execution_budget_id"], "owner", reason="user_cancelled")
+        assert store.update_job_if_status(
+            RUN, ("pending", "validating", "running"), status="cancelled", completed_at=datetime.now(UTC)
+        )
+        # A cancel keeps the generation, so only the status guard protects the run. The count
+        # write makes this sweep take the path that ends the run.
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return result
+
+    monkeypatch.setattr(BudgetService, "waive_interrupted_work", user_cancels)
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "cancelled"
+    assert job["execution_generation"] == held["generation"]
+    assert store.take_ended_orphans() == []
+    # The budget is not checked here: the sweep's resume_admission reopens a budget that
+    # the user's cancel closed. That bug is older than SKY-801 (SKY-814).
