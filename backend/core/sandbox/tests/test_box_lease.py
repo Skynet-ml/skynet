@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 import tempfile
 import threading
 import time
@@ -1483,6 +1484,209 @@ def test_the_reaper_closes_an_idle_box_in_the_context_of_its_last_release() -> N
         _stop(lease, ticker)
 
     assert seen == ["step-2"]
+
+
+@pytest.mark.parametrize("broken", ["clock", "wait"])
+def test_a_release_right_after_a_reaper_failure_still_gets_a_reaper(
+    broken: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release in the reaper's failure log, the old gap before the reaper cleared itself, starts a new reaper.
+
+    Args:
+        broken: The reaper call that fails once, the clock or the idle wait.
+        monkeypatch: Hooks the reaper's failure log.
+    """
+    provider = _Provider()
+    ticker = _Ticker()
+    failed: list[bool] = []
+
+    def clock() -> float:
+        """Return the fake time, and fail the reaper's first read when the clock is the broken call.
+
+        Returns:
+            The fake time.
+
+        Raises:
+            RuntimeError: At the reaper's first read.
+        """
+        if broken == "clock" and not failed and threading.current_thread().name == _REAPER:
+            failed.append(True)
+            raise RuntimeError("The clock broke.")
+        return provider.clock.now
+
+    def wait(seconds: float) -> None:
+        """Fail the first wait when the idle wait is the broken call, else wait on the ticker.
+
+        Args:
+            seconds: The reaper's wait.
+
+        Raises:
+            RuntimeError: At the first wait.
+        """
+        if broken == "wait" and not failed:
+            failed.append(True)
+            raise RuntimeError("The wait broke.")
+        ticker(seconds)
+
+    lease = provider.lease(clock=clock, sleep_after_seconds=600, idle_wait=wait)
+    first = lease.acquire("agent-1", [])
+    second = lease.acquire("agent-2", [])
+    reapers: list[threading.Thread | None] = []
+    logged = threading.Event()
+    log = logging.getLogger(BoxLease.__module__)
+    warning = log.warning
+
+    def release_in_log(message: str, *args: Any) -> None:
+        """Release the second box from another thread at the failure log, then log.
+
+        Args:
+            message: The log message.
+            *args: The message arguments.
+        """
+        if "reaper stopped" in message and not logged.is_set():
+            # Joined here, so the release runs where the old reaper had not yet cleared itself.
+            other = threading.Thread(target=lease.release, args=(second, True), daemon=True)
+            other.start()
+            other.join(timeout=5)
+            reapers.append(lease._reaper)
+            logged.set()
+        warning(message, *args)
+
+    monkeypatch.setattr(log, "warning", release_in_log)
+    lease.release(first, healthy=True)
+    failing = lease._reaper
+    assert failing is not None
+    try:
+        assert logged.wait(timeout=5), "The reaper did not fail."
+        failing.join(timeout=5)
+        assert not failing.is_alive()
+        new = reapers[0]
+        assert new is not None, "The release in the gap started no reaper."
+        assert new is not failing, "The release in the gap started no reaper."
+        assert lease._reaper is new
+        # Taken here, so the kept error does not reach the close in the teardown.
+        with pytest.raises(RuntimeError, match="broke"):
+            lease.acquire("agent-3", [])
+        ticker.passes(1)
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+        assert provider.closed == [first, second]
+    finally:
+        _stop(lease, ticker)
+
+
+def test_a_reaper_start_failure_leaves_the_box_held_and_close_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the reaper thread cannot start, the release raises with no change, and a later release and close work."""
+    provider = _Provider()
+    ticker = _Ticker()
+    lease = provider.lease(sleep_after_seconds=600, idle_wait=ticker)
+    box = lease.acquire("agent-1", [])
+    start = threading.Thread.start
+    refused: list[bool] = []
+
+    def refuse_once(self: threading.Thread) -> None:
+        """Refuse the first reaper start, as when the process has no thread left.
+
+        Args:
+            self: The thread.
+
+        Raises:
+            RuntimeError: At the first reaper start.
+        """
+        if self.name == _REAPER and not refused:
+            refused.append(True)
+            raise RuntimeError("can't start new thread")
+        start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", refuse_once)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        lease.release(box, healthy=True)
+    try:
+        assert lease._reaper is None, "A thread that never started blocks every new reaper."
+        assert lease._leases["agent-1"].busy
+        assert not lease._idle
+
+        lease.release(box, healthy=True)
+        ticker.passes(1)
+        assert lease._reaper is not None
+        assert lease._reaper.is_alive()
+    finally:
+        _stop(lease, ticker)
+    assert box.closed
+
+
+def test_a_clock_failure_in_a_release_leaves_the_box_held() -> None:
+    """A release whose clock read fails changes nothing, so the box is not lost between held and idle."""
+    provider = _Provider()
+    broken: list[bool] = []
+
+    def clock() -> float:
+        """Return the fake time, or fail while the test breaks the clock.
+
+        Returns:
+            The fake time.
+
+        Raises:
+            RuntimeError: While the clock is broken.
+        """
+        if broken:
+            raise RuntimeError("The clock broke.")
+        return provider.clock.now
+
+    ticker = _Ticker()
+    lease = provider.lease(clock=clock, sleep_after_seconds=600, idle_wait=ticker)
+    box = lease.acquire("agent-1", [])
+    broken.append(True)
+    with pytest.raises(RuntimeError, match="The clock broke"):
+        lease.release(box, healthy=True)
+    broken.clear()
+    try:
+        assert lease._leases["agent-1"].busy
+        assert not lease._idle
+        assert lease._reaper is None
+
+        lease.release(box, healthy=True)
+        ticker.passes(1)
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+        assert box.closed
+    finally:
+        _stop(lease, ticker)
+
+
+def test_close_closes_an_idle_box_in_the_context_of_its_last_release() -> None:
+    """close() runs each idle box close in its release's context, as the reaper does, not in the closer's."""
+    provider = _Provider()
+    seen: list[str | None] = []
+
+    def close_in_scope(box: _Box) -> None:
+        """Record the run scope that the close sees, then close the box.
+
+        Args:
+            box: The box.
+        """
+        seen.append(_RUN_SCOPE.get(None))
+        provider.close(box)
+
+    ticker = _Ticker()
+    lease = BoxLease(
+        provider.open, close_in_scope, clock=provider.clock, sleep_after_seconds=600, idle_wait=ticker, **_LIMITS
+    )
+    box = lease.acquire("agent-1", [])
+    token = _RUN_SCOPE.set("step-1")
+    try:
+        lease.release(box, healthy=True)
+    finally:
+        _RUN_SCOPE.reset(token)
+    ticker.passes(1)
+    token = _RUN_SCOPE.set("closer")
+    try:
+        _stop(lease, ticker)
+    finally:
+        _RUN_SCOPE.reset(token)
+
+    assert box.closed
+    assert seen == ["step-1"]
 
 
 @pytest.mark.parametrize("seconds", [0, -1, True, None, "600", float("inf"), float("nan"), 1e10])
