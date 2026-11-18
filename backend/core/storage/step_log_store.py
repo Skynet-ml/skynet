@@ -53,7 +53,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -1001,9 +1001,10 @@ class StepLogStore:
         only reads, so no two-phase commit is needed. A step whose run records
         another shard fails the fence, so it never lands on this one.
 
-        When an entry gets no row (a stale step, a step or object that
-        already has a row, or an object of a job that is gone), the pack
-        gets ``needs_rewrite``, so the compactor drops the entry's bytes.
+        When an entry gets no row (a stale step, a step that already has a
+        row, or an object of a job that is gone), the pack gets
+        ``needs_rewrite``, so the compactor drops the entry's bytes. An
+        object that already has a row does not mark the pack.
 
         Args:
             shard: The shard that records the pack.
@@ -1089,9 +1090,9 @@ class StepLogStore:
             # Another store applied this pack and inserted every current step that had no row then,
             # so a current step with no row now failed its fence.
             return False, stale + fresh
-        landed = 0
+        landed_steps = 0
         if fresh:
-            landed += session.execute(
+            landed_steps = session.execute(
                 insert(AgentStepModel)
                 .values(
                     [
@@ -1112,9 +1113,10 @@ class StepLogStore:
             for entry in objects
             if entry["run_id"] in jobs
         }
+        landed_objects = 0
         if owned:
             # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
-            landed += session.execute(
+            landed_objects = session.execute(
                 insert(TreeObjectModel)
                 .values(
                     [
@@ -1132,7 +1134,17 @@ class StepLogStore:
                 )
                 .on_conflict_do_nothing()
             ).rowcount
-        if landed < len(steps) + len(objects):
+        object_missing = any(entry["run_id"] not in jobs for entry in objects)
+        if not object_missing and landed_objects < len(owned):
+            # Repeated blobs are common, and a mark for each copy would make the compactor rewrite most
+            # packs. A copy of an object that already has a row only wastes its few bytes (SKY-733).
+            present = session.scalar(
+                select(func.count())
+                .select_from(TreeObjectModel)
+                .where(tuple_(TreeObjectModel.username, TreeObjectModel.object_id).in_(list(owned)))
+            )
+            object_missing = present < len(owned)
+        if landed_steps < len(steps) or object_missing:
             # No row points at those bytes. A pack over half the merge target is a candidate only with
             # the mark, so without it the bytes of a deleted account could stay forever (SKY-733).
             session.execute(

@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -733,6 +733,45 @@ def test_record_progress_json_metrics_roundtrip(store: SQLiteJobStore) -> None:
     store.record_progress("p4", "step", metrics)
     events = store.get_progress_events("p4")
     assert events[0]["metrics"] == metrics
+
+
+def test_record_progress_for_generation_selects_its_jobs_in_key_order(store: SQLiteJobStore) -> None:
+    """The fenced progress publish reads its two jobs ordered by key, so its row locks match a delete's (SKY-733).
+
+    SQLite renders no ``FOR UPDATE``, so the test checks the ``ORDER BY`` that sets the lock order on PostgreSQL.
+
+    Args:
+        store: Disposable job store.
+    """
+    for run_id in ("job-b", "job-a"):
+        store.create_job(run_id)
+        store.update_job(run_id, status="running", execution_generation=1)
+    selects: list[str] = []
+
+    def capture_job_select(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Record each ``SELECT`` on the ``jobs`` table.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        if statement.startswith("SELECT") and "FROM jobs" in statement:
+            selects.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", capture_job_select)
+    try:
+        assert store.record_progress_for_generation(
+            "job-a", "candidate", {"score": 1}, source_optimization_id="job-b", generation=1
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture_job_select)
+
+    assert len(selects) == 1
+    assert selects[0].rstrip().endswith("ORDER BY jobs.optimization_id")
 
 
 def test_get_progress_events_chronological_order(store: SQLiteJobStore) -> None:

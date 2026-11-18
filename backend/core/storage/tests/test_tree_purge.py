@@ -614,15 +614,12 @@ def test_a_mixed_pack_applied_after_an_account_is_gone_is_marked_and_rewritten(
     assert _marked(engine) == set()
 
 
-def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
-    engine: Engine, objects: LocalObjectStore, tmp_path: Path
-) -> None:
-    """A second run stores the same blob again: the copy gets no row, the pack gets the mark, and a rewrite drops it.
+def test_a_pack_with_an_object_that_already_has_a_row_is_not_marked(engine: Engine, objects: LocalObjectStore) -> None:
+    """A second run stores the same blob again: the copy gets no row, and the pack does not get the mark.
 
     Args:
         engine: The test engine.
         objects: The test object store.
-        tmp_path: Pytest's temporary folder.
     """
     step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
     try:
@@ -635,18 +632,53 @@ def test_a_pack_with_an_object_that_already_has_a_row_is_marked(
         step_log.flush()
     finally:
         step_log.close()
+    assert len(set(objects.list("")) - {first}) == 1
+    with Session(engine) as session:
+        assert session.scalar(select(TreeObjectModel.pack_key).where(TreeObjectModel.object_id == blob)) == first
+    assert _marked(engine) == set()
+
+
+def test_a_pack_with_an_object_whose_row_is_gone_after_the_insert_is_marked(
+    engine: Engine, objects: LocalObjectStore
+) -> None:
+    """An object row that another transaction deletes after the insert skips it leaves no row, so the pack is marked.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+    """
+    step_log = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+
+    def delete_the_row(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Delete the first copy's row right after the second flush inserts its objects, as a purge could.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        if statement.startswith("INSERT INTO tree_objects"):
+            connection.execute(delete(TreeObjectModel).where(TreeObjectModel.object_id == blob))
+
+    try:
+        trees = TreeStore(step_log)
+        blob = trees.put_blob("job-1", b"same bytes")
+        step_log.flush()
+        (first,) = objects.list("")
+        trees.put_blob("job-2", b"same bytes")
+        trees.put_blob("job-2", b"new bytes")
+        event.listen(engine, "after_cursor_execute", delete_the_row)
+        try:
+            step_log.flush()
+        finally:
+            event.remove(engine, "after_cursor_execute", delete_the_row)
+    finally:
+        step_log.close()
     (second,) = set(objects.list("")) - {first}
     assert _marked(engine) == {second}
-
-    assert _compact(engine, objects, tmp_path / "objects") == 1
-
-    with Session(engine) as session:
-        rows = session.execute(select(TreeObjectModel.pack_key, TreeObjectModel.pack_length)).all()
-    (new_key,) = {key for key, _ in rows} - {first}
-    # The new pack holds only the bytes of its one row: the duplicate copy is gone.
-    assert [length for key, length in rows if key == new_key] == [len(objects.get(new_key))]
-    assert set(objects.list("")) == {first, new_key}
-    assert _marked(engine) == set()
 
 
 def test_a_pack_with_a_stale_step_is_marked_and_rewritten_without_it(

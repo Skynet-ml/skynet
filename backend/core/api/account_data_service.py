@@ -525,6 +525,12 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     are hard-deleted; financial, audit, and telemetry rows are anonymized in
     place. See the module docstring for why those three survive.
 
+    Lock order: the jobs in key order, their run rows, the wallet and the
+    budgets, the tree packs, then the user row. A run delete and a resume lock
+    the job before the wallet, so the jobs come first. No writer locks the
+    user row and then a wallet or budget, so the wallet can come before the
+    user row; a writer that does would deadlock with this delete (SKY-733).
+
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.

@@ -834,7 +834,7 @@ def test_deletion_keeps_a_real_stripe_customer_id(full_schema_engine: Engine) ->
         assert wallet.username.startswith(_anonymized_username(_EMAIL))
 
 
-def _seed_budget_with_holds(engine: Engine, username: str) -> None:
+def _seed_budget_with_holds(engine: Engine, username: str, job_id: str | None = None) -> None:
     """Give an account a funded wallet and a budget with one operation in each ledger state.
 
     The reserved hold is unstarted work, the dispatched hold is a Vercel
@@ -844,6 +844,7 @@ def _seed_budget_with_holds(engine: Engine, username: str) -> None:
     Args:
         engine: Engine holding the full schema.
         username: Owner of the wallet and the budget.
+        job_id: The run the budget is attached to, or ``None`` for no run.
     """
     now = datetime.now(UTC)
     budget_id = f"budget-{username}"
@@ -863,6 +864,7 @@ def _seed_budget_with_holds(engine: Engine, username: str) -> None:
                 creation_fingerprint="f",
                 total_cents=100,
                 state="attached",
+                job_id=job_id,
                 settled_units=130,
                 wallet_settled_units=130,
                 reserved_units=270,
@@ -953,6 +955,42 @@ def test_deletion_releases_the_open_holds_so_the_sweep_skips_them(full_schema_en
         assert (closed.settled_units, closed.wallet_settled_units) == (130, 130)
         live = session.get(ExecutionBudgetModel, f"budget-{_OTHER}")
         assert (live.state, live.blocked_reason, live.reserved_units) == ("attached", None, 270)
+
+
+def test_deletion_closes_the_budget_of_a_run_as_account_deleted_and_releases_each_hold_once(
+    full_schema_engine: Engine,
+) -> None:
+    """A run's budget goes through the run close and then the account close, and ends as one account close (SKY-733).
+
+    The run close releases the reserved hold and detaches the budget. The account close then releases the
+    started holds and sets the reason, so each hold is released one time and the reserved units reach zero.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
+    run_id = "run-of-owner"
+    with Session(full_schema_engine) as session:
+        session.add(JobModel(optimization_id=run_id, username=_EMAIL, status="running"))
+        session.commit()
+    _seed_budget_with_holds(full_schema_engine, _EMAIL, job_id=run_id)
+
+    _delete(full_schema_engine)
+
+    with Session(full_schema_engine) as session:
+        assert session.get(JobModel, run_id) is None
+        closed = session.get(ExecutionBudgetModel, f"budget-{_EMAIL}")
+        assert (closed.state, closed.job_id, closed.blocked_reason) == ("closed", None, "account_deleted")
+        assert (closed.reserved_units, closed.wallet_reserved_units) == (0, 0)
+        assert (closed.settled_units, closed.wallet_settled_units) == (130, 130)
+        assert {
+            operation.id: operation.state
+            for operation in session.scalars(select(ExecutionOperationModel).order_by(ExecutionOperationModel.id))
+        } == {
+            f"reserved-{_EMAIL}": "released",
+            f"dispatched-{_EMAIL}": "released",
+            f"pending-{_EMAIL}": "released",
+            f"settled-{_EMAIL}": "settled",
+        }
 
 
 def test_refund_that_resolved_the_email_before_deletion_reverses_the_closure(full_schema_engine: Engine) -> None:
