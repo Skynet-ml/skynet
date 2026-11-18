@@ -135,7 +135,7 @@ class _UnescapingServer:
         Returns:
             The wrapped server's score and feedback.
         """
-        return self._server.evaluate(_unescape_backticks(candidate), example, **kwargs)
+        return self._server.evaluate(_as_patch(candidate), example, **kwargs)
 
 
 class BestOfNEngine:
@@ -203,7 +203,7 @@ class BestOfNEngine:
         engine.process_result(result, upstream.output_dir)
         adapted = local_result(result, server)
         if on_loop:
-            adapted.best_candidate = _unescape_backticks(adapted.best_candidate)
+            adapted.best_candidate = _as_patch(adapted.best_candidate)
         # Upstream logs a sample with no scored case at -inf; it is not evaluated.
         evaluated = any(math.isfinite(row.get("score", -math.inf)) for row in result.metadata.get("bon_cost_log", []))
         if budget_stop is not None:
@@ -314,6 +314,22 @@ def _escape_backticks(text: str) -> str:
         The text with no run of three backticks; :func:`_unescape_backticks` gives back the exact text.
     """
     return _ESCAPE.sub(lambda match: "<<<<" if match.group() == "<<" else f"<<{len(match.group())} backticks>>", text)
+
+
+def _as_patch(text: str) -> str:
+    """Turn a repository sample back into a diff that ``git apply`` accepts.
+
+    Upstream's reply parser strips the final newline, and ``git apply``
+    refuses a diff with no final newline as a corrupt patch.
+
+    Args:
+        text: A repository sample as upstream parsed it.
+
+    Returns:
+        The sample as a real diff that ends with a newline, or ``""``.
+    """
+    patch = _unescape_backticks(text)
+    return patch if not patch or patch.endswith("\n") else patch + "\n"
 
 
 def _unescape_backticks(text: str) -> str:

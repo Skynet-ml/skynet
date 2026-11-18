@@ -37,6 +37,7 @@ from ..harness import GatewayConfig
 from ..harness_bridge import hidden_hashes
 from ..native_runtime import NativeOptions
 from ..protocol import EngineContext, ModelReply, RepoSeed, Task
+from ..repo_tree import apply_patch
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_contract import SandboxSession
 from ..tree_sandbox import RuntimeBoxSource
@@ -434,7 +435,15 @@ def _new_generation(engine: Engine) -> None:
 def test_a_repository_run_opens_boxes_only_for_commands_and_commits_one_step_each(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Sample two patches on the loop: no box during a model call, and one step for each reply and command."""
+    """Sample two patches on the loop: no box during a model call, and one step for each reply and command.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree, metric_tree = _repo(trees), _tree(trees, "metric.txt", "len")
     loop, model, boxes = _loop(
         owner, engine, step_log, trees, tmp_path, ["```\naa\n```", "```\nbbbb\n```"], generation=1
@@ -446,7 +455,7 @@ def test_a_repository_run_opens_boxes_only_for_commands_and_commits_one_step_eac
         _context(loop, repo_tree),
     )
 
-    assert (result.best_candidate, result.best_score) == ("bbbb", 4.0)
+    assert (result.best_candidate, result.best_score) == ("bbbb\n", 5.0)
     assert model.calls == 2
     assert model.open_boxes == [0, 0]
     assert boxes.opened == 8
@@ -457,7 +466,15 @@ def test_a_repository_run_opens_boxes_only_for_commands_and_commits_one_step_eac
 def test_a_killed_repository_run_resumes_and_repeats_no_committed_sample(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Kill the worker in the second sample's model call, then resume on a new generation."""
+    """Kill the worker in the second sample's model call, then resume on a new generation.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree, metric_tree = _repo(trees), _tree(trees, "metric.txt", "len")
     first, first_model, _ = _loop(
         owner, engine, step_log, trees, tmp_path, ["```\naa\n```", "```\nunused\n```"], generation=1, die_at=1
@@ -479,7 +496,7 @@ def test_a_killed_repository_run_resumes_and_repeats_no_committed_sample(
         _context(loop, repo_tree),
     )
 
-    assert (result.best_candidate, result.best_score) == ("bbbb", 4.0)
+    assert (result.best_candidate, result.best_score) == ("bbbb\n", 5.0)
     # The first sample's reply and commands come back from the log: one new model call, and boxes only for it.
     assert model.calls == 1
     assert model.open_boxes == [0]
@@ -493,7 +510,15 @@ def test_a_killed_repository_run_resumes_and_repeats_no_committed_sample(
 def test_a_repository_sample_prompt_shows_the_editable_files_and_never_a_hidden_one(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The brief reads the seed with no box: the diff form, the path rules and the editable file's text."""
+    """The brief reads the seed with no box: the diff form, the path rules and the editable file's text.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree, metric_tree = _repo(trees), _tree(trees, "metric.txt", "len")
     loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, ["```\naa\n```"], generation=1)
 
@@ -618,7 +643,11 @@ def brief(
 def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_paths(
     brief: Callable[..., str],
 ) -> None:
-    """Editable ``.`` shows every file in sorted order, except read-only and hidden ones."""
+    """Editable ``.`` shows every file in sorted order, except read-only and hidden ones.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     files = {
         "src/b.py": b"B-SOURCE",
         "src/a.py": b"A-SOURCE",
@@ -647,7 +676,11 @@ def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_pa
 def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_their_files(
     brief: Callable[..., str],
 ) -> None:
-    """A constrained path gets its own sorted line and its content, and a hidden constrained path never shows."""
+    """A constrained path gets its own sorted line and its content, and a hidden constrained path never shows.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     files = {
         "src/app.py": b"APP-SOURCE",
         "tests/test_app.py": b"TEST-SOURCE",
@@ -683,7 +716,11 @@ def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_
 def test_a_repository_brief_never_shows_a_file_in_a_hidden_folder_or_through_a_dot_slash_path(
     brief: Callable[..., str],
 ) -> None:
-    """A hidden folder hides each file in it, and a ``./`` path names the same hidden file."""
+    """A hidden folder hides each file in it, and a ``./`` path names the same hidden file.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     files = {"eval/metric.py": b"METRIC-SECRET", "optimize.toml": b"OPTIMIZE-SECRET", "app.py": b"print('app')"}
 
     text = brief(files, ("eval/metric.py", "./optimize.toml", "./app.py"), hidden=("eval", "optimize.toml"))
@@ -694,7 +731,11 @@ def test_a_repository_brief_never_shows_a_file_in_a_hidden_folder_or_through_a_d
 
 
 def test_a_repository_brief_shows_no_binary_file(brief: Callable[..., str]) -> None:
-    """A file that is not UTF-8, or that holds a NUL byte, gets a "not text" line and none of its bytes."""
+    """A file that is not UTF-8, or that holds a NUL byte, gets a "not text" line and none of its bytes.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     files = {"image.bin": b"\xff\xfeLATIN", "program": b"\x00\x01ELF-HEADER", "app.py": b"print('app')"}
 
     text = brief(files, ("image.bin", "program", "app.py"))
@@ -709,7 +750,12 @@ def test_a_repository_brief_shows_no_binary_file(brief: Callable[..., str]) -> N
 def test_a_repository_brief_skips_a_file_larger_than_the_room_left(
     brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A file larger than the room left gets a "no room" line, and a later smaller file still fits."""
+    """A file larger than the room left gets a "no room" line, and a later smaller file still fits.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
     monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 150)
     files = {"first.txt": b"FIRST!", "large.txt": b"LARGE-FILE" * 20, "last.txt": b"END"}
 
@@ -722,7 +768,11 @@ def test_a_repository_brief_skips_a_file_larger_than_the_room_left(
 
 
 def test_a_repository_brief_names_no_hidden_path_in_its_path_rules(brief: Callable[..., str]) -> None:
-    """A hidden editable or constrained path, or one inside a hidden folder, is not named in the path rules."""
+    """A hidden editable or constrained path, or one inside a hidden folder, is not named in the path rules.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     files = {"eval/metric.py": b"m", "optimize.toml": b"t", "src/app.py": b"print('app')"}
 
     text = brief(
@@ -743,7 +793,12 @@ def test_a_repository_brief_names_no_hidden_path_in_its_path_rules(brief: Callab
 def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_is_spent(
     brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Many binary files give a brief near the cap, one summary line, and no read after the room is spent."""
+    """Many binary files give a brief near the cap, one summary line, and no read after the room is spent.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
     monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", 200)
     files = {f"bin/{index:03}": b"\x00" for index in range(100)}
     reads: list[str] = []
@@ -760,7 +815,11 @@ def test_a_repository_brief_counts_its_notices_and_stops_reading_when_the_room_i
 def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_fence(
     brief: Callable[..., str],
 ) -> None:
-    """A file that holds 3- and 4-backtick fences shows them as tokens, so no fence in the brief is longer than 3."""
+    """A file that holds 3- and 4-backtick fences shows them as tokens, so no fence in the brief is longer than 3.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
     text = brief({"README.md": b"intro\n```python\ncode\n```\n````\nend `x` ``y``"}, ("README.md",))
 
     assert (
@@ -787,7 +846,15 @@ def test_upstream_cuts_a_raw_diff_at_its_first_backtick_run() -> None:
 def test_a_repository_sample_with_backtick_tokens_reaches_the_scorer_as_the_whole_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The model spells 3- and 4-backtick runs as tokens; the scorer, the tree and the result get the whole diff."""
+    """The model spells 3- and 4-backtick runs as tokens; the scorer, the tree and the result get the whole diff.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree = _repo(trees)
     reply = _README_DIFF.replace("````", "<<4 backticks>>").replace("```", "<<3 backticks>>")
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [f"```diff\n{reply}\n```"], generation=1)
@@ -798,15 +865,55 @@ def test_a_repository_sample_with_backtick_tokens_reaches_the_scorer_as_the_whol
 
     result = BestOfNEngine().run(Task("", cases=list(_CASES)), loop.server(_recording(scored), max_evals=2), ctx)
 
-    assert scored == [(_README_DIFF, case) for case in _CASES]
-    assert result.best_candidate == _README_DIFF
-    assert [payload["prompt"] for name, payload in events if name == "candidate"] == [{STR_CANDIDATE_KEY: _README_DIFF}]
+    patch = _README_DIFF + "\n"
+    assert scored == [(patch, case) for case in _CASES]
+    assert result.best_candidate == patch
+    assert [payload["prompt"] for name, payload in events if name == "candidate"] == [{STR_CANDIDATE_KEY: patch}]
+
+
+def test_a_repository_sample_and_its_result_apply_to_a_real_tree(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Upstream strips the reply's final newline; the scorer and the result still get a diff that ``git apply`` takes.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    repo_tree = _repo(trees)
+    loop, _, _ = _loop(
+        owner, engine, step_log, trees, tmp_path, [f"```diff\n{_escape_backticks(_README_DIFF)}\n```"], generation=1
+    )
+    scored: list[tuple[Any, Any]] = []
+
+    result = BestOfNEngine().run(
+        Task("", cases=list(_CASES)), loop.server(_recording(scored), max_evals=2), _context(loop, repo_tree)
+    )
+
+    readme = "intro\n```python\ncode\n```\n````\nend\n"
+    for index, patch in enumerate([candidate for candidate, _ in scored] + [result.best_candidate]):
+        checkout = tmp_path / f"checkout-{index}"
+        checkout.mkdir()
+        (checkout / "README.md").write_text(readme)
+        apply_patch(checkout, patch)
+        assert (checkout / "README.md").read_text() == readme.replace("code\n", "code\nmore code\n")
 
 
 def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With a validation split, the finalist re-score gets the real diff, and so does the validated result."""
+    """With a validation split, the finalist re-score gets the real diff, and so does the validated result.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree = _repo(trees)
     reply = _escape_backticks(_README_DIFF)
     replies = [f"```diff\n{reply}\n```"] * 2
@@ -820,16 +927,25 @@ def test_a_repository_sample_reaches_the_validation_re_score_as_the_whole_diff(
         _context(loop, repo_tree),
     )
 
-    assert (_README_DIFF, valset[0]) in scored
-    assert {candidate for candidate, _ in scored} == {_README_DIFF}
+    patch = _README_DIFF + "\n"
+    assert (patch, valset[0]) in scored
+    assert {candidate for candidate, _ in scored} == {patch}
     assert result.metadata["selection_scope"] == "validation"
-    assert result.best_candidate == _README_DIFF
+    assert result.best_candidate == patch
 
 
-def test_a_repository_seed_comes_back_exact_and_never_breaks_the_prompt_fence(
+def test_a_repository_seed_comes_back_whole_and_never_breaks_the_prompt_fence(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With no sample scored, the result is the exact seed, and the prompt shows the seed encoded."""
+    """With no sample scored, the result is the seed with a final newline, and the prompt shows the seed encoded.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     seed = "keep <<<< and ``` and <<3 backticks>> here"
     repo_tree = _repo(trees)
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, ["```\naa\n```"], generation=1)
@@ -841,7 +957,7 @@ def test_a_repository_seed_comes_back_exact_and_never_breaks_the_prompt_fence(
         _context(loop, repo_tree),
     )
 
-    assert result.best_candidate == seed
+    assert result.best_candidate == seed + "\n"
     assert result.best_score is None
     [prompt] = model.prompts
     assert _escape_backticks(seed) in prompt
@@ -886,7 +1002,11 @@ def _recording(scored: list[tuple[Any, Any]]) -> Any:
     ],
 )
 def test_backtick_escaping_round_trips_exactly(text: str) -> None:
-    """Escape then unescape gives back the exact text, also text that looks like a token, and leaves no fence."""
+    """Escape then unescape gives back the exact text, also text that looks like a token, and leaves no fence.
+
+    Args:
+        text: The text to escape and unescape.
+    """
     escaped = _escape_backticks(text)
 
     assert "```" not in escaped
@@ -902,7 +1022,15 @@ def test_a_backtick_run_longer_than_one_token_splits_into_tokens_that_decode() -
 def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A diff whose context line is the literal text ``<<3 backticks>>`` keeps that text, not three backticks."""
+    """A diff whose context line is the literal text ``<<3 backticks>>`` keeps that text, not three backticks.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     diff = "--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,3 @@\n <<3 backticks>> and a << b\n ```\n+new"
     repo_tree = _repo(trees)
     reply = _escape_backticks(diff)
@@ -913,5 +1041,5 @@ def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
         Task("", cases=list(_CASES)), loop.server(_recording(scored), max_evals=2), _context(loop, repo_tree)
     )
 
-    assert scored == [(diff, case) for case in _CASES]
-    assert result.best_candidate == diff
+    assert scored == [(diff + "\n", case) for case in _CASES]
+    assert result.best_candidate == diff + "\n"
