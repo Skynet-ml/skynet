@@ -22,6 +22,7 @@ import pytest
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.exceptions import ServiceError
+from core.sandbox.box_lease import BoxLease
 from core.sandbox.providers import vercel
 
 from .. import native_engines, native_runtime, runner
@@ -502,16 +503,36 @@ def test_the_metric_box_gets_no_repository_file(tmp_path: Path) -> None:
     assert repo_files == {f"{METRIC_REPO_DIR}/eval/metric.py"}
 
 
-def test_the_candidate_box_ends_before_the_metric_files_go_into_the_open_metric_box(tmp_path: Path) -> None:
-    """M opens while C runs; the metric files go into M only after C ended."""
+def test_the_candidate_box_goes_back_to_the_lease_before_the_metric_files_go_into_the_open_metric_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M opens while C runs; the metric files go into M only after C went back to the lease (SKY-398, SKY-805).
+
+    C stays warm for the next version and closes only when the run ends.
+    """
+    release = BoxLease.release
+
+    def recorded(self: BoxLease[Any], box: Any, healthy: bool) -> None:
+        """Log the release in the box's log, then release the box.
+
+        Args:
+            self: The candidate box lease.
+            box: The candidate box.
+            healthy: Whether the box is still good.
+        """
+        box._runtime.log(box, "release", str(healthy))
+        release(self, box, healthy)
+
+    monkeypatch.setattr(BoxLease, "release", recorded)
     runtime, _ = _score_once(tmp_path)
 
     metric_open = runtime.index("metric", "open")
     candidate_run = runtime.index("candidate", "run", "cd ")
-    candidate_close = runtime.index("candidate", "close")
+    candidate_release = runtime.index("candidate", "release", "True")
     metric_files = runtime.index("metric", "write", f"{METRIC_DIR}/metric-")
-    assert metric_open < candidate_close < metric_files
-    assert candidate_run < candidate_close
+    assert metric_open < candidate_release < metric_files
+    assert candidate_run < candidate_release
+    assert runtime.index("candidate", "close") > metric_files
     assert runtime.index("metric", "run", "cd ") > metric_files
 
 

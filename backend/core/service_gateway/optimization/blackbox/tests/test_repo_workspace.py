@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -32,6 +33,8 @@ from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.config import Settings, settings
+from core.sandbox.box_lease import BoxLease
 from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
@@ -237,10 +240,10 @@ def workspace(tmp_path: Path) -> Iterator[tuple[RepoWorkspace, _Runtime, Path, P
     space.close()
 
 
-def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_new_candidate_box(
+def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_clean_candidate_tree(
     workspace: tuple[RepoWorkspace, _Runtime, Path, Path],
 ) -> None:
-    """Setup runs once online without secrets; each version opens a new offline box from the saved state (SKY-398)."""
+    """Setup runs once online without secrets; each version gets a clean offline tree from the saved state (SKY-398, SKY-805)."""
     space, runtime, archive, root = workspace
 
     first = _open(space, _patch(root / "one", archive, {"src/app.py": "x = 2\n"}))
@@ -256,9 +259,8 @@ def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_new_candidate_bo
         second.close()
 
     setup, *candidates = runtime.boxes
-    assert len(candidates) == 2
+    assert len(candidates) == 1
     assert setup.closed
-    assert all(box.closed for box in candidates)
     assert [command for box in runtime.boxes for command, _ in box.commands if "built.txt" in command] == [
         next(command for command, _ in setup.commands if "built.txt" in command)
     ]
@@ -268,7 +270,7 @@ def test_setup_runs_once_in_its_own_box_and_each_version_gets_a_new_candidate_bo
     assert "key=unset" in space.setup_log
     assert all(not box.online and box.spec.snapshot_archive for box in candidates)
     keys = [box.spec.operation_key for box in runtime.boxes]
-    assert keys == ["op:setup-0", "op:candidate-1", "op:candidate-2"]
+    assert keys == ["op:setup-0", "op:candidate-1"]
 
 
 def test_failed_setup_and_broken_patches_are_reported(tmp_path: Path) -> None:
@@ -1554,7 +1556,7 @@ def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
 def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Closing an evaluation box releases it through the box source as healthy (SKY-718)."""
+    """Closing a metric box releases it through the box source as healthy; a candidate box goes back to the lease (SKY-718, SKY-805)."""
     released: list[bool] = []
     release = RepoBoxSource.release
 
@@ -1570,13 +1572,15 @@ def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
         release(self, box, healthy)
 
     monkeypatch.setattr(RepoBoxSource, "release", recorded)
-    space, _ = _scoring_space(tmp_path, _Runtime())
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime)
     try:
         _open(space, "").close()
         space.open_metric().close()
     finally:
         space.close()
-    assert released == [True, True]
+    assert released == [True]
+    assert all(box.closed for box in _candidates(runtime))
 
 
 def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
@@ -1595,8 +1599,9 @@ def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Pat
 
 
 def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Closing a candidate or metric box raises the box's close error, as a plain session close does."""
+    """Closing a metric box, or the workspace with a warm candidate box, raises the box's close error (SKY-805)."""
     space, _ = _scoring_space(tmp_path, _Runtime())
+    closed = False
     try:
         candidate = _open(space, "")
         metric = space.open_metric()
@@ -1611,11 +1616,15 @@ def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, m
             raise RuntimeError("settlement failed")
 
         monkeypatch.setattr(_Box, "close", broken)
-        for box in (candidate, metric):
-            with pytest.raises(RuntimeError, match="settlement failed"):
-                box.close()
+        candidate.close()
+        with pytest.raises(RuntimeError, match="settlement failed"):
+            metric.close()
+        closed = True
+        with pytest.raises(RuntimeError, match="settlement failed"):
+            space.close()
     finally:
-        space.close()
+        if not closed:
+            space.close()
 
 
 @pytest.mark.parametrize(
@@ -1709,33 +1718,34 @@ def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
 def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The failure path releases through the box session, so the session cannot release the box again (SKY-785)."""
+    """The failure path releases through the box session, so the session cannot release the box again (SKY-785, SKY-805)."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
     space = _space(archive, _Runtime(), setup=None)
     opened: list[BoxSession] = []
     releases: list[bool] = []
     open_box = RepoWorkspace._open_box
-    release = RepoBoxSource.release
+    release = BoxLease.release
 
-    def recorded_open(self: RepoWorkspace, *args: Any) -> BoxSession:
+    def recorded_open(self: RepoWorkspace, *args: Any, **options: Any) -> BoxSession:
         """Open the box and keep its session.
 
         Args:
             self: The workspace.
             *args: The open's arguments.
+            **options: The open's keyword arguments.
 
         Returns:
             The session.
         """
-        box = open_box(self, *args)
+        box = open_box(self, *args, **options)
         opened.append(box)
         return box
 
-    def recorded_release(self: RepoBoxSource, box: Any, healthy: bool) -> None:
+    def recorded_release(self: BoxLease[Any], box: Any, healthy: bool) -> None:
         """Record the health, then release the box.
 
         Args:
-            self: The box source.
+            self: The candidate box lease.
             box: The box.
             healthy: The box's health.
         """
@@ -1745,7 +1755,7 @@ def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_n
     try:
         space.prepare()
         monkeypatch.setattr(RepoWorkspace, "_open_box", recorded_open)
-        monkeypatch.setattr(RepoBoxSource, "release", recorded_release)
+        monkeypatch.setattr(BoxLease, "release", recorded_release)
         checkout = space.open_candidate(
             "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
         )
@@ -1963,3 +1973,194 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
     finally:
         session.close()
     assert _containers(tag) == []
+
+
+def _candidates(runtime: _Runtime) -> list[_Box]:
+    """Return the candidate boxes that a runtime opened.
+
+    Args:
+        runtime: The recording runtime.
+
+    Returns:
+        The boxes whose operation key names a candidate, in open order.
+    """
+    return [box for box in runtime.boxes if ":candidate-" in (box.spec.operation_key or "")]
+
+
+def test_a_slot_keeps_its_warm_candidate_box_and_resets_it_for_the_next_version(tmp_path: Path) -> None:
+    """The next version reuses the slot's warm box, without the last version's checkout; the close ends it (SKY-805)."""
+    runtime = _Runtime()
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, runtime, setup=None)
+    try:
+        first = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        first.session.run(f"touch {WORK_DIR}/stray.txt")
+        first.close()
+        (box,) = _candidates(runtime)
+        assert not box.closed
+        second = _open(space, "")
+        assert second.session is first.session
+        assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        assert second.session.read_file(f"{WORK_DIR}/stray.txt") is None
+        second.close()
+        assert _candidates(runtime) == [box]
+        assert not box.closed
+    finally:
+        space.close()
+    assert box.closed
+
+
+def test_a_warm_box_that_fails_its_reset_is_replaced_by_a_new_box_with_the_candidates_key(tmp_path: Path) -> None:
+    """A warm box whose prepared tree changed fails the reset, closes, and the version gets a new box (SKY-805)."""
+    space, archive = _guarded(tmp_path)
+    runtime = space._runtime
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        box = _open(space, version)
+        box.session.run(f"touch {PREPARED_DIR}/planted.py")
+        box.close()
+        (old,) = _candidates(runtime)  # type: ignore[arg-type]
+        replaced = _open(space, version)
+        assert any(f"rm -rf {WORK_DIR}" in command for command, _ in old.commands)
+        assert old.closed
+        new = _candidates(runtime)[-1]  # type: ignore[arg-type]
+        assert replaced.session is new
+        assert new is not old
+        assert replaced.session.read_file(f"{WORK_DIR}/planted.py") is None
+        assert [box.spec.operation_key for box in _candidates(runtime)] == ["op:candidate-1", "op:candidate-2"]  # type: ignore[arg-type]
+        replaced.close()
+    finally:
+        space.close()
+
+
+def test_parallel_candidates_each_keep_their_own_warm_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two candidates at the same time get two boxes under the run and slot keys, and both stay warm (SKY-805)."""
+    keys: list[str] = []
+    acquire = BoxLease.acquire
+
+    def recorded(self: BoxLease[Any], agent_id: str, grants: Any) -> Any:
+        """Record the lease key, then acquire.
+
+        Args:
+            self: The lease.
+            agent_id: The lease key.
+            grants: The grants.
+
+        Returns:
+            The box.
+        """
+        keys.append(agent_id)
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(BoxLease, "acquire", recorded)
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        for _ in range(2):
+            first, second = _open(space, ""), _open(space, "")
+            assert first.session is not second.session
+            first.close()
+            second.close()
+        assert len(_candidates(runtime)) == 2
+        assert keys == ["op:candidate-0", "op:candidate-1"] * 2
+    finally:
+        space.close()
+    assert all(box.closed for box in _candidates(runtime))
+
+
+def test_at_the_cap_a_candidate_waits_for_a_free_box(tmp_path: Path) -> None:
+    """With every slot held, the next candidate waits and then takes the freed warm box, with no new box (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
+    try:
+        held = _open(space, "")
+        opened: list[CandidateBox] = []
+        waiter = threading.Thread(target=lambda: opened.append(_open(space, "")))
+        waiter.start()
+        waiter.join(timeout=0.5)
+        assert waiter.is_alive()
+        assert opened == []
+        held.close()
+        waiter.join(timeout=30)
+        assert not waiter.is_alive()
+        assert opened[0].session is held.session
+        assert len(_candidates(runtime)) == 1
+        opened[0].close()
+    finally:
+        space.close()
+
+
+def test_an_unhealthy_close_replaces_the_warm_box(tmp_path: Path) -> None:
+    """A candidate box closed as unhealthy ends at once, and the next version gets a new box (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        first = _open(space, "")
+        first.close(healthy=False)
+        assert _candidates(runtime)[0].closed
+        second = _open(space, "")
+        assert second.session is not first.session
+        second.close()
+    finally:
+        space.close()
+
+
+def test_closing_the_workspace_closes_a_held_candidate_box_at_its_release(tmp_path: Path) -> None:
+    """The run end closes the lease; a box that a candidate still holds closes when the candidate ends (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    held = _open(space, "")
+    space.close()
+    (box,) = _candidates(runtime)
+    assert not box.closed
+    held.close()
+    assert box.closed
+    with pytest.raises(RuntimeError, match="lease is closed"):
+        space.open_candidate("")
+
+
+def test_the_candidate_lease_takes_its_cap_and_start_budget_from_the_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lease gets REPO_CANDIDATE_VERCEL_CAP and REPO_CANDIDATE_STARTS_PER_MINUTE: 50 and 30 (SKY-805)."""
+    assert Settings.model_fields["repo_candidate_vercel_cap"].default == 50
+    assert Settings.model_fields["repo_candidate_starts_per_minute"].default == 30
+    monkeypatch.setattr(settings, "repo_candidate_vercel_cap", 7)
+    monkeypatch.setattr(settings, "repo_candidate_starts_per_minute", 11)
+    seen: dict[str, Any] = {}
+    init = BoxLease.__init__
+
+    def recorded(self: BoxLease[Any], *args: Any, **options: Any) -> None:
+        """Record the options, then build the lease.
+
+        Args:
+            self: The lease.
+            *args: The opener and the closer.
+            **options: The lease options.
+        """
+        seen.update(options)
+        init(self, *args, **options)
+
+    monkeypatch.setattr(BoxLease, "__init__", recorded)
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), _Runtime(), setup=None)
+    space.close()
+    assert (seen["vercel_cap"], seen["starts_per_minute"]) == (7, 11)
+    assert space._free_slots == list(range(7))
+
+
+def test_each_score_still_gets_a_new_metric_box_next_to_a_warm_candidate_box(tmp_path: Path) -> None:
+    """Metric boxes never come from the lease: each score opens one and its close ends it (SKY-805, SKY-398)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime)
+    try:
+        metrics = []
+        for _ in range(2):
+            _open(space, "").close()
+            metric = space.open_metric()
+            metric.close()
+            metrics.append(metric.session)
+        assert metrics[0] is not metrics[1]
+        assert all(box.closed for box in metrics)
+        assert not set(map(id, metrics)) & set(map(id, _candidates(runtime)))
+    finally:
+        space.close()

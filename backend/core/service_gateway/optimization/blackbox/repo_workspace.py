@@ -13,9 +13,12 @@ versions. Each box holds only the code it needs (SKY-398):
 - The metric setup step runs once in its own box. It installs only the
   packages of ``METRIC_REQUIREMENTS`` and saves a second state that holds no
   repository code. Its network is open only for that install.
-- A candidate box C opens for each evaluation from the prepared state,
-  checks the digest and lays out the version. The parent ends it after the
-  ``[run]`` entry; closing the box is the only cleanup.
+- A candidate box C comes from the run's warm box lease (SKY-805). A new
+  box opens from the prepared state and checks the digest. A warm box from
+  the last candidate of its slot first removes the old checkout, restarts
+  the compose services and checks the digest again; a failed step closes it
+  and a new box opens. The box then lays out the version. The run closes the
+  lease at its end.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
 
@@ -26,6 +29,7 @@ acquire, start, run and release steps match every other tree sandbox box.
 from __future__ import annotations
 
 import base64
+import heapq
 import io
 import json
 import logging
@@ -46,8 +50,12 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from ....config import settings
+from ....sandbox.box_lease import BoxLease
 from ....sandbox.errors import is_temporary_provider_error
 from ....sandbox.grants import Grant
+from ....sandbox.placement import Placement
+from ....sandbox.services import stop_command
 from ....sandbox.snapshots import snapshot_cache_key
 from ....sandbox.trees import BoxSource
 from .repo_tree import (
@@ -454,6 +462,15 @@ def _close_quietly(session: SandboxSession, what: str) -> None:
         logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
 
 
+def _close_session(session: SandboxSession) -> None:
+    """Close one box for good; a close error goes to the caller.
+
+    Args:
+        session: The box.
+    """
+    session.close()
+
+
 class RepoBoxSource:
     """Open a fresh evaluation box for each acquire and close it at release (SKY-718).
 
@@ -494,6 +511,60 @@ class RepoBoxSource:
             healthy: Not used: a closed box is never reused.
         """
         box.close()
+
+
+class _SlotSource:
+    """Give one candidate slot's box from the run's lease, and free the slot at the box's last release (SKY-805).
+
+    A lease key is the run and the slot, like a Cloudflare sandbox id: each
+    parallel candidate gets its own warm box, and no box crosses runs.
+    """
+
+    def __init__(self, lease: BoxLease[SandboxSession], key: str, free: Callable[[], None]) -> None:
+        """Bind the slot to the run's lease.
+
+        Args:
+            lease: The run's candidate box lease.
+            key: The run and the slot.
+            free: Gives the slot back.
+        """
+        self._lease = lease
+        self.key = key
+        self._free = free
+        self._freed = False
+        self._lock = threading.Lock()
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Return the slot's warm box, or open a new one.
+
+        Args:
+            agent_id: The lease key.
+            grants: The grants the lease compares; the box opens with the ``[run]`` hosts.
+
+        Returns:
+            The box.
+        """
+        return self._lease.acquire(agent_id, grants)
+
+    def release(self, box: SandboxSession, healthy: bool) -> None:
+        """Keep a healthy box warm for the slot, or close it; then free the slot.
+
+        Args:
+            box: The slot's box.
+            healthy: False when the box failed, so the slot's next candidate gets a new box.
+        """
+        try:
+            self._lease.release(box, healthy)
+        finally:
+            self.free()
+
+    def free(self) -> None:
+        """Give the slot back once."""
+        with self._lock:
+            if self._freed:
+                return
+            self._freed = True
+        self._free()
 
 
 def _release_failed(source: BoxSource[SandboxSession], session: SandboxSession, what: str) -> None:
@@ -657,9 +728,13 @@ class CandidateBox:
             self._unstamped = False
             return changes
 
-    def close(self) -> None:
-        """Give the box back to its source once; every process the version started ends with it."""
-        self.box.release(healthy=True)
+    def close(self, healthy: bool = True) -> None:
+        """Give the box back to its source once; the next candidate resets a healthy box.
+
+        Args:
+            healthy: False when the box failed, so the lease closes it and the next candidate gets a new box.
+        """
+        self.box.release(healthy=healthy)
 
 
 class MetricBox:
@@ -689,7 +764,7 @@ class MetricBox:
     def install_metric_files(self) -> None:
         """Put the metric files into ``METRIC_REPO_DIR`` at their repository paths.
 
-        Call it only after the candidate box ended (SKY-398).
+        Call it only after the candidate box went back to the lease (SKY-398, SKY-805).
 
         Raises:
             RepoSetupError: When the files cannot be installed.
@@ -759,10 +834,11 @@ def _deliver(session: SandboxSession, path: str, text: str) -> bool:
 
 
 class RepoWorkspace:
-    """Prepare a repository once, then open a fresh candidate box and metric box for each evaluation.
+    """Prepare a repository once, then give a candidate box and a new metric box for each evaluation.
 
-    No box outlives its evaluation, so nothing one version's code writes or
-    starts reaches the next version or the metric.
+    A candidate slot keeps its warm box for the run's next version, after a
+    reset. No metric box outlives its evaluation, so nothing one version's
+    code writes or starts reaches the metric.
     """
 
     def __init__(
@@ -781,6 +857,8 @@ class RepoWorkspace:
         run_vcpus: int | None = None,
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
+        candidate_cap: int | None = None,
+        candidate_starts_per_minute: int | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -802,6 +880,10 @@ class RepoWorkspace:
             run_vcpus: The ``[run] vcpus`` of the candidate box; ``None`` keeps ``spec.vcpus``.
             metric_hosts: The ``[metric] network`` hosts of the metric box; empty keeps it offline.
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
+            candidate_cap: The most warm candidate boxes the run keeps; ``None``
+                takes ``REPO_CANDIDATE_VERCEL_CAP``.
+            candidate_starts_per_minute: The most candidate box starts in any
+                60 seconds; ``None`` takes ``REPO_CANDIDATE_STARTS_PER_MINUTE``.
         """
         self._runtime = runtime
         self._spec = spec
@@ -842,6 +924,25 @@ class RepoWorkspace:
         self._snapshots_off = False
         self._opened = 0
         self._lock = threading.Lock()
+        cap = settings.repo_candidate_vercel_cap if candidate_cap is None else candidate_cap
+        # One lease for each workspace, so a warm box never serves another run (SKY-805).
+        self._run_key = spec.operation_key or unique
+        self._candidates: BoxLease[SandboxSession] = BoxLease(
+            self._open_leased,
+            _close_session,
+            # One slot for each warm box, so the lease never reaches the cap and never spills.
+            vercel_cap=cap,
+            starts_per_minute=(
+                settings.repo_candidate_starts_per_minute
+                if candidate_starts_per_minute is None
+                else candidate_starts_per_minute
+            ),
+        )
+        self._free_slots = list(range(cap))
+        self._slots_free = threading.Condition()
+        # The lease opens a box inside acquire, in the caller's thread, so the
+        # opener reads the asking candidate's spec here and marks the box new.
+        self._pending = threading.local()
 
     @property
     def secrets(self) -> dict[str, str]:
@@ -1086,17 +1187,26 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]) -> BoxSession:
+    def _open_box(
+        self,
+        spec: SandboxSpec,
+        state: _State | None,
+        role: str,
+        grants: tuple[Grant, ...],
+        slot: _SlotSource | None = None,
+    ) -> BoxSession:
         """Open one box from a saved state through the tree sandbox session API (SKY-718, SKY-785).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
-            role: ``candidate`` or ``metric``.
+            role: ``candidate`` or ``metric``, or the lease key of a candidate slot.
             grants: The role's network grants; empty keeps the box offline.
+            slot: The candidate slot whose warm box the run's lease gives;
+                ``None`` opens a new box that closes at its release.
 
         Returns:
-            The session that holds the open box, with a tar state unpacked.
+            The session that holds the box, with a tar state unpacked in a new box.
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
@@ -1133,10 +1243,27 @@ class RepoWorkspace:
                     raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
 
             start = unpack
+        source: BoxSource[SandboxSession] = RepoBoxSource(self._runtime, spec)
+        if slot is not None:
+            source = slot
+            self._pending.spec = spec
+            self._pending.fresh = False
+            if start is not None:
+                unpack_new = start
+
+                def unpack_if_new(session: SandboxSession) -> None:
+                    """Unpack the tar state only into a box that the lease opened for this call.
+
+                    Args:
+                        session: The box.
+                    """
+                    if self._pending.fresh:
+                        unpack_new(session)
+
+                start = unpack_if_new
+
         try:
-            return TreeSandbox.open_session(
-                RepoBoxSource(self._runtime, spec), role, grants, start=start, what="A box from a tar state"
-            )
+            return TreeSandbox.open_session(source, role, grants, start=start, what="A box from a tar state")
         except _BUDGET_ERRORS:
             raise
         except Exception as error:
@@ -1224,18 +1351,25 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
         self.prepare()
+        # Each candidate takes its own key, also when it reuses a warm box.
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        box = self._open_box(spec, state, "candidate", self._run_grants)
+        slot = self._take_slot()
+        try:
+            box, new = self._candidate_box(slot, spec, state)
+        except BaseException:
+            slot.free()
+            raise
         session = box.box
         try:
-            if self._digest_prepared(session) != self._prepared_digest:
+            if new and self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
                 lost = state is not None and state.snapshot_id is not None
                 raise (_SnapshotLostError if lost else RepoSetupError)(
                     "The candidate box does not hold the prepared repository."
                 )
-            self._start_services(session)
+            if new:
+                self._start_services(session)
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
                 f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
@@ -1251,11 +1385,94 @@ class RepoWorkspace:
         box.release_failed("The candidate box")
         return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
+    def _take_slot(self) -> _SlotSource:
+        """Take the lowest free candidate slot, and wait while the run holds a box in every slot.
+
+        Returns:
+            The slot's box source; its last release frees the slot.
+        """
+        with self._slots_free:
+            while not self._free_slots:
+                # At the cap a run waits for its own box, and never spills to another provider.
+                self._slots_free.wait()
+            number = heapq.heappop(self._free_slots)
+
+        def free() -> None:
+            """Give the slot back and wake one waiting candidate."""
+            with self._slots_free:
+                heapq.heappush(self._free_slots, number)
+                self._slots_free.notify()
+
+        return _SlotSource(self._candidates, f"{self._run_key}:candidate-{number}", free)
+
+    def _candidate_box(self, slot: _SlotSource, spec: SandboxSpec, state: _State | None) -> tuple[BoxSession, bool]:
+        """Get the slot's warm box and reset it, or a new box when the slot has none or the reset fails.
+
+        Args:
+            slot: The candidate slot.
+            spec: The new box's spec without its state.
+            state: The prepared state a new box opens from.
+
+        Returns:
+            The session that holds the box, and True when the lease opened it for this call.
+
+        Raises:
+            RepoSetupError: When a tar state cannot be unpacked.
+            _SnapshotLostError: When a new box cannot open from its snapshot.
+        """
+        while True:
+            box = self._open_box(spec, state, slot.key, (), slot=slot)
+            if self._pending.fresh:
+                return box, True
+            try:
+                if self._reset(box.box):
+                    return box, False
+            except _BUDGET_ERRORS:
+                _release_failed(self._candidates, box.box, "A warm candidate box")
+                raise
+            except Exception as error:
+                # Only the type: the provider's text can name the box.
+                logger.warning("A warm candidate box did not reset (%s)", type(error).__name__)
+            # The unhealthy release drops the box, so the next acquire opens a new one.
+            _release_failed(self._candidates, box.box, "A warm candidate box")
+
+    def _reset(self, session: SandboxSession) -> bool:
+        """Clear the last candidate from a warm box, restart its services and check the prepared tree.
+
+        Args:
+            session: The warm box.
+
+        Returns:
+            True when the box is ready for the next version.
+
+        Raises:
+            RepoSetupError: When the services cannot start again.
+        """
+        stops = "".join(f"{stop_command(service)}; " for service in self._spec.services)
+        cleared = session.run(f"{stops}rm -rf {WORK_DIR} {PATCH_FILE}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+        if not cleared.ok:
+            return False
+        self._start_services(session)
+        return self._digest_prepared(session) == self._prepared_digest
+
+    def _open_leased(self, placement: Placement, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new candidate box for the lease with the spec of the candidate that asked for it.
+
+        Args:
+            placement: Not used: the slots stay within the cap, so the lease always places on Vercel.
+            grants: Not used: the box gets the ``[run]`` hosts as given.
+
+        Returns:
+            The open box.
+        """
+        self._pending.fresh = True
+        return RepoBoxSource(self._runtime, self._pending.spec).acquire("candidate", self._run_grants)
+
     def open_metric(self) -> MetricBox:
         """Open a metric box from the metric state, without any repository file.
 
         Returns:
-            The open box; the caller installs the metric files once the candidate box ended.
+            The open box; the caller installs the metric files once the candidate box went back to the lease.
 
         Raises:
             RepoSetupError: When the workspace is not prepared or the box does
@@ -1414,12 +1631,19 @@ class RepoWorkspace:
         )
 
     def close(self) -> None:
-        """Delete the parent's copies of the saved states; no box stays open between evaluations."""
+        """Delete the parent's copies of the saved states, then close the warm candidate boxes.
+
+        A box that a candidate still holds closes at its release.
+
+        Raises:
+            Exception: The first close error of a warm box, raw, after every warm box had its close.
+        """
         with self._lock:
             if self._folder is not None:
                 shutil.rmtree(self._folder, ignore_errors=True)
                 self._folder = None
                 self._prepared = False
+        self._candidates.close()
 
     def release_snapshot(self) -> None:
         """Delete this workspace's snapshots when its owner is done with them.

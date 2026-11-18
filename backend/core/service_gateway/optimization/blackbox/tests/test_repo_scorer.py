@@ -344,9 +344,14 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
     else:
         close = CandidateBox.close
 
-        def close_raises(self: CandidateBox) -> None:
-            """End the box, then report its bill as unconfirmed."""
-            close(self)
+        def close_raises(self: CandidateBox, healthy: bool = True) -> None:
+            """End the box, then report its bill as unconfirmed.
+
+            Args:
+                self: The candidate box.
+                healthy: Whether the box is still good.
+            """
+            close(self, healthy)
             raise UsagePendingError("pending")
 
         monkeypatch.setattr(CandidateBox, "close", close_raises)
@@ -357,6 +362,67 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
             scorer.score("")
     scorer.close()
     assert budget.events == [("park", metric), ("unpark", metric)]
+
+
+@pytest.mark.parametrize(("failure", "healthy"), [(None, True), (BudgetReached("stopped"), False)])
+def test_a_candidate_box_goes_back_unhealthy_when_its_run_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException | None, healthy: bool
+) -> None:
+    """A run that raised may leave the box broken, so its close tells the lease to replace it (SKY-805)."""
+    scorer, _ = _park_scorer(tmp_path, _ParkLog())
+    closes: list[bool] = []
+    close = CandidateBox.close
+
+    def recorded(self: CandidateBox, healthy: bool = True) -> None:
+        """Record the health, then close the box.
+
+        Args:
+            self: The candidate box.
+            healthy: Whether the box is still good.
+        """
+        closes.append(healthy)
+        close(self, healthy)
+
+    def raises(*_args: Any) -> Any:
+        """Fail the candidate run."""
+        raise failure  # type: ignore[misc]
+
+    monkeypatch.setattr(CandidateBox, "close", recorded)
+    if failure is not None:
+        monkeypatch.setattr(scorer, "_run_candidate", raises)
+    try:
+        if failure is None:
+            scorer.score("")
+        else:
+            with pytest.raises(BudgetReached):
+                scorer.score("")
+    finally:
+        scorer.close()
+    assert closes == [healthy]
+
+
+def test_closing_the_scorer_releases_the_snapshots_when_a_warm_box_close_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm candidate box's close error still reaches the caller, after the snapshots are released (SKY-805)."""
+    scorer, _ = _park_scorer(tmp_path, _ParkLog())
+    released: list[bool] = []
+    close = RepoWorkspace.close
+
+    def broken(self: RepoWorkspace) -> None:
+        """Close the workspace, then fail as a box settlement can.
+
+        Args:
+            self: The workspace.
+        """
+        close(self)
+        raise UsagePendingError("pending")
+
+    monkeypatch.setattr(RepoWorkspace, "close", broken)
+    monkeypatch.setattr(RepoWorkspace, "release_snapshot", lambda _self: released.append(True))
+    with pytest.raises(UsagePendingError):
+        scorer.close()
+    assert released == [True]
 
 
 def test_no_run_secret_reaches_the_scorer(scored: tuple[RepoScorer, Path, Path]) -> None:
