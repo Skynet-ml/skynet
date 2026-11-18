@@ -30,11 +30,25 @@ which a new box on a resume does not have. So the scan also prints a state
 line, a hash over the metadata of every file in the PATH folders and of the
 shell profile files, and a changed line makes the box unhealthy too.
 
+On Vercel, a box user command writes its output and exit code to files in
+/tmp that the box user owns, and the control plane reads them back. A stray
+process could put the scan before the step in the file of the scan after it.
+So the scan runs as root wherever the provider's root has capabilities, the
+same rule as the protected-file check of the repo workspace (TS-1). A root
+command's output goes into a root-owned folder. Under ``sudo``, root's
+``HOME`` and ``PATH`` are its own, so the root scan takes the box user from
+``SUDO_UID`` and the box PATH from the image's ``APP_ENTRY_PATH``, and it
+fails when one of them is missing.
+
 The limits: a candidate with root in the box can hide a process or change
-the root tools. A provider that runs each command in a login shell (EC2,
-dev only) reads the box user's profile first, so a planted profile can fake
-the scan there. Other files outside the tree, such as in ``$TMPDIR``,
-``$HOME`` or the working folder, still reach the agent's next step.
+the root tools. The local subprocess box refuses ``sudo`` and the local
+Docker box has a root with no capabilities, so the scan runs as the box user
+there. Both give the output through a pipe, but a stray process of the same
+user can still trace the scan. Both are for development only. A provider
+whose ``sudo`` drops ``APP_ENTRY_PATH``, such as EC2 (dev only), fails each
+root scan, so each of its steps gets a new box. Other files outside the
+tree, such as in ``$TMPDIR``, ``$HOME`` or the working folder, still reach
+the agent's next step.
 
 :meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
 one box from a :class:`BoxSource`, starts it from a state, and gives the
@@ -82,6 +96,7 @@ from ....storage.step_log_store import StepFenceError, StepLogStore, step_id_for
 from ....storage.tree_store import TreeStore
 from .repo_tree import ARCHIVE_CHUNK_BYTES
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox_runtime import LocalSubprocessSession
 
 logger = logging.getLogger(__name__)
 
@@ -106,18 +121,22 @@ _SCAN_STDERR_CHARS = 200
 # Runs a control script in a clean shell. env -i drops the box environment, so a tool comes only from the
 # root-owned /usr/bin and /bin, and not from a folder that the box user can write. The box locale passes
 # through, so tar names files as the box shell does. BOX_PATH and HOME give the scan the folders to check.
-_CLEAN_SHELL = (
-    '/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" LANG="$LANG" LC_ALL="$LC_ALL" BOX_PATH="$PATH"'
-    " /bin/bash --noprofile --norc -c "
-)
+_CLEAN_ENV = '/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" LANG="$LANG" LC_ALL="$LC_ALL" BOX_PATH="$PATH"'
+_CLEAN_BASH = " /bin/bash --noprofile --norc -c "
+_CLEAN_SHELL = _CLEAN_ENV + _CLEAN_BASH
 # Prints a "state <hash>" line, then one "pid start-time" line for each process, except the scan's own shell,
 # its ancestors and its children (ps, awk, sort), and the kernel threads (pid 2 and its children, only when
 # pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A pid with its start time names one
 # process, also when the pid is used again. The hash covers the metadata of each file in the box PATH folders
 # and of the shell profile files. stat -L follows a link to its target. The change time of a file changes on
 # each write, and the box user cannot set it back. stat has GNU flags in a box and BSD flags on a macOS host.
+# A root scan under sudo gets root's HOME and PATH, so it checks the home of the user that sudo names and the
+# image's box PATH. A provider that already runs as root sets no SUDO_UID and keeps the box values.
 SCAN_SCRIPT = (
-    "set -o pipefail; if stat -c %i / >/dev/null 2>&1; then fmt=(-L -c '%n %i %s %Y %Z');"
+    'set -o pipefail; if [ -n "$SUDO_UID" ] && [ "$(id -u)" = 0 ]; then'
+    ' [ "$SUDO_UID" != 0 ] && [ -n "$ENTRY_PATH" ] || exit 1;'
+    ' HOME=$(getent passwd "$SUDO_UID" | cut -d: -f6) && [ -n "$HOME" ] || exit 1; BOX_PATH=$ENTRY_PATH; fi;'
+    " if stat -c %i / >/dev/null 2>&1; then fmt=(-L -c '%n %i %s %Y %Z');"
     " else fmt=(-L -f '%N %i %z %m %c'); fi;"
     ' state=$({ printf "%s\\n" "$BOX_PATH" | tr : "\\n" | while IFS= read -r d; do'
     ' find -H "$d" -maxdepth 1 -exec stat "${fmt[@]}" {} +; done;'
@@ -129,7 +148,9 @@ SCAN_SCRIPT = (
     ' {text = line[pid]; sub(/^ *[0-9]+ +[0-9]+ +/, "", text); sub(/ +$/, "", text); print pid, text}}'
     "' | LC_ALL=C sort"
 )
-PROCESS_SCAN = _CLEAN_SHELL + shlex.quote(SCAN_SCRIPT)
+# sudo keeps APP_ENTRY_PATH (the image's sudoers has !env_reset) and sets SUDO_UID; env -i would drop both.
+_SUDO_ENV = ' ENTRY_PATH="$APP_ENTRY_PATH" SUDO_UID="$SUDO_UID"'
+PROCESS_SCAN = _CLEAN_ENV + _SUDO_ENV + _CLEAN_BASH + shlex.quote(SCAN_SCRIPT)
 
 _Result = TypeVar("_Result")
 
@@ -301,7 +322,7 @@ def _processes(box: SandboxSession) -> frozenset[str] | None:
         BudgetReached: And the other budget errors; the run stops.
     """
     try:
-        result = box.run(PROCESS_SCAN, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        result = box.run(PROCESS_SCAN, timeout_seconds=_CHECK_TIMEOUT_SECONDS, sudo=_scan_as_root(box))
     except _BUDGET_ERRORS:
         raise
     except Exception as error:
@@ -322,6 +343,28 @@ def _processes(box: SandboxSession) -> frozenset[str] | None:
         first,
     )
     return None
+
+
+def _scan_as_root(box: SandboxSession) -> bool:
+    """Return whether the process scan of a box runs as root.
+
+    A box user command on Vercel writes its output to a file that the box
+    user owns, so a stray process could replace the scan's lines. A root
+    command's output goes into a root-owned folder. The rule is the one of the
+    repo workspace's protected check (TS-1): a provider whose root has no
+    capability, local Docker, gives the output through a pipe and runs the
+    scan as the box user, and an unknown box keeps root.
+
+    Args:
+        box: The box.
+
+    Returns:
+        False for the local subprocess box, which refuses ``sudo``, and for a
+        provider whose root has no capability; True for any other box.
+    """
+    if isinstance(box, LocalSubprocessSession):
+        return False
+    return bool(getattr(box, "root_has_capabilities", True))
 
 
 def _clean(script: str) -> str:
