@@ -1266,10 +1266,25 @@ def run(config: SwarmConfig) -> ScenarioResult:
             f"{gated['shards']}-shard commit call p99 is {gated['commit_call_ms']['p99']} ms,"
             f" above {MAX_COMMIT_CALL_P99_MS} ms: the agent waits in commit"
         )
+    violations = list(gated_violations)
+    violations.extend(
+        f"{figures['shards']}-shard pass stored {figures['steps_stored']} of {figures['commits']}"
+        for figures in passes
+        if figures["steps_stored"] != figures["commits"]
+    )
+    if not_compared:
+        violations.append(f"the shard layouts were not compared: {not_compared}")
+    elif same_step_log is not True:
+        violations.append("the shard layouts gave different step logs")
+    if not target_backend:
+        violations.append(
+            "the target is not proven on this backend: it needs Postgres (LOAD_TEST_SWARM_DB_URL)"
+            " and local S3 (LOAD_TEST_SWARM_S3_BUCKET)"
+        )
     for figures in passes:
-        # A pass fails when it lost a step, and the gated pass also when it misses a limit, so the metric and the
+        # A pass fails when it lost a step, and the gated pass also on any gate violation, so the metric and the
         # gate agree.
-        failed = figures["steps_stored"] != figures["commits"] or (figures is gated and bool(gated_violations))
+        failed = figures["steps_stored"] != figures["commits"] or (figures is gated and bool(violations))
         metrics.record(status_code=500 if failed else 200, latency_seconds=figures["seconds_to_durable"])
     result = metrics.finish()
     result.extras = {
@@ -1307,21 +1322,6 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "box_load_measured": box_load(config, gated["commits_per_second"]),
         "box_load_target": box_load(config, TARGET_COMMITS_PER_SECOND),
     }
-    violations = list(gated_violations)
-    violations.extend(
-        f"{figures['shards']}-shard pass stored {figures['steps_stored']} of {figures['commits']}"
-        for figures in passes
-        if figures["steps_stored"] != figures["commits"]
-    )
-    if not_compared:
-        violations.append(f"the shard layouts were not compared: {not_compared}")
-    elif same_step_log is not True:
-        violations.append("the shard layouts gave different step logs")
-    if not target_backend:
-        violations.append(
-            "the target is not proven on this backend: it needs Postgres (LOAD_TEST_SWARM_DB_URL)"
-            " and local S3 (LOAD_TEST_SWARM_S3_BUCKET)"
-        )
     result.slo_violations = violations
     result.slo_passed = not violations
     return result

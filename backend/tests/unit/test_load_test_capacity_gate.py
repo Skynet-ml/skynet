@@ -325,23 +325,30 @@ def test_swarm_gate_fails_when_the_layouts_are_not_compared(monkeypatch: pytest.
 
 
 @pytest.mark.parametrize(
-    ("single", "sharded", "codes"),
+    ("single", "sharded", "target", "codes"),
     [
-        ({}, {}, {200: 2}),
-        ({"steps_stored": 99_999}, {}, {200: 1, 500: 1}),
-        ({}, {"commits_per_second": 5_000.0}, {200: 1, 500: 1}),
-        ({}, {"steps_stored": 99_999}, {200: 1, 500: 1}),
+        ({}, {}, True, {200: 2}),
+        ({"steps_stored": 99_999}, {}, True, {500: 2}),
+        ({}, {"commits_per_second": 5_000.0}, True, {200: 1, 500: 1}),
+        ({}, {"steps_stored": 99_999}, True, {200: 1, 500: 1}),
+        ({}, {"digest": "other"}, True, {200: 1, 500: 1}),
+        ({}, {}, False, {200: 1, 500: 1}),
     ],
 )
 def test_swarm_metric_counts_a_failed_pass(
-    monkeypatch: pytest.MonkeyPatch, single: dict[str, Any], sharded: dict[str, Any], codes: dict[int, int]
+    monkeypatch: pytest.MonkeyPatch,
+    single: dict[str, Any],
+    sharded: dict[str, Any],
+    target: bool,
+    codes: dict[int, int],
 ) -> None:
     """Check that the metric records a failed pass as 500 and a passing pass as 200, so it agrees with the gate.
 
     Args:
-        monkeypatch: Replaces ``run_pass``.
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
         single: The figures to change on the 1-shard pass.
         sharded: The figures to change on the 2-shard pass.
+        target: Whether the run uses the target backend, Postgres and local S3.
         codes: The status codes that the metric must count.
     """
 
@@ -359,8 +366,10 @@ def test_swarm_metric_counts_a_failed_pass(
         return _pass_figures(shard_count, **(sharded if shard_count > 1 else single))
 
     monkeypatch.setattr(swarm_10k, "run_pass", fake_pass)
-    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config()))
+    monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
+    result = swarm_10k.run(_target_backend(monkeypatch, _swarm_config()) if target else _swarm_config())
     assert result.status_codes == codes
+    assert result.slo_passed is (codes == {200: 2})
 
 
 class _Process:
