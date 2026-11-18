@@ -2480,7 +2480,7 @@ def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
 def test_a_proposal_leaves_git_metadata_out_of_the_version(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Leave each ``.git`` part, in any letter case, out of the version the command's tree makes (SKY-815).
+    """Leave a ``.git`` folder that the command writes out of the version, because the box does not keep it (SKY-815).
 
     Args:
         owner: Alice and her budget generation.
@@ -2503,6 +2503,25 @@ def test_a_proposal_leaves_git_metadata_out_of_the_version(
     )
 
     assert _propose(requests, "1", {"main.py": "parent\n"}, "task") == {"id": "1", "files": {"main.py": "child\n"}}
+
+
+def test_the_version_leaves_out_each_git_part_that_the_tree_holds(tmp_path: Path) -> None:
+    """Leave ``.git`` parts, in any letter case, out of a version even when the tree holds them (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    trees = {"after": {"main.py": "a", "sub/.GIT/x": "b", ".git/config": "c"}, "parent": {}}
+    ctx = _box_context(
+        _proposer_options("node agent.js"),
+        tmp_path,
+        file_ids=lambda tree: trees[tree],
+        read_file=lambda tree, path: b"text\n",
+    )
+
+    version = shinka_evolve._Proposer(ctx, _proposer_options("node agent.js"))._version("after", "parent", {})
+
+    assert version == {"main.py": "text\n"}
 
 
 _BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
