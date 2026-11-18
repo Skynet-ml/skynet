@@ -55,7 +55,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TextIO
@@ -1924,12 +1924,39 @@ class ProgramScorer:
                 "error": str(exc),
                 "metrics": {"combined_score": 0.0, "text_feedback": f"Rejected without scoring: {exc}"},
             }
-        futures = [
-            self._cases.submit(self.mailbox.evaluate, value, example, candidate_id=generation)
-            for example in self.examples
-        ]
+        failed = threading.Event()
+
+        def score_case(example: Any) -> tuple[float, dict[str, Any]]:
+            """Score one case, unless an earlier case of this version already failed.
+
+            Args:
+                example: The case.
+
+            Returns:
+                The score and feedback.
+
+            Raises:
+                RuntimeError: When an earlier case failed, so this case is skipped.
+            """
+            # The failure is recorded on the case's own thread, before the pool
+            # takes the next case, so with one case thread the skipped cases are
+            # the same live and on a replay.
+            if failed.is_set():
+                raise RuntimeError("An earlier case of this version failed.")
+            try:
+                return self.mailbox.evaluate(value, example, candidate_id=generation)
+            except BaseException:
+                failed.set()
+                raise
+
+        futures = [self._cases.submit(score_case, example) for example in self.examples]
+        # No case of this version may run after its answer: the next proposal's
+        # model request would race it, and a replay would see another step order.
+        wait(futures)
         results = []
         for index, future in enumerate(futures):
+            # Cases start in order, so a skipped case always follows the failed
+            # case, whose error this raises first.
             score, info = future.result()
             results.append((score, info))
             if math.isfinite(score):

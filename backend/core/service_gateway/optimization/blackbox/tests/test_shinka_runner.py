@@ -1106,6 +1106,71 @@ def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
     assert mailbox.total_evals == 1
 
 
+def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keeps_the_step_order(
+    tmp_path: Path,
+) -> None:
+    """Skip a version's later cases after a crashed case, and answer only when no case of it still runs.
+
+    The worker commits each request as one step by position. A case left
+    running after the answer races the next proposal's model request, so a
+    replay could see another order and fail the resume.
+
+    Args:
+        tmp_path: Scratch folder for the queue and the program.
+    """
+
+    def reply(request: dict[str, Any]) -> dict[str, Any]:
+        """Crash the middle case, score the others and answer the model.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The worker's reply fields.
+        """
+        if request["kind"] == "model":
+            return {"text": "next version"}
+        return {"score": None} if request["example"]["id"] == 1 else {"score": 1.0}
+
+    mailbox, sent = _connected_mailbox(reply)
+    send = mailbox.emit
+
+    def slow_last_case(prefix: str, payload: dict[str, Any]) -> None:
+        """Delay the request of the last case, as a slow thread would.
+
+        Args:
+            prefix: The event family.
+            payload: The request, or a progress event.
+        """
+        if prefix != "APP_NATIVE_RPC ":
+            return
+        if payload["kind"] == "evaluate" and payload["example"]["id"] == 2:
+            time.sleep(0.3)
+        send(prefix, payload)
+
+    mailbox.emit = slow_last_case  # type: ignore[method-assign]
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=mailbox,
+        queue=tmp_path / "queue",
+        examples=[{"id": 0}, {"id": 1}, {"id": 2}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_3" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("text"))
+
+    with pytest.raises(TypeError):
+        scorer.score_program(str(program))
+    mailbox.complete([{"role": "user", "content": "next proposal"}])
+    time.sleep(0.5)
+
+    steps = [(request["kind"], (request.get("example") or {}).get("id")) for request in sent]
+    assert steps == [("evaluate", 0), ("evaluate", 1), ("model", None)]
+    scorer.stop()
+
+
 def test_a_closed_reply_stream_stops_the_run() -> None:
     """Stop at once when the worker closes the reply stream, instead of waiting for the timeout."""
     mailbox = shinka_runner.EvaluatorMailbox("testnonce", 60.0)
