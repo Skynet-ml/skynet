@@ -372,11 +372,15 @@ A manual hold on a change or on a promotion still stops it.
 ### Merging into staging (batch flow 2026-11-10, no window 2026-11-18)
 
 - There is no fixed merge window (Gilad, 2026-11-18). The orchestrator
-  merges a batch into `staging` as soon as the batch passes all its merge
-  gates. The gates are in "Merge gates", "Automatic merges", "Linear
-  revisions and holds" and "PR tests and batch CI".
+  merges a batch into `staging` as soon as the batch passes all its
+  pre-merge gates. These are gates 1-4 in "Merge gates", and the checks in
+  "Automatic merges", "Linear revisions and holds" and "PR tests and batch
+  CI". Gate 5 (the staging smoke test) runs after the merge.
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
-  other batch is in progress (no open `batch/` branch or batch PR).
+  other batch is in progress. A batch is in progress while its batch PR is
+  open, or while its `batch/` branch is not merged and not deleted.
+- When the orchestrator stops a batch without a merge, it closes the batch
+  PR and deletes the `batch/` branch.
 - After an approval, the orchestrator does not merge the PR outside a
   batch. It moves the issue to **Ready to Merge**, adds the
   `ready-to-merge` label, a PR comment and the `agent-review/ready-to-merge`
