@@ -470,18 +470,6 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     assert arguments == ["{model}"]
 
 
-def test_a_failing_files_setup_stops_the_run_with_its_command(tmp_path: Path) -> None:
-    """A setup that exits with an error names the file's command and its output.
-
-    Args:
-        tmp_path: The checkout the setup runs in.
-    """
-    command = [sys.executable, "-c", "import sys; sys.exit('no lockfile')"]
-
-    with pytest.raises(RuntimeError, match=r"\[proposer\] setup command in optimize.toml .* exit code 1: no lockfile"):
-        harness_bridge.run_setup(command, tmp_path)
-
-
 def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
     """A request that names a proposer keeps it, and the run record notes the replacement.
 

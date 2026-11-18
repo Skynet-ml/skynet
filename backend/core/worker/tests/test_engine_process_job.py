@@ -1370,7 +1370,12 @@ def test_a_host_proposer_gets_the_staged_hidden_paths(worker: BackgroundWorker, 
 def test_a_filled_in_host_cli_that_the_files_proposer_replaces_gets_no_host_agent(
     worker: BackgroundWorker, store: FakeJobStore
 ) -> None:
-    """A host CLI that local mode filled in, and that staging replaces with the file's proposer, is never set up (SKY-753)."""
+    """A host CLI that local mode filled in, and that staging replaces with the file's proposer, is never set up (SKY-753).
+
+    Args:
+        worker: The worker under test.
+        store: The fake job store that holds the run.
+    """
     bind, check = MagicMock(return_value="host-token"), MagicMock()
     staged = MagicMock()
 
