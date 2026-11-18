@@ -917,7 +917,15 @@ def pareto_front(table: dict[str, dict[str, float]], ranking: dict[str, float]) 
     """
 
     def dominates(a: dict[str, float], b: dict[str, float]) -> bool:
-        """Tell whether ``a`` is at least as good as ``b`` everywhere and better somewhere."""
+        """Tell whether ``a`` is at least as good as ``b`` everywhere and better somewhere.
+
+        Args:
+            a: The first candidate's score columns.
+            b: The second candidate's score columns.
+
+        Returns:
+            ``True`` when ``a`` dominates ``b``.
+        """
         return all(a.get(k, 0.0) >= b[k] for k in b) and any(a.get(k, 0.0) > b[k] for k in b)
 
     front = [c for c, row in table.items() if not any(dominates(other, row) for d, other in table.items() if d != c)]
@@ -1114,7 +1122,16 @@ class AutoResearchEngine:
             original = server.evaluate_examples
 
             def evaluate_examples(candidate: str, example_ids: Any = None, split: Any = None) -> Any:
-                """Score through the server, then log the per-example answer."""
+                """Score through the server, then log the per-example answer.
+
+                Args:
+                    candidate: The candidate text.
+                    example_ids: The examples to score; all of them when ``None``.
+                    split: The dataset split.
+
+                Returns:
+                    The server's score and side information.
+                """
                 self._refuse_blocked(candidate)
                 score, info = original(candidate, example_ids=example_ids, split=split)
                 scores = {str(k): float(v) for k, v in (info.get("scores") or {}).items()}
@@ -1136,7 +1153,16 @@ class AutoResearchEngine:
         original_single = server.evaluate
 
         def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> Any:
-            """Score through the server, then log the whole-candidate answer."""
+            """Score through the server, then log the whole-candidate answer.
+
+            Args:
+                candidate: The candidate text.
+                example: The example to score.
+                **kwargs: Other server arguments.
+
+            Returns:
+                The server's score and side information.
+            """
             self._refuse_blocked(candidate)
             score, info = original_single(candidate, example, **kwargs)
             # Upstream checkpoints only dataset sweeps; without one the run
@@ -2192,7 +2218,8 @@ class MetaHarnessEngine:
         """
         try:
             document = json.loads(pending.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Deeply nested JSON makes the parser raise RecursionError, which would end the run.
+        except (OSError, ValueError, RecursionError):
             return []
         candidates = document.get("candidates") if isinstance(document, dict) else None
         if not isinstance(candidates, list):
@@ -2219,9 +2246,13 @@ class MetaHarnessEngine:
         # ``resolve`` raises ValueError on a null byte, which would end the run.
         if "\0" in file:
             return "invalid candidate file"
-        path = (self.work_dir / file).resolve()
         agents = (self.work_dir / "agents").resolve()
-        if not path.is_relative_to(agents) or not path.is_file():
+        # An over-long name makes ``is_file`` raise "File name too long", which would end the run.
+        try:
+            path = (self.work_dir / file).resolve()
+            if not path.is_relative_to(agents) or not path.is_file():
+                return "candidate file must exist under agents/"
+        except OSError:
             return "candidate file must exist under agents/"
         if self.repo and path.suffix != self.suffix:
             return "candidate file must be a patch saved by save.sh"
@@ -2502,7 +2533,15 @@ class GepaRepoEngine:
         )
 
         def evaluate(candidate: Any, example: Any = None) -> tuple[float, Any]:
-            """Score through the server, named scores reshaped for GEPA's objective frontier."""
+            """Score through the server, named scores reshaped for GEPA's objective frontier.
+
+            Args:
+                candidate: The candidate.
+                example: The example to score.
+
+            Returns:
+                The score and the reshaped side information.
+            """
             score, info = server.evaluate(candidate, example)
             return score, gepa_named_scores(info)
 

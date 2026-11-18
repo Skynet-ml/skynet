@@ -1464,3 +1464,75 @@ def test_a_billed_failed_call_counts_in_the_proposer_cost_live_and_on_a_resume(
         assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command"]
         assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == 0.02
         assert live.metadata["stop_reason"] == replayed.metadata["stop_reason"] == "proposer_budget"
+
+
+def test_a_pending_entry_with_an_over_long_file_name_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A file name past the file system's limit makes the path check fail; the run refuses the entry and goes on.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    file = "agents/" + "a" * 300 + ".txt"
+    pending = json.dumps({"candidates": [{"name": "long", "file": file}]})
+    command = f"printf '%s' '{pending}' > logs/run/pending_eval.json"
+    model = _Proposer(call={"id": "x", "name": "bash", "arguments": {"command": command}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert result.best_candidate == "seed"
+    rows = [
+        json.loads(line)
+        for summary in tmp_path.rglob("evolution_summary.jsonl")
+        for line in summary.read_text().splitlines()
+    ]
+    assert [row["outcome"] for row in rows] == ["failed: candidate file must exist under agents/"] * 2
+
+
+def test_a_deeply_nested_pending_file_gives_no_candidate(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """JSON nested past the parser's recursion limit is a malformed pending file: the run goes on with no candidate.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    command = "python3 -c \"print('[' * 200000)\" > logs/run/pending_eval.json"
+    model = _Proposer(call={"id": "x", "name": "bash", "arguments": {"command": command}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seed", 4.0)
+    assert len(model.calls) == 4
+
+
+def test_a_budget_smaller_than_one_sweep_after_the_seed_stops_before_the_proposer(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """After the seed's two-case sweep, one scorer call is left: the run stops on the eval budget with no model call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=3)
+
+    assert result.metadata["stop_reason"] == "eval_budget"
+    assert model.calls == []
