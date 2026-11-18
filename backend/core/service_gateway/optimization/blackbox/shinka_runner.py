@@ -216,6 +216,8 @@ class EvaluatorMailbox:
         self.stopped = threading.Event()
         self.total_evals = 0
         self._write_lock = threading.Lock()
+        # A file descriptor, not ``sys.stdout``: :meth:`own_stdout` moves the frames off fd 1.
+        self._frames = 1
         self._listening = False
         self._arrived = threading.Condition()
         self._replies: dict[str, dict[str, Any]] = {}
@@ -253,6 +255,17 @@ class EvaluatorMailbox:
         reader = threading.Thread(target=read, daemon=True)
         reader.start()
         return reader
+
+    def own_stdout(self) -> None:
+        """Keep the process's stdout for frames alone, and send every other stdout write to stderr.
+
+        Upstream prints Rich output to stdout from its own threads, outside the
+        write lock. Such a write inside a frame breaks the request the frame
+        carries, so upstream, its jobs and the model text it prints get stderr.
+        """
+        sys.stdout.flush()
+        self._frames = os.dup(self._frames)
+        os.dup2(2, 1)
 
     def ask(self, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
         """Send one request to the worker and wait for its reply.
@@ -380,8 +393,12 @@ class EvaluatorMailbox:
             prefix: Request or progress event family.
             payload: Event fields to serialize.
         """
+        frame = memoryview(f"{prefix}{self.nonce} {json.dumps(payload, default=str, allow_nan=False)}\n".encode())
         with self._write_lock:
-            print(f"{prefix}{self.nonce} {json.dumps(payload, default=str, allow_nan=False)}", flush=True)
+            # One write per frame, newline included: ``print`` writes the newline
+            # separately, and the parent reads a frame only up to its newline.
+            while frame:
+                frame = frame[os.write(self._frames, frame) :]
 
 
 def rule_blocker(mailbox: EvaluatorMailbox) -> Callable[[str], None]:
@@ -2163,6 +2180,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     mailbox = EvaluatorMailbox(payload["nonce"], timeout)
     stepped = payload.get("transport") == "stdio"
     if stepped:
+        mailbox.own_stdout()
         mailbox.listen(sys.stdin)
         seed_randomness(int(payload.get("seed") or 0))
     if repo:

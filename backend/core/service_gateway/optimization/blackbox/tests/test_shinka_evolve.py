@@ -117,6 +117,8 @@ _FAKE_UPSTREAM = {
         import random
         import sqlite3
         import subprocess
+        import sys
+        import threading
         import uuid
         from pathlib import Path
         from urllib.parse import parse_qsl, urlparse
@@ -129,6 +131,8 @@ _FAKE_UPSTREAM = {
         FAIL_AFTER = None
         # Whether upstream leaves results larger than the runner's artifact archive limit.
         BIG_RESULTS = False
+        # Whether a thread prints Rich-like rows to stdout while the runner sends each request.
+        NOISY = False
 
 
         class EvolutionConfig:
@@ -156,6 +160,7 @@ _FAKE_UPSTREAM = {
                 self.results_dir = Path(evo_config.results_dir)
                 self.running_jobs = []
                 self.failed_jobs_for_retry = {}
+                self.bursts = threading.Semaphore(0)
 
             def _get_completed_job_work_count(self):
                 return 0
@@ -165,6 +170,7 @@ _FAKE_UPSTREAM = {
 
             async def _generate_proposal_async(self, generation, task_id):
                 text = self.best[1].split(START)[1].split(END)[0]
+                self.bursts.release()
                 # Upstream's prompts carry random draws and program ids, so a
                 # replay matches its log only when the runner seeds them.
                 result = await shinka_llm.query_async(
@@ -177,6 +183,17 @@ _FAKE_UPSTREAM = {
                 return self.init_program.replace(START + self.seed_text, START + result.content.replace("'}]", ""))
 
             def run(self):
+                def noise():
+                    # Upstream prints Rich tables from its own threads, one write per
+                    # row, while the runner sends a request; each burst is bounded.
+                    while self.bursts.acquire():
+                        for _ in range(3000):
+                            sys.stdout.write("| " + "-" * 120 + " |\\n")
+
+                if NOISY:
+                    # Frequent thread switches, so a print can land inside a frame.
+                    sys.setswitchinterval(1e-6)
+                    threading.Thread(target=noise, daemon=True).start()
                 asyncio.run(self._run())
 
             async def _run(self):
@@ -207,6 +224,7 @@ _FAKE_UPSTREAM = {
                 folder = self.results_dir / f"gen_{generation}"
                 folder.mkdir(parents=True)
                 (folder / "main.md").write_text(program)
+                self.bursts.release()
                 subprocess.run(
                     [self.python, str(self.results_dir / "evaluate.py"),
                      "--program_path", str(folder / "main.md"), "--results_dir", str(folder / "results")],
@@ -218,13 +236,14 @@ _FAKE_UPSTREAM = {
 }
 
 
-def _fake_python(tmp_path: Path, fail_after: int | None = None, big_results: bool = False) -> str:
+def _fake_python(tmp_path: Path, fail_after: int | None = None, big_results: bool = False, noisy: bool = False) -> str:
     """Write the fake upstream package and an interpreter wrapper that imports it.
 
     Args:
         tmp_path: Pytest's temporary folder.
         fail_after: The generation at which the fake upstream fails, or None for no failure.
         big_results: Whether the fake upstream leaves results larger than the artifact archive limit.
+        noisy: Whether the fake upstream prints rows to stdout from another thread during each request.
 
     Returns:
         The wrapper's path: the engine's ``shinka-evolve`` interpreter.
@@ -238,6 +257,7 @@ def _fake_python(tmp_path: Path, fail_after: int | None = None, big_results: boo
             .lstrip()
             .replace("FAIL_AFTER = None", f"FAIL_AFTER = {fail_after}")
             .replace("BIG_RESULTS = False", f"BIG_RESULTS = {big_results}")
+            .replace("NOISY = False", f"NOISY = {noisy}")
         )
         path.write_text(text, encoding="utf-8")
     python = tmp_path / "shinka-python"
@@ -295,6 +315,42 @@ def test_each_upstream_model_reply_and_scorer_command_is_one_loop_step(
     assert boxes.opened == 6
     assert not any(boxes.open.values())
     assert [kind for _, kind, _ in _steps(engine)] == _KINDS
+
+
+def test_upstream_stdout_output_from_another_thread_cannot_break_a_frame(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep every request and progress frame whole while upstream prints large blocks to stdout.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Replaces ``run_native_engine`` and records unparsed frames.
+    """
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
+    broken: list[str] = []
+    monkeypatch.setattr(sandbox_log, "stream_line", lambda line, **kwargs: broken.append(line))
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path, noisy=True)).run(
+        Task("seed"), loop.server(scorer, max_evals=10), loop.context(max_iterations=2)
+    )
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seedxx", 6.0, 3)
+    # A progress or log frame the worker cannot parse goes to ``stream_line``.
+    assert broken == []
+    assert [kind for _, kind, _ in _steps(engine)] == _KINDS
+    # Upstream's output goes to the stderr log, not into the frames.
+    assert "| ---" in (Path(result.metadata["native_artifacts_dir"]) / "stderr.log").read_text(encoding="utf-8")
 
 
 def test_a_run_killed_in_a_model_call_resumes_from_its_last_committed_step(
