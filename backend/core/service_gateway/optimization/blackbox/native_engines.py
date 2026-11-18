@@ -1723,6 +1723,9 @@ class MetaHarnessEngine:
     """
 
     name = "meta_harness"
+    # The worker host (SKY-722) turns this off: its workspace is a tree, and a
+    # clock value in it would change the tree ids that a resume replays.
+    record_timing = True
 
     def __init__(self, config: OptimizeAnythingConfig) -> None:
         """Pop the engine knobs from the shared config.
@@ -2073,19 +2076,8 @@ class MetaHarnessEngine:
             frontier=best[1] if best else None,
         )
         pending = self.logs_dir / "pending_eval.json"
-        pending.unlink(missing_ok=True)
         started = time.monotonic()
-        outcome = run_proposer(
-            self._task_prompt(iteration),
-            work_dir=self.work_dir,
-            log_dir=self.logs_dir / "claude_sessions",
-            name=f"iter{iteration}",
-            model=self.model,
-            session_id=str(uuid.uuid4()),
-            max_budget_usd=remaining_cost,
-            tools=META_HARNESS_TOOLS,
-            append_system_prompt=self.skill(),
-        )
+        outcome = self._propose(iteration, remaining_cost)
         propose_seconds = time.monotonic() - started
         self.cost_usd += outcome.cost_usd
         self.session_ids.append(outcome.session_id)
@@ -2126,11 +2118,12 @@ class MetaHarnessEngine:
             if "components" in spec:
                 row["components"] = spec["components"]
             rows.append(row)
-        rows[0]["timing_s"] = {
-            "propose": round(propose_seconds, 1),
-            "bench": round(time.monotonic() - bench_started, 1),
-            "wall": round(time.monotonic() - started, 1),
-        }
+        if self.record_timing:
+            rows[0]["timing_s"] = {
+                "propose": round(propose_seconds, 1),
+                "bench": round(time.monotonic() - bench_started, 1),
+                "wall": round(time.monotonic() - started, 1),
+            }
         with (self.logs_dir / "evolution_summary.jsonl").open("a", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
@@ -2146,6 +2139,32 @@ class MetaHarnessEngine:
             candidates=len(rows),
             improved=improved,
             best=new_best[1] if new_best else None,
+        )
+
+    def _propose(self, iteration: int, remaining_cost: float | None) -> ProposerOutcome:
+        """Run one proposer session over the work folder, which leaves ``pending_eval.json`` behind.
+
+        The worker host (SKY-722) replaces this session with its own tool loop;
+        the rest of the iteration stays the same.
+
+        Args:
+            iteration: One-based iteration number.
+            remaining_cost: Proposer spend still allowed, or ``None``.
+
+        Returns:
+            The session's outcome.
+        """
+        (self.logs_dir / "pending_eval.json").unlink(missing_ok=True)
+        return run_proposer(
+            self._task_prompt(iteration),
+            work_dir=self.work_dir,
+            log_dir=self.logs_dir / "claude_sessions",
+            name=f"iter{iteration}",
+            model=self.model,
+            session_id=str(uuid.uuid4()),
+            max_budget_usd=remaining_cost,
+            tools=META_HARNESS_TOOLS,
+            append_system_prompt=self.skill(),
         )
 
     def _log_save_blocks(self) -> None:

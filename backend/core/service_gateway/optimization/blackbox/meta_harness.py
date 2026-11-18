@@ -1,25 +1,424 @@
-"""Run the pinned upstream Meta-Harness proposer and search implementation."""
+"""Run the pinned Meta-Harness loop in the worker engine loop (SKY-722).
+
+The loop of :class:`native_engines.MetaHarnessEngine` runs here unchanged. Only
+its proposer session changes: the ``claude`` CLI in a long-lived box becomes a
+tool loop in the worker. The tool loop is modeled on the Cloudflare Agents SDK
+tool loop, with no dependency on it: call the model with the tools, run each
+tool call, append the results, and call again until a reply asks for no tool.
+Its one tool is modeled on the Cloudflare Sandbox SDK ``exec``: one shell
+command, with the exit code, stdout and stderr as the result. Each model reply is one ``model`` step and each command is one
+``command`` step, so a killed run resumes from its last step.
+
+The workspace is a tree. Each command starts from the tree that the last
+command left, and the engine writes its own files (task, skill, frontier,
+results) over that tree before each session. After a session, the engine reads
+back only ``pending_eval.json`` and the candidate files that it lists.
+
+A run outside the worker engine loop still uses the native box runtime until
+the SKY-728 cutover; the loop path never calls it.
+"""
 
 from __future__ import annotations
 
-from .native_runtime import run_native_engine
-from .protocol import EngineContext, EvalServer, Result, Task
+import contextlib
+import json
+import math
+import posixpath
+from collections.abc import Iterator
+from decimal import Decimal
+from typing import Any
+
+from gepa.oa.budget import BudgetExhausted
+from gepa.oa.config import OptimizeAnythingConfig
+from gepa.oa.task import Task as UpstreamTask
+
+from ....exceptions import ServiceError
+from ....sandbox.trees import BoxFailureError, TreeRejectedError
+from . import native_engines
+from .feedback import emit_candidate, emit_case_scored
+from .native_runtime import native_task_payload, run_native_engine
+from .protocol import (
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    candidate_key,
+    fill_unscored,
+)
+
+BASH_TOOL = {
+    "name": "bash",
+    "description": (
+        "Run one shell command in the Meta-Harness workspace, with no network. Each command starts in the "
+        "workspace root, in a fresh box: files in the workspace persist between commands, but the shell state "
+        "and /tmp do not. Keep scratch files under `scratch/` in the workspace, and delete them when done. "
+        "Returns the exit code, stdout, stderr and whether the command timed out."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"command": {"type": "string", "description": "The shell command."}},
+        "required": ["command"],
+    },
+}
+
+
+_TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
+_WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
+
+
+class _Budget:
+    """The ``budget`` view of the gepa.oa server, read from the host eval server."""
+
+    def __init__(self, server: EvalServer) -> None:
+        """Bind the view to the host eval server.
+
+        Args:
+            server: The host eval server.
+        """
+        self._server = server
+
+    @property
+    def remaining(self) -> int:
+        """Return the scorer calls left."""
+        return self._server.remaining
+
+    @property
+    def used(self) -> int:
+        """Return the scorer calls spent."""
+        return self._server.used
+
+
+class _UpstreamServer:
+    """Answer the gepa.oa server calls that Meta-Harness makes with the host eval server.
+
+    It names cases by position and versions by registration order, and it sends
+    the same ``case_scored`` and ``candidate`` progress events as the native
+    runtime, so the climb view does not change. It scores one case at a time in
+    the caller's thread, so each step has a fixed place in the agent's log.
+    """
+
+    def __init__(self, server: EvalServer, cases: list[Any], ctx: EngineContext) -> None:
+        """Bind the adapter to the host eval server.
+
+        Args:
+            server: The host eval server.
+            cases: The task's cases; the scorer gets these, never the proposer.
+            ctx: The engine context, for its progress sink.
+        """
+        self._server = server
+        self._cases = {str(index): case for index, case in enumerate(cases)}
+        self._progress = ctx.progress_callback
+        self._ids: dict[str, int] = {}
+        self._sweeps: dict[str, list[tuple[str, float]]] = {}
+        self.budget = _Budget(server)
+        self.eval_log: list[dict[str, Any]] = []
+
+    def iter_split(self, split: str) -> Iterator[tuple[str, Any]]:
+        """Yield the cases of a split: all cases are the train split.
+
+        Args:
+            split: ``train`` or ``val``.
+
+        Returns:
+            ``(case id, case)`` pairs.
+        """
+        return iter(self._cases.items() if split == "train" else ())
+
+    def evaluate_examples(
+        self, candidate: str, example_ids: list[str] | None = None, split: str | None = None
+    ) -> tuple[float, dict[str, Any]]:
+        """Score a candidate on cases, and fill each null case with the sweep's scored mean (SKY-367).
+
+        Args:
+            candidate: The candidate text.
+            example_ids: The case ids, or ``None`` for every case.
+            split: Not used; Meta-Harness names its cases.
+
+        Returns:
+            The mean and the per-case ``scores`` and ``infos``, with the null cases under
+            ``UNSCORED_CASES_KEY``.
+
+        Raises:
+            BudgetExhausted: When the budget cannot score every case.
+        """
+        del split
+        ids = list(self._cases) if example_ids is None else [eid for eid in example_ids if eid in self._cases]
+        pairs: list[tuple[str, Any]] = [(eid, self._cases[eid]) for eid in ids] or [("_single", None)]
+        if self.budget.remaining < len(pairs):
+            raise BudgetExhausted(f"Not enough budget to evaluate all examples: {self.budget.remaining} remaining")
+        trial = self._register(candidate)
+        scores: list[float | None] = []
+        infos: dict[str, Any] = {}
+        for eid, case in pairs:
+            try:
+                score, info = self._server.evaluate(candidate, case)
+            except BudgetExhaustedError as error:
+                raise BudgetExhausted(str(error)) from error
+            scores.append(score)
+            infos[eid] = info
+            if score is not None and case is not None:
+                emit_case_scored(self._progress, trial=trial, example_id=eid, score=score, total=len(pairs))
+        filled = fill_unscored([candidate] * len(scores), scores)
+        names = [eid for eid, _ in pairs]
+        self._sweeps[candidate_key(candidate)] = [
+            (eid, score) for eid, score in zip(names, scores, strict=True) if score is not None
+        ]
+        return sum(filled) / len(filled), {
+            "scores": dict(zip(names, filled, strict=True)),
+            "infos": infos,
+            "num_evaluated": len(pairs),
+            native_engines.UNSCORED_CASES_KEY: [eid for eid, score in zip(names, scores, strict=True) if score is None],
+        }
+
+    def log_progress(
+        self, val_score: float, candidate: str | None = None, reflection_cost: float = 0.0
+    ) -> dict[str, Any]:
+        """Send a benchmarked candidate to the climb view, as the native runtime does.
+
+        Args:
+            val_score: The candidate's mean.
+            candidate: The candidate text.
+            reflection_cost: Not used.
+
+        Returns:
+            The score, as the gepa.oa server returns it.
+        """
+        del reflection_cost
+        if isinstance(candidate, str) and math.isfinite(val_score):
+            # A version with a crashed case shows no score (SKY-350, SKY-367).
+            shown = None if self._server.metric_error(candidate) is not None else val_score
+            emit_candidate(
+                self._progress,
+                candidate_id=str(self._register(candidate)),
+                parent_id=None,
+                generation=0,
+                score=shown,
+                per_example=[] if shown is None else self._sweeps.get(candidate_key(candidate), []),
+                candidate=candidate,
+                discovered_at_evals=self._server.used,
+                iteration=None,
+            )
+        return {"val_score": val_score}
+
+    def _register(self, candidate: Candidate) -> int:
+        """Give a candidate its id: its place in the order of first sweeps.
+
+        Args:
+            candidate: The candidate.
+
+        Returns:
+            The id.
+        """
+        return self._ids.setdefault(candidate_key(candidate), len(self._ids))
+
+
+class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
+    """The native Meta-Harness loop, with the proposer session as a tool loop on the engine context."""
+
+    record_timing = False
+
+    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext) -> None:
+        """Build the native engine and bind the context.
+
+        Args:
+            config: The native engine's config.
+            ctx: The engine loop's context, with its model, command and tree calls.
+        """
+        super().__init__(config)
+        self._ctx = ctx
+        self._tree: str | None = None
+
+    def skill(self) -> str:
+        """Return the native skill, with scratch files in the workspace: ``/tmp`` does not persist between commands.
+
+        Returns:
+            The skill text for the tool loop.
+        """
+        return super().skill().replace(_TMP_SCRATCH, _WORKSPACE_SCRATCH)
+
+    def _propose(self, iteration: int, remaining_cost: float | None) -> native_engines.ProposerOutcome:
+        """Run one proposer session as a tool loop: one step per model reply and per command.
+
+        The proposer cap counts only committed costs, so a resume makes the same choices.
+
+        Args:
+            iteration: One-based iteration number.
+            remaining_cost: Proposer spend still allowed, or ``None``.
+
+        Returns:
+            The session's outcome.
+        """
+        ctx = self._ctx
+        assert ctx.put_files is not None
+        assert ctx.call_model is not None
+        pending = self.logs_dir / "pending_eval.json"
+        # A tree write cannot delete a file, so an empty file stands for no candidates.
+        pending.write_text("", encoding="utf-8")
+        files = {
+            path.relative_to(self.work_dir).as_posix(): path.read_bytes()
+            for path in sorted(self.work_dir.rglob("*"))
+            if path.is_file()
+        }
+        tree = ctx.put_files(files, self._tree)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.skill()},
+            {"role": "user", "content": self._task_prompt(iteration)},
+        ]
+        spent = Decimal(0)
+        text = ""
+        exhausted = False
+        while True:
+            if remaining_cost is not None and float(spent) / 100 >= remaining_cost:
+                exhausted = True
+                break
+            reply = ctx.call_model(messages, [BASH_TOOL])
+            spent += reply.cost_cents
+            text = reply.text
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply.text,
+                    **({"tool_calls": reply.tool_calls} if reply.tool_calls else {}),
+                }
+            )
+            if not reply.tool_calls:
+                break
+            for call in reply.tool_calls:
+                output, tree = self._exec(tree, call)
+                messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
+        self._tree = tree
+        self._pull(tree)
+        return native_engines.ProposerOutcome(
+            session_id=f"iter{iteration}",
+            cost_usd=float(spent) / 100,
+            is_error=False,
+            text=text,
+            budget_exhausted=exhausted,
+            killed=False,
+        )
+
+    def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
+        """Run one tool call as one command over the tree, modeled on the Sandbox SDK ``exec``.
+
+        Args:
+            tree: The workspace tree.
+            call: The tool call: its ``name`` and its ``arguments``, as a mapping or JSON text.
+
+        Returns:
+            The tool result as JSON text, and the tree after the command.
+        """
+        assert self._ctx.run_command is not None
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = None
+        command = arguments.get("command") if isinstance(arguments, dict) else None
+        if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
+            # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
+            return json.dumps({"error": f"Call the {BASH_TOOL['name']} tool with a command string."}), tree
+        try:
+            result, tree = self._ctx.run_command(tree, command, ())
+        except (TreeRejectedError, BoxFailureError) as error:
+            # The step committed the failure, so a resume raises it again and gets the same result here.
+            return json.dumps({"error": f"The command failed and changed nothing: {error}"}), tree
+        output = {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+        }
+        return json.dumps(output), tree
+
+    def _pull(self, tree: str) -> None:
+        """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
+
+        Args:
+            tree: The tree after the session.
+        """
+        assert self._ctx.read_file is not None
+        logs = self.logs_dir.relative_to(self.work_dir).as_posix()
+        pending = self.logs_dir / "pending_eval.json"
+        data = self._ctx.read_file(tree, f"{logs}/pending_eval.json")
+        if data is None:
+            pending.unlink(missing_ok=True)
+            return
+        pending.write_bytes(data)
+        for spec in self._read_pending(pending):
+            file = spec.get("file")
+            if not isinstance(file, str):
+                continue
+            path = posixpath.normpath(file)
+            # ``_validate`` refuses a file outside ``agents/``, so only those come back.
+            if not path.startswith("agents/"):
+                continue
+            local = self.work_dir / path
+            content = self._ctx.read_file(tree, path)
+            # An entry that names a local folder, or a path under a local file, cannot be a candidate
+            # file; ``_validate`` refuses it.
+            with contextlib.suppress(OSError):
+                if content is None:
+                    local.unlink(missing_ok=True)
+                else:
+                    local.parent.mkdir(parents=True, exist_ok=True)
+                    local.write_bytes(content)
 
 
 class MetaHarnessEngine:
-    """Select the native Meta-Harness engine without changing its algorithm."""
+    """Run the pinned Meta-Harness loop in the worker engine loop."""
 
     name = "meta_harness"
 
     def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
-        """Delegate the unchanged engine to the selected execution runtime.
+        """Run the unchanged loop, with its proposer sessions on the engine context, or in the native runtime.
 
         Args:
             task: Optimization inputs.
             server: Skynet scorer and budget.
-            ctx: Model routing, runtime and workspace.
+            ctx: The engine context; ``native_options`` gives the optional proposer knobs. With no worker
+                host, the native box runtime runs the engine.
 
         Returns:
-            The upstream aggregate incumbent and execution evidence.
+            The frontier's best candidate and the loop's evidence.
+
+        Raises:
+            ServiceError: When a worker-loop run is on a repository, or the candidate is not one text.
+            BudgetExhaustedError: When no scorer call is left.
         """
-        return run_native_engine(self.name, task, server, ctx)
+        if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file):
+            # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
+            return run_native_engine(self.name, task, server, ctx)
+        if ctx.repo_seed is not None:
+            raise ServiceError("Meta-Harness cannot run on a repository in the worker engine loop yet.")
+        if not task.str_mode:
+            raise ServiceError("Native agent engines require a single text candidate.")
+        if server.remaining <= 0:
+            raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
+        options = ctx.native_options
+        engine_config: dict[str, Any] = {"model": options.model if options else ""}
+        if ctx.max_iterations is not None:
+            engine_config["max_iterations"] = ctx.max_iterations
+        if options is not None and options.proposer.max_candidates_per_iter is not None:
+            engine_config["max_candidates_per_iter"] = options.proposer.max_candidates_per_iter
+        config = OptimizeAnythingConfig(
+            engine=self.name,
+            max_token_cost=options.max_token_cost if options else None,
+            max_evals=server.remaining,
+            max_concurrency=1,
+            run_dir=ctx.run_dir,
+            stop_at_score=ctx.stop_at_score,
+            sandbox=False,
+            engine_config=engine_config,
+        )
+        upstream = _WorkerMetaHarness(config, ctx).run(
+            UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, list(task.cases), ctx)
+        )
+        return Result(
+            best_candidate=upstream.best_candidate,
+            best_score=upstream.best_score,
+            total_evals=server.used,
+            metadata={**upstream.metadata, "upstream_revision": native_engines.META_HARNESS_REVISION},
+        )
