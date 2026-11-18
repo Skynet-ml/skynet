@@ -49,7 +49,7 @@ Skynet also gives you recovery codes. Keep them in a safe place. Use one if you 
 
 ## Where your code runs
 
-User workloads run in isolated sandboxes. In the hosted product, Vercel Sandbox is the execution boundary. This covers setup checks, optimization runs, recovery and work on completed runs.
+Your code runs only in isolated sandboxes. The sandbox is the execution boundary. In the hosted product, Vercel Sandbox is the most mature sandbox provider, but it is not the only one. Each candidate runs in its own sandbox, and the metric scores it in a separate sandbox. This covers setup checks, optimization runs, recovery and work on completed runs.
 
 Skynet workers do not run your code. They are the control plane. They start jobs, reserve and settle budgets, give scoped credentials to sandboxes, and save checkpoints.
 

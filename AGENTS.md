@@ -232,10 +232,15 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
   implementation and include GEPA, Best-of-N and Meta-Harness, plus Skynet's
   own AutoResearch and the pinned AutoSaddler and ShinkaEvolve packages.
   `Auto` composes eligible engines without redefining their algorithms.
-- **Vercel Sandbox** is the production execution boundary for user workloads,
-  including optimization setup, runs, recovery, and completed-run
-  interactions. Workers are the control plane: they orchestrate jobs, reserve
-  and settle budgets, broker scoped credentials, persist checkpoints, and
+- The **sandbox component** is the production execution boundary for user
+  code. Vercel Sandbox is its most mature provider today. Other providers
+  plug in through the same `SandboxEnvironment` interface. Each candidate
+  runs in its own sandbox. The metric scores each candidate in a separate
+  sandbox. A sandbox may fail at any time: the step log is the truth, and
+  only tree ids cross the boundary. Workers are the control plane: they host
+  the user, workspace, run and agent actors, run the engine loops and model
+  calls with no box alive, commit every step, reserve and settle budgets,
+  broker scoped credentials through the workspace capability registry, and
   dispatch sandbox work.
 - **Protected execution** reserves wallet and run-budget headroom before paid
   work. Managed model usage, Skynet fees, and sandbox usage are metered. For
