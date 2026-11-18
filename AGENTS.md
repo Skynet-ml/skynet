@@ -108,9 +108,10 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   Before and After images or videos.
 - **Fix bugs locally, push once.** Each push starts a new review. Test and
   review the full diff locally, then push once.
-- **Among agents, only the orchestrator merges**, through a batch, as soon
-  as the batch passes all its merge gates (no fixed window, Gilad,
-  2026-11-18). The `skynet-pr-workflow` skill lists the gates.
+- **Among agents, only the orchestrator merges.** It merges PRs into
+  `staging` through a batch, as soon as the batch passes all its merge
+  gates (no fixed window, Gilad, 2026-11-18). The `skynet-pr-workflow`
+  skill lists the gates.
   Implementation and review agents never merge, and never post
   `Approved for merge` or `Changes requested:`.
 - A PR merges into `staging` when one Opus 5.5 review at medium effort

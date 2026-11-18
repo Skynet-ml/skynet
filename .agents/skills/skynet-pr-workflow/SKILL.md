@@ -304,8 +304,8 @@ A manual hold on a change or on a promotion still stops it.
   Merge the batch PR with a command that requires its reviewed head commit
   (`gh pr merge <n> --merge --match-head-commit <sha>`). Never bypass
   branch protection or queue an unchecked future merge.
-- **Among agents, only the orchestrator merges** (through the batch, see
-  "Merging into staging" below). Gilad can also merge.
+- **Among agents, only the orchestrator merges** (into `staging` through
+  the batch, see "Merging into staging" below). Gilad can also merge.
   Implementation and review agents leave the final action to the orchestrator.
 
 ### Linear revisions and holds (2026-10-19, 2026-11-11)
@@ -373,10 +373,10 @@ A manual hold on a change or on a promotion still stops it.
 
 - There is no fixed merge window (Gilad, 2026-11-18). The orchestrator
   merges a batch into `staging` as soon as the batch passes all its merge
-  gates. The gates are in "Automatic merges", "Linear revisions and holds"
-  and "PR tests and batch CI".
+  gates. The gates are in "Merge gates", "Automatic merges", "Linear
+  revisions and holds" and "PR tests and batch CI".
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
-  other batch PR is open.
+  other batch is in progress (no open `batch/` branch or batch PR).
 - After an approval, the orchestrator does not merge the PR outside a
   batch. It moves the issue to **Ready to Merge**, adds the
   `ready-to-merge` label, a PR comment and the `agent-review/ready-to-merge`
