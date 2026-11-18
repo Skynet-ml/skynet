@@ -368,7 +368,8 @@ class RepoScorer:
                 repository's ``optimize.toml``.
             secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
                 the run.
-            budget: The run budget, which meters a call with a Skynet key.
+            budget: The run budget, which meters a call with a Skynet key
+                and parks each warm candidate box between evaluations.
             recorder: Writes each relayed service and MCP call into the run
                 record; ``None`` records nothing.
 
@@ -394,6 +395,9 @@ class RepoScorer:
         self._run_entry = run_entry
         self._run_timeout = run_timeout
         self._workspace = workspace
+        if budget is not None and getattr(budget, "park", None) is not None:
+            # A warm candidate box waits in the lease between evaluations (SKY-647, SKY-805).
+            workspace.park_in(budget)
         self._gateway = gateway
         self._code = code
         self._timeout_seconds = timeout_seconds

@@ -14,10 +14,18 @@ versions. Each box holds only the code it needs (SKY-398):
   packages of ``METRIC_REQUIREMENTS`` and saves a second state that holds no
   repository code. Its network is open only for that install.
 - A candidate box C comes from the run's warm box lease (SKY-805). A new
-  box opens from the prepared state and checks the digest. A warm box from
-  the last candidate of its slot first removes the old checkout, restarts
-  the compose services and checks the digest again; a failed step closes it
-  and a new box opens. The box then lays out the version. The run closes the
+  box opens from the prepared state, checks the digest and records the box
+  user's state outside the repository folder. A warm box from the last
+  candidate of its slot first resets: it stops the compose services and
+  removes everything in the repository folder but the prepared tree. It
+  removes what changed since the open in the box user's HOME caches
+  (``~/.cache``), user base (``~/.local``: user site-packages, ``.pth``
+  files, ``sitecustomize``) and own temp entries, and that state must match
+  the record of the open. Then it starts the services and checks the digest
+  again. A failed step closes the box and a new box opens, so a version sees
+  the same box state as in a new box. Files outside these folders are not
+  reset. The box then lays out the version. Between
+  candidates the warm box is parked in the run budget. The run closes the
   lease at its end.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
@@ -47,8 +55,9 @@ from pathlib import Path
 
 from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
-from ....billing.runtime import UsagePendingError
+from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
+from ....billing.usage_tags import box_tag
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....config import settings
 from ....sandbox.box_lease import BoxLease
@@ -296,6 +305,74 @@ for folder, folders, files in os.walk(".", followlinks=False):
 print(sha.hexdigest())
 """
 
+# The box user's state outside the repository folder that a version can
+# write and the next version on a warm box could read: the HOME caches, the
+# user base (user site-packages, its ``.pth`` files and ``sitecustomize``)
+# and the box user's own entries in the temp folder. The provider's command
+# files (``.app-*``) stay. With a time argument it first removes each entry
+# whose change time is after it: a version can set a file's other times, but
+# not its change time. It prints the time it started and a digest of the
+# remaining entries, with each file's size and change time. A new box records
+# both before the first version; at a reset the digest must match again, so a
+# warm box holds the same state as a new box, or the parent replaces it.
+_USER_STATE = r"""
+import hashlib, os, stat, sys, time
+
+started = time.time()
+since = float(sys.argv[1]) if len(sys.argv) > 1 else None
+home = os.path.expanduser("~")
+tops = [os.path.join(home, ".cache"), os.path.join(home, ".local")]
+temp = os.environ.get("TMPDIR") or "/tmp"
+try:
+    names = sorted(os.listdir(temp))
+except OSError:
+    names = []
+for name in names:
+    path = os.path.join(temp, name)
+    try:
+        if not name.startswith(".app-") and os.lstat(path).st_uid == os.getuid():
+            tops.append(path)
+    except OSError:
+        pass
+
+def newer(info):
+    return since is not None and info.st_ctime > since
+
+def clear(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        for name in os.listdir(path):
+            clear(os.path.join(path, name))
+        if newer(os.lstat(path)) and not os.listdir(path):
+            os.rmdir(path)
+    elif newer(info):
+        os.unlink(path)
+
+def walk(path, sha):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    kind = stat.S_IFMT(info.st_mode)
+    sha.update(f"{path}\0{kind}\0".encode("utf-8", "surrogateescape"))
+    if stat.S_ISDIR(info.st_mode):
+        for name in sorted(os.listdir(path)):
+            walk(os.path.join(path, name), sha)
+    else:
+        sha.update(f"{info.st_size}\0{info.st_ctime_ns}\0".encode())
+
+if since is not None:
+    for top in tops:
+        clear(top)
+sha = hashlib.sha256()
+for top in tops:
+    walk(top, sha)
+print(f"{started!r} {sha.hexdigest()}")
+"""
+
 
 def _pick_base_python() -> str:
     """Set ``p`` in a box command to the base interpreter.
@@ -336,6 +413,17 @@ class _State:
 
     snapshot_id: str | None = None
     archive: Path | None = None
+
+
+@dataclass(frozen=True)
+class _Warm:
+    """What the parent knows of a slot's box from its open: its key, and its box user's state then."""
+
+    # The operation key the box opened with. A reused box keeps it, so its budget tag never changes.
+    key: str | None
+    # The box clock when the state was read, and the state's digest; ``None`` when it could not be read.
+    since: float | None
+    state: str | None
 
 
 def redact(text: str, secrets: Iterable[str]) -> str:
@@ -517,25 +605,38 @@ class _SlotSource:
     """Give one candidate slot's box from the run's lease, and free the slot at the box's last release (SKY-805).
 
     A lease key is the run and the slot, like a Cloudflare sandbox id: each
-    parallel candidate gets its own warm box, and no box crosses runs.
+    parallel candidate gets its own warm box, and no box crosses runs. A
+    warm box is parked in the run budget from its healthy release until the
+    slot's next acquire, so the budget sees that it waits (SKY-647).
     """
 
-    def __init__(self, lease: BoxLease[SandboxSession], key: str, free: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        lease: BoxLease[SandboxSession],
+        key: str,
+        free: Callable[[], None],
+        park: Callable[[str], None],
+        unpark: Callable[[str], None],
+    ) -> None:
         """Bind the slot to the run's lease.
 
         Args:
             lease: The run's candidate box lease.
             key: The run and the slot.
             free: Gives the slot back.
+            park: Parks the slot's warm box in the run budget.
+            unpark: Ends the park of the slot's warm box.
         """
         self._lease = lease
         self.key = key
         self._free = free
+        self._park = park
+        self._unpark = unpark
         self._freed = False
         self._lock = threading.Lock()
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
-        """Return the slot's warm box, or open a new one.
+        """End the park of the slot's warm box, then return it, or open a new one.
 
         Args:
             agent_id: The lease key.
@@ -544,10 +645,11 @@ class _SlotSource:
         Returns:
             The box.
         """
+        self._unpark(self.key)
         return self._lease.acquire(agent_id, grants)
 
     def release(self, box: SandboxSession, healthy: bool) -> None:
-        """Keep a healthy box warm for the slot, or close it; then free the slot.
+        """Keep a healthy box warm and parked for the slot, or close it; then free the slot.
 
         Args:
             box: The slot's box.
@@ -555,6 +657,8 @@ class _SlotSource:
         """
         try:
             self._lease.release(box, healthy)
+            if healthy and self._lease.keeps_warm:
+                self._park(self.key)
         finally:
             self.free()
 
@@ -858,7 +962,6 @@ class RepoWorkspace:
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
         candidate_cap: int | None = None,
-        candidate_starts_per_minute: int | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -882,8 +985,6 @@ class RepoWorkspace:
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
             candidate_cap: The most warm candidate boxes the run keeps; ``None``
                 takes ``REPO_CANDIDATE_VERCEL_CAP``.
-            candidate_starts_per_minute: The most candidate box starts in any
-                60 seconds; ``None`` takes ``REPO_CANDIDATE_STARTS_PER_MINUTE``.
         """
         self._runtime = runtime
         self._spec = spec
@@ -933,17 +1034,19 @@ class RepoWorkspace:
             _close_session,
             # One slot for each warm box; the opener ignores the placement, so a box never spills.
             vercel_cap=cap,
-            starts_per_minute=(
-                settings.repo_candidate_starts_per_minute
-                if candidate_starts_per_minute is None
-                else candidate_starts_per_minute
-            ),
+            starts_per_minute=settings.repo_candidate_starts_per_minute,
         )
         self._free_slots = list(range(cap))
         self._slots_free = threading.Condition()
         # The lease opens a box inside acquire, in the caller's thread, so the
         # opener reads the asking candidate's spec here and marks the box new.
         self._pending = threading.local()
+        self._warm: dict[str, _Warm] = {}
+        # Its own lock: ``_lock`` is held through the whole setup.
+        self._park_lock = threading.Lock()
+        self._budget: BudgetRuntime | None = None
+        # The budget tag of each slot's parked warm box.
+        self._parked: dict[str, str] = {}
 
     @property
     def secrets(self) -> dict[str, str]:
@@ -959,6 +1062,44 @@ class RepoWorkspace:
     def watched(self) -> tuple[str, ...]:
         """Return the protected paths the candidate box checks."""
         return self._protected
+
+    def park_in(self, budget: BudgetRuntime) -> None:
+        """Park each warm candidate box in this run budget while it waits for the slot's next candidate.
+
+        A warm box keeps its hold between evaluations, so without the park the
+        budget would wait for it to end before it stops the run (SKY-647).
+
+        Args:
+            budget: The run budget that holds the candidate boxes.
+        """
+        with self._park_lock:
+            self._budget = budget
+
+    def _park(self, slot: str) -> None:
+        """Park the slot's warm box under the tag of the key it opened with.
+
+        Args:
+            slot: The slot's lease key.
+        """
+        with self._park_lock:
+            warm = self._warm.get(slot)
+            # After the close, nothing ends a park, and the lease closes the box.
+            if self._closed or self._budget is None or warm is None or warm.key is None or slot in self._parked:
+                return
+            tag = box_tag(warm.key)
+            self._budget.park(tag)
+            self._parked[slot] = tag
+
+    def _unpark(self, slot: str) -> None:
+        """End the park of the slot's warm box, if it has one.
+
+        Args:
+            slot: The slot's lease key.
+        """
+        with self._park_lock:
+            tag = self._parked.pop(slot, None)
+            if tag is not None and self._budget is not None:
+                self._budget.unpark(tag)
 
     def prepare(self, *, on_output: OutputSink | None = None) -> None:
         """Run the setup box and the metric setup step once, and keep both states.
@@ -1359,7 +1500,7 @@ class RepoWorkspace:
             if self._closed:
                 raise RuntimeError("The box lease is closed.")
         self.prepare()
-        # Each candidate takes its own key, also when it reuses a warm box.
+        # Each candidate takes a new key, but only a new box uses it: a warm box keeps the key it opened with.
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
         slot = self._take_slot()
@@ -1377,6 +1518,9 @@ class RepoWorkspace:
                     "The candidate box does not hold the prepared repository."
                 )
             if new:
+                # Before the services start, as at a reset, so the next reset clears what they write.
+                since, state = self._user_state(session)
+                self._warm[slot.key] = _Warm(spec.operation_key, since, state)
                 self._start_services(session)
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
@@ -1411,7 +1555,7 @@ class RepoWorkspace:
                 heapq.heappush(self._free_slots, number)
                 self._slots_free.notify()
 
-        return _SlotSource(self._candidates, f"{self._run_key}:candidate-{number}", free)
+        return _SlotSource(self._candidates, f"{self._run_key}:candidate-{number}", free, self._park, self._unpark)
 
     def _candidate_box(self, slot: _SlotSource, spec: SandboxSpec, state: _State | None) -> tuple[BoxSession, bool]:
         """Get the slot's warm box and reset it, or a new box when the slot has none or the reset fails.
@@ -1433,7 +1577,7 @@ class RepoWorkspace:
             if self._pending.fresh:
                 return box, True
             try:
-                if self._reset(box.box):
+                if self._reset(box.box, slot.key):
                     return box, False
             except _BUDGET_ERRORS:
                 _release_failed(self._candidates, box.box, "A warm candidate box")
@@ -1441,17 +1585,24 @@ class RepoWorkspace:
             except Exception as error:
                 # Only the type: the provider's text can name the box.
                 logger.warning("A warm candidate box did not reset (%s)", type(error).__name__)
+            except BaseException:
+                # The lease must not keep the box held: the slot's next acquire would wait for it forever.
+                _release_failed(self._candidates, box.box, "A warm candidate box")
+                raise
             # The unhealthy release drops the box, so the next acquire opens a new one.
             _release_failed(self._candidates, box.box, "A warm candidate box")
 
-    def _reset(self, session: SandboxSession) -> bool:
+    def _reset(self, session: SandboxSession, slot: str) -> bool:
         """Clear the last candidate from a warm box, restart its services and check the prepared tree.
 
-        The reset keeps only the prepared tree of the repository folder, so a
-        version never reads or changes an earlier call's folder.
+        The reset keeps only the prepared tree of the repository folder, and
+        brings the box user's caches, user base and temp files back to the
+        state the box had when it opened (see ``_USER_STATE``). So a version
+        never reads or changes what an earlier version left.
 
         Args:
             session: The warm box.
+            slot: The slot's lease key.
 
         Returns:
             True when the box is ready for the next version.
@@ -1469,8 +1620,41 @@ class RepoWorkspace:
         )
         if not cleared.ok:
             return False
+        warm = self._warm.get(slot)
+        if warm is None or warm.since is None:
+            return False
+        if self._user_state(session, warm.since)[1] != warm.state:
+            return False
         self._start_services(session)
         return self._digest_prepared(session) == self._prepared_digest
+
+    def _user_state(self, session: SandboxSession, since: float | None = None) -> tuple[float | None, str | None]:
+        """Read the box user's state outside the repository folder, after removing what changed since ``since``.
+
+        It runs as the box user: a local Docker root has no capability to
+        remove that user's files.
+
+        Args:
+            session: The candidate box.
+            since: The box clock when the box opened; ``None`` removes nothing.
+
+        Returns:
+            The box clock when the read started and the state's digest, or
+            ``(None, None)`` when the command failed or printed something else.
+        """
+        argument = "" if since is None else f" {since!r}"
+        result = session.run(
+            f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_USER_STATE)}{argument}',
+            timeout_seconds=_HASH_TIMEOUT_SECONDS,
+        )
+        lines = result.stdout.strip().splitlines() if result.ok else []
+        parts = lines[-1].split() if lines else []
+        if len(parts) != 2 or len(parts[1]) != 64:
+            return None, None
+        try:
+            return float(parts[0]), parts[1]
+        except ValueError:
+            return None, None
 
     def _open_leased(self, placement: Placement, grants: Sequence[Grant]) -> SandboxSession:
         """Open a new candidate box for the lease with the spec of the candidate that asked for it.
@@ -1663,6 +1847,11 @@ class RepoWorkspace:
                 shutil.rmtree(self._folder, ignore_errors=True)
                 self._folder = None
                 self._prepared = False
+        # ``_closed`` is set first, so no release parks a box after this list.
+        with self._park_lock:
+            parked = list(self._parked)
+        for slot in parked:
+            self._unpark(slot)
         self._candidates.close()
 
     def release_snapshot(self) -> None:

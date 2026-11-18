@@ -32,6 +32,7 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.usage_tags import box_tag
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.config import Settings, settings
 from core.sandbox.box_lease import BoxLease
@@ -2302,6 +2303,239 @@ def test_a_kept_reaper_error_reaches_the_candidate_and_keeps_the_snapshots(tmp_p
         box = _open(space, "")
         assert box.session is _candidates(runtime)[0]  # type: ignore[arg-type]
         assert len(runtime.boxes) == opened
+        box.close()
+    finally:
+        space.close()
+
+
+class _Parks:
+    """A run budget that records each park and unpark of a box tag."""
+
+    def __init__(self) -> None:
+        """Start with no event."""
+        self.events: list[tuple[str, str]] = []
+
+    def park(self, box: str) -> None:
+        """Record one park."""
+        self.events.append(("park", box))
+
+    def unpark(self, box: str) -> None:
+        """Record one unpark."""
+        self.events.append(("unpark", box))
+
+
+def test_a_warm_candidate_box_is_parked_in_the_run_budget_under_its_first_key_between_candidates(
+    tmp_path: Path,
+) -> None:
+    """The budget sees a warm box wait between candidates, so it can stop the run early (SKY-647, SKY-805)."""
+    budget = _Parks()
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    space.park_in(budget)  # type: ignore[arg-type]
+    first, fourth = box_tag("op:candidate-1"), box_tag("op:candidate-4")
+    try:
+        box = _open(space, "")
+        assert budget.events == []
+        box.close()
+        assert budget.events == [("park", first)]
+        box = _open(space, "")
+        assert budget.events == [("park", first), ("unpark", first)]
+        # A reused box keeps the key it opened with, not this candidate's op:candidate-2.
+        box.close()
+        assert budget.events[-1] == ("park", first)
+        _open(space, "").close(healthy=False)
+        assert budget.events[-1] == ("unpark", first)
+        _open(space, "").close()
+        assert budget.events[-1] == ("park", fourth)
+    finally:
+        space.close()
+    assert budget.events == [
+        ("park", first),
+        ("unpark", first),
+        ("park", first),
+        ("unpark", first),
+        ("park", fourth),
+        ("unpark", fourth),
+    ]
+
+
+_KEEP_PTH = 'mkdir -p "$HOME/.local" && echo keep > "$HOME/.local/keep.pth"'
+
+
+def test_a_reset_clears_what_a_version_wrote_in_the_home_caches_user_base_and_temp_folder(tmp_path: Path) -> None:
+    """A warm box gives the next version the box user's state of a new box, and keeps what setup left (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=_KEEP_PTH)
+    try:
+        first = _open(space, "")
+        first.session.run(
+            'mkdir -p "$HOME/.cache/pip" "$HOME/.local/lib/site-packages" "$TMPDIR/left"'
+            ' && echo cached > "$HOME/.cache/pip/wheel"'
+            ' && echo "import os" > "$HOME/.local/lib/site-packages/planted.pth"'
+            ' && echo hook > "$HOME/.local/lib/site-packages/sitecustomize.py"'
+            ' && echo note > "$TMPDIR/note" && echo deep > "$TMPDIR/left/deep"'
+        )
+        first.close()
+        second = _open(space, "")
+        assert second.session is first.session
+        (box,) = _candidates(runtime)
+        for path in (
+            ".cache/pip/wheel",
+            ".local/lib/site-packages/planted.pth",
+            ".local/lib/site-packages/sitecustomize.py",
+        ):
+            assert not (box.path / path).exists(), path
+        assert not (box.path / ".local/lib").exists()
+        assert not (box.path / "tmp/note").exists()
+        assert not (box.path / "tmp/left").exists()
+        assert (box.path / ".local/keep.pth").read_text() == "keep\n"
+        # The open records the state and the reset clears it, both as the box user:
+        # a local Docker root cannot remove that user's files.
+        script = shlex.quote(repo_workspace._USER_STATE)
+        reads = [command for command, _ in box.commands if script in command]
+        assert len(reads) == 2
+        assert reads[0].endswith(script)
+        assert re.search(r" [0-9.]+$", reads[1])
+        assert not any(script in command for command in box.root_commands)
+        second.close()
+    finally:
+        space.close()
+
+
+def test_a_warm_box_whose_setup_file_in_the_user_base_changed_is_replaced_by_a_new_box(tmp_path: Path) -> None:
+    """A changed file that setup left cannot be restored in place, so the next version gets a new box (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=_KEEP_PTH)
+    try:
+        first = _open(space, "")
+        first.session.run('echo "import planted" > "$HOME/.local/keep.pth"')
+        first.close()
+        second = _open(space, "")
+        old, new = _candidates(runtime)
+        assert old.closed
+        assert second.session is new
+        assert (new.path / ".local/keep.pth").read_text() == "keep\n"
+        second.close()
+    finally:
+        space.close()
+
+
+def test_an_interrupt_in_the_reset_gives_the_warm_box_back_so_the_next_candidate_does_not_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A KeyboardInterrupt in the reset releases the box unhealthy, so the lease holds no busy entry (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+
+        def interrupted(*_args: Any) -> bool:
+            """Stop the reset as an interrupt does."""
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(space, "_reset", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            space.open_candidate("")
+        assert old.closed
+        monkeypatch.undo()
+        opened: list[CandidateBox] = []
+        waiter = threading.Thread(target=lambda: opened.append(_open(space, "")), daemon=True)
+        waiter.start()
+        waiter.join(timeout=30)
+        assert not waiter.is_alive()
+        assert opened[0].session is _candidates(runtime)[-1]
+        assert opened[0].session is not old
+        opened[0].close()
+    finally:
+        space.close()
+
+
+_UNPACK = "base64 -d | tar -xzf - -C .;"
+
+
+def test_a_warm_box_from_a_tar_state_skips_the_unpack_and_a_new_box_runs_it(tmp_path: Path) -> None:
+    """With snapshots off, only a box that the lease opened for the call unpacks the tar state (SKY-805)."""
+    runtime = _SnapshotRuntime(failing=True)
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        _open(space, "").close()
+        assert space._snapshots_off
+        (warm,) = _candidates(runtime)
+        assert sum(_UNPACK in command for command, _ in warm.commands) == 1
+        box = _open(space, "")
+        assert box.session is warm
+        assert sum(_UNPACK in command for command, _ in warm.commands) == 1
+        box.close(healthy=False)
+        box = _open(space, "")
+        new = _candidates(runtime)[-1]
+        assert box.session is new
+        assert new is not warm
+        assert sum(_UNPACK in command for command, _ in new.commands) == 1
+        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_budget_error_in_the_reset_gives_the_box_back_unhealthy_frees_the_slot_and_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget stop in a warm box's reset closes the box and frees its slot before it reaches the run (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None, candidate_cap=1)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+
+        def stopped(*_args: Any) -> bool:
+            """Stop the reset as the run budget does."""
+            raise BudgetReached("stopped")
+
+        monkeypatch.setattr(space, "_reset", stopped)
+        with pytest.raises(BudgetReached):
+            space.open_candidate("")
+        assert old.closed
+        assert space._free_slots == [0]
+        monkeypatch.undo()
+        box = _open(space, "")
+        assert box.session is _candidates(runtime)[-1]
+        assert box.session is not old
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_warm_box_whose_clear_command_fails_is_replaced_like_a_digest_mismatch(tmp_path: Path) -> None:
+    """A failed clear of the repository folder closes the warm box, and the version gets a new box (SKY-805)."""
+    runtime = _Runtime()
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, runtime, setup=None)
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)
+        run = old.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Fail the reset's clear and run every other command.
+
+            Args:
+                command: The shell command.
+                **options: The run's other arguments.
+
+            Returns:
+                The command's result.
+            """
+            if command.startswith("find .app-repo "):
+                return CommandResult(exit_code=1, stderr="rm: busy")
+            return run(command, **options)
+
+        old.run = failing  # type: ignore[method-assign]
+        box = _open(space, _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        assert old.closed
+        assert box.session is _candidates(runtime)[-1]
+        assert box.session is not old
+        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
         box.close()
     finally:
         space.close()

@@ -289,11 +289,17 @@ def _park_scorer(tmp_path: Path, budget: _ParkLog) -> tuple[RepoScorer, Path]:
     return scorer, archive
 
 
-def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_path: Path) -> None:
-    """The metric box is parked until the candidate box ended; no box stays open to park between evaluations (SKY-647)."""
+def test_the_metric_box_waits_parked_for_the_candidate_box_and_the_warm_candidate_box_between_evaluations(
+    tmp_path: Path,
+) -> None:
+    """The metric box is parked until the candidate box ended; the warm candidate box is parked until the next one.
+
+    The run budget can then stop a run whose every box waits (SKY-647, SKY-805).
+    """
     budget = _ParkLog()
     scorer, archive = _park_scorer(tmp_path, budget)
     metric = box_tag("repo-scorer:owner:metric-2")
+    candidate = box_tag("repo-scorer:owner:candidate-1")
     seen: list[list[tuple[str, str]]] = []
     run = scorer._run_candidate
 
@@ -317,21 +323,25 @@ def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_
     assert budget.events == []
     assert scorer.score("")["score"] == pytest.approx(0.1)
     assert seen == [[("park", metric)]]
-    assert budget.events == [("park", metric), ("unpark", metric)]
+    assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric)]
     with pytest.raises(RepoScoreError, match="README"):
         scorer.score(_patch(tmp_path / "bad", archive, {"README": "changed\n"}))
     scorer.close()
-    assert budget.events == [("park", metric), ("unpark", metric)]
+    assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric), ("unpark", candidate)]
 
 
 @pytest.mark.parametrize("failure", ["run_raises", "run_failed", "close_raises"])
 def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once."""
+    """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once.
+
+    Only a candidate box that went back healthy stays warm and parked, until the run ends (SKY-805).
+    """
     budget = _ParkLog()
     scorer, _ = _park_scorer(tmp_path, budget)
     metric = box_tag("repo-scorer:owner:metric-2")
+    candidate = box_tag("repo-scorer:owner:candidate-1")
     if failure == "run_raises":
 
         def raises(*_args: Any) -> Any:
@@ -361,7 +371,12 @@ def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
         with pytest.raises((BudgetReached, UsagePendingError)):
             scorer.score("")
     scorer.close()
-    assert budget.events == [("park", metric), ("unpark", metric)]
+    if failure == "run_raises":
+        assert budget.events == [("park", metric), ("unpark", metric)]
+    elif failure == "run_failed":
+        assert budget.events == [("park", candidate), ("park", metric), ("unpark", metric), ("unpark", candidate)]
+    else:
+        assert budget.events == [("park", metric), ("park", candidate), ("unpark", metric), ("unpark", candidate)]
 
 
 @pytest.mark.parametrize(("failure", "healthy"), [(None, True), (BudgetReached("stopped"), False)])
