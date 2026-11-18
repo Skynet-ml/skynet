@@ -112,8 +112,26 @@ _MAX_ARCHIVE_BYTES = 8 * native_engines.MAX_CANDIDATE_BYTES
 # bytes for one name is NAME_MAX itself.
 _MAX_CARRY_PATH_BYTES = 512
 _MAX_CARRY_NAME_BYTES = 255
+# An ``evaluate`` error echoes the agent's path or ids, which may be huge: a short head keeps the error readable.
+_ECHO_CHARS = 200
+# The marker file that stands for an empty lab folder in the tree.
+_KEEP = ".keep"
 
 logger = logging.getLogger(__name__)
+
+
+def _echo(text: str) -> str:
+    """Cut untrusted text that an error result repeats to its first ``_ECHO_CHARS`` characters.
+
+    Args:
+        text: The text to repeat.
+
+    Returns:
+        The text unchanged when it fits, else its head and a note with its full length.
+    """
+    if len(text) <= _ECHO_CHARS:
+        return text
+    return f"{text[:_ECHO_CHARS]}[... {len(text)} characters in all]"
 
 
 class _UpstreamServer:
@@ -420,6 +438,14 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 "round.",
             ),
             ("- If `eval.sh` prints", "- If the `evaluate` tool answers"),
+            (
+                "- `notebook.md` is yours and is the only memory that survives between rounds.",
+                "- `notebook.md` is yours. It and `work/` are the only files that survive between rounds, up to "
+                f"size caps: keep each file at most {native_engines.MAX_CANDIDATE_BYTES // 2**20} MiB and all of "
+                f"them together at most {_MAX_CARRY_BYTES // 2**20} MiB, each path inside the lab at most "
+                f"{_MAX_CARRY_PATH_BYTES} bytes and each file or folder name at most {_MAX_CARRY_NAME_BYTES} bytes "
+                "as UTF-8. A file past a cap is dropped.",
+            ),
         ]
         if self.example_ids:
             edits.append(
@@ -526,7 +552,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                     killed = True
                     break
                 if call.get("name") == EVALUATE_TOOL["name"]:
-                    output = self._evaluate(server, tree, call)
+                    output = loop_tools.clip(self._evaluate(server, tree, call))
                 else:
                     output, tree = loop_tools.run_bash(
                         ctx, tree, call, misuse="Call the bash tool with a command string, or the evaluate tool."
@@ -551,7 +577,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         stays out, and the scan goes on. Its bytes are never read: the cap checks each file's size first.
 
         Returns:
-            The file bytes, keyed by path inside the lab.
+            The file bytes, keyed by path inside the lab, with a ``.keep`` marker in each empty folder.
         """
         ranking = self._ranking()
         # Every archived candidate has a full score. A score that is not finite ranks last, so a NaN cannot break
@@ -572,7 +598,17 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 del paths[name]
                 continue
             total += size
-        return {name: path.read_bytes() for name, path in paths.items()}
+        files = {name: path.read_bytes() for name, path in paths.items()}
+        # A tree holds only files, so an empty folder of the lab, such as ``frontier/`` in round 1 or a ``work/``
+        # with every file dropped, gets a marker file; without it, the folder is missing from the box.
+        files.update(
+            {
+                f"{path.relative_to(self.work_dir).as_posix()}/{_KEEP}": b""
+                for path in sorted(self.work_dir.rglob("*"))
+                if path.is_dir() and not any(path.iterdir())
+            }
+        )
+        return files
 
     def _evaluate(self, server: Any, tree: str, call: dict[str, Any]) -> str:
         """Score a lab file as the upstream HTTP handler that ``eval.sh`` calls does.
@@ -585,7 +621,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             call: The tool call.
 
         Returns:
-            The tool result as JSON text, cut to ``OUTPUT_BYTES`` as a command output is.
+            The tool result as JSON text. An error echoes at most ``_ECHO_CHARS`` of the untrusted path or ids;
+            the session cuts the whole result to ``OUTPUT_BYTES``, as it cuts a command output.
         """
         assert self._ctx.read_file is not None
         refused = loop_tools.refused_arguments(call, EVALUATE_TOOL["name"])
@@ -608,16 +645,14 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         try:
             data = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
         except FileTooLargeError:
-            return json.dumps(
-                {"error": f"{path} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."},
-                ensure_ascii=False,
-            )
+            error = f"{_echo(path)} is larger than {native_engines.MAX_CANDIDATE_BYTES} bytes, the candidate cap."
+            return json.dumps({"error": error}, ensure_ascii=False)
         if data is None:
-            return json.dumps({"error": f"No file {path} in the lab."}, ensure_ascii=False)
+            return json.dumps({"error": f"No file {_echo(path)} in the lab."}, ensure_ascii=False)
         try:
             candidate = data.decode("utf-8")
         except UnicodeDecodeError:
-            return json.dumps({"error": f"{path} is not UTF-8 text."}, ensure_ascii=False)
+            return json.dumps({"error": f"{_echo(path)} is not UTF-8 text."}, ensure_ascii=False)
         marker = json.dumps({"error": native_engines.BUDGET_EXHAUSTED_MARKER}, ensure_ascii=False)
         if server.budget.remaining <= 0:
             return marker
@@ -630,7 +665,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 visible = set(self.example_ids)
                 unknown = [eid for eid in example_ids or () if eid not in visible]
                 if unknown:
-                    return json.dumps({"error": f"Unknown or sealed example_ids: {unknown[:5]}"}, ensure_ascii=False)
+                    error = f"Unknown or sealed example_ids: {_echo(str(unknown[:5]))}"
+                    return json.dumps({"error": error}, ensure_ascii=False)
                 targets = list(example_ids or self.example_ids)
                 average, info = server.evaluate_examples(candidate, example_ids=targets)
                 if set(targets) == visible:
@@ -646,7 +682,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             # round can spend the rest on probes, as in the native run.
             return marker
         body["budget"] = {"used": budget.used, "remaining": budget.remaining}
-        return loop_tools.clip(json.dumps(body, ensure_ascii=False))
+        return json.dumps(body, ensure_ascii=False)
 
     def _pull(self, tree: str) -> None:
         """Copy the agent's ``work/`` and ``notebook.md`` from the tree into the local lab.
@@ -666,6 +702,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         work.mkdir()
         total = 0
         for path in ["notebook.md", *(self._ctx.list_files(tree, "work") or [])]:
+            # The marker that ``_lab_files`` puts in an empty ``work/`` is not the agent's file.
+            if path == f"work/{_KEEP}":
+                continue
             # ``work/`` starts empty and the notebook path is short, so a path past the bounds has no local file.
             if len(path.encode("utf-8", "surrogateescape")) > _MAX_CARRY_PATH_BYTES or any(
                 len(name.encode("utf-8", "surrogateescape")) > _MAX_CARRY_NAME_BYTES for name in path.split("/")

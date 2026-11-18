@@ -656,6 +656,48 @@ def test_a_bad_evaluate_input_gets_an_error_result_and_spends_no_budget(
     assert (result.best_candidate, result.best_score, result.total_evals) == ("seedx", 5.0, 2)
 
 
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ({"file": "work/" + "a" * 70_000}, "No file work/aaa"),
+        ({"file": "work/c1.txt", "example_ids": ["z" * 70_000]}, "Unknown or sealed example_ids: ['zzz"),
+    ],
+    ids=["long-path", "long-ids"],
+)
+def test_an_evaluate_error_echoes_only_a_short_head_of_a_long_path_or_id(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    arguments: dict[str, Any],
+    error: str,
+) -> None:
+    """The error repeats a short head of the untrusted text, so the prompt stays under its cap and the run scores.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        arguments: The arguments of the bad evaluate call, about half the prompt cap long.
+        error: Text that the error result starts with.
+    """
+    bad: Turn = lambda n: {"id": "bad", "name": "evaluate", "arguments": arguments}  # noqa: E731
+    model = _Researcher([_WRITE, bad, _evaluate()])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=2, stop_at_score=None)
+
+    message = _tool_result(model, 2)["error"]
+    assert message.startswith(error)
+    assert "characters in all]" in message
+    assert len(message.encode("utf-8")) < 400
+    assert _tool_result(model, 3)["budget"] == {"used": 2, "remaining": 0}
+    assert (result.best_candidate, result.total_evals) == ("seedx", 2)
+
+
 @pytest.mark.parametrize("extra", [{}, {"example_ids": None}, {"example_ids": []}], ids=["missing", "null", "empty"])
 def test_no_example_ids_runs_a_full_evaluation(
     owner: tuple[User, int],
@@ -860,6 +902,12 @@ def test_the_worker_brief_names_the_evaluate_tool_and_not_eval_sh(tmp_path: Path
     assert "The `evaluate` tool with only a `file` is a **full evaluation**" in brief
     assert "The `evaluate` tool with a `file` and `example_ids` is a **probe**" in brief
     assert "Only `work/` and `notebook.md` carry over" in brief
+    assert "is the only memory" not in brief
+    assert (
+        "- `notebook.md` is yours. It and `work/` are the only files that survive between rounds, up to size caps: "
+        "keep each file at most 8 MiB and all of them together at most 32 MiB, each path inside the lab at most "
+        "512 bytes and each file or folder name at most 255 bytes as UTF-8. A file past a cap is dropped." in brief
+    )
     # The lab tree is built once per round, so a full evaluation of this round is not in the box's archive yet.
     assert "a full evaluation before this round" in brief
     assert (
@@ -1640,6 +1688,56 @@ def test_a_run_writes_a_lab_tree_with_the_archive_under_its_cap(
     assert archived == {"archive/c003.txt": b"seedxxx", "archive/c002.txt": b"seedxx"}
     assert len(list((_lab(tmp_path) / "archive").glob("c*.txt"))) == 4
     assert (result.best_candidate, result.best_score, result.total_evals) == ("seedxxxx", 8.0, 8)
+
+
+def test_an_empty_lab_folder_gets_a_keep_marker_that_never_comes_back(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 1's empty ``frontier/`` and a ``work/`` with every file dropped stay in the box tree as ``.keep``.
+
+    The marker is not the agent's file, so ``_pull`` leaves it in the tree.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    writes: list[dict[str, bytes]] = []
+    put_files = EngineLoop.put_files
+
+    def recorded(loop: EngineLoop, files: dict[str, bytes], base_tree_id: str | None = None) -> str:
+        """Record each tree write.
+
+        Args:
+            loop: The engine loop.
+            files: The file bytes by path.
+            base_tree_id: The base tree.
+
+        Returns:
+            The new tree's id.
+        """
+        writes.append(dict(files))
+        return put_files(loop, files, base_tree_id)
+
+    monkeypatch.setattr(EngineLoop, "put_files", recorded)
+    model = _Researcher([*_ROUND, _bash("rm -f work/*")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=6, stop_at_score=None)
+
+    assert writes[0]["frontier/.keep"] == b""
+    assert [name for name in writes[1] if name.startswith("work/")] == ["work/.keep"]
+    assert [name for name in writes[2] if name.startswith("work/")] == ["work/.keep"]
+    assert not (_lab(tmp_path) / "work" / ".keep").exists()
+    assert (result.best_candidate, result.total_evals) == ("seedxxx", 6)
 
 
 def test_a_lab_file_the_local_file_system_refuses_stays_behind(

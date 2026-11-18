@@ -82,7 +82,8 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
         call: The tool call.
 
     Returns:
-        The parsed value, or ``None`` when the text is not JSON, and whether the arguments break a bound.
+        The parsed value, or ``None`` when the text is not JSON, and whether the arguments break a bound or are not
+        valid UTF-8.
     """
     value = call.get("arguments")
     if isinstance(value, str):
@@ -108,27 +109,28 @@ def arguments(call: Mapping[str, Any]) -> dict[str, Any] | None:
         call: The tool call.
 
     Returns:
-        The arguments, or ``None`` when they are not a JSON object or break the length or depth bound.
+        The arguments, or ``None`` when they are not a JSON object, break the length or depth bound or are not valid
+        UTF-8.
     """
     value, refused = _parse(call)
     return value if not refused and isinstance(value, dict) else None
 
 
 def refused_arguments(call: Mapping[str, Any], tool: str) -> str | None:
-    """Give the error result for a tool call whose arguments break the length or depth bound.
+    """Give the error result for a tool call whose arguments break the length or depth bound or are not valid UTF-8.
 
     Args:
         call: The tool call.
         tool: The tool's name, for the message.
 
     Returns:
-        The error result as JSON text, or ``None`` when the arguments are inside the bounds.
+        The error result as JSON text, or ``None`` when the arguments are inside the bounds and valid UTF-8.
     """
     if not _parse(call)[1]:
         return None
     error = (
         f"Send the {tool} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
-        f"nested at most {MAX_ARGUMENT_DEPTH} levels."
+        f"nested at most {MAX_ARGUMENT_DEPTH} levels, with only valid UTF-8 text (no lone surrogates)."
     )
     return json.dumps({"error": error}, ensure_ascii=False)
 
