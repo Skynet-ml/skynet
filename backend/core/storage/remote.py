@@ -75,6 +75,7 @@ from .models import (
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
+from .shard_map import MAIN, ShardMap, UnroutableRunError
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -699,6 +700,25 @@ class PostgresSandboxTrialStore:
             ]
 
 
+def _step_resume_at(session: Session, run_id: str) -> datetime | None:
+    """Return the oldest of the run's newest committed step times, one for each agent.
+
+    Args:
+        session: A session on the run's step log shard.
+        run_id: The job id.
+
+    Returns:
+        The time, or ``None`` when the run committed no step.
+    """
+    newest_per_agent = (
+        session.query(func.max(AgentStepModel.created_at).label("newest"))
+        .filter(AgentStepModel.run_id == run_id)
+        .group_by(AgentStepModel.agent_id)
+        .subquery()
+    )
+    return session.query(func.min(newest_per_agent.c.newest)).scalar()
+
+
 class RemoteDBJobStore:
     """PostgreSQL-backed job storage using SQLAlchemy.
 
@@ -739,6 +759,7 @@ class RemoteDBJobStore:
             db_url,
             **_build_engine_kwargs(db_url),
         )
+        self._step_log_shards = ShardMap.from_settings(self._engine)
         if settings.embeddings_enabled and settings.embeddings_dim != EMBEDDING_DIM:
             # The embedding columns are a fixed-width vector(EMBEDDING_DIM). A
             # mismatched EMBEDDINGS_DIM boots fine but pgvector then rejects every
@@ -1783,6 +1804,8 @@ class RemoteDBJobStore:
         without a checkpoint (SKY-711). Its automatic resumes count against
         ``MAX_AUTOMATIC_RESUMES`` instead of ``job_max_attempts``; 4 is above
         the default ``job_max_attempts`` of 3, so a step log run gets more tries.
+        Only an automatic requeue adds 1 to ``automatic_resumes``, so a manual
+        resume does not use up the cap (SKY-801). ``attempts`` counts both.
 
         Args:
             optimization_id: The job to resume.
@@ -1793,7 +1816,8 @@ class RemoteDBJobStore:
 
         Returns:
             The new attempt count, or ``None`` when the job row is missing, was
-            changed concurrently, waits for in-flight usage, or hit its budget.
+            changed concurrently, waits for in-flight usage, hit its budget, or
+            lost the last automatic resume to another sweep.
         """
         session = self._get_session()
         try:
@@ -1831,13 +1855,17 @@ class RemoteDBJobStore:
             # before an engine with more than one agent writes the step log.
             # created_at is the time the pack was applied, not the commit time, so
             # the bound can be a flush window late (SKY-711 follow-up).
-            newest_per_agent = (
-                session.query(func.max(AgentStepModel.created_at).label("newest"))
-                .filter(AgentStepModel.run_id == optimization_id)
-                .group_by(AgentStepModel.agent_id)
-                .subquery()
-            )
-            step_resume_at = session.query(func.min(newest_per_agent.c.newest)).scalar()
+            # The jobs row lock stays held while the shard answers, as in a step log flush, so no step lands in between.
+            shard = job.step_log_shard or MAIN
+            if shard not in self.step_log_shards.names():
+                raise UnroutableRunError(
+                    f"run {optimization_id} records step log shard {shard!r}, which this pod does not have"
+                )
+            if shard == MAIN:
+                step_resume_at = _step_resume_at(session, optimization_id)
+            else:
+                with Session(self.step_log_shards.engine(shard)) as shard_session:
+                    step_resume_at = _step_resume_at(shard_session, optimization_id)
             fresh_restart = (automatic or resumes_interrupted) and not checkpoints and step_resume_at is None
             if not checkpoints and step_resume_at is None and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
@@ -1856,8 +1884,12 @@ class RemoteDBJobStore:
                     "This run has no verified cumulative execution budget; authorize a new run instead."
                 )
             current_attempt = int(job.attempts or 0)
-            if automatic and step_resume_at is not None:
-                if bump_attempts and current_attempt >= MAX_AUTOMATIC_RESUMES:
+            # attempts counts automatic resumes too, so they use up the manual limit
+            # of job_max_attempts; SKY-801 keeps this, and only the automatic cap
+            # ignores manual resumes.
+            step_capped = automatic and step_resume_at is not None
+            if step_capped:
+                if bump_attempts and int(job.automatic_resumes or 0) >= MAX_AUTOMATIC_RESUMES:
                     raise CheckpointCompatibilityError(
                         f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
                     )
@@ -1965,7 +1997,8 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
-            job.execution_generation = int(job.execution_generation or 0) + 1
+            held_generation = int(job.execution_generation or 0)
+            job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None
             current = int(job.attempts or 0)
@@ -2023,6 +2056,65 @@ class RemoteDBJobStore:
                 job.message = "Resuming after a worker restart"  # type: ignore[assignment]
             else:
                 job.message = "Resuming"  # type: ignore[assignment]
+            if automatic and bump_attempts:
+                # On PostgreSQL the row lock above serializes two sweeps. The cap in
+                # this UPDATE keeps MAX_AUTOMATIC_RESUMES where there is no row lock.
+                counted = (
+                    session.query(JobModel)
+                    .filter(
+                        JobModel.optimization_id == optimization_id,
+                        *([JobModel.automatic_resumes < MAX_AUTOMATIC_RESUMES] if step_capped else []),
+                    )
+                    .update(
+                        {JobModel.automatic_resumes: JobModel.automatic_resumes + 1},
+                        synchronize_session=False,
+                    )
+                )
+                if not counted:
+                    budget_id, username = job.execution_budget_id, job.username
+                    session.rollback()
+                    # After the rollback this sweep may not end the run: it can see a
+                    # moved generation, or a usage wait that has not expired, and the
+                    # run would stay running until the next sweep. End it now with the
+                    # cap error, and close the admission that the resume reopened. When
+                    # the wait has expired, this write runs first, so the run keeps the
+                    # cap error, not the sweep's interrupted end. The guard on the
+                    # generation and the status leaves alone a run that another sweep
+                    # requeued or a worker claimed since.
+                    ended = (
+                        session.query(JobModel)
+                        .filter(
+                            JobModel.optimization_id == optimization_id,
+                            JobModel.execution_generation == held_generation,
+                            JobModel.status.in_(("running", "validating")),
+                        )
+                        .update(
+                            {
+                                JobModel.status: "failed",
+                                JobModel.stop_reason: "interrupted",
+                                JobModel.completed_at: datetime.now(UTC),
+                                JobModel.message: (
+                                    f"{ORPHANED_RUN_RECOVERY_FAILED_MESSAGE} "
+                                    f"This run reached its limit of {MAX_AUTOMATIC_RESUMES} automatic resumes."
+                                ),
+                                JobModel.recovery: None,
+                                JobModel.claimed_by: None,
+                                JobModel.claimed_at: None,
+                                JobModel.lease_expires_at: None,
+                            },
+                            synchronize_session=False,
+                        )
+                    )
+                    if not ended:
+                        session.rollback()
+                        return None
+                    # The resume above can reopen admission. Close it in the same
+                    # transaction as the failure, so a run that another sweep
+                    # requeued keeps its admission open.
+                    budget_service.stop_admission(budget_id, username, reason="job_failed", session=session)
+                    session.commit()
+                    self._note_ended_orphan(optimization_id, held_generation)
+                    return None
             session.commit()
             return next_attempt
         finally:
@@ -2100,6 +2192,7 @@ class RemoteDBJobStore:
             job.latest_metrics = {}  # type: ignore[assignment]
             job.result = None  # type: ignore[assignment]
             job.attempts = 0  # type: ignore[assignment]
+            job.automatic_resumes = 0  # type: ignore[assignment]
             job.sandbox_image = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]
@@ -2189,6 +2282,15 @@ class RemoteDBJobStore:
             return override
         return settings.user_storage_quota_bytes
 
+    @property
+    def step_log_shards(self) -> ShardMap:
+        """Return the step log shard map over this store's engine."""
+        # A test store that skips ``__init__`` builds the map on its first use.
+        shards = getattr(self, "_step_log_shards", None)
+        if shards is None:
+            shards = self._step_log_shards = ShardMap.from_settings(self._engine)
+        return shards
+
     def compute_user_storage(self, username: str) -> StorageUsage:
         """Return the user's unified storage usage across every owned table.
 
@@ -2198,7 +2300,7 @@ class RemoteDBJobStore:
         Returns:
             The :class:`StorageUsage` total and per-category breakdown.
         """
-        return compute_user_storage(self._engine, username)
+        return compute_user_storage(self._engine, username, self.step_log_shards)
 
     def compute_user_storage_items(self, username: str, limit: int = 20) -> list[StorageItem]:
         """Return the user's largest individual items for the cleanup list.

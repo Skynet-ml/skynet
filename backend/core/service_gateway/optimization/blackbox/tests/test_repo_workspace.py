@@ -36,7 +36,7 @@ from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
 
-from .. import repo_workspace
+from .. import repo_tree, repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_tree import unpack_tree, version_patch
@@ -46,6 +46,7 @@ from ..repo_workspace import (
     PREPARED_DIR,
     WORK_DIR,
     CandidateBox,
+    Checkout,
     MetricBox,
     RepoBoxSource,
     RepoSetupError,
@@ -56,6 +57,7 @@ from ..repo_workspace import (
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import ParentSandboxSession
 from ..sandbox_runtime import AsyncBridgeSession
+from ..tree_sandbox import BoxSession
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -1704,6 +1706,58 @@ def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
     assert len(closes) == 1
 
 
+def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure path releases through the box session, so the session cannot release the box again (SKY-785)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    opened: list[BoxSession] = []
+    releases: list[bool] = []
+    open_box = RepoWorkspace._open_box
+    release = RepoBoxSource.release
+
+    def recorded_open(self: RepoWorkspace, *args: Any) -> BoxSession:
+        """Open the box and keep its session.
+
+        Args:
+            self: The workspace.
+            *args: The open's arguments.
+
+        Returns:
+            The session.
+        """
+        box = open_box(self, *args)
+        opened.append(box)
+        return box
+
+    def recorded_release(self: RepoBoxSource, box: Any, healthy: bool) -> None:
+        """Record the health, then release the box.
+
+        Args:
+            self: The box source.
+            box: The box.
+            healthy: The box's health.
+        """
+        releases.append(healthy)
+        release(self, box, healthy)
+
+    try:
+        space.prepare()
+        monkeypatch.setattr(RepoWorkspace, "_open_box", recorded_open)
+        monkeypatch.setattr(RepoBoxSource, "release", recorded_release)
+        checkout = space.open_candidate(
+            "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
+        )
+        assert isinstance(checkout, Checkout)
+        assert releases == [False]
+        opened[0].release(healthy=True)
+        assert releases == [False]
+    finally:
+        monkeypatch.undo()
+        space.close()
+
+
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
     tmp_path: Path,
 ) -> None:
@@ -1909,3 +1963,38 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
     finally:
         session.close()
     assert _containers(tag) == []
+
+
+def test_box_git_apply_runs_no_filter_from_a_bare_repository_layout(planted_bare_repo: tuple[Path, Path]) -> None:
+    """The box ``GIT`` prefix gives ``git apply`` no config from a bare-repository layout (SKY-812).
+
+    The candidate and stage boxes apply a version with this prefix. The same
+    command without the flag runs the planted filter, so the plant is live.
+
+    Args:
+        planted_bare_repo: Fixture.
+    """
+    repo, marker = planted_bare_repo
+    (repo.parent / "version.patch").write_text(
+        "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+hi\n"
+    )
+
+    def apply(git: str) -> None:
+        """Apply the version in the bare layout with one git prefix.
+
+        Args:
+            git: The git command prefix.
+        """
+        (repo / "y").unlink(missing_ok=True)
+        subprocess.run(
+            ["bash", "-c", f"{git} apply --binary --whitespace=nowarn ../version.patch"], cwd=repo, check=True
+        )
+
+    apply(repo_workspace.GIT)
+    assert (repo / "y").read_text() == "hi\n"
+    assert not marker.exists()
+
+    unsafe = repo_workspace.GIT.replace(f" {shlex.join(repo_tree.SAFE_GIT)}", "")
+    assert unsafe != repo_workspace.GIT
+    apply(unsafe)
+    assert marker.exists()
