@@ -8,6 +8,7 @@ names a disposable PostgreSQL database, in its own schema that it drops after.
 from __future__ import annotations
 
 import gc
+import sqlite3
 import threading
 import time
 import uuid
@@ -1167,6 +1168,86 @@ def test_one_flush_is_one_put_and_one_transaction(make_store, engine, objects) -
     assert _step_rows(engine) == 6
 
 
+def test_a_batch_above_the_sqlite_bind_limit_lands_in_one_flush(make_store, engine, objects) -> None:
+    """A batch of 3,001 steps needs more bind variables than SQLite allows in one statement; it lands at once (SKY-807)."""
+    commits: list[object] = []
+
+    def default_bind_limit(dbapi_connection: Any, record: Any) -> None:
+        """Set SQLite's default bind-variable limit; some builds raise it, and production may not.
+
+        Args:
+            dbapi_connection: The new SQLite connection.
+            record: The pool record.
+        """
+        dbapi_connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)
+
+    def count_commit(connection: Any) -> None:
+        """Count one transaction commit.
+
+        Args:
+            connection: The committing connection.
+        """
+        commits.append(connection)
+
+    event.listen(engine, "connect", default_bind_limit)
+    engine.dispose()
+    store = make_store()
+    step_ids = [_commit(store, seq=seq) for seq in range(1, 3_002)]
+    event.listen(engine, "commit", count_commit)
+
+    store.flush()
+    event.remove(engine, "commit", count_commit)
+
+    store.durable(step_ids[-1], 1, timeout=0)
+    assert objects.puts == 1
+    assert len(commits) == 1
+    assert _step_rows(engine) == 3_001
+
+
+def test_each_flush_statement_splits_into_chunks_under_the_bind_limit(make_store, engine, monkeypatch) -> None:
+    """With a small bind limit, the step insert, the tree object insert and the id query each split into chunks."""
+    limit = 28
+    monkeypatch.setattr("core.storage.step_log_store.SQL_PARAMS_MAX", limit)
+    ids = [f"{number:064x}" for number in range(9, 0, -1)]
+    statements: list[tuple[str, list[Any]]] = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany) -> None:
+        """Record the SQL text and the parameters of each statement.
+
+        Args:
+            connection: The connection.
+            cursor: The DB-API cursor.
+            statement: The SQL text.
+            parameters: The statement parameters.
+            context: The execution context.
+            executemany: Whether the call is an executemany.
+        """
+        statements.append((statement, list(parameters)))
+
+    store = make_store()
+    for seq in range(1, 31):
+        _commit(store, seq=seq)
+    for object_id in ids:
+        store.put_object("job-1", object_id, b"blob\0" + object_id.encode())
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        store.flush()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    step_inserts = [params for sql, params in statements if sql.startswith("INSERT INTO agent_steps")]
+    object_inserts = [params for sql, params in statements if sql.startswith("INSERT INTO tree_objects")]
+    id_queries = [params for sql, params in statements if sql.startswith("SELECT agent_steps.step_id")]
+    assert len(step_inserts) > 1
+    assert len(object_inserts) > 1
+    assert len(id_queries) > 1
+    assert all(len(params) <= limit for params in step_inserts + object_inserts + id_queries)
+    assert [value for params in object_inserts for value in params if value in ids] == sorted(ids)
+    assert _step_rows(engine) == 30
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(TreeObjectModel)) == 9
+
+
 def test_a_read_before_the_flush_returns_the_buffered_bytes(make_store, objects) -> None:
     """Before the flush the step and object come from the buffer; after it, from the pack."""
     store = make_store()
@@ -1262,6 +1343,107 @@ def test_a_failed_outside_flush_wakes_the_flusher(make_store, engine, objects, m
 
     store.durable(step_id, 1, timeout=3)
     assert _step_rows(engine) == 1
+
+
+def test_a_flush_that_fails_again_logs_the_count_and_only_the_error_type(make_store, caplog, monkeypatch) -> None:
+    """Each repeat of a failed flush logs one line with its count and error type, never the error text."""
+    caplog.set_level("WARNING", logger="core.storage.step_log_store")
+    store = make_store(flush_window_seconds=0.05)
+
+    def failing_apply(*args: Any) -> Any:
+        """Fail the database write with row data in the error text.
+
+        Args:
+            *args: The ``_apply`` arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("row data: secret-output")
+
+    monkeypatch.setattr(store, "_apply", failing_apply)
+    _commit(store)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not any("3 times" in r.getMessage() for r in caplog.records):
+        time.sleep(0.01)
+    monkeypatch.undo()
+
+    repeats = [r for r in caplog.records if "times in a row" in r.getMessage()]
+    assert any("3 times" in r.getMessage() for r in repeats)
+    assert all("RuntimeError" in r.getMessage() and "secret" not in r.getMessage() for r in repeats)
+    assert all(r.exc_info is None for r in repeats)
+
+
+def test_a_flush_that_fails_with_a_new_error_type_logs_the_full_error_again(make_store, caplog, monkeypatch) -> None:
+    """When a repeat fails with another error type, the log shows that error's full trace, and the count starts again."""
+    caplog.set_level("WARNING", logger="core.storage.step_log_store")
+    store = make_store(flush_window_seconds=0.05)
+    errors: list[Exception] = [RuntimeError("first"), RuntimeError("first"), ValueError("second"), ValueError("second")]
+
+    def failing_apply(*args: Any) -> Any:
+        """Fail the database write with the next error of the list, then with the last one.
+
+        Args:
+            *args: The ``_apply`` arguments.
+
+        Raises:
+            Exception: Always.
+        """
+        raise errors.pop(0) if len(errors) > 1 else errors[0]
+
+    monkeypatch.setattr(store, "_apply", failing_apply)
+    _commit(store)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not any("ValueError" in r.getMessage() for r in caplog.records):
+        time.sleep(0.01)
+    monkeypatch.undo()
+
+    traced = [r.exc_info[0] for r in caplog.records if r.exc_info]
+    assert traced[:2] == [RuntimeError, ValueError]
+    repeats = [r.getMessage() for r in caplog.records if "times in a row" in r.getMessage()]
+    assert repeats[:2] == [
+        "step log flush failed 2 times in a row (RuntimeError); it tries again after the window",
+        "step log flush failed 2 times in a row (ValueError); it tries again after the window",
+    ]
+
+
+def test_a_flush_that_fails_with_a_new_driver_error_logs_the_full_error_again(make_store, caplog, monkeypatch) -> None:
+    """Both SQLite errors are ``sqlite3.OperationalError``; a new SQLite error code still logs its full trace."""
+    caplog.set_level("WARNING", logger="core.storage.step_log_store")
+    store = make_store(flush_window_seconds=0.05)
+    too_many_orig = sqlite3.OperationalError("too many SQL variables")
+    too_many_orig.sqlite_errorcode = sqlite3.SQLITE_ERROR
+    locked_orig = sqlite3.OperationalError("database is locked")
+    locked_orig.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    too_many = OperationalError("INSERT", {"output": "secret"}, too_many_orig)
+    locked = OperationalError("INSERT", {"output": "secret"}, locked_orig)
+    errors: list[Exception] = [too_many, too_many, locked, locked]
+
+    def failing_apply(*args: Any) -> Any:
+        """Fail the database write with the next error of the list, then with the last one.
+
+        Args:
+            *args: The ``_apply`` arguments.
+
+        Raises:
+            OperationalError: Always.
+        """
+        raise errors.pop(0) if len(errors) > 1 else errors[0]
+
+    monkeypatch.setattr(store, "_apply", failing_apply)
+    _commit(store)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sum("times in a row" in r.getMessage() for r in caplog.records) < 2:
+        time.sleep(0.01)
+    monkeypatch.undo()
+
+    traced = [r.exc_info[1].orig.sqlite_errorcode for r in caplog.records if r.exc_info]
+    assert traced[:2] == [sqlite3.SQLITE_ERROR, sqlite3.SQLITE_BUSY]
+    repeats = [r.getMessage() for r in caplog.records if "times in a row" in r.getMessage()]
+    assert repeats[:2] == [
+        "step log flush failed 2 times in a row (OperationalError); it tries again after the window",
+        "step log flush failed 2 times in a row (OperationalError); it tries again after the window",
+    ]
 
 
 def test_a_closed_store_refuses_new_steps_and_objects(make_store) -> None:
