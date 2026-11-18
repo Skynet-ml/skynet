@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1299,3 +1300,127 @@ def test_a_child_that_does_not_exit_after_its_result_is_stopped(
 
     assert result.best_candidate == "seed"
     assert children[0].returncode == -signal.SIGKILL
+
+
+def test_a_progress_event_with_a_boolean_field_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A progress event with ``true`` as its candidate id, case total or score reaches no run view.
+
+    JSON ``true`` is a Python ``bool``, which is also an ``int``, so each field needs its own check.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the version and case events.
+    """
+    shown: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    monkeypatch.setattr(autosaddler, "emit_candidate", lambda _callback, **fields: shown.append(fields))
+    monkeypatch.setattr(autosaddler, "emit_case_scored", lambda _callback, **fields: cases.append(fields))
+    version = {"score": 1.0, "candidate": "good", "per_example": []}
+    case = {"event": "case_scored", "example_id": "0", "score": 1.0, "total": 1}
+    lines = [
+        {"op": "progress", "event": {**version, "candidate_id": True}},
+        {"op": "progress", "event": {**version, "candidate_id": 1, "score": True}},
+        {"op": "progress", "event": {**case, "candidate_id": True}},
+        {"op": "progress", "event": {**case, "candidate_id": 1, "total": True}},
+        {"op": "progress", "event": {**case, "candidate_id": 1, "score": True}},
+    ]
+
+    result = _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), _bare_ctx(tmp_path)
+    )
+
+    assert result.metadata["replies"] == [{}] * len(lines)
+    assert shown == []
+    assert cases == []
+
+
+def test_the_child_stop_reason_reaches_the_result_metadata(tmp_path: Path) -> None:
+    """The stop reason in the child's result document reaches the engine result's metadata.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    result_document = {"best_candidate": "seed", "best_score": 1.0, "stop_reason": "budget_reached"}
+    script = f"import sys\nsys.stdin.readline()\nprint({json.dumps({'op': 'result', 'result': result_document})!r})\n"
+
+    result = _runner(tmp_path, script).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), _bare_ctx(tmp_path)
+    )
+
+    assert result.metadata["stop_reason"] == "budget_reached"
+
+
+def test_scorer_feedback_names_the_case_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scorer feedback for an evaluation on a case names that case by its index.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Records the scorer feedback.
+    """
+    feedback: list[dict[str, Any]] = []
+    monkeypatch.setattr(autosaddler, "emit_scorer_feedback", lambda _callback, **fields: feedback.append(fields))
+    lines = [{"op": "evaluate", "candidate": "seed", "example": {"id": 0}, "candidate_id": 4}]
+
+    _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed", cases=["a"]), EvalServer(lambda *_: (1.0, {}), max_evals=1), _bare_ctx(tmp_path)
+    )
+
+    assert [(fields["example_id"], fields["candidate_id"]) for fields in feedback] == [("0", "4")]
+
+
+def test_a_refused_put_files_is_an_error_reply_and_the_run_goes_on(tmp_path: Path) -> None:
+    """A tree store that refuses the child's files with a ValueError sends an error reply, not a run failure.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def refuse(*_: Any) -> str:
+        """Refuse the files as the tree store does for a bad path.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad path")
+
+    ctx = replace(_bare_ctx(tmp_path), put_files=refuse)
+    lines = [{"op": "put_files", "files": {"a.txt": "eA=="}, "base_tree_id": None}]
+
+    result = _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), ctx
+    )
+
+    assert result.best_candidate == "seed"
+    assert result.metadata["replies"] == [{"error": "ValueError: bad path"}]
+
+
+def test_list_files_with_no_path_lists_the_tree_root(tmp_path: Path) -> None:
+    """A list request with no path asks the loop for the whole tree, with an empty path.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    asked: list[tuple[str, str]] = []
+
+    def list_files(tree_id: str, path: str) -> list[str]:
+        """Record the request and list one file.
+
+        Args:
+            tree_id: The tree.
+            path: The folder in the tree.
+
+        Returns:
+            One path.
+        """
+        asked.append((tree_id, path))
+        return ["a.txt"]
+
+    ctx = replace(_bare_ctx(tmp_path), list_files=list_files)
+    lines = [{"op": "list_files", "tree_id": "t"}]
+
+    result = _runner(tmp_path, _chat_script(lines)).run(
+        Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=1), ctx
+    )
+
+    assert asked == [("t", "")]
+    assert result.metadata["replies"] == [{"paths": ["a.txt"]}]
