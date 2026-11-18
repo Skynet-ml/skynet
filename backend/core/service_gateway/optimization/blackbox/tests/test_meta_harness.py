@@ -32,7 +32,7 @@ from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
 from core.service_gateway.optimization.blackbox import native_engines
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_CHARS, MetaHarnessEngine
+from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_BYTES, MetaHarnessEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
@@ -881,9 +881,57 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
 
     stdout = first["stdout"]
     assert stdout == second["stdout"]
-    assert stdout.startswith("a" * (OUTPUT_CHARS // 2) + "\n[... 50000 characters cut ...]\n")
-    assert stdout.endswith("\n" + "b" * (OUTPUT_CHARS // 2))
+    kept = (80_000 - 50_042) // 2
+    assert stdout == "a" * kept + "\n[... 50042 characters cut ...]\n" + "b" * kept
+    assert meta_mod._prompt_bytes(stdout) <= OUTPUT_BYTES
     assert first["stderr"] == "e"
+
+
+@pytest.mark.parametrize("letter", ["\x01", "א", "\U0001f600", "\udc80"])
+def test_an_output_is_cut_to_its_bytes_in_the_prompt(letter: str) -> None:
+    """A control character, a Hebrew letter or a non-BMP one takes more prompt bytes than one, and the cut counts them.
+
+    Args:
+        letter: The one character of the output.
+    """
+    text = "<" + letter * 100_000 + ">"
+
+    clipped = meta_mod._clip(text)
+
+    assert clipped == meta_mod._clip(text)
+    assert OUTPUT_BYTES - 64 <= meta_mod._prompt_bytes(clipped) <= OUTPUT_BYTES
+    assert clipped.startswith("<" + letter)
+    assert clipped.endswith(letter + ">")
+
+
+def test_one_command_of_control_and_hebrew_output_leaves_room_for_the_next_model_call(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A control character takes 7 prompt bytes and a Hebrew letter 2, so the cut keeps one result under the cap.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    script = "import sys; sys.stdout.buffer.write(bytes(30000)); sys.stderr.buffer.write(('\\u05d0' * 60000).encode())"
+    model = _Proposer(call={"id": "b", "name": "bash", "arguments": {"command": f'python3 -c "{script}"'}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    assert len(model.calls) >= 2
+    result = json.loads(model.calls[1][-1]["content"])
+    assert result["stdout"].startswith("\x00")
+    assert result["stderr"].startswith("א")
+    before, after = (
+        len(json.dumps(call, ensure_ascii=False).encode("utf-8", "surrogatepass")) for call in model.calls[:2]
+    )
+    # The reply and the result add the two cut streams and a little framing, so the prompt stays under the cap.
+    assert after - before < 2 * OUTPUT_BYTES + 1_000
+    assert after < meta_mod.MAX_PROMPT_BYTES
 
 
 def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
@@ -900,7 +948,7 @@ def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    letters = 20_000
+    letters = 14_000
     text = f"('\\u05d0' * {letters}).encode()"
     script = f"import sys; sys.stdout.buffer.write({text}); sys.stderr.buffer.write({text})"
     model = _Proposer(call={"id": "h", "name": "bash", "arguments": {"command": f'python3 -c "{script}"'}})
@@ -1080,7 +1128,7 @@ def test_a_hebrew_transcript_past_the_byte_cap_ends_the_session_and_the_run_goes
 ) -> None:
     """The prompt cap counts UTF-8 bytes, so Hebrew output under the cap in characters still ends the session.
 
-    Each session writes its candidate and prints 60,000 Hebrew letters: under the cap as characters, past it as
+    Each session writes its candidate and prints 24,000 Hebrew letters: under the cap as characters, past it as
     bytes. The session asks the model no more, and its candidate still runs.
 
     Args:
@@ -1091,8 +1139,8 @@ def test_a_hebrew_transcript_past_the_byte_cap_ends_the_session_and_the_run_goes
         tmp_path: Pytest's temporary folder.
         monkeypatch: Pytest's monkeypatch.
     """
-    monkeypatch.setattr(meta_mod, "MAX_PROMPT_BYTES", 100_000)
-    model = _Proposer(output_chars=OUTPUT_CHARS, output_letter="\\u05d0")
+    monkeypatch.setattr(meta_mod, "MAX_PROMPT_BYTES", 40_000)
+    model = _Proposer(output_chars=12_000, output_letter="\\u05d0")
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
     result = _run(loop)

@@ -84,8 +84,9 @@ _TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
 _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
-# prompt hashes that a replay checks, bounded.
-OUTPUT_CHARS = 30_000
+# prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as ``_propose``
+# measures it: a cut in characters lets one result of Hebrew or control characters fill ``MAX_PROMPT_BYTES``.
+OUTPUT_BYTES = 30_000
 # Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
 # never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
 # parser, ``json.dumps`` and the next prompt hash raise RecursionError.
@@ -171,8 +172,44 @@ def _too_deep(value: Any) -> bool:
     return False
 
 
+def _prompt_bytes(text: str) -> int:
+    """Measure a stream as ``_propose`` measures it in the prompt.
+
+    The tool result is the JSON of the output, and ``_propose`` measures the JSON of the messages, so the stream
+    is encoded twice: a control character takes 7 bytes, not 1.
+
+    Args:
+        text: The stream.
+
+    Returns:
+        The UTF-8 bytes of the stream, encoded twice as JSON, with its quotes.
+    """
+    return len(json.dumps(json.dumps(text, ensure_ascii=False), ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
+
+def _fit(chars: Iterator[str], budget: int) -> int:
+    """Count the characters, in order, whose prompt bytes fit in ``budget``.
+
+    Args:
+        chars: The characters.
+        budget: The prompt bytes they may take, without quotes.
+
+    Returns:
+        How many of the first characters fit.
+    """
+    quotes = _prompt_bytes("")
+    count = 0
+    for char in chars:
+        # JSON escapes each code point alone, so the sizes add up, and a cut between code points always encodes.
+        budget -= _prompt_bytes(char) - quotes
+        if budget < 0:
+            break
+        count += 1
+    return count
+
+
 def _clip(text: str) -> str:
-    """Cut a command output to ``OUTPUT_CHARS``: keep its head and tail, with a note on what was cut.
+    """Cut a command output to ``OUTPUT_BYTES`` in the prompt: keep its head and tail, with a note on what was cut.
 
     Args:
         text: The output.
@@ -180,10 +217,13 @@ def _clip(text: str) -> str:
     Returns:
         The output unchanged when it fits, else its head, a note and its tail.
     """
-    if len(text) <= OUTPUT_CHARS:
+    if _prompt_bytes(text) <= OUTPUT_BYTES:
         return text
-    half = OUTPUT_CHARS // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters cut ...]\n{text[-half:]}"
+    # The note for a cut of every character is the longest note, so the result always fits.
+    half = (OUTPUT_BYTES - _prompt_bytes(f"\n[... {len(text)} characters cut ...]\n")) // 2
+    head = _fit(iter(text), half)
+    tail = _fit(reversed(text), half)
+    return f"{text[:head]}\n[... {len(text) - head - tail} characters cut ...]\n{text[len(text) - tail :]}"
 
 
 class _Budget:
