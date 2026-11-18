@@ -1283,8 +1283,8 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
-    The final run's fresh scores decide; a run stopped before its final run
-    compares the versions' own scores instead. A scored version beats a
+    The final run's fresh scores decide, also when both are empty; a run
+    stopped before its final run compares the versions' own scores instead. A scored version beats a
     starting version with no score only when the starting code's own
     ``[run]`` entry failed in the run that gave that missing score: the
     final run's ``details.baseline_run_failed`` flag, or the version list
@@ -1303,7 +1303,10 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     if _version_has_no_score(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    final_run = baseline is not None or optimized is not None
+    # A final run where every version failed a [run] case leaves both scores
+    # empty; its boolean run-failed flag still marks the final run as done.
+    run_failed_flag = (result.get("details") or {}).get("baseline_run_failed")
+    final_run = baseline is not None or optimized is not None or isinstance(run_failed_flag, bool)
     if not final_run:
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, best)
     if optimized is None:
@@ -1313,10 +1316,7 @@ def improved_patch(result: dict[str, Any]) -> str | None:
         # code's, so a scored version proves no improvement over it. The
         # search may have scored the starting code while its final run
         # failed, so the final run's own flag decides when there is one.
-        if final_run:
-            seed_run_failed = (result.get("details") or {}).get("baseline_run_failed") is True
-        else:
-            seed_run_failed = _seed_run_failed(result)
+        seed_run_failed = run_failed_flag is True if final_run else _seed_run_failed(result)
         return best if seed_run_failed else None
     return best if optimized > baseline else None
 
