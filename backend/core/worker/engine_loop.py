@@ -376,6 +376,8 @@ class EngineLoop:
         # box gets no hidden file and a run output with a hidden path is refused, so these trees hold no hidden
         # content and are not walked. A replay adds the same trees in the same order as the live run.
         self._run_outputs: set[str] = set()
+        # _without_git results by tree id. A tree id is the hash of its content, so a result never goes stale.
+        self._git_free: dict[str, str] = {}
         # The loop builds its sandbox, so the sandbox uses the run's step log and the loop's registry.
         self._sandbox = TreeSandbox(trees, run.step_log, candidates, metrics, registry=self._registry)
         self._model = model
@@ -1284,6 +1286,8 @@ class EngineLoop:
     def _without_git(self, tree_id: str) -> str:
         """Return a folder without a ``.git`` entry in any letter case, at any depth, as :func:`_shown` tells.
 
+        The loop walks each folder id once and keeps the result, since a run writes over the same base many times.
+
         Args:
             tree_id: The folder.
 
@@ -1293,12 +1297,15 @@ class EngineLoop:
         Raises:
             LookupError: When the run cannot see the folder or one below it.
         """
+        if tree_id in self._git_free:
+            return self._git_free[tree_id]
         stored = self._stored(tree_id)
         kept = [
             TreeEntry(entry.name, "tree", self._without_git(entry.object_id)) if entry.mode == "tree" else entry
             for entry in _shown(stored).values()
         ]
-        return tree_id if kept == stored else self._trees.put_tree(self._run.run_id, kept)
+        self._git_free[tree_id] = tree_id if kept == stored else self._trees.put_tree(self._run.run_id, kept)
+        return self._git_free[tree_id]
 
     def _refuse_hidden(self, folder: TreeEntry, path: str) -> None:
         """Refuse to replace a folder with a file when a path below the folder is hidden.

@@ -2911,3 +2911,26 @@ def test_put_files_drops_git_entries_from_folders_it_does_not_change(
     clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
 
     assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second write over the same base does not read its unchanged folder again."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    base = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+    sub = next(entry.object_id for entry in trees.get_tree(RUN_ID, base) if entry.name == "sub")
+    reads: list[str] = []
+    stored = loop._stored
+    monkeypatch.setattr(loop, "_stored", lambda tree_id: reads.append(tree_id) or stored(tree_id))
+
+    first = loop.put_files({"README": b"y"}, base)
+    second = loop.put_files({"README": b"z"}, base)
+
+    assert first != second
+    assert reads.count(sub) == 1
