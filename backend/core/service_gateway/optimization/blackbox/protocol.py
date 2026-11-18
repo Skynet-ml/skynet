@@ -418,7 +418,7 @@ class ReadFile(Protocol):
                 does not load.
 
         Returns:
-            The file bytes, or ``None`` when the file is missing or hidden.
+            The file bytes, or ``None`` when the path is missing, hidden, or not a file or executable.
 
         Raises:
             FileTooLargeError: When the file has more than ``max_bytes`` bytes.
