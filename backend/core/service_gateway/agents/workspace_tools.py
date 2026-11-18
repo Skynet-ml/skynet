@@ -149,7 +149,8 @@ How to write the run's files:
   - ``[target.<name>]``, one table for each stage: ``entry`` (required), ``vcpus`` (1 or an even number from
     2 to 32, default 2), ``timeout`` (seconds for each ``skynet.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
-    60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``.
+    60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``. A contract needs a ``[run]`` section
+    or at least one ``[target.<name>]`` stage.
   - ``[metric]``: ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts

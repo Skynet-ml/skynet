@@ -36,6 +36,11 @@ entry = ["node", "agent/my-agent.js"]
 # example to install the command.
 setup = ["npm", "ci"]
 
+[run]
+# Required, unless a [target.<name>] stage runs the version. The metric scores
+# the output of this entry.
+entry = "bot/run.py:main"
+
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
 # no cases.
