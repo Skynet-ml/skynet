@@ -1846,7 +1846,8 @@ def test_swarm_pass_frees_its_lock_when_its_cleanup_fails(
     """Check that a pass frees its advisory lock when its row or pack cleanup fails, and raises the cleanup error.
 
     Args:
-        monkeypatch: Replaces the engine, the shard processes, the step log read and one cleanup step.
+        monkeypatch: Replaces the engine, the shard processes, the step log read and, after the reset, one cleanup
+            step.
         tmp_path: The pass folder.
         cleanup: The cleanup step that fails.
     """
@@ -1866,7 +1867,19 @@ def test_swarm_pass_frees_its_lock_when_its_cleanup_fails(
         """
         raise OSError("cleanup failed")
 
-    monkeypatch.setattr(swarm_10k, cleanup, fail)
+    reset = swarm_10k._reset
+
+    def reset_then_fail_cleanup(reset_engine: Engine, runs: list[str]) -> None:
+        """Reset the database, then make the later cleanup step fail; the reset also deletes rows.
+
+        Args:
+            reset_engine: The database to reset.
+            runs: The job ids.
+        """
+        reset(reset_engine, runs)
+        monkeypatch.setattr(swarm_10k, cleanup, fail)
+
+    monkeypatch.setattr(swarm_10k, "_reset", reset_then_fail_cleanup)
     config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
     with pytest.raises(OSError, match="cleanup failed"):
         swarm_10k.run_pass(config, 1, tmp_path / "pass")
