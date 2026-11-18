@@ -1172,8 +1172,10 @@ def test_shard_packs_with_no_delete_function_stay_for_the_compactor(caplog: pyte
     assert "1 tree packs (packs/w2/b) on step log shards have no delete function" in caplog.text
 
 
-def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: dict[str, str], tmp_path: Path) -> None:
-    """The row deletes return no pack key for each row; the counts come from the row counts.
+def test_only_the_tree_object_delete_returns_and_only_the_pack_key(
+    engine: Engine, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """Only the tree object delete returns a column, the pack key; the other counts come from the row counts.
 
     Args:
         engine: The test engine.
@@ -1189,7 +1191,56 @@ def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: di
     assert summary == (4 + 8 + 1, 1)
     deletes = [sql for sql, _ in statements if sql.startswith("DELETE")]
     assert deletes
-    assert not any("RETURNING" in sql for sql in deletes)
+    (returning,) = [sql for sql in deletes if "RETURNING" in sql]
+    assert returning.startswith("DELETE FROM tree_objects WHERE tree_objects.username = ")
+    assert returning.endswith((" RETURNING pack_key", " RETURNING tree_objects.pack_key"))
+
+
+def test_a_tree_object_written_after_the_pack_lock_marks_its_pack(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row of a run that the job snapshot missed can point at an unlocked pack; the purge marks that pack too.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        packs: The shared pack and the pack of ``ada``.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    late = "packs/w9/late.pack"
+    lock = tree_purge._lock_account_packs
+
+    def lock_then_write(session: Session, username: str, run_ids: list[str]) -> set[str]:
+        """Lock the account's packs, then write a row of the account into a new pack, as a late flush does.
+
+        Args:
+            session: The purge transaction.
+            username: The account.
+            run_ids: The account's runs.
+
+        Returns:
+            The locked keys, without the new pack.
+        """
+        pointed = lock(session, username, run_ids)
+        session.add(StoragePackModel(pack_key=late, worker_id="w9", byte_size=1))
+        session.add(
+            TreeObjectModel(
+                username=username, object_id="late-object", byte_size=1, pack_key=late, pack_offset=0, pack_length=1
+            )
+        )
+        session.flush()
+        return pointed
+
+    monkeypatch.setattr(tree_purge, "_lock_account_packs", lock_then_write)
+    deleted: list[str] = []
+
+    summary = _purge(engine, _deleter(tmp_path / "objects", deleted))
+
+    assert summary == (4 + 8 + 1 + 1, 1)
+    assert deleted == [packs["ada"]]
+    assert _marked(engine) == {packs["shared"], late}
+    assert _rows(engine, "ada", ADA_RUNS) == (0, 0, 0)
 
 
 def test_the_error_names_the_first_keys_and_the_count(monkeypatch: pytest.MonkeyPatch) -> None:

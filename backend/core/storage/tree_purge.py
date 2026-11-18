@@ -12,14 +12,18 @@ pass of the compactor rewrites it, at any size, with only the entries that
 rows still point at. The old pack is then retired and deleted, with the
 deleted account's bytes (:mod:`core.storage.tree_compactor`).
 
-The locks follow one global order: the account's ``jobs`` rows, then the
-``storage_packs`` rows, each in key order, and only then the deletes.
-:meth:`StepLogStore._apply` locks the jobs first too, so no flush of the
-account's runs writes a row behind the purge. The compactor takes the same
-locks with NOWAIT, so a merge of these packs gives up instead of waiting.
-A merge that commits between the key read and the pack lock moves rows to a
-new pack; the purge then locks again, in key order, under a savepoint, and
-never locks a pack after a delete.
+The locks follow one global order. First come the account's ``jobs`` rows,
+in key order. Then :func:`delete_run_rows` deletes the run rows and takes the
+wallet and budget locks; ``account_data_service.delete_account``,
+``remote.delete_job`` and ``remote.delete_jobs`` call it first. Then come the
+``storage_packs`` rows, in key order, and last the step and tree object
+deletes. :meth:`StepLogStore._apply` locks the jobs first too, so no flush of
+the account's runs writes a row behind the purge. The compactor takes the
+pack locks with NOWAIT, so a merge of these packs gives up instead of
+waiting. A merge that commits between the key read and the pack lock moves
+rows to a new pack; the purge then locks again, in key order, under a
+savepoint. The one pack lock after a delete is the ``needs_rewrite`` mark of
+a pack that a run outside the job snapshot wrote to after the pack lock.
 
 Only a pack that a deleted row pointed at can be deleted. A locked pack with
 no rows was retired by a merge, and the compactor deletes it after its grace
@@ -358,8 +362,17 @@ def _purge_database(
     deleted_rows = 0
     for chunk in _chunks(run_ids):
         deleted_rows += _delete_rows(session, delete(AgentStepModel).where(AgentStepModel.run_id.in_(chunk)))
+    late: set[str] = set()
     if username is not None:
-        deleted_rows += _delete_rows(session, delete(TreeObjectModel).where(TreeObjectModel.username == username))
+        # A run created after the job snapshot is not locked, and its flush can point rows at a pack outside
+        # the locked set. The pack is only marked, never deleted at once, so the compactor drops those bytes.
+        for pack_key in session.scalars(
+            delete(TreeObjectModel).where(TreeObjectModel.username == username).returning(TreeObjectModel.pack_key),
+            execution_options={"synchronize_session": False},
+        ):
+            deleted_rows += 1
+            if pack_key not in pointed:
+                late.add(pack_key)
     # Only the packs that the deleted rows pointed at: a locked pack that no row points at was
     # retired by a merge, and the compactor deletes it after the grace time.
     unreferenced: list[str] = []
@@ -383,7 +396,7 @@ def _purge_database(
                 .order_by(StoragePackModel.pack_key)
             )
         )
-    for chunk in _chunks(sorted(pointed - set(unreferenced))):
+    for chunk in _chunks(sorted((pointed - set(unreferenced)) | late)):
         session.execute(
             update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
             execution_options={"synchronize_session": False},
