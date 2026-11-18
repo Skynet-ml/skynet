@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from gepa.oa.budget import BudgetExhausted
 
@@ -224,13 +224,84 @@ class CandidateRecord:
         return self.total / self.count
 
 
+class ToolDefinition(TypedDict):
+    """One tool that the model may call, in the engine loop's flat form.
+
+    ``input_schema`` is the JSON Schema of the call's arguments. :func:`openai_tools` gives the OpenAI form.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class ToolCall(TypedDict):
+    """One tool call that a model reply asks for, in the engine loop's flat form.
+
+    ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object. The engine gives
+    the model an error tool result for raw text, so the model can correct its call.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] | str
+
+
+def openai_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+    """Convert flat tool definitions to the OpenAI ``tools`` form that LiteLLM takes.
+
+    Args:
+        tools: The flat tool definitions.
+
+    Returns:
+        One ``{"type": "function", "function": {"name", "description", "parameters"}}`` item for each tool.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
+    """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
+
+    Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
+    call keeps the raw text instead, so the same reply always gives the same calls.
+
+    Args:
+        message: The assistant message, for example ``response.choices[0].message.model_dump()``.
+
+    Returns:
+        The flat tool calls in their order; empty when the message asks for none.
+    """
+    calls: list[ToolCall] = []
+    for call in message.get("tool_calls") or []:
+        function = call["function"]
+        raw = function.get("arguments") or "{}"
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        arguments = parsed if isinstance(parsed, dict) else raw
+        calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
+    return calls
+
+
 @dataclass(frozen=True)
 class ModelReply:
     """One model response: its text, the tool calls that it asks for, and its cost in cents."""
 
     text: str
     cost_cents: Decimal
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -238,10 +309,10 @@ class RepoSeed:
     """The run's repository seed tree and the rules for its paths, all repository-relative.
 
     A symlink of the tree must not be, lie below or hold a hidden path: the engine loop stops on such a tree,
-    because the link's target would stay visible under its real path. When the seed hides paths, the tree must
-    also have no symlink loop and no symlink that names an absolute path or a path that leaves the tree, since
-    the loop cannot tell what it reaches. The engine loop does not enforce the editable, read-only and constrained paths; the caller
-    enforces them where it accepts a candidate.
+    because the link's target would stay visible under its real path. When the seed hides paths of its own, the
+    tree must also have no symlink loop and no symlink that names an absolute path or a path that leaves the
+    tree, since the loop cannot tell what it reaches. The engine loop does not enforce the editable, read-only
+    and constrained paths; the caller enforces them where it accepts a candidate.
     """
 
     tree_id: str
@@ -250,7 +321,8 @@ class RepoSeed:
     constrained_paths: tuple[str, ...] = ()
     # The engine never reads hidden content. It can confirm a guessed hidden name, because writes to it are
     # refused. Each key is the SHA-256 of a normalized repository-relative path, built by
-    # harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case. The value is its kind. A folder key hides its whole subtree, so check a path with
+    # harness_bridge.hidden_hashes with fold_case=False because hashed_kind does not fold case. The value is its
+    # kind. A folder key hides its whole subtree, so check a path with
     # harness_bridge.hashed_kind, never with ``path in hidden_hashes``.
     hidden_hashes: Mapping[str, str] = field(default_factory=dict)
 
@@ -280,7 +352,7 @@ class EngineContext:
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None
     # The worker engine loop (SKY-719) sets these; each model call and command is one step there.
-    call_model: Callable[[str | list[dict[str, Any]], list[dict[str, Any]] | None], ModelReply] | None = None
+    call_model: Callable[[str | list[dict[str, Any]], list[ToolDefinition] | None], ModelReply] | None = None
     run_command: Callable[[str, str, tuple[Grant, ...]], tuple[CommandResult, str]] | None = None
     put_files: Callable[[Mapping[str, bytes], str | None], str] | None = None
     read_file: Callable[[str, str], bytes | None] | None = None

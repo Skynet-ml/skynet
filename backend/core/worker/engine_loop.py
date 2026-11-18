@@ -122,6 +122,7 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ModelReply,
     ScorerAbortError,
     SideInfo,
+    ToolDefinition,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from ..service_gateway.optimization.blackbox.tree_sandbox import StepCommittedError, StepRef, TreeSandbox
@@ -151,7 +152,7 @@ _STOP_ERRORS = (
 )
 
 Prompt = str | list[dict[str, Any]]
-ModelCall = Callable[[Prompt, list[dict[str, Any]] | None], ModelReply]
+ModelCall = Callable[[Prompt, list[ToolDefinition] | None], ModelReply]
 StepScorer = Callable[["EngineLoop", Candidate, Any], tuple[float | None, SideInfo]]
 _Outcome = TypeVar("_Outcome")
 
@@ -383,8 +384,13 @@ class EngineLoop:
         """
         return self.call_model(prompt).text
 
-    def call_model(self, prompt: Prompt, tools: list[dict[str, Any]] | None = None) -> ModelReply:
+    def call_model(self, prompt: Prompt, tools: list[ToolDefinition] | None = None) -> ModelReply:
         """Call the model with no box open, and commit the reply as one ``model`` step.
+
+        Both shapes are flat and provider-neutral. A tool definition is ``{"name", "description",
+        "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
+        (:class:`ToolCall`), with ``arguments`` as a dict, or as raw text when it is not a JSON object. The
+        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`.
 
         Args:
             prompt: The prompt text or messages.
@@ -457,8 +463,9 @@ class EngineLoop:
         tree's content, so the same files over the same base give the same id, also on a resume. A hidden path
         cannot be written, replaced or removed: a tree id would otherwise confirm a guess of its content. The
         refusal confirms that a guessed path is hidden, but it gives no hidden content. A tree over a base that a
-        run step gave is not walked for symlinks, as its base is not. The loop does not enforce the editable, read-only and constrained paths of a :class:`RepoSeed`; the caller
-        enforces them where it accepts a candidate.
+        run step gave is not walked for symlinks, as its base is not. The loop does not enforce the editable,
+        read-only and constrained paths of a :class:`RepoSeed`; the caller enforces them where it accepts a
+        candidate.
 
         Args:
             files: The file bytes by ``/``-separated path; a file keeps an existing executable mode.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -17,7 +18,9 @@ from ..protocol import (
     candidate_key,
     engine_score,
     fill_unscored,
+    openai_tools,
     score_batch,
+    tool_calls_from_openai,
 )
 from ..runner import normalize_score
 from .mocks import vowel_scorer
@@ -375,3 +378,72 @@ def test_score_batch_keeps_order_and_metric_error_status() -> None:
         assert [score for score, _ in results] == [-2.0, -2.0, -4.0]
         assert results[1][1]["status"] == METRIC_ERROR
     assert server.used == 6
+
+
+# An assistant message as LiteLLM's ``response.choices[0].message.model_dump()`` gives it.
+_OPENAI_MESSAGE: dict[str, Any] = {
+    "role": "assistant",
+    "content": None,
+    "tool_calls": [
+        {
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "ls -la"}'},
+        },
+        {"id": "call_def", "type": "function", "function": {"name": "bash", "arguments": ""}},
+    ],
+}
+
+
+def test_openai_tools_converts_flat_definitions() -> None:
+    """A flat definition becomes an OpenAI function tool whose ``parameters`` is the input schema."""
+    schema = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+    tools = openai_tools([{"name": "bash", "description": "Run a command.", "input_schema": schema}])
+
+    assert tools == [
+        {"type": "function", "function": {"name": "bash", "description": "Run a command.", "parameters": schema}}
+    ]
+
+
+def test_tool_calls_from_openai_parses_arguments_and_keeps_ids() -> None:
+    """Each call keeps its id and name, and its JSON arguments become a dict; empty arguments are an empty dict."""
+    assert tool_calls_from_openai(_OPENAI_MESSAGE) == [
+        {"id": "call_abc", "name": "bash", "arguments": {"command": "ls -la"}},
+        {"id": "call_def", "name": "bash", "arguments": {}},
+    ]
+
+
+@pytest.mark.parametrize("message", [{"role": "assistant", "content": "done"}, {"tool_calls": None}])
+def test_tool_calls_from_openai_gives_no_calls_for_a_plain_reply(message: dict[str, Any]) -> None:
+    """A reply that asks for no tool gives no calls."""
+    assert tool_calls_from_openai(message) == []
+
+
+@pytest.mark.parametrize("arguments", ['{"command": ', "[1, 2]"])
+def test_tool_calls_from_openai_keeps_raw_text_that_is_no_json_object(arguments: str) -> None:
+    """Bad JSON, or JSON that is no object, stays raw text, so the engine can answer it with an error result."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": arguments}]
+
+
+def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
+    """A flat definition sent in OpenAI form, and the OpenAI call it gets, convert back to the flat shapes."""
+    definition = {"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}
+    sent = openai_tools([definition])[0]["function"]
+    call = {"id": "call_1", "name": sent["name"], "arguments": {"command": "pytest -q"}}
+    message = {
+        "tool_calls": [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])},
+            }
+        ]
+    }
+
+    assert {"name": sent["name"], "description": sent["description"], "input_schema": sent["parameters"]} == definition
+    assert tool_calls_from_openai(message) == [call]

@@ -38,6 +38,9 @@ from core.service_gateway.optimization.blackbox.protocol import (
     RepoSeed,
     Result,
     Task,
+    ToolCall,
+    ToolDefinition,
+    tool_calls_from_openai,
 )
 from core.service_gateway.optimization.blackbox.registry import EngineCapabilities
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
@@ -228,11 +231,13 @@ class _Model:
         self.fail_at = fail_at
         self.cost = Decimal(1)
         self.error: Exception | None = None
+        # When set, every call returns these tool calls, as a real provider reply converts to.
+        self.reply_calls: list[ToolCall] | None = None
         self.prompts: list[str] = []
-        self.tools: list[list[dict[str, Any]] | None] = []
+        self.tools: list[list[ToolDefinition] | None] = []
         self.open_boxes: list[int] = []
 
-    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> ModelReply:
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None) -> ModelReply:
         """Answer one prompt, and call each tool once with the reply.
 
         Args:
@@ -259,8 +264,11 @@ class _Model:
         self.prompts.append(str(prompt))
         self.tools.append(tools)
         text = f"{str(prompt).split()[-1]}x"
-        calls = [{"name": tool["name"], "arguments": {"text": text}} for tool in tools or []]
-        return ModelReply(text, self.cost, calls)
+        calls: list[ToolCall] = [
+            {"id": f"call_{index}", "name": tool["name"], "arguments": {"text": text}}
+            for index, tool in enumerate(tools or [])
+        ]
+        return ModelReply(text, self.cost, calls if self.reply_calls is None else self.reply_calls)
 
 
 class _FakeEngine:
@@ -1170,7 +1178,8 @@ def test_a_settle_failure_after_the_commit_stops_the_loop_and_the_resume_replays
 def test_a_closed_step_log_stops_the_box_steps_after_one_box(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A step log closed alone fails every commit; it has no public closed state, so one box opens, then the loop stops."""
+    """A step log closed alone fails every commit; it has no public closed state, so one box opens, then the loop
+    stops."""
     seed_tree = _tree(trees, "answer.txt", "a")
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     assert loop.model("improve a") == "ax"
@@ -1290,7 +1299,7 @@ def test_two_calls_open_one_agent_once(
     assert [seq for seq, _, _ in _steps(engine)] == [0, 1]
 
 
-_TOOLS = [{"name": "edit", "parameters": {"type": "object"}}]
+_TOOLS: list[ToolDefinition] = [{"name": "edit", "description": "Edit the text.", "input_schema": {"type": "object"}}]
 
 
 def test_a_model_call_with_tools_commits_its_tool_calls_and_cost_and_a_resume_replays_them(
@@ -1302,7 +1311,7 @@ def test_a_model_call_with_tools_commits_its_tool_calls_and_cost_and_a_resume_re
     assert ctx.call_model is not None
     reply = ctx.call_model("improve seed", _TOOLS)
 
-    assert reply == ModelReply("seedx", Decimal(1), [{"name": "edit", "arguments": {"text": "seedx"}}])
+    assert reply == ModelReply("seedx", Decimal(1), [{"id": "call_0", "name": "edit", "arguments": {"text": "seedx"}}])
     assert model.tools == [_TOOLS]
     assert model.open_boxes == [0]
     assert [kind for _, kind, _ in _steps(engine)] == ["model"]
@@ -1313,9 +1322,36 @@ def test_a_model_call_with_tools_commits_its_tool_calls_and_cost_and_a_resume_re
     assert resumed_model.prompts == []
 
 
-@pytest.mark.parametrize("tools", [None, [{"name": "other"}]])
+def test_converted_openai_tool_calls_commit_and_a_resume_replays_them_unchanged(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Calls from a real OpenAI-shaped reply, also one with bad JSON, survive the step log as the live call gave
+    them."""
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": '{"text": "seedx"}'}},
+            {"id": "call_b", "type": "function", "function": {"name": "edit", "arguments": '{"text": '}},
+        ],
+    }
+    model.reply_calls = tool_calls_from_openai(message)
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.tool_calls == [
+        {"id": "call_a", "name": "edit", "arguments": {"text": "seedx"}},
+        {"id": "call_b", "name": "edit", "arguments": '{"text": '},
+    ]
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+@pytest.mark.parametrize("tools", [None, [{"name": "other", "description": "", "input_schema": {}}]])
 def test_a_resume_with_other_tools_diverges(
-    tools: list[dict[str, Any]] | None,
+    tools: list[ToolDefinition] | None,
     owner: tuple[User, int],
     engine: Engine,
     step_log: StepLogStore,
@@ -1747,7 +1783,8 @@ def test_a_bad_seed_stops_the_loop_in_context_and_a_good_seed_is_checked_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A seed with a link to a hidden path stops the loop before the engine starts; a checked tree is not walked again."""
+    """A seed with a link to a hidden path stops the loop before the engine starts; a checked tree is not walked
+    again."""
     hidden = hidden_hashes(["eval"])
     good, _, _ = _loop(owner, engine, step_log, trees, tmp_path / "good", generation=1, hidden=hidden)
     seed = _store(trees, {"src/a.py": b"a"}, {"docs": "src"})
