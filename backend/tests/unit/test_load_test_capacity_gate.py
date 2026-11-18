@@ -1544,6 +1544,24 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
     assert _rows(engine) == _OTHER_ROWS
 
 
+def test_swarm_cleanup_keeps_a_job_of_another_run(tmp_path: Path) -> None:
+    """Check that the cleanup deletes only swarm jobs, so a job that another process adds during a pass stays.
+
+    Args:
+        tmp_path: The database folder.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    swarm_10k._reset(engine, ["swarm-0"])
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id="opt-real", username="someone", status="running"))
+        session.commit()
+    with Session(engine) as session:
+        swarm_10k._delete_swarm_rows(session)
+        session.commit()
+    assert _rows(engine)["jobs"] == ["opt-real"]
+    engine.dispose()
+
+
 def _object_store_fails(folder: Path) -> tuple[Any, Any]:
     """Fail as a bad object store setting does.
 
