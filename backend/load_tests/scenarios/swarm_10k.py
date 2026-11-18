@@ -874,19 +874,21 @@ def _shard_process(
     try:
         url = shard["url"]
         engine = create_engine(url, connect_args={"timeout": 60} if url.startswith("sqlite") else {})
-        objects, _ = _object_store(Path(shard["folder"]) / "objects")
-        store = StepLogStore(
-            engine,
-            objects,
-            shard["worker_id"],
-            flush_window_seconds=config.flush_window_seconds,
-            flush_max_bytes=shard["flush_max_bytes"],
-        )
-        boxes = FakeBoxProvider()
-        barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
-        started = _now()
-        stop = threading.Event()
+        store = None
         try:
+            objects, _ = _object_store(Path(shard["folder"]) / "objects")
+            store = StepLogStore(
+                engine,
+                objects,
+                shard["worker_id"],
+                flush_window_seconds=config.flush_window_seconds,
+                flush_max_bytes=shard["flush_max_bytes"],
+            )
+            boxes = FakeBoxProvider()
+            # Another shard's failure aborts the barrier, so the wait can raise and must still close the store.
+            barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
+            started = _now()
+            stop = threading.Event()
             drivers = driver_count(len(agents))
             with ThreadPoolExecutor(max_workers=drivers, thread_name_prefix="swarm-driver") as pool:
                 try:
@@ -900,7 +902,8 @@ def _shard_process(
                     stop.set()
                     raise
         finally:
-            store.close()
+            if store is not None:
+                store.close()
             engine.dispose()
         results.put(
             {
@@ -988,7 +991,9 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         The pass figures, with the step log digest.
 
     Raises:
-        RuntimeError: When the database URL is not local, or a shard process fails or does not report.
+        RuntimeError: When a safety check refuses the database or the S3 settings (the URL is not local, the
+            name is not a throwaway name, a job is not a swarm run, another pass holds the lock), or a shard
+            process fails or does not report.
     """
     _check_db_url(config.db_url)
     # Check the S3 settings before any database write, so a bad setting leaves no row behind.

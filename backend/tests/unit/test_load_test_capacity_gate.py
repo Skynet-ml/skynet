@@ -612,7 +612,7 @@ def test_a_failed_loop_start_closes_its_step_log(tmp_path: Path, monkeypatch: py
         real_close(self)
 
     def refuse(*args: Any, **kwargs: Any) -> None:
-        """Fail the loop start, as a ValueError from ``EngineLoop`` does.
+        """Fail the loop start, as an error in ``EngineLoop`` does.
 
         Args:
             *args: Not used.
@@ -1655,7 +1655,7 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
 
 
 def test_swarm_cleanup_keeps_a_job_of_another_run(tmp_path: Path) -> None:
-    """Check that the cleanup deletes only swarm jobs, so a job that another process adds during a pass stays.
+    """Check that the cleanup deletes only the pass's own jobs, so a job that another process adds stays.
 
     Args:
         tmp_path: The database folder.
