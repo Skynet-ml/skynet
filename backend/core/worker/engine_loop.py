@@ -521,7 +521,8 @@ class EngineLoop:
 
         Returns:
             The sorted paths of the files and executables below the folder, at any depth, from the tree's root,
-            without a hidden path; or ``None`` when the path is hidden or is not a folder in the tree.
+            without a hidden path; or ``None`` when the path is hidden, holds only hidden paths, or is not a
+            folder in the tree.
 
         Raises:
             LoopStoppedError: When a symlink of the tree is, lies below or holds a hidden path; the loop keeps it.
@@ -533,9 +534,11 @@ class EngineLoop:
             return None
         parts = [] if path in {"", "."} else path.split("/")
         folder = self._folder(tree_id, parts)
-        if folder is None:
+        prefix = "".join(f"{part}/" for part in parts)
+        # A folder left empty by the filter is gone from the box too, so it is missing here as well (SKY-353).
+        if folder is None or (parts and self._visible(folder, prefix) is None):
             return None
-        files = self._files(folder, "".join(f"{part}/" for part in parts))
+        files = self._files(folder, prefix)
         return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
 
     def remaining_cost_usd(self) -> float:
@@ -747,15 +750,34 @@ class EngineLoop:
             raise LookupError(f"run {self._run.run_id} cannot see tree {tree_id}")
         return {entry.name: entry for entry in entries}
 
-    def _visible_tree(self, tree_id: str, prefix: str = "") -> str:
+    def _visible_tree(self, tree_id: str) -> str:
         """Return the tree without its hidden paths and without ``.optimize/exploits``.
 
         Args:
-            tree_id: The tree, or one of its folders.
-            prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+            tree_id: The tree.
 
         Returns:
             The visible tree's id; the same id when nothing is left out.
+
+        Raises:
+            LookupError: When the run cannot see the tree or one of its folders.
+        """
+        visible = self._visible(tree_id, "")
+        return self._trees.put_tree(self._run.run_id, []) if visible is None else visible
+
+    def _visible(self, tree_id: str, prefix: str) -> str | None:
+        """Return a folder without its hidden paths, or ``None`` when it holds only hidden paths.
+
+        A folder that the filter leaves empty is dropped, not kept empty: an empty ``eval/`` would show the
+        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays.
+
+        Args:
+            tree_id: The folder.
+            prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+
+        Returns:
+            The visible folder's id, the same id when nothing is left out; or ``None`` when the folder has
+            entries and the filter leaves none of them.
 
         Raises:
             LookupError: When the run cannot see the tree or one of its folders.
@@ -767,10 +789,15 @@ class EngineLoop:
             if hashed_kind(self._hidden, path) is not None:
                 continue
             if entry.mode == "tree":
-                entry = TreeEntry(name, "tree", self._visible_tree(entry.object_id, f"{path}/"))
+                visible = self._visible(entry.object_id, f"{path}/")
+                if visible is None:
+                    continue
+                entry = TreeEntry(name, "tree", visible)
             kept.append(entry)
         if kept == list(entries.values()):
             return tree_id
+        if not kept:
+            return None
         return self._trees.put_tree(self._run.run_id, kept)
 
     def _check_links(self, tree_id: str) -> str:

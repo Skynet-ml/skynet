@@ -1624,6 +1624,26 @@ def test_a_candidate_box_gets_no_hidden_path_and_no_exploits(
     assert loop.score(_tree(trees, "answer.txt", "abc"), tree, "grep -c secret metric/eval/metric.py") == 1.0
 
 
+def test_a_folder_with_only_hidden_files_looks_like_a_missing_folder(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With only ``eval/metric.py`` hidden, ``eval/`` is missing from list_files and from the candidate box."""
+    hidden = hidden_hashes(["eval/metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    tree = _store(trees, {"eval/metric.py": b"secret", "src/a.py": b"a"})
+    ctx = loop.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
+    assert ctx.list_files is not None
+    assert ctx.run_command is not None
+
+    assert ctx.list_files(tree, "eval") is None
+    assert ctx.list_files(tree, "eval") == ctx.list_files(tree, "missing")
+    assert ctx.list_files(tree, "") == ["src/a.py"]
+    listed, _ = ctx.run_command(tree, "find . | sort; ls eval", ())
+
+    assert listed.stdout.split() == [".", "./src", "./src/a.py"]
+    assert listed.exit_code != 0
+
+
 def test_a_scorer_of_the_eval_server_cannot_read_a_hidden_path(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
