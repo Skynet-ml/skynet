@@ -164,20 +164,19 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     value = call.get("arguments")
-    # The transcript holds an empty object for every argument that ``refused_arguments`` refuses. ``_parse`` measures
-    # compact text after it dumps it again with spaces, so a check on the text alone would keep some refused text.
+    # The transcript holds an empty object for every argument that ``refused_arguments`` refuses. Compact text can
+    # grow past the bound when ``_parse`` dumps it again with spaces, so a check on the text alone would keep some
+    # refused text.
     if _parse(call)[1]:
         value = _REFUSED_ARGUMENTS
     elif isinstance(value, str):
-        # Text that is not JSON passes ``_parse``, but a lone surrogate in it would still break the UTF-8 prompt.
+        # Text that is not JSON passes ``_parse`` and gets the misuse error, but a lone surrogate in it would still
+        # break the UTF-8 prompt, so the transcript also holds an empty object for it.
         if _refused_text(value):
             value = _REFUSED_ARGUMENTS
     else:
-        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_parse`` measures
-        # the arguments with no escapes, so Hebrew text does not count six characters a letter.
+        # Sorted keys give the same text for a live reply and for its replay from the step log.
         value = json.dumps(value, sort_keys=True, ensure_ascii=False)
-        if _refused_text(value):
-            value = _REFUSED_ARGUMENTS
     return {
         "id": call.get("id"),
         "type": "function",
@@ -390,8 +389,7 @@ def run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
         The tool result as JSON text, and the tree after the command.
     """
     assert ctx.run_command is not None
-    # ``_parse`` or the step commit (SKY-821) refuses a lone surrogate first; ``surrogatepass`` keeps this measure
-    # from ever raising.
+    # ``_parse`` refuses a lone surrogate first; ``surrogatepass`` keeps this measure from ever raising.
     if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
         error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
         return json.dumps({"error": error}, ensure_ascii=False), tree

@@ -415,7 +415,6 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         Returns:
             The tool result as JSON text, and the tree after the command.
         """
-        assert self._ctx.run_command is not None
         refused = loop_tools.refused_arguments(call, BASH_TOOL["name"])
         if refused is not None:
             return refused, tree

@@ -2588,6 +2588,31 @@ def test_compact_text_that_grows_past_the_bound_gives_an_empty_transcript_object
     assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
 
 
+def test_text_that_is_not_json_with_a_raw_lone_surrogate_gives_an_empty_transcript_object() -> None:
+    """Text that is not JSON passes the bound and gets the misuse error, but its lone surrogate stays out of the prompt."""
+    call = {"id": "c", "name": "bash", "arguments": '{"command": "echo \ud800'}
+
+    def run_command(tree: str, command: str, env: Any) -> Any:
+        """Fail the test: a call with no command must not run.
+
+        Args:
+            tree: Not used.
+            command: Not used.
+            env: Not used.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the command ran")
+
+    assert loop_tools.refused_arguments(call, "bash") is None
+    output, tree = loop_tools.run_bash(SimpleNamespace(run_command=run_command), "t", call, misuse="misuse")
+
+    assert json.loads(output) == {"error": "misuse"}
+    assert tree == "t"
+    assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
+
+
 def test_an_evaluation_of_the_lab_parent_is_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
