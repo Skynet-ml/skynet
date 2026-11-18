@@ -153,6 +153,15 @@ export function runProposerHarness(
 // Marks where the command goes in the translated row text.
 const COMMAND_SLOT = "\u0000";
 
+/** Join a command's parts the way Python's `shlex.join` does, as the run-record note shows them. */
+export function shellJoin(parts: readonly string[]): string {
+  return parts
+    .map((part) =>
+      part && !/[^\w@%+=:,./-]/.test(part) ? part : `'${part.replaceAll("'", `'"'"'`)}'`,
+    )
+    .join(" ");
+}
+
 /**
  * The proposer row's text: the contract file's command when the run uses it,
  * else the harness name. The command is left-to-right text, so in Hebrew a
@@ -172,7 +181,7 @@ export function runProposerLabel(
   return (
     <>
       {before}
-      <bdi dir="ltr">{entry.join(" ")}</bdi>
+      <bdi dir="ltr">{shellJoin(entry)}</bdi>
       {after.join("")}
     </>
   );

@@ -21,7 +21,9 @@ registerHooks({
 });
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { BlackboxConfigCard, runProposerHarness, runProposerLabel, runStopScore } = await import("./BlackboxConfig");
+const { BlackboxConfigCard, runProposerHarness, runProposerLabel, runStopScore, shellJoin } = await import(
+  "./BlackboxConfig"
+);
 
 const job = { optimization_id: "run-1", status: "running" } as OptimizationStatusResponse;
 
@@ -106,6 +108,16 @@ void describe("runProposerLabel", () => {
     assert.match(html, /<bdi dir="ltr">node agent\/run\.js<\/bdi>/);
     assert.notEqual(html, renderToStaticMarkup(<>{runProposerLabel({ max_tool_calls: 5 }, {})}</>));
     assert.equal(runProposerLabel({ harness: "pi" }, fromFile), runProposerLabel({ harness: "pi" }, {}));
+  });
+});
+
+void describe("shellJoin", () => {
+  void it("quotes each part like Python's shlex.join, so the run page matches the run-record note", () => {
+    // Expected values from Python: shlex.join([...]).
+    assert.equal(shellJoin(["node", "agent/run.js", "--fast"]), "node agent/run.js --fast");
+    assert.equal(shellJoin(["{model}", "a b", ""]), "'{model}' 'a b' ''");
+    assert.equal(shellJoin(["it's", "x=1,y@2%3+4:5"]), `'it'"'"'s' x=1,y@2%3+4:5`);
+    assert.equal(shellJoin(["$HOME", "é"]), "'$HOME' 'é'");
   });
 });
 
