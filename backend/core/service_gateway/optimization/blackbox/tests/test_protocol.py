@@ -472,7 +472,7 @@ def _deep_list(levels: int) -> list[Any]:
     return value
 
 
-@pytest.mark.parametrize("arguments", ["[" * 5000 + "]" * 5000, _deep_list(5000)])
+@pytest.mark.parametrize("arguments", ["[" * 5000 + "]" * 5000, _deep_list(5000)], ids=["text", "value"])
 def test_tool_calls_from_openai_gives_a_clear_error_for_arguments_that_nest_too_deep(arguments: Any) -> None:
     """Arguments past Python's recursion limit, as text or as a value, raise a named error, not RecursionError.
 
