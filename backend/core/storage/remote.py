@@ -2021,13 +2021,14 @@ class RemoteDBJobStore:
                 if not counted:
                     budget_id, username = job.execution_budget_id, job.username
                     session.rollback()
-                    # After the rollback the sweep may not end the run: it can see a
+                    # After the rollback this sweep may not end the run: it can see a
                     # moved generation, or a usage wait that has not expired, and the
-                    # run would stay running with no kept error. End it here with the
-                    # cap error. When the wait has expired, this write runs first, so
-                    # the run keeps the cap error, not the sweep's interrupted end. The
-                    # guard on the generation and the status leaves alone a run that
-                    # another sweep requeued or a worker claimed since.
+                    # run would stay running until the next sweep. End it now with the
+                    # cap error, and close the admission that the resume reopened. When
+                    # the wait has expired, this write runs first, so the run keeps the
+                    # cap error, not the sweep's interrupted end. The guard on the
+                    # generation and the status leaves alone a run that another sweep
+                    # requeued or a worker claimed since.
                     ended = (
                         session.query(JobModel)
                         .filter(

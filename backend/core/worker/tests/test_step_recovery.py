@@ -1090,6 +1090,54 @@ def test_two_sweeps_cannot_both_resume_a_run_past_the_cap(
     assert (budget.state, budget.blocked_reason) == ("closed", "job_failed")
 
 
+def test_a_stale_sweep_keeps_the_cap_error_on_a_run_whose_usage_wait_expired(
+    store: StepJobStore, step_logs: Any, request: pytest.FixtureRequest
+) -> None:
+    """A run that already waits for usage keeps the cap error, not the expired wait's interrupted end.
+
+    Args:
+        store: The job store.
+        step_logs: Factory for a worker's step log.
+        request: Pytest request, to skip the PostgreSQL case.
+    """
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("the row lock on PostgreSQL makes the second sweep wait; SQLite shows the guarded update")
+    _funded_run(store)
+    generation = _claim(store, "pod-a")
+    log = step_logs("pod-a")
+    _commit(log, 0, generation)
+    log.flush()
+    expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    _set_job(
+        store,
+        automatic_resumes=MAX_AUTOMATIC_RESUMES - 1,
+        recovery={"state": "recovering", "phase": "waiting_for_usage", "waiting_since": expired},
+    )
+    _kill(store)
+    listed = store._checkpoints.list_for_optimization
+
+    def other_sweep_first(optimization_id: str) -> Any:
+        """Let another sweep use the last automatic resume after this sweep read the row.
+
+        Args:
+            optimization_id: The run whose checkpoints the requeue lists.
+
+        Returns:
+            The run's checkpoints.
+        """
+        _set_job(store, automatic_resumes=MAX_AUTOMATIC_RESUMES)
+        return listed(optimization_id)
+
+    store._checkpoints.list_for_optimization = other_sweep_first  # type: ignore[method-assign]
+
+    store.recover_orphaned_jobs()
+
+    job = store.get_job(RUN)
+    assert job["status"] == "failed"
+    assert f"limit of {MAX_AUTOMATIC_RESUMES} automatic resumes" in job["message"]
+    assert job["recovery"] is None
+
+
 # A worker claim keeps the generation, so only the generation guard protects the claimed run.
 @pytest.mark.parametrize("claimed_by", [None, "pod-b"], ids=["requeued", "requeued-and-claimed"])
 def test_a_stale_sweep_leaves_alone_a_run_that_another_sweep_requeued(
