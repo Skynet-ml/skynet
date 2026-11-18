@@ -441,19 +441,18 @@ _RUN = (
 )
 
 
-@pytest.mark.parametrize("first", ["ok", "boom", "slow"])
-def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_path: Path, first: str) -> None:
-    """Give each version its own new candidate box from the snapshot, and close it also after a failed run (SKY-805).
-
-    A box is never reused, so no state of one version reaches the next one,
-    and the setup runs only once.
+def _score_two(tmp_path: Path, runtime: _SnapshotRuntime, first: str) -> list[float]:
+    """Score two versions with a repository scorer that runs ``src/run.py`` in its candidate boxes.
 
     Args:
         tmp_path: Scratch folder.
-        first: The first version's input: it succeeds, raises or runs out of time.
+        runtime: The box runtime.
+        first: The first version's input; the second version's input is ``ok``.
+
+    Returns:
+        The two scores.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.py": _RUN})
-    runtime = _SnapshotRuntime(tmp_path / "snaps")
     scorer = RepoScorer(
         _space(archive, runtime),
         "def score(repo_path, case, output):\n    return 1.0, 'ran'\n",
@@ -462,17 +461,79 @@ def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_p
         run_timeout=1.0,
     )
     try:
-        results = [scorer.score("", {"input": value}) for value in (first, "ok")]
+        return [scorer.score("", {"input": value})["score"] for value in (first, "ok")]
     finally:
         scorer.close()
 
-    assert [result["score"] for result in results] == [0.0 if first != "ok" else 1.0, 1.0]
-    candidates = [box for box in runtime.boxes if ":candidate-" in str(box.spec.operation_key)]
+
+def _boxes(runtime: _SnapshotRuntime, kind: str) -> list[_Box]:
+    """Return the boxes of one kind, in open order.
+
+    Args:
+        runtime: The box runtime.
+        kind: ``setup``, ``candidate`` or ``metric``.
+
+    Returns:
+        The boxes whose operation key names that kind.
+    """
+    return [box for box in runtime.boxes if f":{kind}-" in str(box.spec.operation_key)]
+
+
+@pytest.mark.parametrize("first", ["ok", "boom", "slow"])
+def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_path: Path, first: str) -> None:
+    """Give each version its own new candidate box from the snapshot, and close it also after a failed run (SKY-805).
+
+    A box is never reused, so no state of one version reaches the next one,
+    and the setup runs only once. Each score also gets its own new metric box.
+
+    Args:
+        tmp_path: Scratch folder.
+        first: The first version's input: it succeeds, raises or runs out of time.
+    """
+    runtime = _SnapshotRuntime(tmp_path / "snaps")
+
+    assert _score_two(tmp_path, runtime, first) == [0.0 if first != "ok" else 1.0, 1.0]
+    candidates = _boxes(runtime, "candidate")
+    metrics = _boxes(runtime, "metric")
     assert len(candidates) == 2
     assert candidates[0] is not candidates[1]
+    assert len(metrics) == 2
+    assert metrics[0] is not metrics[1]
     assert [box.spec.snapshot_id for box in candidates] == ["snap-0", "snap-0"]
+    assert len(_boxes(runtime, "setup")) == 1
     assert all(box.closed for box in runtime.boxes)
     assert [_setups(box) for box in runtime.boxes] == [1] + [0] * (len(runtime.boxes) - 1)
+    keys = [box.spec.operation_key for box in runtime.boxes]
+    assert len(set(keys)) == len(keys)
+
+
+@pytest.mark.parametrize("fault", ["snapshot", "open"])
+def test_each_scored_version_gets_a_new_box_from_the_tar_state_when_the_snapshot_fails(
+    tmp_path: Path, fault: str
+) -> None:
+    """Open a new candidate box from the tar state for each version when the snapshot fails (SKY-805).
+
+    Args:
+        tmp_path: Scratch folder.
+        fault: Which step the provider refuses: the save or the open from the snapshot.
+    """
+    error = ServiceError("provider refused")
+    runtime = _SnapshotRuntime(
+        tmp_path / "snaps",
+        snapshot_error=error if fault == "snapshot" else None,
+        open_error=error if fault == "open" else None,
+    )
+
+    assert _score_two(tmp_path, runtime, "boom") == [0.0, 1.0]
+    candidates = _boxes(runtime, "candidate")
+    assert len(candidates) == 2
+    assert candidates[0] is not candidates[1]
+    assert all(box.spec.snapshot_id is None and box.spec.snapshot_archive for box in candidates)
+    assert all(_setups(box) == 0 for box in candidates)
+    # The open fault is found only at the first candidate open, so setup runs once more to make the tar state.
+    assert len(_boxes(runtime, "setup")) == (1 if fault == "snapshot" else 2)
+    assert len(_boxes(runtime, "metric")) == 2
+    assert all(box.closed for box in runtime.boxes)
     keys = [box.spec.operation_key for box in runtime.boxes]
     assert len(set(keys)) == len(keys)
 
