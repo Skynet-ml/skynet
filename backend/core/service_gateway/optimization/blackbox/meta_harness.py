@@ -183,6 +183,9 @@ class _UpstreamServer:
         self._progress = ctx.progress_callback
         self._ids: dict[str, int] = {}
         self._sweeps: dict[str, list[tuple[str, float]]] = {}
+        # The server records a metric error only for a scorer crash, so the adapter keeps the versions that
+        # scored NaN or infinite on a case: those crashed too, and must get no score (SKY-751).
+        self._non_finite: set[str] = set()
         self.budget = _Budget(server)
         self.eval_log: list[dict[str, Any]] = []
 
@@ -270,6 +273,8 @@ class _UpstreamServer:
         scored = [score if score is not None and math.isfinite(score) else None for score in scores]
         filled = fill_unscored([candidate] * len(scored), scored)
         names = [eid for eid, _ in pairs]
+        if any(score is not None and not math.isfinite(score) for score in scores):
+            self._non_finite.add(candidate_key(candidate))
         self._sweeps[candidate_key(candidate)] = [
             (eid, score) for eid, score in zip(names, scored, strict=True) if score is not None
         ]
@@ -297,7 +302,7 @@ class _UpstreamServer:
         del reflection_cost
         if isinstance(candidate, str) and math.isfinite(val_score):
             # A version with a crashed case shows no score (SKY-350, SKY-367).
-            shown = None if self._server.metric_error(candidate) is not None else val_score
+            shown = None if self.crashed(candidate) else val_score
             trial = self._register(candidate)
             logger.info(
                 "Candidate %s scored %s after %s evaluations",
@@ -323,6 +328,17 @@ class _UpstreamServer:
                 iteration=None,
             )
         return {"val_score": val_score}
+
+    def crashed(self, candidate: Candidate) -> bool:
+        """Tell whether a version crashed on a case: a metric error, or a NaN or infinite score.
+
+        Args:
+            candidate: The version.
+
+        Returns:
+            ``True`` when the version must get no score.
+        """
+        return self._server.metric_error(candidate) is not None or candidate_key(candidate) in self._non_finite
 
     def _register(self, candidate: Candidate) -> int:
         """Give a candidate its id: its place in the order of first sweeps.
@@ -387,6 +403,15 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             for path in sorted(self.work_dir.rglob("*"))
             if path.is_file()
         }
+        # A tree holds only files, so an empty folder of the layout (such as ``logs/run/reports``) gets a marker
+        # file; without it, the folder is missing and the agent's first write into it fails.
+        files.update(
+            {
+                f"{path.relative_to(self.work_dir).as_posix()}/.keep": b""
+                for path in sorted(self.work_dir.rglob("*"))
+                if path.is_dir() and not any(path.iterdir())
+            }
+        )
         tree = ctx.put_files(files, self._tree)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.skill()},
@@ -405,11 +430,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             if commands >= self._max_tool_calls or len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
                 exhausted = True
                 break
-            reply = self._call_model(messages)
+            reply, failed_cents = self._call_model(messages)
+            spent += failed_cents
             if isinstance(reply, ModelCallFailedError):
-                # A failed call that the provider billed settles its cost on the run's ledger, but the replayed
-                # error does not carry that cost, so ``spent`` cannot count it the same way live and on a resume.
-                # The run budget still bounds the total spend (gap filed against SKY-719).
                 failed = True
                 text = str(reply)
                 break
@@ -442,30 +465,34 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             killed=False,
         )
 
-    def _call_model(self, messages: list[dict[str, Any]]) -> ModelReply | ModelCallFailedError:
+    def _call_model(self, messages: list[dict[str, Any]]) -> tuple[ModelReply | ModelCallFailedError, Decimal]:
         """Call the model with the bash tool, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
 
         Each attempt is one ``model`` step, so a resume replays the same failures and the same retries. A live
         failure waits ``MODEL_RETRY_WAIT_SECONDS`` before the next attempt; a replayed failure made no call, so it
-        does not wait.
+        does not wait. A failed attempt that the provider billed carries its committed cost, live and on a replay,
+        so the proposer cap counts it the same way both times.
 
         Args:
             messages: The session's messages.
 
         Returns:
-            The reply, or the last :class:`ModelCallFailedError` when every attempt failed.
+            The reply, or the last :class:`ModelCallFailedError` when every attempt failed, and the summed cost of
+            the failed attempts, in cents.
         """
         assert self._ctx.call_model is not None
         failure = ModelCallFailedError("unknown")
+        failed_cents = Decimal(0)
         for attempt in range(MODEL_ATTEMPTS):
             try:
-                return self._ctx.call_model(messages, [BASH_TOOL])
+                return self._ctx.call_model(messages, [BASH_TOOL]), failed_cents
             except ModelCallFailedError as error:
                 failure = error
+                failed_cents += error.cost_cents
             # The loop raises a live failure from the model's own error, and a replayed failure with no cause.
             if failure.__cause__ is not None and attempt < MODEL_ATTEMPTS - 1:
                 _sleep(MODEL_RETRY_WAIT_SECONDS)
-        return failure
+        return failure, failed_cents
 
     def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
         """Run one tool call as one command over the tree, modeled on the Sandbox SDK ``exec``.
@@ -520,8 +547,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             if not isinstance(file, str):
                 continue
             path = posixpath.normpath(file)
-            # ``_validate`` refuses a file outside ``agents/``, so only those come back.
-            if not path.startswith("agents/"):
+            # ``_validate`` refuses a file outside ``agents/``, or a path with a null byte (no file system path
+            # holds one), so only the others come back.
+            if not path.startswith("agents/") or "\0" in path:
                 continue
             local = self.work_dir / path
             content = self._ctx.read_file(tree, path)
@@ -588,11 +616,10 @@ class MetaHarnessEngine:
             engine_config=engine_config,
         )
         worker = _WorkerMetaHarness(config, ctx, options.proposer.max_tool_calls if options else None)
-        upstream = worker.run(
-            UpstreamTask(**native_task_payload(self.name, task)), _UpstreamServer(server, list(task.cases), ctx)
-        )
-        # A best version with no finite mean, or with a crashed case, has no score (SKY-350, SKY-367).
-        scored = math.isfinite(upstream.best_score) and server.metric_error(upstream.best_candidate) is None
+        adapter = _UpstreamServer(server, list(task.cases), ctx)
+        upstream = worker.run(UpstreamTask(**native_task_payload(self.name, task)), adapter)
+        # A best version with no finite mean, or with a crashed case, has no score (SKY-350, SKY-367, SKY-751).
+        scored = math.isfinite(upstream.best_score) and not adapter.crashed(upstream.best_candidate)
         return Result(
             best_candidate=upstream.best_candidate,
             best_score=upstream.best_score if scored else None,

@@ -2216,6 +2216,9 @@ class MetaHarnessEngine:
         file = spec.get("file")
         if not isinstance(file, str):
             return "missing file"
+        # ``resolve`` raises ValueError on a null byte, which would end the run.
+        if "\0" in file:
+            return "invalid candidate file"
         path = (self.work_dir / file).resolve()
         agents = (self.work_dir / "agents").resolve()
         if not path.is_relative_to(agents) or not path.is_file():

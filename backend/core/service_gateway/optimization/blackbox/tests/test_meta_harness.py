@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from gepa.oa.budget import BudgetExhausted
 from gepa.oa.config import OptimizeAnythingConfig
 from sqlalchemy.engine import Engine
 
@@ -34,6 +35,7 @@ from core.service_gateway.optimization.blackbox.harness_bridge import hidden_has
 from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_CHARS, MetaHarnessEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
+    BudgetExhaustedError,
     EngineContext,
     EvalServer,
     ModelReply,
@@ -44,7 +46,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop, ModelCallFailedError
+from core.worker.engine_loop import EngineLoop, ModelCallBilledError, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -91,6 +93,7 @@ class _Proposer:
         cost: str = "1",
         call: dict[str, Any] | None = None,
         fail_at: frozenset[int] = frozenset(),
+        billed_at: frozenset[int] = frozenset(),
         output_chars: int = 0,
     ) -> None:
         """Set the script.
@@ -100,10 +103,12 @@ class _Proposer:
             cost: The cost of each reply, in cents.
             call: A tool call to send in place of the scripted command.
             fail_at: The indexes of the attempts, failed ones included, that fail as a rate limit does.
+            billed_at: The indexes of the attempts that fail after the provider billed one cent.
             output_chars: The length of the extra stdout that the scripted command prints.
         """
         self.die_at = die_at
         self.fail_at = fail_at
+        self.billed_at = billed_at
         self.attempts = 0
         self.cost = Decimal(cost)
         self.call = call
@@ -124,12 +129,15 @@ class _Proposer:
         Raises:
             _WorkerDiedError: In the call at ``die_at``.
             RuntimeError: In the attempts of ``fail_at``.
+            ModelCallBilledError: In the attempts of ``billed_at``.
         """
         if len(self.calls) == self.die_at:
             raise _WorkerDiedError
         self.attempts += 1
         if self.attempts - 1 in self.fail_at:
             raise RuntimeError("429 rate limited")
+        if self.attempts - 1 in self.billed_at:
+            raise ModelCallBilledError("1")
         assert isinstance(prompt, list)
         self.calls.append([dict(message) for message in prompt])
         self.tools.append(tools)
@@ -220,6 +228,7 @@ def _run(
     *,
     events: list[tuple[str, dict[str, Any]]] | None = None,
     scorer: Any = _score,
+    max_evals: int = 20,
     **fields: Any,
 ) -> Result:
     """Run Meta-Harness for two iterations on the loop.
@@ -228,6 +237,7 @@ def _run(
         loop: The engine loop.
         events: A list that collects the progress events.
         scorer: The step scorer.
+        max_evals: The scorer-run budget.
         **fields: Other context fields.
 
     Returns:
@@ -235,7 +245,7 @@ def _run(
     """
     sink = None if events is None else (lambda kind, data: events.append((kind, data)))
     ctx = loop.context(max_iterations=2, progress_callback=sink, **fields)
-    return MetaHarnessEngine().run(Task("seed", cases=list(_CASES)), loop.server(scorer, max_evals=20), ctx)
+    return MetaHarnessEngine().run(Task("seed", cases=list(_CASES)), loop.server(scorer, max_evals=max_evals), ctx)
 
 
 def _options(
@@ -273,7 +283,16 @@ def test_the_loop_path_never_starts_the_native_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With the worker host, the engine runs the native loop in the worker, not through the box runtime."""
+    """With the worker host, the engine runs the native loop in the worker, not through the box runtime.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
     native = MagicMock(side_effect=AssertionError("the native runtime ran"))
     monkeypatch.setattr(meta_mod, "run_native_engine", native)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
@@ -285,7 +304,12 @@ def test_the_loop_path_never_starts_the_native_runtime(
 def test_a_context_without_the_worker_host_runs_the_native_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime."""
+    """Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
     incumbent = Result(best_candidate="native", best_score=0.5, total_evals=3)
     native = MagicMock(return_value=incumbent)
     monkeypatch.setattr(meta_mod, "run_native_engine", native)
@@ -300,7 +324,15 @@ def test_a_context_without_the_worker_host_runs_the_native_runtime(
 def test_each_model_reply_and_each_command_commits_one_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Each iteration is a model reply, its command and the final reply; the climb finds the best candidate."""
+    """Each iteration is a model reply, its command and the final reply; the climb finds the best candidate.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer()
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -322,7 +354,15 @@ def test_each_model_reply_and_each_command_commits_one_step(
 def test_a_run_killed_mid_climb_resumes_from_its_last_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Kill the worker in the third model call, then resume: no committed reply or command runs again."""
+    """Kill the worker in the third model call, then resume: no committed reply or command runs again.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     first, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=2), generation=1)
     with pytest.raises(_WorkerDiedError):
         _run(first)
@@ -353,6 +393,14 @@ def test_the_climb_view_gets_its_progress_events(
     """Each benchmarked version sends its scored cases, its notes and one candidate event, as the native runtime does.
 
     Each scorer call runs in the candidate's and case's scope, and the run log gets the native typed events.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     events: list[tuple[str, dict[str, Any]]] = []
@@ -412,7 +460,15 @@ def test_the_climb_view_gets_its_progress_events(
 def test_a_bad_tool_call_gets_an_error_result_and_no_step(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A call to an unknown tool goes back to the model as an error, and opens no box."""
+    """A call to an unknown tool goes back to the model as an error, and opens no box.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer(call={"id": "x", "name": "edit", "arguments": "{}"})
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -427,7 +483,15 @@ def test_a_bad_tool_call_gets_an_error_result_and_no_step(
 def test_the_proposer_cost_cap_stops_the_session(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """With a cap of one cent, the session runs its first reply's command and then asks the model no more."""
+    """With a cap of one cent, the session runs its first reply's command and then asks the model no more.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer(cost="1")
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
     result = _run(loop, native_options=_options(max_token_cost=0.01))
@@ -441,7 +505,15 @@ def test_the_proposer_cost_cap_stops_the_session(
 def test_a_repository_run_is_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A repository run needs ``save.sh`` and git in the box, which this port does not give yet."""
+    """A repository run needs ``save.sh`` and git in the box, which this port does not give yet.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
     seed = RepoSeed(tree_id=_tree(trees, "a.py", "a"))
@@ -472,7 +544,17 @@ def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """Until SKY-816, the tool loop is the only proposer: a setting that it would drop fails the run before any call."""
+    """Until SKY-816, the tool loop is the only proposer: a setting that it would drop fails the run before any call.
+
+    Args:
+        options: The native options with the dropped setting.
+        field: The setting that the error names.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer()
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -485,7 +567,15 @@ def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
 def test_the_default_proposer_settings_are_not_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The default ``[proposer]`` table, and a budget route with no MCP servers, run the tool loop."""
+    """The default ``[proposer]`` table, and a budget route with no MCP servers, run the tool loop.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
 
     result = _run(loop, native_options=_options(budget_route={MCP_RELAY_ROUTE_KEY: {"servers": []}}))
@@ -496,7 +586,15 @@ def test_the_default_proposer_settings_are_not_refused(
 def test_a_task_that_holds_the_metric_source_is_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """As in the native runtime, a task document that holds the metric source never reaches the workspace."""
+    """As in the native runtime, a task document that holds the metric source never reaches the workspace.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer()
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
     metric = "def score(candidate):\n    return len(candidate)"
@@ -511,7 +609,15 @@ def test_a_task_that_holds_the_metric_source_is_refused(
 def test_a_bash_call_cannot_read_a_hidden_path(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The bash tool runs through the loop, so ``cat`` of the hidden ``eval/`` and ``optimize.toml`` gives nothing."""
+    """The bash tool runs through the loop, so ``cat`` of the hidden ``eval/`` and ``optimize.toml`` gives nothing.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     hidden = hidden_hashes(["eval", "optimize.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1, hidden=hidden)
     # The loop refuses to write a hidden path, so the seed tree goes straight into the tree store.
@@ -570,7 +676,16 @@ def test_a_failed_command_goes_back_to_the_model_and_keeps_the_tree(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A refused tree or a dead box is an error tool result, not the end of the run; the tree does not change."""
+    """A refused tree or a dead box is an error tool result, not the end of the run; the tree does not change.
+
+    Args:
+        error: The box error that the command raises.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
 
     def fail(tree_id: str, command: str, grants: tuple[Any, ...]) -> Any:
@@ -597,7 +712,15 @@ def test_a_failed_command_goes_back_to_the_model_and_keeps_the_tree(
 def test_a_pending_entry_that_clashes_with_a_local_folder_or_file_is_skipped(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """An entry that names a local folder, or a path under a local file, changes nothing and does not raise."""
+    """An entry that names a local folder, or a path under a local file, changes nothing and does not raise.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     worker = _worker(loop, tmp_path)
     (worker.work_dir / "agents" / "v").mkdir()
@@ -620,7 +743,15 @@ def test_a_pending_entry_that_clashes_with_a_local_folder_or_file_is_skipped(
 def test_a_pending_entry_outside_agents_is_not_copied_or_deleted(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Only files under ``agents/`` come back from the tree; a path outside it is neither written nor deleted."""
+    """Only files under ``agents/`` come back from the tree; a path outside it is neither written nor deleted.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     worker = _worker(loop, tmp_path)
     outside = worker.work_dir.parent / "outside.txt"
@@ -638,7 +769,15 @@ def test_a_pending_entry_outside_agents_is_not_copied_or_deleted(
 def test_the_worker_path_keeps_clock_values_out_of_the_workspace(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The summary rows that go into the tree hold no timing, so a resume puts the same files in the tree."""
+    """The summary rows that go into the tree hold no timing, so a resume puts the same files in the tree.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
 
     _run(loop)
@@ -650,7 +789,11 @@ def test_the_worker_path_keeps_clock_values_out_of_the_workspace(
 
 
 def test_the_worker_skill_and_tool_keep_scratch_files_in_the_workspace(tmp_path: Path) -> None:
-    """``/tmp`` does not persist between commands, so the skill and the tool both point to ``scratch/``."""
+    """``/tmp`` does not persist between commands, so the skill and the tool both point to ``scratch/``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     config = OptimizeAnythingConfig(engine="meta_harness", run_dir=str(tmp_path), engine_config={"model": ""})
     skill = meta_mod._WorkerMetaHarness(config, EngineContext(reflection_lm=str, run_dir=str(tmp_path))).skill()
 
@@ -662,7 +805,15 @@ def test_the_worker_skill_and_tool_keep_scratch_files_in_the_workspace(tmp_path:
 def test_a_scorer_traceback_reaches_the_proposer_as_one_line(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A scorer error can hold metric source in its traceback; the workspace keeps only its last line."""
+    """A scorer error can hold metric source in its traceback; the workspace keeps only its last line.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     traceback = (
         "Traceback (most recent call last):\n"
         '  File "metric.py", line 3, in score\n'
@@ -702,7 +853,15 @@ def test_a_scorer_traceback_reaches_the_proposer_as_one_line(
 def test_a_long_command_output_is_cut_to_its_head_and_tail(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Each output keeps a fixed size, so the later prompts and their hashes stay bounded and stable."""
+    """Each output keeps a fixed size, so the later prompts and their hashes stay bounded and stable.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     worker = _worker(loop, tmp_path)
     tree = loop.put_files({"a.txt": b"a"})
@@ -721,7 +880,15 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
 def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A transient failure commits a failed step and a retry; a resume replays both with no new model call."""
+    """A transient failure commits a failed step and a retry; a resume replays both with no new model call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     first, _ = _loop(
         owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0}), die_at=2), generation=1
     )
@@ -745,7 +912,15 @@ def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
 def test_a_model_call_that_fails_on_every_attempt_ends_the_session_as_an_error(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """After the fixed number of attempts, the session fails and the run stops with the proposer error."""
+    """After the fixed number of attempts, the session fails and the run stops with the proposer error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer(fail_at=frozenset({0, 1, 2}))
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -764,7 +939,16 @@ def test_a_live_failure_waits_before_its_retry_and_a_replayed_one_does_not(
     tmp_path: Path,
     sleeps: list[float],
 ) -> None:
-    """A live failed call waits before its retry; its replay made no call, so it waits for nothing."""
+    """A live failed call waits before its retry; its replay made no call, so it waits for nothing.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        sleeps: The recorded retry waits.
+    """
     first, _ = _loop(
         owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0}), die_at=2), generation=1
     )
@@ -788,7 +972,16 @@ def test_no_wait_follows_the_last_failed_attempt(
     tmp_path: Path,
     sleeps: list[float],
 ) -> None:
-    """The session waits only between attempts, so three failures wait twice."""
+    """The session waits only between attempts, so three failures wait twice.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        sleeps: The recorded retry waits.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(fail_at=frozenset({0, 1, 2})), generation=1)
 
     with pytest.raises(ProposerFailedError):
@@ -810,7 +1003,19 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At the proposer's tool-call cap or the prompt cap, the session asks the model no more; its candidate still runs."""
+    """At the proposer's tool-call cap or the prompt cap, the session asks the model no more; its candidate still runs.
+
+    Args:
+        cap: The cap that the case sets.
+        value: The cap's value.
+        output_chars: The length of the extra stdout that the scripted command prints.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
     options = _options()
     if cap == "max_tool_calls":
         options = _options(max_tool_calls=value)
@@ -830,7 +1035,18 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
 def test_a_non_finite_score_sends_no_case_event_and_no_per_case_score(
     bad: float, owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """As in the native runner, a NaN or infinite score is no score: it gets the scored mean and marks the crash."""
+    """As in the native runner, a NaN or infinite score is no score: it gets the scored mean and marks the crash.
+
+    The crashed version then shows no score and no per-case scores in the climb view (SKY-751).
+
+    Args:
+        bad: The NaN or infinite score.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
         """Score the first case as infinite, and the second by length.
@@ -860,14 +1076,22 @@ def test_a_non_finite_score_sends_no_case_event_and_no_per_case_score(
 
     cases = [(data["example_id"], data["score"]) for kind, data in events if kind == PROGRESS_CASE_SCORED]
     assert cases == [("1", 4.0)]
-    candidates = [data["per_example"] for kind, data in events if kind == PROGRESS_CANDIDATE]
-    assert candidates == [[{"id": "1", "score": 4.0}]]
+    candidates = [(data["score"], data["per_example"]) for kind, data in events if kind == PROGRESS_CANDIDATE]
+    assert candidates == [(None, [])]
 
 
 def test_a_sweep_with_no_scored_case_lists_every_case_as_unscored(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """As in the native runner, a sweep with no finite score keeps the unscored mean and lists every case."""
+    """As in the native runner, a sweep with no finite score keeps the unscored mean and lists every case.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     scores = iter([math.nan, None])
     server = loop.server(lambda _loop, _candidate, _case: (next(scores), {}), max_evals=20)
@@ -887,7 +1111,16 @@ def test_a_full_sweep_logs_its_start_as_the_native_runner_does(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Each sweep of every case logs ``candidate.eval.start`` once, with the native payload; a partial one does not."""
+    """Each sweep of every case logs ``candidate.eval.start`` once, with the native payload; a partial one does not.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
+    """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     adapter = meta_mod._UpstreamServer(loop.server(_score, max_evals=20), list(_CASES), loop.context())
 
@@ -906,13 +1139,21 @@ def test_a_full_sweep_logs_its_start_as_the_native_runner_does(
 def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A reply with more tool calls than the cap allows runs the first ones, then ends the session out of budget."""
+    """A reply with more tool calls than the cap allows runs the first ones, then ends the session out of budget.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
     worker = _worker(loop, tmp_path, loop.context())
     worker._max_tool_calls = 2
     call = {"id": "c", "name": "bash", "arguments": {"command": "true"}}
     replies = iter([ModelReply("", Decimal(1), [call, call, call])])
-    worker._call_model = lambda messages: next(replies)
+    worker._call_model = lambda messages: (next(replies), Decimal(0))
 
     outcome = worker._propose(1, None)
 
@@ -923,7 +1164,15 @@ def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
 def test_the_transcript_holds_tool_calls_in_the_openai_form(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The next prompt holds each tool call as an OpenAI function call, with its arguments as sorted JSON text."""
+    """The next prompt holds each tool call as an OpenAI function call, with its arguments as sorted JSON text.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -949,7 +1198,15 @@ def test_the_transcript_holds_tool_calls_in_the_openai_form(
 def test_a_best_version_with_no_finite_mean_has_no_score(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The seed scores NaN on every case and no rival comes: the result keeps the seed with no score, not -inf."""
+    """The seed scores NaN on every case and no rival comes: the result keeps the seed with no score, not -inf.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     model = _Proposer(call={"id": "x", "name": "edit", "arguments": "{}"})
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -962,7 +1219,15 @@ def test_a_best_version_with_no_finite_mean_has_no_score(
 def test_a_best_version_with_a_crashed_case_has_no_score(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The seed crashes on one case and no rival comes: its filled mean is no score, as the server says."""
+    """The seed crashes on one case and no rival comes: its filled mean is no score, as the server says.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
 
     def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
         """Crash on the first case, and score the second by length.
@@ -987,3 +1252,215 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
 
     assert result.best_candidate == "seed"
     assert result.best_score is None
+
+
+def test_a_pending_entry_with_a_null_byte_is_skipped_and_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """No file system path holds a null byte: the pull skips the entry and the check refuses it, with no error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files(
+        {"logs/run/pending_eval.json": _pending("agents/a\u0000b.txt", "agents/ok.txt"), "agents/ok.txt": b"ok"}
+    )
+
+    worker._pull(tree)
+
+    assert (worker.work_dir / "agents" / "ok.txt").read_text() == "ok"
+    assert worker._validate({"name": "c0", "file": "agents/a\u0000b.txt"}) == "invalid candidate file"
+
+
+def test_a_best_version_with_a_non_finite_case_has_no_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed scores NaN on one case and 4 on the other: it crashed, so neither the result nor the climb scores it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case as NaN, and the second by length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        del loop
+        return (math.nan if case == _CASES[0] else float(len(str(candidate)))), {}
+
+    model = _Proposer(call={"id": "x", "name": "edit", "arguments": "{}"})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, scorer=score)
+
+    assert result.best_candidate == "seed"
+    assert result.best_score is None
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [None]
+
+
+def test_a_budget_too_small_for_a_full_sweep_stops_before_it(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With one scorer call left for a two-case sweep, the run stops on the eval budget and scores no case of it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    pending = json.dumps(
+        {"candidates": [{"name": "c1", "file": "agents/c1.txt"}, {"name": "c2", "file": "agents/c2.txt"}]}
+    )
+    command = f"printf seedx > agents/c1.txt && printf seedxx > agents/c2.txt && printf '%s' '{pending}' > logs/run/pending_eval.json"
+    model = _Proposer(call={"id": "x", "name": "bash", "arguments": {"command": command}})
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, max_evals=5)
+
+    assert result.metadata["stop_reason"] == "eval_budget"
+    # The seed and ``c1`` use four calls; ``c2`` would need two, so it scores no case.
+    assert result.total_evals == 4
+    assert (result.best_candidate, result.best_score) == ("seedx", 5.0)
+
+
+def test_a_scorer_budget_error_mid_sweep_stops_as_upstream_budget_exhaustion(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A budget error from the scorer becomes the upstream budget error, so the engine stops on the eval budget.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    server = MagicMock(remaining=10, used=0)
+    server.evaluate.side_effect = BudgetExhaustedError("the run budget is spent")
+    adapter = meta_mod._UpstreamServer(server, list(_CASES), loop.context())
+
+    with pytest.raises(BudgetExhausted, match="the run budget is spent"):
+        adapter.evaluate_examples("seed")
+
+
+def test_a_run_with_no_scorer_call_left_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no scorer call left, the run fails on the budget before any model call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(BudgetExhaustedError):
+        _run(loop, max_evals=0)
+    assert model.calls == []
+
+
+def test_the_workspace_tree_holds_the_empty_layout_folders(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A tree holds only files, so each empty layout folder gets a marker and the agent can write into it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    (worker.logs_dir / "reports").mkdir()
+    command = "printf r > logs/run/reports/r.md && printf a > agents/a.txt"
+    replies = iter(
+        [
+            ModelReply("", Decimal(1), [{"id": "c", "name": "bash", "arguments": {"command": command}}]),
+            ModelReply("done", Decimal(1), []),
+        ]
+    )
+    prompts: list[list[dict[str, Any]]] = []
+
+    def call(messages: list[dict[str, Any]]) -> tuple[ModelReply, Decimal]:
+        """Keep the prompt and give the next scripted reply.
+
+        Args:
+            messages: The session's messages.
+
+        Returns:
+            The reply and no failed cost.
+        """
+        prompts.append(list(messages))
+        return next(replies), Decimal(0)
+
+    worker._call_model = call
+
+    worker._propose(1, None)
+
+    assert json.loads(prompts[1][-1]["content"])["exit_code"] == 0
+
+
+@pytest.mark.parametrize("cap", [None, 0.02])
+def test_a_billed_failed_call_counts_in_the_proposer_cost_live_and_on_a_resume(
+    cap: float | None,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A failed call that the provider billed adds its committed cost to the total and to the cap, also on a replay.
+
+    Args:
+        cap: The proposer cost cap, in dollars, or ``None`` for no cap.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _options(max_token_cost=cap)
+    first, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(billed_at=frozenset({0})), generation=1)
+    live = _run(first, native_options=options)
+
+    _new_generation(engine)
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=2)
+    replayed = _run(loop, native_options=options)
+
+    assert model.calls == []
+    if cap is None:
+        # Four replies of one cent each and the billed failure of one cent.
+        assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == 0.05
+    else:
+        # The billed failure and the first reply reach the cap, so the session asks the model no more.
+        assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command"]
+        assert live.metadata["proposer_cost_usd"] == replayed.metadata["proposer_cost_usd"] == 0.02
+        assert live.metadata["stop_reason"] == replayed.metadata["stop_reason"] == "proposer_budget"
