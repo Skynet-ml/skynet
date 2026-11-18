@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "स्कोर प्रगति",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1} अभी चल रहा है — आप प्रगति को वास्तविक समय में ट्रैक कर सकते हैं।",
   "optimization.overview.queued": "{p1} शुरू होने की प्रतीक्षा में है — प्रोसेसिंग शुरू होते ही प्रगति यहाँ दिखेगी।",
+  "optimization.overview.no_score": "कोई स्कोर नहीं",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1} रद्द किया गया — यह उस क्षण की स्थिति है जब इसे रद्द किया गया था।",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1} विफल हो गया।",
   "auto.features.optimizations.components.overviewtab.template.4": "{p1} परिणाम और प्रदर्शन स्कोर।",

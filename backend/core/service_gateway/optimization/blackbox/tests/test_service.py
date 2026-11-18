@@ -1877,6 +1877,35 @@ def _failure_counts(caplog: pytest.LogCaptureFixture, label: str) -> list[tuple[
     ]
 
 
+class _AsRepositoryScorer:
+    """Give a python scorer's ``run_failed`` case no score, as the repository scorer does (SKY-751)."""
+
+    def __init__(self, scorer: Any) -> None:
+        """Wrap ``scorer``.
+
+        Args:
+            scorer: The python scorer that stands in for the repository scorer.
+        """
+        self._scorer = scorer
+
+    def __getattr__(self, name: str) -> Any:
+        """Return the wrapped scorer's attribute, for example ``usage`` or ``close``."""
+        return getattr(self._scorer, name)
+
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score one case; a ``run_failed`` case loses its score.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            The score, or None for a failed run, and the side info.
+        """
+        score, side_info = self._scorer(candidate, case)
+        return (None if side_info.get("status") == "run_failed" else score), side_info
+
+
 def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
     """Run ``payload`` with its python scorer in the place of the repository scorer.
 
@@ -1894,7 +1923,7 @@ def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id:
     """
     return service_mod.run_job(
         service_mod.job_spec_from_payload(payload),
-        service_mod.build_scorer(payload.scorer, job_id=artifact_id),
+        _AsRepositoryScorer(service_mod.build_scorer(payload.scorer, job_id=artifact_id)),
         service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
         artifact_id=artifact_id,
         started=time.perf_counter(),
@@ -1929,7 +1958,7 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Some failed cases keep the run and its score; the response and the log give the count (SKY-221)."""
+    """Some failed cases keep the run but leave no score; the run keeps the start and says why (SKY-221, SKY-751)."""
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"hello world", "winner"}, every=2)
 
@@ -1941,10 +1970,35 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     report_on = service_mod.report_cases(service_mod.legacy_case_splits(list(_MANY_CASES), 1))
     failed = sum(1 for case in report_on if case["i"] % 2 == 0)
     assert calls == ["search"]
-    assert response.best_score is not None
+    assert response.best_candidate == "hello world"
+    assert response.regression_guard_applied is True
+    assert response.best_score is None
+    assert response.baseline_score is None
+    assert response.metric_improvement is None
     assert 0 < failed < len(report_on)
     assert response.details["failed_cases"] == failed
-    assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
+    assert _failure_counts(caplog, "starting point") == [(failed, len(report_on))]
+    assert any("No version has a score" in record.getMessage() for record in caplog.records)
+
+
+def test_a_scored_version_beats_a_starting_point_that_fails_some_cases(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully scored version beats a starting point with a failed case; no start score, no improvement (SKY-751)."""
+    calls = _winner_strategy(monkeypatch)
+    code = _run_fails_code({"hello world"}, every=2)
+
+    response = _run_as_repository(
+        _payload(scorer={"kind": "python", "metric_code": code}, cases=_MANY_CASES), tmp_path, "job-start-fails"
+    )
+
+    assert calls == ["search"]
+    assert response.best_candidate == "winner"
+    assert response.regression_guard_applied is False
+    assert response.best_score == 0.5
+    assert response.baseline_score is None
+    assert response.metric_improvement is None
+    assert response.details["failed_cases"] == 0
 
 
 def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(

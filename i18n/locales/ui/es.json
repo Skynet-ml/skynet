@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "Progresión de la puntuación",
   "auto.features.optimizations.components.overviewtab.template.1": "La {p1} se está ejecutando ahora: puedes seguir el progreso en tiempo real.",
   "optimization.overview.queued": "La {p1} está esperando para empezar: el progreso aparecerá aquí en cuanto se procese.",
+  "optimization.overview.no_score": "Sin puntuación",
   "auto.features.optimizations.components.overviewtab.template.2": "La {p1} se canceló: este es el estado en el momento en que se canceló.",
   "auto.features.optimizations.components.overviewtab.template.3": "La {p1} falló.",
   "auto.features.optimizations.components.overviewtab.template.4": "Los resultados y las puntuaciones de rendimiento de la {p1}.",

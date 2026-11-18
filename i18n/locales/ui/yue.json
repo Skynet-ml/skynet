@@ -1698,6 +1698,7 @@
   "auto.features.optimizations.components.overviewtab.4": "分數進度",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1} 運行緊 — 你可以即時追蹤進度。",
   "optimization.overview.queued": "{p1} 等緊開始 — 一開始處理，進度就會喺度顯示。",
+  "optimization.overview.no_score": "冇分數",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1} 已被取消 — 呢個係取消時嘅狀態。",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1} 失敗咗。",
   "auto.features.optimizations.components.overviewtab.template.4": "{p1} 結果同效能分數。",

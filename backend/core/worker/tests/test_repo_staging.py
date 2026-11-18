@@ -52,7 +52,7 @@ from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import harness_bridge, runner
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
@@ -2133,6 +2133,36 @@ _CRASHED_EDIT = {
 )
 def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, Any]) -> None:
     """A metric error has no score (SKY-350), so even a stray number never makes it publishable."""
+    assert repo_staging.improved_patch(result) is None
+
+
+_RUN_FAILED_START = {
+    "candidate": "",
+    "score": None,
+    "side_info": {"error": "Run failed: ConnectionError", "status": RUN_FAILED_STATUS},
+}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, 0.4, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, None, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+    ],
+)
+def test_a_scored_version_beats_a_starting_code_with_no_score(result: dict[str, Any]) -> None:
+    """A starting code whose ``[run]`` failed has no score, so a scored version opens a PR (SKY-751)."""
+    assert repo_staging.improved_patch(result) == _EDIT
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+    assert "The starting code has no score" in body
+    assert "This version scored 0.4." in body
+
+
+def test_a_version_whose_run_failed_is_never_published() -> None:
+    """A best version with a failed ``[run]`` case has no score, so it opens no PR (SKY-751)."""
+    failed = {**_RUN_FAILED_START, "candidate": _EDIT}
+    result = _result(None, None, versions=[{"candidate": "", "score": 0.2}, failed])
+
     assert repo_staging.improved_patch(result) is None
 
 

@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "점수 진행 상황",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1}이(가) 지금 실행 중입니다 — 진행 상황을 실시간으로 추적할 수 있습니다.",
   "optimization.overview.queued": "{p1}이(가) 시작을 기다리는 중입니다 — 처리가 시작되면 여기에 진행 상황이 표시됩니다.",
+  "optimization.overview.no_score": "점수 없음",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1}이(가) 취소되었습니다 — 취소된 시점의 상태입니다.",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1}이(가) 실패했습니다.",
   "auto.features.optimizations.components.overviewtab.template.4": "{p1} 결과 및 성능 점수입니다.",

@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "Puan ilerlemesi",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1} şu anda çalışıyor — ilerlemeyi gerçek zamanlı izleyebilirsiniz.",
   "optimization.overview.queued": "{p1} başlamayı bekliyor — işlenmeye başladığında ilerleme burada görünecek.",
+  "optimization.overview.no_score": "Puan yok",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1} iptal edildi — bu, iptal edildiği andaki durumdur.",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1} başarısız oldu.",
   "auto.features.optimizations.components.overviewtab.template.4": "{p1} sonuçları ve performans puanları.",

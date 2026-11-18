@@ -144,8 +144,15 @@ function OverviewTabImpl({
   // baseline and the optimized score exist, keeping the three cards coherent.
   const displayImprovement =
     baseline != null && optimized != null ? (improvement ?? optimized - baseline) : undefined;
+  // SKY-751: a finished version with a failed case has no score; it says so, never 0.
+  // A run with no starting point measures no baseline, so it shows no cards.
+  const runFinished = bbResult?.seed_candidate != null && !stagesActive;
+  const showScore = (score: number | null | undefined) =>
+    score == null && runFinished ? msg("optimization.overview.no_score") : fmtScore(score);
   const showScoreCards =
-    scoresReady || ((stagesActive || job.status === "stopped") && baseline != null);
+    scoresReady ||
+    (runFinished && (baseline != null || optimized != null)) ||
+    ((stagesActive || job.status === "stopped") && baseline != null);
 
   const viewStatus: "queued" | "running" | "success" | "failed" | "cancelled" | "other" = (() => {
     if (isQueued) return "queued";
@@ -233,7 +240,7 @@ function OverviewTabImpl({
                   <HelpTip text={tip("blackbox.score.baseline")}>{TERMS.baselineScore}</HelpTip>
                 </p>
                 <p dir="ltr" className="text-3xl font-mono font-bold tabular-nums">
-                  {fmtScore(baseline)}
+                  {showScore(baseline)}
                 </p>
               </TiltCard>
             </StaggerItem>
@@ -243,7 +250,7 @@ function OverviewTabImpl({
                   <HelpTip text={tip("blackbox.score.optimized")}>{TERMS.optimizedScore}</HelpTip>
                 </p>
                 <p dir="ltr" className="text-3xl font-mono font-bold text-primary tabular-nums">
-                  {fmtScore(optimized)}
+                  {showScore(optimized)}
                 </p>
               </TiltCard>
             </StaggerItem>

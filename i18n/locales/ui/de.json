@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "Score-Verlauf",
   "auto.features.optimizations.components.overviewtab.template.1": "Die {p1} läuft gerade — du kannst den Fortschritt in Echtzeit verfolgen.",
   "optimization.overview.queued": "Die {p1} wartet auf den Start — der Fortschritt erscheint hier, sobald sie bearbeitet wird.",
+  "optimization.overview.no_score": "Keine Bewertung",
   "auto.features.optimizations.components.overviewtab.template.2": "Die {p1} wurde abgebrochen — dies ist der Zustand zum Zeitpunkt des Abbruchs.",
   "auto.features.optimizations.components.overviewtab.template.3": "Die {p1} ist fehlgeschlagen.",
   "auto.features.optimizations.components.overviewtab.template.4": "Die Ergebnisse und Leistungs-Scores der {p1}.",

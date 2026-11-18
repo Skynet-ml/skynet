@@ -4637,8 +4637,8 @@ def test_a_candidate_that_links_the_calls_folder_cannot_touch_the_metric(tmp_pat
     assert [(result["score"], result["feedback"]) for result in results] == [(0.25, "real metric")] * 2
 
 
-def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
-    """A candidate that raises gets 0 and "Run failed:" feedback; the metric never runs (E38)."""
+def test_a_failed_run_has_no_score_and_skips_the_metric(tmp_path: Path) -> None:
+    """A candidate that raises gets no score and "Run failed:" feedback; the metric never runs (E38, SKY-751)."""
     marker = tmp_path / "metric-ran"
     metric = f"def score(repo_path, case, output):\n    open({str(marker)!r}, 'w').write('x')\n    return 1.0\n"
     scorer = _probed(tmp_path, "src/cand.py:boom", code=metric)
@@ -4646,7 +4646,7 @@ def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert result["feedback"].startswith("Run failed: ")
     assert "candidate broke" in result["feedback"]
     assert len(result["feedback"]) <= 2_000
@@ -4663,7 +4663,7 @@ def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: 
     finally:
         scorer.close()
     feedback = reply["feedback"]
-    assert reply["score"] == 0.0
+    assert reply["score"] is None
     assert feedback.startswith("Run failed: Traceback (most recent call last):")
     assert 'File "src/cand.py"' in feedback
     assert 'raise RuntimeError("candidate broke")' in feedback
@@ -4984,7 +4984,7 @@ def test_a_process_the_entry_left_cannot_forge_the_supervisor_result(tmp_path: P
         result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "the entry crashed" in result["feedback"]
     assert "FORGED" not in result["feedback"]
 
@@ -5038,15 +5038,15 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
         scorer.close()
 
 
-def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
-    """A ``[run]`` timeout scores 0, and the metric that would get the time never runs (SKY-642)."""
+def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
+    """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751)."""
     metric = "def score(repo_path, case, output=None, elapsed_s=None):\n    raise RuntimeError('metric ran')\n"
     scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric, run_timeout=1.0)
     try:
         result = scorer.score("", {"input": 5})
     finally:
         scorer.close()
-    assert result["score"] == 0.0
+    assert result["score"] is None
     assert "timeout after 1 s" in result["feedback"]
 
 

@@ -1029,6 +1029,7 @@
   "auto.features.optimizations.components.overviewtab.4": "Score progression",
   "auto.features.optimizations.components.overviewtab.template.1": "The {p1} is running now — you can track progress in real time.",
   "optimization.overview.queued": "The {p1} is waiting to start — progress appears here once a worker picks it up.",
+  "optimization.overview.no_score": "No score",
   "auto.features.optimizations.components.overviewtab.template.2": "The {p1} was cancelled — this is the state at the moment it was cancelled.",
   "auto.features.optimizations.components.overviewtab.template.3": "The {p1} failed.",
   "auto.features.optimizations.components.overviewtab.template.4": "The {p1} results and performance scores.",

@@ -66,6 +66,25 @@ void describe("finished-run Overview fixtures", () => {
     assert.ok(!render({ ...fixture, scorePoints: [] }).includes("overviewtab.4"));
   });
 
+  void it("says no score, never 0, for a finished version with a failed case", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: null,
+        metric_improvement: null,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD), "score cards");
+    assert.ok(
+      html.includes("optimization.overview.no_score") || html.includes(">No score<"),
+      "no score",
+    );
+    assert.ok(html.includes(">0.78<"), "the scored version");
+  });
+
   void it("formats scores raw", () => {
     const html = render(overviewFixture("oa-gepa"));
     assert.ok(html.includes(">0.42<") && html.includes(">0.78<"), "raw black-box scores");

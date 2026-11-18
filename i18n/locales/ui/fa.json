@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "روند پیشرفت امتیاز",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1} اکنون در حال اجراست — می‌توانید پیشرفت را در زمان واقعی دنبال کنید.",
   "optimization.overview.queued": "{p1} در انتظار شروع است — پیشرفت به‌محض شروع پردازش در اینجا نمایش داده می‌شود.",
+  "optimization.overview.no_score": "بدون امتیاز",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1} لغو شد — این وضعیت در لحظه‌ی لغو است.",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1} ناموفق بود.",
   "auto.features.optimizations.components.overviewtab.template.4": "نتایج {p1} و امتیازهای کارایی.",

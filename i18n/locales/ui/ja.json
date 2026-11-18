@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "スコアの推移",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1}は現在実行中です — 進捗をリアルタイムで追跡できます。",
   "optimization.overview.queued": "{p1}は開始待ちです — 処理が始まると、ここに進捗が表示されます。",
+  "optimization.overview.no_score": "スコアなし",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1}はキャンセルされました — これはキャンセルされた時点の状態です。",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1}は失敗しました。",
   "auto.features.optimizations.components.overviewtab.template.4": "{p1}の結果とパフォーマンススコアです。",

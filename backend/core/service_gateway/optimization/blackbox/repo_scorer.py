@@ -88,7 +88,7 @@ from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .protocol import STATUS_KEY
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY
 from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
@@ -201,10 +201,6 @@ _TARGET_ROLE = "target."
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
 RUN_FAILED = "Run failed: "
-# SKY-221: the side info ``status`` of a case whose entry failed. The final run
-# reads it, not the feedback, because pending rule-judge notes go in front of
-# the feedback.
-RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -464,8 +460,9 @@ class RepoScorer:
                 if ran is not None and ran.get("error"):
                     error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
                     error = error[len(RUN_FAILED) :]
+                    # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
-                        "score": 0.0,
+                        "score": None,
                         "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
                         STATUS_KEY: RUN_FAILED_STATUS,
                     }

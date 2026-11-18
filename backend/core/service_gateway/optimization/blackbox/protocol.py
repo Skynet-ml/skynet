@@ -36,6 +36,10 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
+# SKY-751: the status of a case whose ``[run]`` entry failed (crash, non-zero
+# exit, timeout). The runner never invents a score, so that case has no score
+# too; it keeps its own status so the final run can report the failure text.
+RUN_FAILED_STATUS = "run_failed"
 STATUS_KEY = "status"
 # SKY-367: the pinned upstream engines need a number for every case, and they
 # use negative infinity as their own "no score" value. A single case scored
@@ -442,7 +446,10 @@ class EvalServer:
         # which hands back UNSCORED or a batch-filled number; the status marks
         # it as no score.
         if score is None or is_metric_error(side_info):
-            return None, {**side_info, STATUS_KEY: METRIC_ERROR}
+            # A scorer's own ``run_failed`` status never drops a score; only a
+            # failed [run] entry, which sends no score, keeps it (SKY-751).
+            failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+            return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
         return score, side_info
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
@@ -456,7 +463,8 @@ class EvalServer:
         key = candidate_key(candidate)
         record = self._records.get(key)
         failed = score is None or is_metric_error(side_info)
-        error = str(side_info.get("error") or METRIC_ERROR) if failed else None
+        failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        error = str(side_info.get("error") or (RUN_FAILED_STATUS if failed_run else METRIC_ERROR)) if failed else None
         crashed = failed or "error" in side_info
         # A failed case adds nothing to the total: the version's mean is None.
         value = 0.0 if failed or score is None else float(score)

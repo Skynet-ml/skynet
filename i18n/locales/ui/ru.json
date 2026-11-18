@@ -2350,6 +2350,7 @@
   "auto.features.optimizations.components.overviewtab.4": "Динамика оценки",
   "auto.features.optimizations.components.overviewtab.template.1": "{p1} выполняется сейчас — вы можете отслеживать прогресс в реальном времени.",
   "optimization.overview.queued": "{p1} ожидает запуска — прогресс появится здесь, как только начнётся обработка.",
+  "optimization.overview.no_score": "Нет оценки",
   "auto.features.optimizations.components.overviewtab.template.2": "{p1} была отменена — это состояние на момент отмены.",
   "auto.features.optimizations.components.overviewtab.template.3": "{p1} завершилась сбоем.",
   "auto.features.optimizations.components.overviewtab.template.4": "Результаты {p1} и оценки производительности.",
