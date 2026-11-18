@@ -1493,6 +1493,161 @@ def test_remove_unrecorded_queries_the_keys_in_chunks(engine, objects, store, ma
     assert objects.list(f"{COMPACTED_PREFIX}/") == [recorded]
 
 
+def _orphan_an_old_flush_pack(engine: Engine, objects: FlakyObjectStore, store: StepLogStore) -> tuple[str, str]:
+    """Write one flush pack, take its transaction back out, and file it under a write time far in the past.
+
+    This is the pack of a pod that died after its PUT and came back under a new name.
+
+    Args:
+        engine: The test engine.
+        objects: The test object store.
+        store: The step log of worker ``w1``.
+
+    Returns:
+        The old pack key and the id of its step.
+    """
+    step_id = store.commit(
+        run_id=RUNS[0],
+        agent_id="agent-a",
+        seq=1,
+        kind="model",
+        execution_generation=1,
+        grant_list_id="grants-1",
+        body={"output": "lost"},
+    )
+    store.flush()
+    with Session(engine) as session:
+        written = session.get(AgentStepModel, step_id).pack_key
+        session.execute(delete(AgentStepModel).where(AgentStepModel.pack_key == written))
+        session.execute(delete(StoragePackModel).where(StoragePackModel.pack_key == written))
+        session.commit()
+    old = f"{PACK_PREFIX}/w1/{1:020d}-{uuid.uuid4().hex}.pack"
+    objects.put(old, objects.get(written))
+    objects._path(written).unlink()
+    return old, step_id
+
+
+def test_the_sweep_claims_a_flush_pack_that_recovery_read_before_the_delete(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """Recovery GETs an old pack, the sweep deletes it, then recovery applies: the claim row keeps the apply out."""
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    original_get = objects.get
+    swept: list[int] = []
+
+    def get_then_sweep(key: str, *args: Any, **kwargs: Any) -> bytes:
+        """Read the pack, then run the sweep before recovery applies what it read.
+
+        Args:
+            key: The object key.
+            *args: The other get arguments.
+            **kwargs: The other get keyword arguments.
+
+        Returns:
+            The bytes read before the sweep.
+        """
+        data = original_get(key, *args, **kwargs)
+        if key == old and not swept:
+            swept.append(make_compactor(grace_seconds=0.0).remove_unrecorded())
+        return data
+
+    monkeypatch.setattr(objects, "get", get_then_sweep)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 0
+    finally:
+        recovering.close()
+
+    assert swept == [1]
+    assert objects.list(f"{PACK_PREFIX}/") == []
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+        claim = session.get(StoragePackModel, old)
+        assert (claim.worker_id, claim.byte_size, claim.needs_rewrite) == ("w1", 0, False)
+    # The claim is a retired pack with no row: the removal drops it after the grace time.
+    assert make_compactor(grace_seconds=0.0).remove_retired() == 1
+    assert _pack_rows(engine) == set()
+
+
+def test_recovery_skips_a_flush_pack_that_the_sweep_deleted_after_the_list(
+    engine, objects, store, make_compactor, monkeypatch
+) -> None:
+    """Recovery lists an old pack, the sweep claims and deletes it, then recovery's GET finds nothing and skips it."""
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    original_list = objects.list
+    sweeping: list[bool] = []
+
+    def list_then_sweep(prefix: str) -> list[str]:
+        """List the worker's packs, then run the sweep once before recovery reads them.
+
+        Args:
+            prefix: The key prefix.
+
+        Returns:
+            The keys listed before the sweep.
+        """
+        listed = original_list(prefix)
+        if prefix == f"{PACK_PREFIX}/w1/" and not sweeping:
+            sweeping.append(True)
+            assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 1
+        return listed
+
+    monkeypatch.setattr(objects, "list", list_then_sweep)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 0
+    finally:
+        recovering.close()
+
+    assert original_list(f"{PACK_PREFIX}/") == []
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id) is None
+        assert session.get(StoragePackModel, old).worker_id == "w1"
+
+
+def test_the_sweep_does_not_claim_a_flush_pack_that_recovery_applied_first(
+    engine, objects, store, make_compactor
+) -> None:
+    """Recovery applies the old pack first; the sweep's claim then conflicts, and the pack and its rows stay."""
+    old, step_id = _orphan_an_old_flush_pack(engine, objects, store)
+    recovering = StepLogStore(engine, objects, "w1", flush_window_seconds=60.0)
+    try:
+        assert recovering.recover() == 1
+    finally:
+        recovering.close()
+
+    assert make_compactor(grace_seconds=0.0).remove_unrecorded() == 0
+
+    assert objects.list(f"{PACK_PREFIX}/") == [old]
+    with Session(engine) as session:
+        assert session.get(AgentStepModel, step_id).pack_key == old
+        assert session.get(StoragePackModel, old).byte_size > 0
+
+
+def test_a_pass_sweeps_the_packs_with_no_row_at_most_once_an_interval(engine, objects, make_compactor) -> None:
+    """Two passes inside the sweep interval list the prefixes once; with no interval, each pass sweeps."""
+    for interval, expected in ((3600.0, 1), (0.0, 2)):
+        compactor = make_compactor(sweep_interval_seconds=interval)
+        sweeps: list[int] = []
+
+        def count(sweeps: list[int] = sweeps) -> int:
+            """Count one sweep.
+
+            Args:
+                sweeps: The list that gets one item for each sweep.
+
+            Returns:
+                No pack deleted.
+            """
+            sweeps.append(1)
+            return 0
+
+        compactor.remove_unrecorded = count
+        compactor.run_once()
+        compactor.run_once()
+        assert len(sweeps) == expected
+
+
 def _kill_child(database: str, root: str, marker: str) -> None:
     """Run a merge that hangs inside its commit until the parent kills the process.
 
@@ -1767,3 +1922,24 @@ def test_postgres_a_held_merge_blocks_a_job_delete_but_not_a_job_update(
 
     assert results == [3]
     _assert_all_readable(postgres_store, written)
+
+
+@needs_postgres
+def test_postgres_only_one_replica_sweeps_the_packs_with_no_row(tmp_path, postgres_engine, objects) -> None:
+    """A replica that finds the sweep lock held skips the sweep; once the lock is free, it sweeps."""
+    orphan = f"{PACK_PREFIX}/gone-pod/{1:020d}-a.pack"
+    objects.put(orphan, b"x")
+    compactor = TreeCompactor(postgres_engine, objects, _deleter(tmp_path / "objects", []), grace_seconds=0.0)
+    with postgres_engine.connect() as holder:
+        assert holder.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+        try:
+            assert compactor.remove_unrecorded() == 0
+            assert objects.list(f"{PACK_PREFIX}/") == [orphan]
+        finally:
+            holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": tree_compactor.SWEEP_LOCK_KEY})
+            holder.commit()
+
+    assert compactor.remove_unrecorded() == 1
+    assert objects.list(f"{PACK_PREFIX}/") == []
+    with Session(postgres_engine) as session:
+        assert session.get(StoragePackModel, orphan).worker_id == "gone-pod"

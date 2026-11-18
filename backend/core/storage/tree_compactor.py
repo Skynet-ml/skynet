@@ -29,9 +29,17 @@ The order makes a kill at any point safe:
 Only packs with a ``storage_packs`` row are merged, so a pack that a flush
 wrote but did not apply yet stays for :meth:`StepLogStore.recover`. A flush
 pack that still has no row after ``UNRECORDED_FLUSH_PACK_AGE_SECONDS`` is
-deleted: no worker applies it any more. The new
-packs are outside ``packs/``, where recovery never lists them, and their
-rows commit in the same transaction as the moved rows.
+deleted: no worker applies it any more. The sweep first claims the pack with
+a ``storage_packs`` row of no rows and the pack's worker id, the same insert
+that an apply makes. Only one of the two wins, so recovery never applies a
+pack that the sweep deletes. The claim row is a retired pack, and step 4
+deletes it after the grace time. The new packs are outside ``packs/``, where
+recovery never lists them, and their rows commit in the same transaction as
+the moved rows.
+
+The sweep of the packs with no row lists the whole prefix, so it runs at most
+once each ``SWEEP_INTERVAL_SECONDS`` on a replica, and on PostgreSQL on one
+replica at a time, under an advisory lock that a busy replica skips.
 
 A compacted pack of at most half of ``target_bytes`` is a candidate again, so
 a byte can be copied in more than one pass. This is acceptable: a pass copies
@@ -66,7 +74,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import ColumnElement, Table, Update, and_, case, delete, exists, or_, select, update
+from sqlalchemy import ColumnElement, Table, Update, and_, case, delete, exists, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -118,6 +128,11 @@ INTERVAL_SECONDS = 60.0
 # A pod that comes back under a new name never applies its packs, so without this sweep their bytes,
 # also those of a deleted account, would stay forever (SKY-733).
 UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
+# Each sweep of the packs with no row lists all of packs/ and compacted/; the LIST cost must not grow with
+# the pass interval or the replica count.
+SWEEP_INTERVAL_SECONDS = 3600.0
+# A stable fleet-wide pg_try_advisory_xact_lock key; the 742137000001-8 keys are in use elsewhere.
+SWEEP_LOCK_KEY = 742137000009
 
 # A pack is in use while a row points at it. The step log shards (SKY-731) add their reference here.
 REFERENCED = or_(
@@ -202,6 +217,7 @@ class TreeCompactor:
         grace_seconds: float = GRACE_SECONDS,
         target_bytes: int = TARGET_BYTES,
         interval_seconds: float = INTERVAL_SECONDS,
+        sweep_interval_seconds: float = SWEEP_INTERVAL_SECONDS,
     ) -> None:
         """Bind the compactor.
 
@@ -214,6 +230,7 @@ class TreeCompactor:
             target_bytes: A pack over half of this size is not a merge candidate. A pass skips a
                 candidate that would take the new pack past this size, and goes on to the next one.
             interval_seconds: The wait between two passes of the background thread.
+            sweep_interval_seconds: The least time between two sweeps of the packs with no row.
         """
         self._engine = engine
         self._objects = objects
@@ -222,6 +239,8 @@ class TreeCompactor:
         self._grace_seconds = grace_seconds
         self._target_bytes = target_bytes
         self._interval_seconds = interval_seconds
+        self._sweep_interval_seconds = sweep_interval_seconds
+        self._next_sweep = 0.0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -233,7 +252,11 @@ class TreeCompactor:
         Returns:
             The number of packs merged and the number of packs deleted.
         """
-        removed = self._attempt(self.remove_retired) + self._attempt(self.remove_unrecorded)
+        removed = self._attempt(self.remove_retired)
+        if time.monotonic() >= self._next_sweep:
+            # Set before the sweep, so a failed sweep also waits the interval and does not LIST each pass.
+            self._next_sweep = time.monotonic() + self._sweep_interval_seconds
+            removed += self._attempt(self.remove_unrecorded)
         return self._attempt(self.merge), removed
 
     def _attempt(self, step: Callable[[], int]) -> int:
@@ -561,14 +584,32 @@ class TreeCompactor:
     def remove_unrecorded(self) -> int:
         """Delete the packs with no ``storage_packs`` row that no writer applies any more.
 
+        On PostgreSQL only one replica sweeps at a time: a replica that does not get the advisory lock skips.
+
+        Returns:
+            The number of packs deleted; ``0`` when another replica holds the sweep lock.
+        """
+        if self._engine.dialect.name != "postgresql":
+            return self._sweep_unrecorded()
+        # The transaction-level lock goes with the connection's transaction, also when the sweep raises.
+        with self._engine.connect() as connection, connection.begin():
+            if not connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": SWEEP_LOCK_KEY}):
+                logger.info("Another replica sweeps the tree packs with no row; this pass skips the sweep")
+                return 0
+            return self._sweep_unrecorded()
+
+    def _sweep_unrecorded(self) -> int:
+        """List both pack prefixes and delete the old packs with no row.
+
         A new pack that a pass wrote and did not commit goes once it is older than the grace time. A
-        flush pack goes once it is older than ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
+        flush pack goes once it is older than ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``, and only after this
+        sweep claims it.
 
         Returns:
             The number of packs deleted.
         """
         now_ns = time.time_ns()
-        old: list[str] = []
+        old: dict[str, list[str]] = {}
         for prefix, age_seconds in (
             (COMPACTED_PREFIX, self._grace_seconds),
             (PACK_PREFIX, UNRECORDED_FLUSH_PACK_AGE_SECONDS),
@@ -578,6 +619,7 @@ class TreeCompactor:
             listed = self._objects.list(f"{prefix}/")
             # The key starts with its write time, so a writer that is still before its commit keeps its pack.
             cutoff_ns = now_ns - int(age_seconds * 1e9)
+            old[prefix] = []
             for key in listed:
                 try:
                     written_ns = int(key.rsplit("/", 1)[-1][:20])
@@ -585,26 +627,61 @@ class TreeCompactor:
                     logger.warning("Skipping %s: its key does not start with a write time", key)
                     continue
                 if written_ns < cutoff_ns:
-                    old.append(key)
-        if not old:
+                    old[prefix].append(key)
+        if not old[COMPACTED_PREFIX] and not old[PACK_PREFIX]:
             return 0
         recorded: set[str] = set()
+        claimed: list[str] = []
         with Session(self._engine) as session:
-            for chunk in _chunks(old):
+            for chunk in _chunks(old[COMPACTED_PREFIX]):
                 recorded.update(
                     session.scalars(select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.in_(chunk)))
                 )
+            claimed = self._claim_flush_packs(session, old[PACK_PREFIX])
+            session.commit()
         removed = 0
-        for key in old:
-            if key in recorded:
-                continue
+        for key in [key for key in old[COMPACTED_PREFIX] if key not in recorded] + claimed:
             try:
                 self._delete_object(key)
             except Exception:
+                # A claimed flush pack keeps its claim row, so remove_retired deletes it after the grace time.
                 logger.warning("Could not delete the unrecorded pack %s; a later pass tries again", key, exc_info=True)
                 continue
             removed += 1
         return removed
+
+    def _claim_flush_packs(self, session: Session, keys: list[str]) -> list[str]:
+        """Insert a claim row for each flush pack that has no ``storage_packs`` row yet.
+
+        The claim is the insert that :meth:`StepLogStore._apply` makes, so a recovery that applies the
+        pack and this sweep cannot both win. The row has the pack's worker id, so the worker's next
+        recovery counts the pack as recorded and does not GET it.
+
+        Args:
+            session: The open sweep transaction; the caller commits.
+            keys: The old flush pack keys, ``packs/<worker>/<time>-<id>.pack``.
+
+        Returns:
+            The keys that this sweep claimed; a pack that an apply recorded first is not one of them.
+        """
+        insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
+        now = datetime.now(UTC)
+        claimed: list[str] = []
+        for chunk in _chunks(sorted(keys)):
+            claimed.extend(
+                session.scalars(
+                    insert(StoragePackModel)
+                    .values(
+                        [
+                            {"pack_key": key, "worker_id": key.split("/")[1], "byte_size": 0, "created_at": now}
+                            for key in chunk
+                        ]
+                    )
+                    .on_conflict_do_nothing()
+                    .returning(StoragePackModel.pack_key)
+                )
+            )
+        return sorted(claimed)
 
     def start(self) -> None:
         """Start the background pass loop."""

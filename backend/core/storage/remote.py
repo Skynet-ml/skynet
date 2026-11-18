@@ -71,6 +71,7 @@ from .models import (
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
+from .tree_purge import mark_run_packs
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -1393,6 +1394,9 @@ class RemoteDBJobStore:
             session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
             session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
             self._close_deleted_job_budgets(session, [optimization_id])
+            # The job lock comes where the job delete took it before; the cascade then drops the steps, so
+            # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
+            mark_run_packs(session, [optimization_id])
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
             session.commit()
         finally:
@@ -1508,6 +1512,9 @@ class RemoteDBJobStore:
                 synchronize_session=False
             )
             self._close_deleted_job_budgets(session, optimization_ids)
+            # The job lock comes where the job delete took it before; the cascade then drops the steps, so
+            # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
+            mark_run_packs(session, optimization_ids)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))

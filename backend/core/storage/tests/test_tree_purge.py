@@ -624,6 +624,62 @@ def test_the_purge_locks_the_jobs_then_the_packs_before_it_deletes(engine: Engin
         assert statements[first_pack_lock].endswith("FOR UPDATE")
 
 
+def _record_with_parameters(engine: Engine) -> tuple[list[tuple[str, list[Any]]], Any]:
+    """Record each SQL statement that the engine runs from now on, with its parameter values.
+
+    Args:
+        engine: The test engine.
+
+    Returns:
+        The list that gets each statement, with its whitespace made single, and its parameter values,
+        and a function that stops the recording.
+    """
+    statements: list[tuple[str, list[Any]]] = []
+
+    def record(conn: Any, cursor: Any, statement: str, parameters: Any, *args: Any) -> None:
+        """Record one statement and its parameter values.
+
+        Args:
+            conn: The connection.
+            cursor: The cursor.
+            statement: The SQL text.
+            parameters: The parameters, a tuple or a dict by dialect.
+            *args: The other event arguments.
+        """
+        values = list(parameters.values()) if isinstance(parameters, dict) else list(parameters or ())
+        statements.append((" ".join(statement.split()), values))
+
+    event.listen(engine, "before_cursor_execute", record)
+    return statements, lambda: event.remove(engine, "before_cursor_execute", record)
+
+
+def test_the_pack_lock_takes_each_chunk_in_key_order_for_update(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pack lock sorts the keys over the chunks, and each lock statement orders by key FOR UPDATE."""
+    keys = {f"packs/w1/{index:02d}" for index in range(12)}
+    with Session(engine) as session:
+        for key in keys:
+            session.add(StoragePackModel(pack_key=key, worker_id="w1", byte_size=1))
+        session.commit()
+    monkeypatch.setattr(tree_purge, "CHUNK_SIZE", 5)
+    statements, stop = _record_with_parameters(engine)
+    try:
+        with Session(engine) as session:
+            tree_purge._lock_packs(session, keys)
+            session.rollback()
+    finally:
+        stop()
+    locks = [(sql, values) for sql, values in statements if "FROM storage_packs" in sql]
+
+    assert len(locks) == 3
+    for sql, _ in locks:
+        assert "ORDER BY storage_packs.pack_key" in sql
+        if engine.dialect.name == "postgresql":
+            assert sql.endswith("FOR UPDATE")
+    assert [value for _, values in locks for value in values] == sorted(keys)
+
+
 def _move_to_a_new_pack(engine: Engine, objects: LocalObjectStore, old: str) -> str:
     """Move every row of a pack to a new pack and retire the old one, as a compactor merge commits it.
 
@@ -850,3 +906,93 @@ def test_a_bucket_that_cannot_open_fails_the_purge(
     with pytest.raises(TreePurgeError, match="tree bucket") as error:
         _purge(engine, None)
     assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_the_purge_deletes_rows_with_no_returning_list(engine: Engine, packs: dict[str, str], tmp_path: Path) -> None:
+    """The row deletes return no pack key for each row; the counts come from the row counts."""
+    statements, stop = _record_with_parameters(engine)
+    try:
+        summary = _purge(engine, _deleter(tmp_path / "objects", []))
+    finally:
+        stop()
+
+    assert summary == TreePurgeSummary(deleted_rows=4 + 8 + 1, deleted_packs=1)
+    deletes = [sql for sql, _ in statements if sql.startswith("DELETE")]
+    assert deletes
+    assert not any("RETURNING" in sql for sql in deletes)
+
+
+def test_the_error_names_the_first_keys_and_the_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DeleteObjects response with many Errors names the count and only the first few keys."""
+    failed = [f"packs/w1/{index:02d}" for index in range(12)]
+    response = {"Errors": [{"Key": key, "Code": "InternalError"} for key in reversed(failed)]}
+    client = type("Client", (), {"delete_objects": lambda self, **kwargs: response})()
+    monkeypatch.setattr(settings, "tree_bucket", "trees")
+    monkeypatch.setattr(tree_compactor, "boto3", type("Boto3", (), {"client": staticmethod(lambda name: client)}))
+
+    with pytest.raises(TreePurgeError) as error:
+        tree_purge.bucket_deleter()(failed)
+
+    message = str(error.value)
+    assert "12 tree packs" in message
+    assert ", ".join(failed[: tree_purge.ERROR_KEYS_SHOWN]) in message
+    assert failed[tree_purge.ERROR_KEYS_SHOWN] not in message
+
+
+def test_a_job_delete_marks_the_packs_of_its_steps(engine: Engine, packs: dict[str, str]) -> None:
+    """Marking the packs of one deleted run marks both packs that hold its steps, before the steps go."""
+    with Session(engine) as session:
+        assert _marked(engine) == set()
+        tree_purge.mark_run_packs(session, [ADA_RUNS[0], ADA_RUNS[0], "no-such-job"])
+        session.execute(delete(AgentStepModel).where(AgentStepModel.run_id == ADA_RUNS[0]))
+        session.execute(delete(JobModel).where(JobModel.optimization_id == ADA_RUNS[0]))
+        session.commit()
+
+    assert _marked(engine) == {packs["shared"], packs["ada"]}
+
+
+def test_a_job_delete_rewrites_the_shared_pack_without_the_run(
+    engine: Engine, objects: LocalObjectStore, packs: dict[str, str], tmp_path: Path
+) -> None:
+    """After a run is deleted, the compactor rewrites the shared pack with only the entries that rows still use."""
+    with Session(engine) as session:
+        tree_purge.mark_run_packs(session, [BOB_RUN])
+        session.execute(delete(AgentStepModel).where(AgentStepModel.run_id == BOB_RUN))
+        session.execute(delete(JobModel).where(JobModel.optimization_id == BOB_RUN))
+        session.commit()
+        kept = sum(
+            sum(session.scalars(select(model.pack_length).where(model.pack_key == packs["shared"])))
+            for model in (AgentStepModel, TreeObjectModel)
+        )
+
+    assert _compact(engine, objects, tmp_path / "objects") == 1
+
+    with Session(engine) as session:
+        new = session.scalars(
+            select(StoragePackModel.pack_key).where(StoragePackModel.pack_key.startswith("compacted/"))
+        ).one()
+    # A merged pack is the kept entries back to back, so its size shows that the run's step bytes went.
+    assert len(objects.get(new)) == kept
+    assert objects.list("packs/") == [packs["ada"]]
+
+
+def test_a_job_delete_locks_the_jobs_then_the_packs_in_key_order(engine: Engine, packs: dict[str, str]) -> None:
+    """The mark locks the run's job first, then its packs ordered by key, before it marks any pack."""
+    statements, stop = _record_with_parameters(engine)
+    try:
+        with Session(engine) as session:
+            tree_purge.mark_run_packs(session, ADA_RUNS)
+            session.rollback()
+    finally:
+        stop()
+
+    sqls = [sql for sql, _ in statements]
+    first_job_lock = next(i for i, sql in enumerate(sqls) if "FROM jobs" in sql)
+    pack_lock = next(i for i, sql in enumerate(sqls) if sql.startswith("SELECT storage_packs.pack_key"))
+    mark = next(i for i, sql in enumerate(sqls) if sql.startswith("UPDATE storage_packs"))
+    assert first_job_lock < pack_lock < mark
+    assert "ORDER BY jobs.optimization_id" in sqls[first_job_lock]
+    assert "ORDER BY storage_packs.pack_key" in sqls[pack_lock]
+    if engine.dialect.name == "postgresql":
+        assert sqls[first_job_lock].endswith("FOR UPDATE")
+        assert sqls[pack_lock].endswith("FOR UPDATE")

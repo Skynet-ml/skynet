@@ -36,6 +36,7 @@ from core.billing.budgets import BudgetService
 from core.constants import OPTIMIZATION_TYPE_TAGGING, WORKER_RESTART_CAUSE
 from core.storage.base import JobStore
 from core.storage.models import (
+    AgentStepModel,
     Base,
     BillingCustomerModel,
     ExecutionBudgetModel,
@@ -43,6 +44,7 @@ from core.storage.models import (
     GepaCheckpointModel,
     JobModel,
     OptimizationShareGrantModel,
+    StoragePackModel,
     WalletLedgerModel,
 )
 from core.storage.remote import RemoteDBJobStore
@@ -461,6 +463,50 @@ def test_delete_job_closes_budget_and_keeps_ledger(store: SQLiteJobStore, bulk: 
     snapshot = BudgetService(engine=store.engine).get(budget_id, "payer")
     assert snapshot.reserved_cents == 0
     assert snapshot.job_id is None
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_delete_job_marks_the_packs_of_its_steps_for_rewrite(store: SQLiteJobStore, bulk: bool) -> None:
+    """Deleting a run marks each pack that holds its steps, so the compactor rewrites its bytes away (SKY-733).
+
+    Args:
+        store: Private fixture database.
+        bulk: Whether the job goes through ``delete_jobs`` instead of ``delete_job``.
+    """
+    store.create_job("gone-run")
+    store.create_job("kept-run")
+    with Session(store.engine) as session:
+        for key in ("packs/w1/shared", "packs/w1/kept"):
+            session.add(StoragePackModel(pack_key=key, worker_id="w1", byte_size=10))
+        for step_id, run_id, key in (
+            ("gone-run:a:0", "gone-run", "packs/w1/shared"),
+            ("kept-run:a:0", "kept-run", "packs/w1/shared"),
+            ("kept-run:a:1", "kept-run", "packs/w1/kept"),
+        ):
+            session.add(
+                AgentStepModel(
+                    step_id=step_id,
+                    run_id=run_id,
+                    agent_id="a",
+                    seq=int(step_id[-1]),
+                    kind="model",
+                    execution_generation=1,
+                    grant_list_id="grants-1",
+                    pack_key=key,
+                    pack_offset=0,
+                    pack_length=5,
+                )
+            )
+        session.commit()
+
+    if bulk:
+        store.delete_jobs(["gone-run"])
+    else:
+        store.delete_job("gone-run")
+
+    with Session(store.engine) as session:
+        marked = {key for key, flag in session.query(StoragePackModel.pack_key, StoragePackModel.needs_rewrite) if flag}
+    assert marked == {"packs/w1/shared"}
 
 
 def test_delete_jobs_tolerates_missing_ids(store: SQLiteJobStore) -> None:

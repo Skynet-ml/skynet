@@ -127,8 +127,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
             DomainError: 401 (``accounts.invalid_credentials``) when a local
                 account's confirmation password is missing or does not match.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
-                the tree bucket does not delete the account's packs; nothing
-                is deleted, and a retry can succeed.
+                the tree bucket does not delete the account's packs. The
+                database rows stay, so the account is not deleted. A batch
+                delete can remove some packs before the error; a retry is
+                safe and deletes the rest.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking

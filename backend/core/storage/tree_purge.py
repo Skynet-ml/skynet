@@ -35,6 +35,10 @@ fails the whole account deletion. A rollback after the delete leaves rows
 that point at a deleted pack; the next deletion of the account removes them,
 and S3 does not fail on a key that is already gone.
 
+A run that is deleted before its account goes the same way:
+:func:`mark_run_packs` runs in the job delete's transaction, before the
+cascade deletes the run's steps, and marks every pack that they point at.
+
 The purge is one function so that a later change can add the step log
 shards (SKY-731) in one place.
 """
@@ -57,6 +61,8 @@ CHUNK_SIZE = 200
 S3_DELETE_BATCH = 1000
 # Pack lock rounds before the purge gives up; each extra round needs a merge that commits in between.
 PACK_LOCK_TRIES = 3
+# Pack keys that one error message names; the message gives the full count.
+ERROR_KEYS_SHOWN = 5
 
 
 class TreePurgeError(RuntimeError):
@@ -87,6 +93,35 @@ def _chunks(items: list[str]) -> Iterable[list[str]]:
         The chunks, in order.
     """
     return (items[start : start + CHUNK_SIZE] for start in range(0, len(items), CHUNK_SIZE))
+
+
+def _describe(keys: list[str]) -> str:
+    """Name the count of tree packs and the first few keys, for an error message.
+
+    Args:
+        keys: The pack keys.
+
+    Returns:
+        The text.
+    """
+    more = ", ..." if len(keys) > ERROR_KEYS_SHOWN else ""
+    return f"{len(keys)} tree packs ({', '.join(keys[:ERROR_KEYS_SHOWN])}{more})"
+
+
+def _lock_jobs(session: Session, run_ids: list[str]) -> None:
+    """Lock ``jobs`` rows FOR UPDATE in key order, as :meth:`StepLogStore._apply` does.
+
+    Args:
+        session: The open transaction.
+        run_ids: The job ids, sorted.
+    """
+    for chunk in _chunks(run_ids):
+        session.execute(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(chunk))
+            .order_by(JobModel.optimization_id)
+            .with_for_update()
+        ).all()
 
 
 def _lock_packs(session: Session, keys: set[str]) -> None:
@@ -125,7 +160,7 @@ def _read_pack_keys(session: Session, username: str, run_ids: list[str]) -> set[
     return keys
 
 
-def _lock_account_packs(session: Session, username: str, run_ids: list[str]) -> None:
+def _lock_account_packs(session: Session, username: str, run_ids: list[str]) -> set[str]:
     """Lock every pack that the account's rows point at, in key order, before any delete.
 
     A compactor merge can move rows to a new pack between the key read and the lock. The read after
@@ -137,6 +172,10 @@ def _lock_account_packs(session: Session, username: str, run_ids: list[str]) -> 
         username: The account.
         run_ids: The account's job ids.
 
+    Returns:
+        The keys of the packs that the account's rows point at, all locked. No row moves off them before
+        the commit: a merge needs these locks, and a flush of the account's runs needs the job locks.
+
     Raises:
         TreePurgeError: When the keys still change after ``PACK_LOCK_TRIES`` tries; a retry can succeed.
     """
@@ -147,7 +186,7 @@ def _lock_account_packs(session: Session, username: str, run_ids: list[str]) -> 
         found = _read_pack_keys(session, username, run_ids)
         if found <= keys:
             savepoint.commit()
-            return
+            return found
         savepoint.rollback()
         keys |= found
     raise TreePurgeError("the account's tree packs kept moving during the purge; try again")
@@ -184,7 +223,7 @@ def bucket_deleter() -> Callable[[list[str]], None] | None:
             # DeleteObjects answers 200 also when single keys fail; it lists them in Errors.
             failed = sorted(error.get("Key", "?") for error in response.get("Errors") or [])
             if failed:
-                raise TreePurgeError(f"could not delete the tree packs {', '.join(failed)}")
+                raise TreePurgeError(f"could not delete {_describe(failed)}")
 
     return delete_objects
 
@@ -221,32 +260,27 @@ def purge_user(
     run_ids = sorted(run_ids)
     # The jobs come first, in key order, as in StepLogStore._apply: a flush of these runs waits for the
     # commit and then finds no job, so it writes no row behind the purge.
-    for chunk in _chunks(run_ids):
-        session.execute(
-            select(JobModel.optimization_id)
-            .where(JobModel.optimization_id.in_(chunk))
-            .order_by(JobModel.optimization_id)
-            .with_for_update()
-        ).all()
+    _lock_jobs(session, run_ids)
     # The packs are locked before any row goes, so a compactor merge of them (NOWAIT) gives up and
     # never holds a pack that the purge waits for.
-    _lock_account_packs(session, username, run_ids)
+    pointed = _lock_account_packs(session, username, run_ids)
 
-    returned: set[str] = set()
     deleted_rows = 0
     for chunk in _chunks(run_ids):
-        steps = session.scalars(
-            delete(AgentStepModel).where(AgentStepModel.run_id.in_(chunk)).returning(AgentStepModel.pack_key),
+        deleted_rows += (
+            session.execute(
+                delete(AgentStepModel).where(AgentStepModel.run_id.in_(chunk)),
+                execution_options={"synchronize_session": False},
+            ).rowcount
+            or 0
+        )
+    deleted_rows += (
+        session.execute(
+            delete(TreeObjectModel).where(TreeObjectModel.username == username),
             execution_options={"synchronize_session": False},
-        ).all()
-        returned.update(steps)
-        deleted_rows += len(steps)
-    objects = session.scalars(
-        delete(TreeObjectModel).where(TreeObjectModel.username == username).returning(TreeObjectModel.pack_key),
-        execution_options={"synchronize_session": False},
-    ).all()
-    returned.update(objects)
-    deleted_rows += len(objects)
+        ).rowcount
+        or 0
+    )
     workspaces = session.execute(
         delete(WorkspaceModel).where(WorkspaceModel.username == username),
         execution_options={"synchronize_session": False},
@@ -256,7 +290,7 @@ def purge_user(
     # Only the packs that the deleted rows pointed at: a locked pack that no row points at was
     # retired by a merge, and the compactor deletes it after the grace time.
     unreferenced: list[str] = []
-    for chunk in _chunks(sorted(returned)):
+    for chunk in _chunks(sorted(pointed)):
         unreferenced.extend(
             session.scalars(
                 select(StoragePackModel.pack_key)
@@ -275,7 +309,7 @@ def purge_user(
                 .order_by(StoragePackModel.pack_key)
             )
         )
-    for chunk in _chunks(sorted(returned - set(unreferenced))):
+    for chunk in _chunks(sorted(pointed - set(unreferenced))):
         session.execute(
             update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
             execution_options={"synchronize_session": False},
@@ -293,10 +327,38 @@ def purge_user(
         except TreePurgeError:
             raise
         except Exception as exc:
-            raise TreePurgeError(f"could not delete the tree packs {', '.join(unused)}") from exc
+            raise TreePurgeError(f"could not delete {_describe(unused)}") from exc
         for chunk in _chunks(unused):
             session.execute(
                 delete(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)),
                 execution_options={"synchronize_session": False},
             )
     return TreePurgeSummary(deleted_rows=deleted_rows, deleted_packs=len(unused))
+
+
+def mark_run_packs(session: Session, run_ids: list[str]) -> None:
+    """Mark for rewrite each pack that the steps of runs about to be deleted point at.
+
+    The job delete's cascade removes the steps, but not their bytes in packs that other runs share.
+    The mark makes the compactor rewrite such a pack without them. A pack that only these steps used
+    has no row left after the delete, and the compactor deletes it after the grace time.
+
+    Call this in the job delete's transaction, before the jobs go. The locks follow the purge's
+    order: the jobs, then the packs, each in key order. A flush of these runs waits for the jobs, and a
+    merge that would move their steps gives up on the job lock, so no step moves off a read pack.
+
+    Args:
+        session: The job delete's open session; the caller commits.
+        run_ids: The job ids to be deleted. Duplicates and missing ids are allowed.
+    """
+    run_ids = sorted(set(run_ids))
+    _lock_jobs(session, run_ids)
+    keys: set[str] = set()
+    for chunk in _chunks(run_ids):
+        keys.update(session.scalars(select(AgentStepModel.pack_key).where(AgentStepModel.run_id.in_(chunk)).distinct()))
+    _lock_packs(session, keys)
+    for chunk in _chunks(sorted(keys)):
+        session.execute(
+            update(StoragePackModel).where(StoragePackModel.pack_key.in_(chunk)).values(needs_rewrite=True),
+            execution_options={"synchronize_session": False},
+        )

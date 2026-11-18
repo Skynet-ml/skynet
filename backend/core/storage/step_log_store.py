@@ -632,7 +632,12 @@ class StepLogStore:
             for key in self._objects.list(f"{PACK_PREFIX}/{self._worker_id}/"):
                 if key in recorded:
                     continue
-                pack = self._objects.get(key)
+                try:
+                    pack = self._objects.get(key)
+                except KeyError:
+                    # The compactor's sweep claimed and deleted the pack after the list; its claim row
+                    # also keeps a late apply of the pack out.
+                    continue
                 claimed, _ = self._apply(key, len(pack), _read_manifest(pack))
                 applied += claimed
             return applied
