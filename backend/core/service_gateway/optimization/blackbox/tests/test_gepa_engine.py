@@ -24,7 +24,7 @@ from core.billing.budgets import BudgetService
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
 from core.sandbox.errors import SandboxInfraError
-from core.sandbox.trees import TreeRejectedError
+from core.sandbox.trees import BoxFailureError, GrantDeniedError, TreeRejectedError
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
@@ -724,7 +724,13 @@ def _no_native(*args: Any, **kwargs: Any) -> Result:
 def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(
     monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
 ) -> None:
-    """Run repository GEPA on the loop: no box for a model call or a file, and one step for each reply and command."""
+    """Run repository GEPA on the loop: no box for a model call or a file, and one step for each reply and command.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
 
     result, model, counter, loop = _repo_run(stores, tmp_path / "loop", generation=1)
@@ -746,7 +752,13 @@ def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(
 def test_a_killed_repository_run_resumes_to_the_population_of_a_clean_run(
     monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
 ) -> None:
-    """Kill the worker in the middle of the second proposal, and resume it in the same folder."""
+    """Kill the worker in the middle of the second proposal, and resume it in the same folder.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
     clean_stores = _Stores(tmp_path / "clean")
     try:
@@ -906,7 +918,12 @@ def _file(path: str, text: str = "new\n") -> str:
 def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_box(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Refuse hidden, protected, read-only, outside and invalid paths; then write the valid files over the parent."""
+    """Refuse hidden, protected, read-only, outside and invalid paths; then write the valid files over the parent.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls(
         [
             _file("eval/metric.py"),
@@ -941,7 +958,11 @@ def test_the_proposer_refuses_each_path_rule_and_writes_a_valid_version_with_no_
 def test_the_proposer_lists_and_reads_with_no_box_and_keeps_the_parent_when_turns_run_out(
     tmp_path: Path,
 ) -> None:
-    """List folders and read a file with no box, run one command, and keep the parent with no version."""
+    """List folders and read a file with no box, run one command, and keep the parent with no version.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     replies = ["```ls\n```", "```ls\nsrc\n```", "```ls\nnone\n```", "```read\nanswer.txt\n```", "```sh\nls\n```"]
     calls = _FakeCalls([*replies, "no block"])
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
@@ -960,7 +981,12 @@ def test_the_proposer_lists_and_reads_with_no_box_and_keeps_the_parent_when_turn
 
 
 def test_the_reflection_cost_cap_stops_the_repository_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """GEPA's cost stopper reads the committed cost of the proposer's replies."""
+    """GEPA's cost stopper reads the committed cost of the proposer's replies.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
     monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
     calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)], cents=5)
     server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=200)
@@ -972,7 +998,11 @@ def test_the_reflection_cost_cap_stops_the_repository_run(monkeypatch: pytest.Mo
 
 
 def test_a_loop_stop_in_the_proposer_stops_the_repository_run(tmp_path: Path) -> None:
-    """GEPA logs a proposer error and goes on, so the engine raises the loop's stop after GEPA returns."""
+    """GEPA logs a proposer error and goes on, so the engine raises the loop's stop after GEPA returns.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
 
     def stopped(prompt: Any, tools: Any) -> ModelReply:
         """Stop, as a fenced or closed loop does.
@@ -998,7 +1028,12 @@ def test_a_loop_stop_in_the_proposer_stops_the_repository_run(tmp_path: Path) ->
 def test_a_repository_run_with_no_loop_keeps_the_native_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Until the cutover (SKY-728), a repository run with no loop calls or no seed runs in the native runtime."""
+    """Until the cutover (SKY-728), a repository run with no loop calls or no seed runs in the native runtime.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
     native = Result(best_candidate="patch", best_score=1.0, total_evals=0)
     monkeypatch.setattr(gepa_mod, "run_native_engine", lambda *args: native)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
@@ -1015,7 +1050,12 @@ def test_a_repository_run_with_no_loop_keeps_the_native_runtime(
 def test_the_proposer_refuses_the_exploits_folder_its_parents_and_their_case_variants(
     path: str, tmp_path: Path
 ) -> None:
-    """A file at a parent of the exploits folder would block the hidden suite, so each case variant is refused."""
+    """A file at a parent of the exploits folder would block the hidden suite, so each case variant is refused.
+
+    Args:
+        path: The path the model writes.
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([_file(path)] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
     ctx = calls.ctx(tmp_path, repo_seed=RepoSeed("tree-seed", editable_paths=(".",)))
     proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
@@ -1027,7 +1067,11 @@ def test_the_proposer_refuses_the_exploits_folder_its_parents_and_their_case_var
 
 
 def test_the_proposer_writes_a_path_that_only_starts_like_the_exploits_folder(tmp_path: Path) -> None:
-    """``.optimizer`` and ``.optimize/exploits2`` are neither the exploits folder nor one of its parents."""
+    """``.optimizer`` and ``.optimize/exploits2`` are neither the exploits folder nor one of its parents.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([_file(".optimizer") + "\n" + _file(".optimize/exploits2/a.py")])
     ctx = calls.ctx(tmp_path, repo_seed=RepoSeed("tree-seed", editable_paths=(".",)))
     proposer = gepa_mod._LoopRepoProposer.bind(ctx, Task(""))
@@ -1154,7 +1198,11 @@ def test_a_file_at_a_folder_that_holds_only_hidden_files_writes_as_at_a_missing_
 
 
 def test_a_file_at_a_parent_of_a_protected_or_read_only_path_is_refused(tmp_path: Path) -> None:
-    """A file at ``cfg`` or ``lib`` would replace the protected or read-only path under it."""
+    """A file at ``cfg`` or ``lib`` would replace the protected or read-only path under it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([_file("cfg") + "\n" + _file("lib")] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
     seed = RepoSeed(
         "tree-seed", editable_paths=(".",), constrained_paths=("cfg/rules.toml",), readonly_paths=("lib/sub",)
@@ -1168,7 +1216,11 @@ def test_a_file_at_a_parent_of_a_protected_or_read_only_path_is_refused(tmp_path
 
 
 def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -> None:
-    """The brief lists the visible protected and read-only paths, and leaves out the hidden ones."""
+    """The brief lists the visible protected and read-only paths, and leaves out the hidden ones.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([_file("answer.txt")])
     seed = RepoSeed(
         "tree-seed",
@@ -1188,7 +1240,11 @@ def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -
 
 
 def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
-    """A long file or listing ends with a notice, so the model does not write back a part as the whole file."""
+    """A long file or listing ends with a notice, so the model does not write back a part as the whole file.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls(["```read\nlong.txt\n```", "```ls\n```"] + ["no block"] * (gepa_mod._MAX_TURNS - 2))
     names = [f"f{index:04}" for index in range(1000)]
     ctx = calls.ctx(tmp_path, read_file=lambda tree_id, path: b"x" * 5000, list_files=lambda tree_id, path="": names)
@@ -1202,7 +1258,11 @@ def test_a_cut_read_or_listing_says_it_was_cut(tmp_path: Path) -> None:
 
 
 def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Path) -> None:
-    """On the loop a version is a tree id, so a run with no task seed and no scorer calls left returns the seed tree."""
+    """On the loop a version is a tree id, so a run with no task seed and no scorer calls left returns the seed tree.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ctx = _FakeCalls([]).ctx(tmp_path)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=0)
 
@@ -1214,7 +1274,12 @@ def test_a_repository_run_with_no_evals_left_returns_the_seed_tree(tmp_path: Pat
 def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When GEPA stops with no saved state, a loop run with no task seed returns the run's seed tree."""
+    """When GEPA stops with no saved state, a loop run with no task seed returns the run's seed tree.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
 
     def exhausted(**kwargs: Any) -> None:
         """Stop as the scorer cap does before GEPA saves a state.
@@ -1239,7 +1304,12 @@ def test_a_repository_run_that_gepa_ends_with_no_result_returns_the_seed_tree(
 def test_a_repository_run_starts_from_the_task_seed_when_it_is_a_tree_of_the_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Auto's continuation gives the winner's tree as the task seed, so GEPA starts and falls back there."""
+    """Auto's continuation gives the winner's tree as the task seed, so GEPA starts and falls back there.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+    """
     seeds: list[Any] = []
 
     def exhausted(**kwargs: Any) -> None:
@@ -1265,7 +1335,12 @@ def test_a_repository_run_starts_from_the_task_seed_when_it_is_a_tree_of_the_run
 
 
 def test_the_start_tree_is_the_task_seed_only_when_the_real_loop_can_see_it(stores: _Stores, tmp_path: Path) -> None:
-    """On a real loop, a tree id of the run is the start, empty and ``None`` give the seed tree, and text fails."""
+    """On a real loop, a tree id of the run is the start, empty and ``None`` give the seed tree, and text fails.
+
+    Args:
+        stores: The stores of the run.
+        tmp_path: Pytest's temporary folder.
+    """
     run = stores.user.workspace().start_run(
         _RUN_ID,
         step_log=stores.step_log,
@@ -1315,7 +1390,11 @@ def test_the_start_tree_is_the_task_seed_only_when_the_real_loop_can_see_it(stor
 
 
 def test_a_hidden_path_outside_the_editable_paths_gets_the_answer_of_any_other_path(tmp_path: Path) -> None:
-    """A hidden name and a plain name outside the editable paths get the same answer, so it does not show which is hidden."""
+    """A hidden name and a plain name outside the editable paths get the same answer, so it does not show which is hidden.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([])
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path), Task(""))
     assert proposer is not None
@@ -1330,7 +1409,11 @@ def test_a_hidden_path_outside_the_editable_paths_gets_the_answer_of_any_other_p
 
 
 def test_a_command_whose_output_is_rejected_gets_a_fixed_note_and_the_proposal_goes_on(tmp_path: Path) -> None:
-    """The rejection names the hidden path, so the model gets a fixed note; the next reply still runs."""
+    """The rejection names the hidden path, so the model gets a fixed note; the next reply still runs.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     rejected: list[str] = []
 
     def reject(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
@@ -1368,7 +1451,11 @@ def test_a_command_whose_output_is_rejected_gets_a_fixed_note_and_the_proposal_g
 
 
 def test_a_loop_stop_in_a_proposer_command_ends_the_proposal(tmp_path: Path) -> None:
-    """A loop stop from a command is not a box error, so the proposer keeps it and raises it."""
+    """A loop stop from a command is not a box error, so the proposer keeps it and raises it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
 
     def stopped(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
         """Stop, as a fenced or closed loop does.
@@ -1439,7 +1526,11 @@ def test_a_folder_whose_files_are_all_hidden_looks_missing_on_a_real_loop(stores
 
 
 def test_a_failed_model_call_keeps_the_parent_and_gepa_does_not_pay_for_it_again(tmp_path: Path) -> None:
-    """A failed reply ends only its proposal, so GEPA's batch retry does not call the model for it again."""
+    """A failed reply ends only its proposal, so GEPA's batch retry does not call the model for it again.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)])
     model_calls: list[tuple[int | None, int]] = []
 
@@ -1476,3 +1567,110 @@ def test_a_failed_model_call_keeps_the_parent_and_gepa_does_not_pay_for_it_again
     assert len(briefs) == len(set(briefs)) > 1
     assert calls.writes
     assert result.total_evals == 12
+
+
+def test_a_refused_grant_list_in_a_proposer_command_stops_the_proposal(tmp_path: Path) -> None:
+    """A grant list with no network policy fails each later command too, so the proposer keeps the error and raises it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def denied(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Refuse the grants, as the loop does for a grant list that does not resolve to a network policy.
+
+        Args:
+            tree_id: Not used.
+            command: Not used.
+            grants: Not used.
+
+        Raises:
+            GrantDeniedError: Always.
+        """
+        raise GrantDeniedError("run-1:root:3", "the grant list has no network policy")
+
+    calls = _FakeCalls(["```sh\nls\n```", _file("answer.txt")])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, run_command=denied), Task(""))
+    assert proposer is not None
+
+    with pytest.raises(GrantDeniedError):
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert isinstance(proposer.failure, GrantDeniedError)
+    assert calls.writes == []
+
+
+def test_a_box_failure_in_a_proposer_command_reaches_the_model_and_the_proposal_goes_on(tmp_path: Path) -> None:
+    """A box that failed is the command's own failure, so the model gets a note and its next reply still runs.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def failed(tree_id: str, command: str, grants: tuple[Any, ...]) -> tuple[CommandResult, str]:
+        """Fail the box, as the loop does for a box that died.
+
+        Args:
+            tree_id: Not used.
+            command: Not used.
+            grants: Not used.
+
+        Raises:
+            BoxFailureError: Always.
+        """
+        raise BoxFailureError("run-1:root:3", "the box died")
+
+    calls = _FakeCalls(["```sh\nls\n```", _file("answer.txt")])
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, run_command=failed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-1"}
+    assert calls.prompts[1] == "The command did not run: Step run-1:root:3: the box died"
+    assert proposer.failure is None
+
+
+def test_a_hidden_path_inside_the_editable_paths_gets_the_generic_note_and_no_write(tmp_path: Path) -> None:
+    """When the whole repository is editable, a hidden path gets only the generic note and is not written.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = _FakeCalls([_file("eval/metric.py")] + ["no block"] * (gepa_mod._MAX_TURNS - 1))
+    seed = RepoSeed("tree-seed", editable_paths=(".",), hidden_hashes=hidden_hashes(["eval/metric.py"]))
+    proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
+    assert proposer is not None
+
+    assert proposer({"c": "tree-parent"}, {"c": []}, ["c"]) == {"c": "tree-parent"}
+    assert calls.prompts[1] == "The files break the editing rules: 'eval/metric.py' may not be changed."
+    assert calls.writes == []
+
+
+def test_a_stopped_proposer_raises_the_stop_again_with_no_model_call(tmp_path: Path) -> None:
+    """After a stop, a later proposal raises the kept stop before it calls the model.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    model_calls: list[int] = []
+
+    def stopped(prompt: Any, tools: Any) -> ModelReply:
+        """Stop, as a fenced or closed loop does.
+
+        Args:
+            prompt: Not used.
+            tools: Not used.
+
+        Raises:
+            LoopStoppedError: Always.
+        """
+        model_calls.append(len(prompt))
+        raise LoopStoppedError("Run run-1 is closed.")
+
+    proposer = gepa_mod._LoopRepoProposer.bind(_FakeCalls([]).ctx(tmp_path, call_model=stopped), Task(""))
+    assert proposer is not None
+    with pytest.raises(LoopStoppedError) as first:
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+
+    with pytest.raises(LoopStoppedError) as second:
+        proposer({"c": "tree-parent"}, {"c": []}, ["c"])
+    assert second.value is first.value
+    assert model_calls == [1]
