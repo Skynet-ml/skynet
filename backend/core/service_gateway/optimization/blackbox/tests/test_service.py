@@ -69,29 +69,14 @@ from ..sandbox import LocalSubprocessSession
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
 from .mocks import (
+    AGENT_OUTPUT_SCORER_CODE,
+    VOWEL_SCORER_CODE,
     FakeGateway,
     FakeReflectionLM,
     FakeSandboxRuntime,
     vowel_scorer,
 )
 from .test_repo_scorer import _probed
-
-# The metric answers in the one object form (SKY-769), so these sources stay here
-# and not in the shared mocks.
-VOWEL_SCORER_CODE = """
-def score(candidate, case=None):
-    text = candidate if isinstance(candidate, str) else " ".join(candidate.values())
-    vowels = sum(ch in "aeiou" for ch in text)
-    return {"score": vowels / max(1, len(text)), "feedback": f"{vowels} vowel(s)"}
-"""
-
-# It judges what the agent wrote, which the runner hands over in place of the case.
-AGENT_OUTPUT_SCORER_CODE = """
-def score(candidate, case=None):
-    output = (case or {}).get("output") or ""
-    vowels = sum(ch in "aeiou" for ch in output)
-    return {"score": vowels / max(1, len(output)), "feedback": f"{vowels} vowel(s)"}
-"""
 
 _CASES = [{"target": "aeiou", "i": i} for i in range(10)]
 
