@@ -1,7 +1,7 @@
 """Add the automatic resume count to jobs (SKY-801).
 
 Revision ID: a7c3e5f9b1d4
-Revises: e8b2d4f6a9c1
+Revises: 1c02f9da1d9f
 
 ``jobs.automatic_resumes`` counts only the orphan sweep's requeues, so a
 manual resume no longer uses up the step log run's cap of automatic resumes.
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a7c3e5f9b1d4"
-down_revision: str | Sequence[str] | None = "e8b2d4f6a9c1"
+down_revision: str | Sequence[str] | None = "1c02f9da1d9f"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
