@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
-from core.billing.runtime import UsagePendingError
+from core.billing.runtime import ProviderFailedError, UsagePendingError
 from core.billing.usage_tags import LANE_KEY, current_tags, usage_scope
 from core.models.blackbox import BlackboxStrategy
 from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
@@ -760,6 +760,7 @@ def test_a_negative_model_bound_is_refused(
     "error",
     [
         UsagePendingError("The usage is not settled."),
+        ProviderFailedError("The provider failed the response."),
         UnpricedOperationError("The operation has no price."),
         LeaseExhaustedError("No lease is left."),
         BudgetInsufficientError("The budget has no room."),
@@ -1134,7 +1135,8 @@ def test_auto_composes_its_lanes_on_the_loop_with_one_agent_for_each_lane(
     assert [lane.status for lane in lanes] == ["completed"] * len(lanes)
     assert model.open_boxes == [0] * len(model.prompts)
     assert not +boxes.open
-    lane_agents = [auto.lane_tag("explore", name) for name in AUTO_ENGINES] + [auto.lane_tag("continue", "gepa")]
+    lanes_run = [auto.lane_tag("explore", name) for name in AUTO_ENGINES] + [auto.lane_tag("continue", "gepa")]
+    lane_agents = [f"{ROOT_AGENT_ID}/{lane}" for lane in lanes_run]
     for agent_id in lane_agents:
         steps = _steps(engine, agent_id)
         # The first command step is the lane's committed budget room read.
@@ -2541,10 +2543,49 @@ def test_an_engine_that_ends_before_its_replay_is_over_diverges_at_finish(
     assert loop.model("improve seed") == "seedx"
     with pytest.raises(StepDivergedError) as diverged:
         loop.finish()
-    assert "'lane-a'" in str(diverged.value)
+    assert f"'{ROOT_AGENT_ID}/lane-a'" in str(diverged.value)
     assert f"'{ROOT_AGENT_ID}'" in str(diverged.value)
     with pytest.raises(StepDivergedError):
         loop.model("improve seedx")
+    assert model.prompts == []
+
+
+def test_finish_does_not_count_the_runs_generation_commits(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The run's own generation commits are no agent of the loop, so a run that ends a generation still finishes."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    loop.model("improve seed")
+    step_id = loop._run.end_generation(["seedx"], "seedx")
+    step_log.durable(step_id, 1)
+
+    loop.finish()
+    assert loop.model("improve seedx") == "seedxx"
+
+
+def test_finish_does_not_count_a_harness_capture_of_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A harness capture commits to the run's step log under its own agent, which the loop does not replay."""
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    first.model("improve seed")
+    capture = step_log.commit(
+        run_id=RUN_ID,
+        agent_id="harness",
+        seq=0,
+        kind="command",
+        execution_generation=1,
+        grant_list_id="grants-1",
+        body={"source": "exec", "command": "true"},
+        tree_id=trees.put_tree(RUN_ID, []),
+    )
+    step_log.durable(capture, 1)
+    first.finish()
+
+    _new_generation(engine)
+    loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert loop.model("improve seed") == "seedx"
+    loop.finish()
     assert model.prompts == []
 
 

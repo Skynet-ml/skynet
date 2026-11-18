@@ -19,10 +19,15 @@ on its command and its grant list, and a score step on its command, its
 outputs tree and its grant list. The tree sandbox writes those step bodies,
 and they do not record a run step's input tree or a score step's metric tree.
 So a replay cannot see an engine that sends the same command over another
-input tree, or that scores the same outputs with another metric tree. The
-host calls :meth:`EngineLoop.finish` when the engine returns or raises: an
-engine that ends before it replays every committed step raises
-:class:`StepDivergedError` there.
+input tree, or that scores the same outputs with another metric tree.
+
+A host that runs an engine on the loop must follow this contract. It calls
+:meth:`EngineLoop.finish` when the engine returns or raises: an engine that
+ends before it replays every committed step raises
+:class:`StepDivergedError` there. Its model client bills no call itself, and
+raises :class:`ModelCallBilledError` for a provider failure that the provider
+billed (see the ``model`` argument of :class:`EngineLoop`). No host calls the
+loop yet: SKY-728 (remove the one-box run path) connects it.
 
 A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
@@ -84,9 +89,11 @@ seed tree without its hidden paths. The raw seed tree id is a hash of the
 hidden content too, so the engine never gets it.
 
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
-into the threads that it starts, so the tag names the agent. Calls outside a
-lane go to the root agent. The steps of one agent run one at a time, in the
-order of its log.
+into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
+Calls outside a lane go to the root agent, ``loop``. Other writers of the run's
+step log, such as :meth:`Run.end_generation` and a harness capture, commit
+under other agent ids, and :meth:`EngineLoop.finish` checks only the loop's.
+The steps of one agent run one at a time, in the order of its log.
 """
 
 from __future__ import annotations
@@ -146,6 +153,9 @@ from .actors import Agent, LeaseExhaustedError, Run, StepResult
 from .step_recovery import last_committed_step, still_owns_run
 
 ROOT_AGENT_ID = "loop"
+# The run's step log has other writers (Run.end_generation, a harness capture). The loop's agent ids are the
+# only durable record of which agents the loop owns, so finish() can check them on a resume that never opens one.
+_LANE_AGENT_PREFIX = f"{ROOT_AGENT_ID}/"
 # Linux follows at most 40 symlinks in one path lookup (MAXSYMLINKS), so a longer chain fails in a box too.
 _MAX_LINK_HOPS = 40
 # Links can reach a path count that grows fast with their nesting, so a tree that reaches more stops the loop.
@@ -218,6 +228,18 @@ class ModelCallBilledError(RuntimeError):
         self.cost_cents = Decimal(str(cost_cents))
 
 
+def _loop_agent(agent_id: str) -> bool:
+    """Return whether an agent id is one that the loop gives to its root agent or a lane.
+
+    Args:
+        agent_id: A committed agent id of the run.
+
+    Returns:
+        Whether the loop owns the agent.
+    """
+    return agent_id == ROOT_AGENT_ID or agent_id.startswith(_LANE_AGENT_PREFIX)
+
+
 def _reply(record: dict[str, Any]) -> ModelReply:
     """Return the reply that a committed model step holds.
 
@@ -281,9 +303,14 @@ class EngineLoop:
             candidates: Gives the boxes that run candidate commands.
             metrics: Opens a new metric box for each score, so no score runs in a box that another step used.
             model: Calls the model with a prompt and the tool definitions (``None`` for no tools), and returns its
-                reply with the cost in cents. A failed call that the provider billed raises
-                :class:`ModelCallBilledError` with the cost; a failed call whose bill is not known yet raises
-                :class:`UsagePendingError`, which stops the loop.
+                reply with the provider's cost in cents. The agent's lease is the one ledger path of a model call:
+                the loop settles the reply's cost there. So the client must not reserve or settle the call on the
+                budget itself, for example through :class:`BudgetRuntime`, or the call is billed twice. A failed
+                call that the provider billed raises :class:`ModelCallBilledError` with the cost. When the client
+                cannot know the bill of a failed call, it raises :class:`ModelCallBilledError` with
+                ``model_max_cents``, the most that the call can cost. Every other error is a failed call with no
+                cost. A :class:`UsagePendingError` (also a :class:`ProviderFailedError`) can come only from a
+                client that bills through the budget runtime, so it stops the loop and the lease bills nothing.
             model_max_cents: The most that one model call can cost; at most one lease.
             run_dir: The loop's local folder.
             registry: The capability registry that the grant lists resolve against.
@@ -421,7 +448,8 @@ class EngineLoop:
         Raises:
             LoopStoppedError: The kept stop, with its own type, when the loop stopped or was closed; or a new one
                 when the committed agents cannot be read.
-            StepDivergedError: When an agent with committed steps did not replay all of them; the loop keeps it.
+            StepDivergedError: When an agent of the loop with committed steps did not replay all of them; the loop
+                keeps it. Steps of other agents of the run, such as :meth:`Run.end_generation`, do not count.
         """
         with self._stops():
             try:
@@ -437,8 +465,10 @@ class EngineLoop:
                 ) from error
             with self._lock:
                 logs = dict(self._logs)
+            # Only the loop's own agents replay; the run's generations and a harness capture commit under others.
+            owned = {agent_id for agent_id in committed if _loop_agent(agent_id)}
             # An agent that never opened in this loop replayed none of its committed steps.
-            left = sorted(agent_id for agent_id in committed if agent_id not in logs or logs[agent_id].replay)
+            left = sorted(agent_id for agent_id in owned if agent_id not in logs or logs[agent_id].replay)
             if left:
                 raise StepDivergedError(f"The engine ended before it replayed every committed step of agents {left}.")
 
@@ -502,10 +532,10 @@ class EngineLoop:
                     """
                     try:
                         reply = self._model(prompt, tools)
-                    # A failure whose bill is not confirmed yet comes as UsagePendingError, as the billing runtime
-                    # raises it (core/billing/runtime.py). It is a stop and commits nothing, so the runtime keeps
-                    # the call's coverage until usage reconciliation settles it. A cost of 0 here would settle the
-                    # step as free.
+                    # Only a client that bills through the budget runtime raises UsagePendingError, and so
+                    # ProviderFailedError (core/billing/runtime.py). That breaks the one-ledger contract of
+                    # ``model``, so the loop stops: the runtime's held coverage stays the only bill of the call, and
+                    # the lease bills it nothing.
                     except _STOP_ERRORS:
                         raise
                     except Exception as error:
@@ -1255,7 +1285,8 @@ class EngineLoop:
             LoopStoppedError: When the agent's committed log has a gap, the run is closed, or the step log read
                 fails.
         """
-        agent_id = current_tags().get(LANE_KEY) or ROOT_AGENT_ID
+        lane = current_tags().get(LANE_KEY)
+        agent_id = f"{_LANE_AGENT_PREFIX}{lane}" if lane else ROOT_AGENT_ID
         with self._lock:
             log = self._logs.get(agent_id)
             if log is not None:

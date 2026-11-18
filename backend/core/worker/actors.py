@@ -753,7 +753,9 @@ class Agent:
         Raises:
             ValueError: The agent's next seq is past ``SEQ_MAX``; the work did not start.
         """
-        # The same lock as ``step``, so the two paths cannot take one seq, and the seq check comes before the work.
+        # The same lock as ``step``, so the seq check comes before the work. A successful box step of the engine loop
+        # commits through the tree sandbox and moves ``next_seq`` outside this lock; the loop's lock for each agent
+        # keeps the agent's seqs unique.
         with self._lock:
             _check_count("next_seq", self.next_seq, SEQ_MAX)
             body, tree_id = work()
