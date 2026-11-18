@@ -1112,7 +1112,7 @@ def test_a_closed_reply_stream_stops_the_run() -> None:
 def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_filed() -> None:
     """Start upstream's next proposal only once no job, completed-job work or side effect is in flight."""
     order: list[str] = []
-    runner = SimpleNamespace(running_jobs=["job"], pending=1, side_effects=True)
+    runner = SimpleNamespace(running_jobs=["job"], failed_jobs_for_retry={}, pending=1, side_effects=True)
 
     async def propose(generation: int, task_id: str) -> str:
         """Record the proposal.
@@ -1152,6 +1152,45 @@ def test_the_gate_holds_a_proposal_until_the_previous_version_is_scored_and_file
 
     assert asyncio.run(scenario()) == "task-1"
     assert order == ["job done", "filing done", "side effects done", "propose 1"]
+
+
+def test_the_gate_holds_a_proposal_while_a_database_retry_is_queued() -> None:
+    """Start upstream's next proposal only once its retry queue of failed database writes is empty."""
+    order: list[str] = []
+    runner = SimpleNamespace(running_jobs=[], failed_jobs_for_retry={"job-1": object()})
+
+    async def propose(generation: int, task_id: str) -> str:
+        """Record the proposal.
+
+        Args:
+            generation: Upstream's generation number.
+            task_id: Upstream's task id.
+
+        Returns:
+            The task id.
+        """
+        order.append(f"propose {generation}")
+        return task_id
+
+    runner._generate_proposal_async = propose
+    runner._get_completed_job_work_count = lambda: 0
+    runner._has_background_side_effect_work = lambda: False
+    shinka_runner.install_sequential_gate(runner)
+
+    async def scenario() -> str:
+        """Finish the retry while the proposal waits.
+
+        Returns:
+            The proposal's result.
+        """
+        proposal = asyncio.create_task(runner._generate_proposal_async(2, "task-2"))
+        await asyncio.sleep(0.12)
+        order.append("retry done")
+        runner.failed_jobs_for_retry.clear()
+        return await proposal
+
+    assert asyncio.run(scenario()) == "task-2"
+    assert order == ["retry done", "propose 2"]
 
 
 def test_seeding_makes_upstream_draws_and_program_ids_repeat(monkeypatch: pytest.MonkeyPatch) -> None:

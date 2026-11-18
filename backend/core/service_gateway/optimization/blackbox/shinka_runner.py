@@ -963,11 +963,13 @@ def install_worker_models(mailbox: EvaluatorMailbox) -> None:
 
 
 def install_sequential_gate(runner: Any) -> None:
-    """Start each proposal only once no evaluation or completed-job work is in flight.
+    """Start each proposal only once no evaluation, completed-job work or database retry is in flight.
 
     A resumed run replays its steps in order, so the order of model calls and
     evaluations must not depend on thread timing: with one proposal and one
     evaluation job at a time, this gate makes the run strictly sequential.
+    Upstream's monitor loop retries a failed database write on its own, and
+    that retry draws program ids, so a proposal must not overlap it.
 
     Args:
         runner: Upstream's ``ShinkaEvolveRunner``.
@@ -986,7 +988,10 @@ def install_sequential_gate(runner: Any) -> None:
         """
         # Upstream signals no event when its jobs finish, so the gate polls.
         while (  # noqa: ASYNC110
-            runner.running_jobs or runner._get_completed_job_work_count() or runner._has_background_side_effect_work()
+            runner.running_jobs
+            or runner.failed_jobs_for_retry
+            or runner._get_completed_job_work_count()
+            or runner._has_background_side_effect_work()
         ):
             await asyncio.sleep(0.05)
         return await original(generation, task_id)
@@ -1083,7 +1088,8 @@ def refuse_unsafe_patch(patch: Any) -> None:
     if not isinstance(patch, str) or not patch.strip():
         return
     text = patch.replace("\r\n", "\n").replace("\r", "\n")
-    # Git's own reading of the patch, raw line endings included.
+    # Git's own reading of the patch, raw line endings included. The image's
+    # base layer installs git (backend/Dockerfile), and a missing git raises here.
     summary = subprocess.run(
         ["git", "apply", "--summary", "-"], input=patch, capture_output=True, text=True, check=False
     ).stdout
