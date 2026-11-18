@@ -19,7 +19,7 @@ El archivo `optimize.toml` del repositorio debe tener una sección `[run]` o una
 - Una entrada de función, por ejemplo `entry = "serve.py:serve"`, recibe `case["input"]` como argumento. `output` es su valor devuelto.
 - Una entrada de comando, por ejemplo `entry = ["python", "-m", "pytest", "-q"]`, recibe la entrada como JSON en stdin. `output` es `{"exit_code": ..., "stdout": "..."}`.
 
-El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica. El evaluador no puede importar ni ejecutar el código de la versión. Ve la versión solo a través de `output`. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica. El evaluador no puede importar ni ejecutar el código de la versión. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
 
 ## El valor devuelto
 

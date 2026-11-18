@@ -19,7 +19,7 @@ The `optimize.toml` file of the repository must have a `[run]` section or a `[ta
 - A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
 - A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
 
-The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`. Read [How optimization works](/docs/concepts/optimization).
+The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from skynet import call`. Read [How optimization works](/docs/concepts/optimization).
 
 ## The return value
 

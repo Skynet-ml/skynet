@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Le dépôt contient à sa racine un fichier `serve.py` avec `def serve(input)`. L'entrée `[run]` l'appelle dans sa propre boîte de sandbox. Skynet l'utilise pour servir la meilleure version après l'exécution.
 
-L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte ne contient aucun fichier du dépôt ni aucun code de la version, donc l'évaluateur ne peut pas importer `serve.py`. Il voit la version seulement à travers `output`. Sans entrée `[run]` ni étape `[target.<name>]`, Skynet refuse le fichier `optimize.toml`.
+L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte ne contient aucun fichier du dépôt ni aucun code de la version, donc l'évaluateur ne peut pas importer `serve.py`. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from skynet import call`. Sans entrée `[run]` ni étape `[target.<name>]`, Skynet refuse le fichier `optimize.toml`.
 
 > [!NOTE]
 > L'agent de code qui rédige les versions ne peut voir ni le source de l'évaluateur, ni les valeurs attendues, ni les secrets de l'exécution.

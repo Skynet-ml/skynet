@@ -58,10 +58,12 @@ change their plan. Then call `next_tool`.
    Skip this step when the scorer needs no cases.
 5. **Set the scorer.** Write Python that defines
    `score(repo_path, case, output=None)`. `output` is what the `[run]` entry
-   of the repository's `optimize.toml` (or a `[target.<name>]` stage)
-   returned for the case. The scorer runs in its own box with no repository
-   files, so it reads `output` and never imports the repository's code.
-   With no cases, the entry runs once with no input. Return `(score, "<short feedback>")` or
+   of the repository's `optimize.toml` returned for the case. With
+   `[target.<name>]` stages, the scorer calls each stage with
+   `call("<name>", input)`, imported by `from skynet import call, StageError`.
+   The scorer runs in its own box with no repository files, so it never
+   imports the repository's code. With no cases, the entry runs once with no
+   input. Return `(score, "<short feedback>")` or
    `{"score": <number>, "feedback": "<short text>"}`. Higher is better.
    Skynet refuses a bare number, because the engines learn from the
    feedback. Call `repo_draft_set_scorer` with the code as `metric_code`.

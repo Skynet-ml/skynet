@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 The repository has a `serve.py` file at its root with `def serve(input)`. The `[run]` entry calls it in its own sandbox box. Skynet uses it to serve the best version after the run.
 
-The scorer runs in a separate sandbox box. That box holds no repository files and no version code, so the scorer cannot import `serve.py`. It sees the version only through `output`. Without a `[run]` entry or a `[target.<name>]` stage, Skynet refuses the `optimize.toml` file.
+The scorer runs in a separate sandbox box. That box holds no repository files and no version code, so the scorer cannot import `serve.py`. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from skynet import call`. Without a `[run]` entry or a `[target.<name>]` stage, Skynet refuses the `optimize.toml` file.
 
 > [!NOTE]
 > The coding agent that writes versions cannot see the scorer source, the expected values or the run secrets.

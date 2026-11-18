@@ -19,7 +19,7 @@ def score(repo_path, case, output=None):
 - 함수 엔트리(예: `entry = "serve.py:serve"`)는 `case["input"]`를 인수로 받습니다. `output`은 그 반환값입니다.
 - 명령 엔트리(예: `entry = ["python", "-m", "pytest", "-q"]`)는 입력을 stdin의 JSON으로 받습니다. `output`은 `{"exit_code": ..., "stdout": "..."}`입니다.
 
-채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만 버전을 봅니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
 
 ## 반환값
 

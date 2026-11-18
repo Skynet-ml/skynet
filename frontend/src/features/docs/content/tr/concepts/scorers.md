@@ -19,7 +19,7 @@ Deponun `optimize.toml` dosyasında bir `[run]` bölümü veya bir `[target.<nam
 - Bir fonksiyon giriş noktası, örneğin `entry = "serve.py:serve"`, `case["input"]` değerini argüman olarak alır. `output`, onun döndürdüğü değerdir.
 - Bir komut giriş noktası, örneğin `entry = ["python", "-m", "pytest", "-q"]`, girdiyi stdin üzerinden JSON olarak alır. `output`, `{"exit_code": ..., "stdout": "..."}` değeridir.
 
-Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden görür. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
 ## Dönüş değeri
 

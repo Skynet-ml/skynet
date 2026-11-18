@@ -19,7 +19,7 @@ Il file `optimize.toml` del repository deve avere una sezione `[run]` o una fase
 - Una voce di funzione, per esempio `entry = "serve.py:serve"`, riceve `case["input"]` come argomento. `output` è il suo valore restituito.
 - Una voce di comando, per esempio `entry = ["python", "-m", "pytest", "-q"]`, riceve l'input come JSON su stdin. `output` è `{"exit_code": ..., "stdout": "..."}`.
 
-Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica. Lo scorer non può importare né eseguire il codice della versione. Vede la versione solo attraverso `output`. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica. Lo scorer non può importare né eseguire il codice della versione. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from skynet import call`. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
 
 ## Il valore restituito
 
