@@ -75,6 +75,13 @@ def test_success_with_no_final_score_marks_no_score(sent: _Recorder) -> None:
     assert sent.calls[0]["facts"] == {"score": None, "no_score": True, "duration": 125}
 
 
+def test_a_stopped_run_with_no_final_score_is_not_marked_no_score(sent: _Recorder) -> None:
+    """A stopped run may never measure its final version, so it does not say "no score" (SKY-751)."""
+    notify_job_completed("run1", "alice", "stopped", baseline_score=None, optimized_score=None)
+
+    assert sent.calls[0]["facts"] == {"score": None, "duration": 125}
+
+
 def test_failed_emits_failed_with_a_truncated_error(sent: _Recorder) -> None:
     """A failed run emits ``failed`` carrying the error as its detail."""
     notify_job_completed("run1", "alice", "failed", message="x" * 400)

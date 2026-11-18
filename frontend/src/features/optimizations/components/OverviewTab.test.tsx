@@ -82,6 +82,34 @@ void describe("finished-run Overview fixtures", () => {
     assert.ok(html.includes(">0.78<"), "the scored version");
   });
 
+  void it("says no score on both cards when a successful run scored neither version", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      blackbox_result: {
+        ...fixture.job.blackbox_result!,
+        baseline_score: null,
+        best_score: null,
+        metric_improvement: null,
+      },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD) && html.includes(OPTIMIZED_CARD), "score cards");
+    assert.equal(html.split("optimization.overview.no_score").length - 1, 2, "no score twice");
+  });
+
+  void it("never says no score for a stopped run that missed its final score", () => {
+    const fixture = overviewFixture("oa-gepa");
+    const job = {
+      ...fixture.job,
+      status: "stopped" as const,
+      blackbox_result: { ...fixture.job.blackbox_result!, best_score: null, metric_improvement: null },
+    };
+    const html = render({ ...fixture, job });
+    assert.ok(html.includes(BASELINE_CARD), "score cards");
+    assert.ok(!html.includes("optimization.overview.no_score"), "no 'no score' label");
+  });
+
   void it("formats scores raw", () => {
     const html = render(overviewFixture("oa-gepa"));
     assert.ok(html.includes(">0.42<") && html.includes(">0.78<"), "raw black-box scores");

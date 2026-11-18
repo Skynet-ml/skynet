@@ -146,11 +146,15 @@ function OverviewTabImpl({
     baseline != null && optimized != null ? (improvement ?? optimized - baseline) : undefined;
   // SKY-751: a finished version with a failed case has no score; it says so, never 0.
   // A run with no starting point measures no baseline, so it shows no cards.
+  // Only a successful run had its final run, so only there a missing score
+  // means "no score"; a stopped or failed run never measured it.
   const runFinished = bbResult?.seed_candidate != null && !stagesActive;
+  const runSucceeded = job.status === "success" && bbResult?.seed_candidate != null;
   const showScore = (score: number | null | undefined) =>
-    score == null && runFinished ? msg("optimization.overview.no_score") : fmtScore(score);
+    score == null && runSucceeded ? msg("optimization.overview.no_score") : fmtScore(score);
   const showScoreCards =
     scoresReady ||
+    runSucceeded ||
     (runFinished && (baseline != null || optimized != null)) ||
     ((stagesActive || job.status === "stopped") && baseline != null);
 
