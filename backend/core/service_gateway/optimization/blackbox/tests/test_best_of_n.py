@@ -359,6 +359,48 @@ def _context(loop: EngineLoop, repo_tree: str) -> EngineContext:
     )
 
 
+def _store(trees: TreeStore, files: dict[str, bytes]) -> str:
+    """Store files as a tree straight in the tree store, as the caller of a loop stores a seed.
+
+    ``put_files`` refuses a hidden path, so a seed that holds one is written here.
+
+    Args:
+        trees: The tree store.
+        files: The file bytes by ``/``-separated path.
+
+    Returns:
+        The tree id.
+    """
+    root: dict[str, Any] = {}
+    for path, data in files.items():
+        *folders, name = path.split("/")
+        level = root
+        for folder in folders:
+            level = level.setdefault(folder, {})
+        level[name] = data
+
+    def put(level: dict[str, Any]) -> str:
+        """Store one folder and the folders below it.
+
+        Args:
+            level: The folder's entries by name: a nested folder, or the file bytes.
+
+        Returns:
+            The folder's tree id.
+        """
+        return trees.put_tree(
+            RUN_ID,
+            [
+                TreeEntry(name, "tree", put(value))
+                if isinstance(value, dict)
+                else TreeEntry(name, "file", trees.put_blob(RUN_ID, value))
+                for name, value in level.items()
+            ],
+        )
+
+    return put(root)
+
+
 def _steps(engine: Engine, agent_id: str = ROOT_AGENT_ID) -> list[tuple[str, int]]:
     """Return an agent's committed steps.
 
@@ -476,7 +518,15 @@ def test_a_repository_sample_prompt_shows_the_editable_files_and_never_a_hidden_
 def test_a_best_of_n_lane_commits_its_model_steps_to_its_own_agent(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Upstream calls the model on a loopback server thread; the step still goes to the lane's agent."""
+    """Upstream calls the model on a loopback server thread; the step still goes to the lane's agent.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
     repo_tree, metric_tree = _repo(trees), _tree(trees, "metric.txt", "len")
     loop, model, _ = _loop(owner, engine, step_log, trees, tmp_path, ["```\naa\n```"], generation=1)
 
@@ -488,7 +538,7 @@ def test_a_best_of_n_lane_commits_its_model_steps_to_its_own_agent(
         )
 
     assert model.calls == 1
-    assert [kind for kind, _ in _steps(engine, "explore-best_of_n")] == _SAMPLE
+    assert [kind for kind, _ in _steps(engine, f"{ROOT_AGENT_ID}/explore-best_of_n")] == _SAMPLE
     assert _steps(engine) == []
 
 
@@ -532,15 +582,17 @@ def brief(
             The brief text.
         """
         loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [], generation=1, hidden=hidden)
-        seed = RepoSeed(
-            loop.put_files(files),
-            editable_paths=editable,
-            readonly_paths=readonly,
-            constrained_paths=constrained,
-            hidden_hashes=hidden_hashes(hidden),
+        ctx = loop.context(
+            repo_seed=RepoSeed(
+                _store(trees, files),
+                editable_paths=editable,
+                readonly_paths=readonly,
+                constrained_paths=constrained,
+                hidden_hashes=hidden_hashes(hidden),
+            )
         )
-        ctx = loop.context(repo_seed=seed)
-        read_file, list_files = ctx.read_file, ctx.list_files
+        seed, read_file, list_files = ctx.repo_seed, ctx.read_file, ctx.list_files
+        assert seed is not None
         assert read_file is not None
         assert list_files is not None
 
