@@ -167,6 +167,32 @@ def test_meta_harness_benchmarks_seed_then_proposed_candidates(
     assert (logs / "claude_sessions" / "iter1_stdout.json").read_text().startswith('{"type": "result"')
 
 
+@pytest.mark.parametrize("repo", [None, {"editable_paths": ["src"], "readonly_paths": []}], ids=["text", "repo-patch"])
+def test_meta_harness_refuses_a_candidate_file_over_its_byte_cap(
+    repo: dict[str, Any] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A candidate file over ``MAX_CANDIDATE_BYTES`` is too large; a file at the cap passes the size check.
+
+    Args:
+        repo: The repository settings; ``None`` for a text run.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+    """
+    monkeypatch.setattr(native_engines, "MAX_CANDIDATE_BYTES", 10)
+    config = _config("meta_harness") if repo is None else _config("meta_harness", repo=repo)
+    config.run_dir = str(tmp_path / "run")
+    engine = native_engines.MetaHarnessEngine(config)
+    agents = engine.work_dir / "agents"
+    agents.mkdir(parents=True)
+    (agents / f"big{engine.suffix}").write_text("x" * 11)
+    (agents / f"fits{engine.suffix}").write_text("x" * 10)
+
+    assert engine._validate({"name": "big", "file": f"agents/big{engine.suffix}"}) == native_engines.CANDIDATE_TOO_LARGE
+    assert engine._validate({"name": "fits", "file": f"agents/fits{engine.suffix}"}) != (
+        native_engines.CANDIDATE_TOO_LARGE
+    )
+
+
 def test_autoresearch_runs_directed_rounds_on_engine_recorded_evidence(
     tmp_path: Path, fake_home: Path, server: EvalServer
 ) -> None:
