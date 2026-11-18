@@ -935,6 +935,41 @@ def test_a_repository_brief_reads_no_file_past_its_read_cap(
     assert text.endswith("\n1 more files are not shown.")
 
 
+def test_a_repository_brief_skips_an_editable_path_that_is_not_in_the_seed_and_shows_the_next_file(
+    brief: Callable[..., str],
+) -> None:
+    """An editable path the seed does not hold (a file to create) adds nothing, and the next file still shows.
+
+    Args:
+        brief: Builds the brief for a seed.
+    """
+    text = brief({"src/app.py": b"APP-SOURCE"}, ("new.py", "src/app.py"))
+
+    assert "Current content of `src/app.py`:\n```\nAPP-SOURCE\n```" in text
+    assert "more files are not shown" not in text
+
+
+def test_a_repository_brief_reads_no_file_when_its_notice_and_line_break_pass_the_room_by_one_byte(
+    brief: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A room that holds the file's notice but not its line break reads no file and gives the count line.
+
+    Args:
+        brief: Builds the brief for a seed.
+        monkeypatch: Pytest's monkeypatch, to lower the brief's byte cap.
+    """
+    notice = best_of_n._not_text("a.txt")
+    # The rules and the closing count line come out of the cap, so the room left is the notice's size exactly.
+    cap = len(brief({}, ("a.txt",))) + len("\n1 more files are not shown.") + len(notice)
+    monkeypatch.setattr(best_of_n, "_BRIEF_MAX_BYTES", cap)
+    reads: list[str] = []
+
+    text = brief({"a.txt": b"ok"}, ("a.txt",), reads=reads)
+
+    assert reads == []
+    assert text.endswith("\n1 more files are not shown.")
+
+
 class _UndecodableBytes(bytes):
     """File bytes that fail the test when the brief decodes them."""
 
