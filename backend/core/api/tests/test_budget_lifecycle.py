@@ -27,9 +27,8 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
         """Capture the trusted admission closure without creating any paid work."""
 
         def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
-            """Require the budget to close while the run is still active."""
-            assert store.get_job("protected-cancel")["status"] == "running"
-            calls.append((identity, username, reason))
+            """Record each close with the run's status, so the test can require the first one before the write."""
+            calls.append((identity, username, reason, store.get_job("protected-cancel")["status"]))
 
         def close_for_failed_job(self, identity: str, username: str, *, expected_generation: int) -> None:
             """Record the release of the cancelled run's unstarted holds.
@@ -47,7 +46,11 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     bypass_auth(app)
     response = TestClient(app).post("/optimizations/protected-cancel/cancel")
     assert response.status_code == 200
-    assert calls == [("budget", "alice", "user_cancelled")]
+    # The second stop closes admission that a resume reopened before the write.
+    assert calls == [
+        ("budget", "alice", "user_cancelled", "running"),
+        ("budget", "alice", "user_cancelled", "cancelled"),
+    ]
     assert releases == [("budget", "alice", 0)]
     assert store.get_job("protected-cancel")["status"] == "cancelled"
 
@@ -216,7 +219,7 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     assert body["cancelled"] == ["normal-run"]
     assert [entry["optimization_id"] for entry in body["skipped"]] == ["judge-session"]
     assert "stop_run" in body["skipped"][0]["reason"]
-    assert stops == [("run-budget", "user_cancelled")]
+    assert stops == [("run-budget", "user_cancelled"), ("run-budget", "user_cancelled")]
     assert releases == ["run-budget"]
     assert ends == []
     assert store.get_job("judge-session")["status"] == "running"

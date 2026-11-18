@@ -152,14 +152,15 @@ def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: 
             break
     if cancelled and job.get("execution_budget_id") is not None:
         try:
-            # A manual resume between the first stop and the write fences a new
-            # generation and reopens admission, so the generation in ``job`` is
-            # stale. The row is cancelled now, so its current generation's
-            # unstarted holds belong to no worker.
+            # A manual resume between the first stop and the write can fence a new
+            # generation, so the generation in ``job`` is stale. The row is
+            # cancelled now, so its current generation's unstarted holds belong to
+            # no worker.
             generation = int((job_store.get_job(optimization_id) or {}).get("execution_budget_generation") or 0)
-            if generation != int(job.get("execution_budget_generation") or 0):
-                # Without this stop the close names the reopened budget ``job_failed``.
-                _stop_budget_admission(job_store, job, "user_cancelled")
+            # That resume reopens admission, with or without a new generation (a
+            # run that waits for usage keeps its generation). Without this stop the
+            # close names the reopened budget ``job_failed``.
+            _stop_budget_admission(job_store, job, "user_cancelled")
             BudgetService(engine=job_store.engine).close_for_failed_job(
                 job["execution_budget_id"], job["username"], expected_generation=generation
             )
