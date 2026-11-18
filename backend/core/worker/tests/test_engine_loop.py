@@ -1560,6 +1560,50 @@ def test_a_reply_larger_than_the_bound_is_a_failed_model_call_with_its_cost(
     assert first.call_model("improve other", _TOOLS).text == "otherx"
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    # json.loads accepts the escape of a lone surrogate, but UTF-8 cannot hold it; a set is no JSON value at all.
+    [json.loads('{"text": "\\ud800"}'), {"items": {1, 2}}],
+    ids=["lone-surrogate", "set"],
+)
+def test_a_reply_that_is_not_utf8_json_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    arguments: dict[str, Any],
+) -> None:
+    """A reply that the commit cannot encode gives a failed call that the lease bills, not a stop with a lost cost.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        arguments: Tool call arguments that are not UTF-8 JSON.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "ModelReplyNotJSONError"
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    assert first.remaining_cost_usd() == pytest.approx(9.99)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as replayed:
+        resumed.call_model("improve seed", _TOOLS)
+    assert replayed.value.cost_cents == Decimal(1)
+    assert resumed_model.prompts == []
+
+
 def test_a_tool_only_reply_with_no_text_gives_an_empty_text_live_and_on_a_resume(
     owner: tuple[User, int],
     engine: Engine,

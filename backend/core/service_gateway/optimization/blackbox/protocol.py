@@ -289,8 +289,10 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         The flat tool calls in their order; empty when the message asks for none.
 
     Raises:
-        ModelReplyTooDeepError: When the arguments nest too deep for JSON to read or write. The engine loop
-            turns it into a failed model call, as it does for a parsed reply that nests too deep.
+        ModelReplyTooDeepError: When the arguments nest too deep for JSON to read or write. Raised from the model
+            client, the engine loop records it as a failed model call with no cost. A client that got a billed
+            reply must wrap this error in ``core.worker.engine_loop.ModelCallBilledError`` with the cost to keep
+            the cost.
     """
     calls: list[ToolCall] = []
     for call in message.get("tool_calls") or []:

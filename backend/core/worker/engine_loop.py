@@ -42,8 +42,9 @@ catches it and calls again gets it again, before any work.
 A step's own failure is no stop: a failed model call, or a box step that
 raises one of the box errors, commits a record that a replay raises again.
 Model output is untrusted, so a reply that nests deeper than
-``_MAX_REPLY_DEPTH`` or is larger than ``_MAX_REPLY_BYTES`` is a failed model
-call too, and its step settles the reply's cost (SKY-817).
+``_MAX_REPLY_DEPTH``, is larger than ``_MAX_REPLY_BYTES`` or is not UTF-8
+JSON is a failed model call too, and its step settles the reply's cost
+(SKY-817).
 Every other error of a step is a stop. It can come after the step committed,
 for example from a settle or the durable wait, so the live engine must not
 act on it: a resume would replay the committed result instead. A stop gives
@@ -247,6 +248,10 @@ class ModelReplyTooLargeError(ValueError):
     """A model reply is larger than ``_MAX_REPLY_BYTES`` (SKY-817)."""
 
 
+class ModelReplyNotJSONError(ValueError):
+    """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
+
+
 def _check_reply(body: dict[str, Any]) -> None:
     """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
 
@@ -258,6 +263,7 @@ def _check_reply(body: dict[str, Any]) -> None:
     Raises:
         ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
         ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
+        ModelReplyNotJSONError: When it holds a value that is not JSON, or a lone surrogate that UTF-8 cannot hold.
     """
     stack: list[tuple[Any, int]] = [(body, 1)]
     while stack:
@@ -271,7 +277,11 @@ def _check_reply(body: dict[str, Any]) -> None:
         if depth > _MAX_REPLY_DEPTH:
             raise ModelReplyTooDeepError(f"The model reply nests more than {_MAX_REPLY_DEPTH} levels.")
         stack.extend((child, depth + 1) for child in children)
-    size = len(json.dumps(body, ensure_ascii=False).encode())
+    try:
+        # The same encoding as the step log's commit, so the bound measures the bytes that the commit writes.
+        size = len(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError) as error:
+        raise ModelReplyNotJSONError(f"The model reply is not UTF-8 JSON: {type(error).__name__}: {error}") from error
     if size > _MAX_REPLY_BYTES:
         raise ModelReplyTooLargeError(f"The model reply is {size} bytes, more than {_MAX_REPLY_BYTES}.")
 
@@ -557,9 +567,10 @@ class EngineLoop:
             LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
-            ModelCallFailedError: When the model call fails, or its reply nests too deep or is too large; its step
-                settles the cost of a :class:`ModelCallBilledError` or of the refused reply, and a replay raises a committed failure again. Its ``cost_cents``
-                is the committed cost, live and on a replay.
+            ModelCallFailedError: When the model call fails, or its reply nests too deep, is too large or is not
+                UTF-8 JSON; its step settles the cost of a :class:`ModelCallBilledError` or of the refused reply, and
+                a replay raises a committed failure again. Its ``cost_cents`` is the committed cost, live and on a
+                replay.
         """
         with self._stops():
             # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
@@ -603,7 +614,7 @@ class EngineLoop:
                         body["tool_calls"] = reply.tool_calls
                     try:
                         _check_reply(body)
-                    except (ModelReplyTooDeepError, ModelReplyTooLargeError) as error:
+                    except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
                         failures.append(error)
                         # The provider billed the reply, so its failed step settles the reply's cost.
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, reply.cost_cents)
