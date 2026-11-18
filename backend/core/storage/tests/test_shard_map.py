@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import threading
 import time
 import zlib
@@ -1574,6 +1575,54 @@ def test_the_sweep_claims_an_old_flush_pack_with_no_shard_in_its_manifest_on_mai
         )
     with Session(shard) as session:
         assert session.get(StoragePackModel, old) is None
+
+
+def test_the_sweep_keeps_an_old_flush_pack_that_names_a_shard_its_map_does_not_have(
+    main: Engine,
+    shard: Engine,
+    two_shard_log: StepLogStore,
+    objects: LocalObjectStore,
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """An orphan flush pack of an unknown shard that no job records stays with a warning; the other orphan goes.
+
+    Args:
+        main: The main database.
+        shard: The shard database ``s2``.
+        two_shard_log: The step log over both shards.
+        objects: The object store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch.
+        caplog: Pytest's log capture fixture.
+    """
+    _write_account(two_shard_log)
+    recorded = sorted(objects.list("packs/"))
+    swept = _orphan_pack(objects, shard)
+    pack = objects.get(swept)
+    manifest = _read_manifest(pack)
+    (length,) = _FOOTER.unpack(pack[-_FOOTER.size :])
+    manifest["shard"] = "s9"
+    footer = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    unknown = f"packs/gone-pod/{1:020d}-c.pack"
+    objects.put(unknown, pack[: -_FOOTER.size - length] + footer + _FOOTER.pack(len(footer)))
+    assert _read_manifest(objects.get(unknown))["shard"] == "s9"
+    monkeypatch.setattr(tree_compactor, "UNRECORDED_FLUSH_PACK_AGE_SECONDS", 0.0)
+    compactor = TreeCompactor(
+        main, objects, _delete_one(tmp_path / "objects"), grace_seconds=0.0, shards=two_shard_log._shards
+    )
+
+    with caplog.at_level(logging.WARNING, logger=tree_compactor.__name__):
+        assert compactor.remove_unrecorded() == 1
+
+    assert sorted(objects.list("packs/")) == sorted([*recorded, unknown])
+    assert [record.getMessage() for record in caplog.records] == [
+        f"The unrecorded pack {unknown} names step log shard 's9', which this map does not have"
+    ]
+    for engine in (main, shard):
+        with Session(engine) as session:
+            assert session.get(StoragePackModel, unknown) is None
 
 
 def _orphan_pack(objects: LocalObjectStore, shard: Engine) -> str:
