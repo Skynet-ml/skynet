@@ -328,6 +328,19 @@ def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) ->
     assert CONSTRAINTS_REQUIRED in text
 
 
+def test_review_reports_a_contract_with_no_run_and_no_target(harness: Any) -> None:
+    """A contract that gives the metric no version output cannot rank versions, so review refuses it (SKY-761)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    text = 'version = 1\n[paths]\neditable = ["src"]\n'
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml=text)
+
+    body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert body["ready"] is False
+    assert [issue for issue in body["issues"] if "Add a [run] section or a [target.<name>] stage" in issue]
+
+
 def test_contract_guide_comes_from_the_setup_agent_guide(harness: Any) -> None:
     """Serve the in-app guide and example themselves, not a copy (SKY-693)."""
     client, _engine, _calls = harness

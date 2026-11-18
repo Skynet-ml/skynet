@@ -1241,7 +1241,9 @@ def _compose_tree(root: Path) -> Path:
     """
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("VALUE = 1\n")
-    (root / "optimize.toml").write_text('version = 1\n[sandbox]\ncompose = "compose.yaml"\n')
+    (root / "optimize.toml").write_text(
+        'version = 1\n[sandbox]\ncompose = "compose.yaml"\n[run]\nentry = "src/app.py:main"\n'
+    )
     (root / "compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n")
     return root
 
@@ -1255,7 +1257,8 @@ _RENAME_SERVICE_FIX = (
 _BREAK_CONSTRAINTS_FIX = (
     "diff --git a/optimize.toml b/optimize.toml\n"
     "--- a/optimize.toml\n+++ b/optimize.toml\n"
-    '@@ -1,3 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n+not = [valid\n'
+    '@@ -1,5 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n-[run]\n-entry = "src/app.py:main"\n'
+    "+not = [valid\n"
 )
 
 
@@ -1558,7 +1561,7 @@ def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
     (trusted / "src").mkdir(parents=True)
     (trusted / "src" / "app.py").write_text("VALUE = 1\n")
     (trusted / "intent.md").write_text("Keep the app fast.\n")
-    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n')
+    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n[run]\nentry = "src/app.py:main"\n')
 
     class Gateway:
         """Protects nothing and opens no box."""

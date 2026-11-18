@@ -18,13 +18,21 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import Engine, case, create_engine, func, or_, text
-from sqlalchemy.engine import make_url
+from sqlalchemy import ColumnElement, Engine, TextClause, and_, case, create_engine, func, or_, text, true
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
 from .. import run_log
-from ..billing.budgets import BudgetConflictError, BudgetError, BudgetInFlightError, BudgetService
+from ..billing.budgets import (
+    USER_STOP_REASONS,
+    BudgetConflictError,
+    BudgetError,
+    BudgetInFlightError,
+    BudgetService,
+)
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_TAGGING,
@@ -39,6 +47,7 @@ from ..constants import (
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
 )
+from ..i18n import CANCELLATION_REASON, PAUSE_REASON
 from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialClaim, TrialFingerprintError, TrialStatus
 from ..worker.checkpoint_compat import CheckpointCompatibilityError, validate_checkpoint
 from .agent_run_store import PostgresAgentRunStore
@@ -48,6 +57,7 @@ from .log_quota import LogQuotaGate
 from .migrate import stamp_if_unadopted, upgrade_if_adopted
 from .models import (
     EMBEDDING_DIM,
+    PROGRESS_EVENT_KEY_SQL,
     AgentStagedDatasetModel,
     AgentStepModel,
     Base,
@@ -62,16 +72,17 @@ from .models import (
     ProgressEventModel,
     RunCallModel,
     RunCandidateModel,
-    RunFolderItemModel,
     SandboxTrialModel,
     UserModel,
     UserQuotaAuditModel,
     UserQuotaOverrideModel,
     UserStorageQuotaOverrideModel,
+    progress_event_key,
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
 from .shard_map import MAIN, ShardMap, UnroutableRunError
+from .tree_purge import delete_run_rows, mark_run_packs, purge_run_shards
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -103,7 +114,145 @@ def _mark_resume_budget_stop(job: JobModel) -> None:
     job.recovery = None
 
 
+def _interrupted_recovery(recovery: Any, generation: Any = None) -> dict[str, Any] | None:
+    """Build the marker of a run that a requeue gave up, so a later manual resume waives its crash.
+
+    Skynet pays for the crash (SKY-406 D3): a manual resume waives the
+    interrupted generation, and a run with no checkpoint restarts fresh.
+
+    Args:
+        recovery: The run's recovery marker as the requeue read it.
+        generation: The interrupted budget generation that the requeue waived;
+            ``None`` takes the generation of ``recovery``.
+
+    Returns:
+        The ``interrupted`` marker, or ``None`` when no interrupted generation is known.
+    """
+    previous = recovery if isinstance(recovery, dict) else {}
+    if generation is None:
+        generation = previous.get("interrupted_budget_generation")
+    if generation is None:
+        return None
+    cause = previous.get("cause")
+    return {
+        "state": "interrupted",
+        "interrupted_budget_generation": int(generation),
+        **({"cause": cause} if cause else {}),
+    }
+
+
+def _leave_sweep_recovery(
+    session: Session, optimization_id: str, generation: int, recovery: dict[str, Any] | None
+) -> None:
+    """Replace the ``recovering`` marker of a run that a requeue gave up, and commit.
+
+    On SQLite, a status write can land between the requeue's reads and its
+    claim. A write that does not pass ``ends_recovery``, such as a worker's,
+    leaves the sweep's ``recovering`` marker, and the UI hides the status of a
+    run whose marker says ``recovering`` (SKY-814).
+
+    Args:
+        session: The requeue's session.
+        optimization_id: The run that the requeue gave up.
+        generation: The generation that the requeue fenced; a run past it
+            belongs to another writer, which keeps its marker.
+        recovery: The marker the run keeps, from ``_interrupted_recovery``.
+    """
+    session.query(JobModel).filter(
+        JobModel.optimization_id == optimization_id,
+        JobModel.execution_generation == generation,
+    ).update({JobModel.recovery: recovery}, synchronize_session=False)
+    session.commit()
+
+
+def _end_user_stopped_requeue(
+    session: Session, optimization_id: str, generation: int, recovery: dict[str, Any] | None, reason: str
+) -> None:
+    """Give up a requeue to the user's cancel or pause, write the user's status, and commit.
+
+    The route closes admission before its status write, and the API can stop
+    between the two, so the sweep writes the user's status itself. When the
+    route's write landed first, the compare-and-set misses and only the
+    sweep's ``recovering`` marker ends (SKY-814).
+
+    Args:
+        session: The requeue's session, with no write of the requeue pending.
+        optimization_id: The run that the user stopped.
+        generation: The execution generation that the requeue holds.
+        recovery: The marker the run keeps, from ``_interrupted_recovery``.
+        reason: The user's stop reason on the closed budget.
+    """
+    paused = reason == "user_paused"
+    ended = (
+        session.query(JobModel)
+        .filter(
+            JobModel.optimization_id == optimization_id,
+            JobModel.status.in_(("running", "validating")),
+            JobModel.execution_generation == generation,
+        )
+        .update(
+            {
+                JobModel.status: "paused" if paused else "cancelled",
+                JobModel.message: PAUSE_REASON if paused else CANCELLATION_REASON,
+                JobModel.completed_at: datetime.now(UTC),
+                JobModel.recovery: recovery,
+                JobModel.claimed_by: None,
+                JobModel.claimed_at: None,
+                JobModel.lease_expires_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not ended:
+        _leave_sweep_recovery(session, optimization_id, generation, recovery)
+        return
+    session.commit()
+
+
 logger = logging.getLogger(__name__)
+
+
+def _add_progress_event(
+    session: Session,
+    optimization_id: str,
+    message: str | None,
+    metrics: dict[str, Any],
+    timestamp: datetime,
+) -> bool:
+    """Add one progress event row in the session's transaction.
+
+    An event with a string of 1 to ``MAX_PROGRESS_EVENT_KEY_LENGTH``
+    characters under ``PROGRESS_EVENT_KEY`` goes through
+    ``ON CONFLICT DO NOTHING`` on the unique key index, so a replayed event
+    whose key the job already stores adds no row (SKY-808). The index also
+    holds back a concurrent copy until the first one commits.
+
+    Args:
+        session: Open database session.
+        optimization_id: ID of the job emitting the event.
+        message: Human-readable event marker, or ``None``.
+        metrics: Metric payload to persist with the event.
+        timestamp: Timestamp assigned to the event row.
+
+    Returns:
+        Whether a row was added.
+    """
+    if progress_event_key(metrics) is None:
+        session.add(
+            ProgressEventModel(optimization_id=optimization_id, timestamp=timestamp, event=message, metrics=metrics)
+        )
+        return True
+    dialect = session.get_bind().dialect.name
+    key_sql, where_sql = PROGRESS_EVENT_KEY_SQL[dialect]
+    insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
+    statement = (
+        insert(ProgressEventModel)
+        .values(optimization_id=optimization_id, timestamp=timestamp, event=message, metrics=metrics)
+        .on_conflict_do_nothing(
+            index_elements=[ProgressEventModel.optimization_id, text(key_sql)], index_where=text(where_sql)
+        )
+    )
+    return cast(CursorResult[Any], session.execute(statement)).rowcount == 1
 
 
 def _usage_wait_start(recovery: dict[str, Any]) -> datetime | None:
@@ -164,6 +313,11 @@ def _track_usage_wait(recovery: dict[str, Any], budget: Any) -> dict[str, Any] |
 
 
 MAX_PROGRESS_EVENTS = 5000
+# The normal trim keeps keyed rows, so a replay cannot add them again (SKY-808).
+# A user subprocess can set any key, so this multiple of the cap still bounds
+# all rows of a job: past it the trim deletes the oldest rows, keyed or not.
+# A replay of a key deleted here adds it again, acceptable only past this hard cap.
+PROGRESS_EVENTS_HARD_CAP_FACTOR = 2
 ORPHANED_RUN_MESSAGE = "The run stopped because its worker went away. Resume, retry or clone it to continue."
 ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
     "The run stopped because its worker went away, and it cannot continue by itself. Retry or clone it."
@@ -302,6 +456,12 @@ def _json_int(value: Any) -> int | None:
     Extraction returns text on PostgreSQL (``->>``) and native affinity values
     on SQLite, so both forms must coerce; junk degrades to ``None``, mirroring
     the ``isinstance`` guards the analytics aggregations always applied.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The integer, or ``None`` when the value is not one.
     """
     try:
         return int(value)
@@ -310,7 +470,14 @@ def _json_int(value: Any) -> int | None:
 
 
 def _json_float(value: Any) -> float | None:
-    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one."""
+    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The float, or ``None`` when the value is not one.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -775,6 +942,9 @@ class RemoteDBJobStore:
         Safe to call repeatedly. If the database role lacks the privilege
         to install the extension, the log line below is the operator's
         hint to run ``CREATE EXTENSION vector`` once out-of-band.
+
+        Returns:
+            True when the extension exists, False when its install failed.
         """
         try:
             with self._engine.connect() as conn:
@@ -796,6 +966,9 @@ class RemoteDBJobStore:
         SQLAlchemy's create_all can't express HNSW, and we don't want to
         pay for a reindex on every restart — the IF NOT EXISTS guard
         makes the call free on warm databases.
+
+        Returns:
+            True when the indexes exist, False when their creation failed.
         """
         statements = [
             (
@@ -1234,7 +1407,13 @@ class RemoteDBJobStore:
             session.close()
 
     def update_job_if_status(
-        self, optimization_id: str, expected: tuple[str, ...], *, expected_generation: int | None = None, **kwargs: Any
+        self,
+        optimization_id: str,
+        expected: tuple[str, ...],
+        *,
+        expected_generation: int | None = None,
+        ends_recovery: bool = False,
+        **kwargs: Any,
     ) -> bool:
         """Update a job only while its status is one of ``expected`` (compare-and-set).
 
@@ -1249,6 +1428,10 @@ class RemoteDBJobStore:
             expected: Status values the row must currently hold for the write to
                 apply.
             expected_generation: Execution fence required for worker-owned writes.
+            ends_recovery: Whether a user's stop writes the status. Then a
+                ``recovering`` marker becomes ``interrupted``, or ``None`` when
+                no interrupted generation is known, in the same transaction.
+                Any other marker stays.
             **kwargs: Column values to overwrite.
 
         Returns:
@@ -1287,6 +1470,15 @@ class RemoteDBJobStore:
             if expected_generation is not None:
                 query = query.filter(JobModel.execution_generation == expected_generation)
             rows = query.update(update_values, synchronize_session=False)
+            if rows and ends_recovery:
+                # Sweeps skip a stopped run, so a sweep's recovering marker would stay
+                # and hide the user's status in the UI. The interrupted marker keeps the
+                # crash waivable for a later manual resume (SKY-814).
+                recovery = session.query(JobModel.recovery).filter(JobModel.optimization_id == optimization_id).scalar()
+                if isinstance(recovery, dict) and recovery.get("state") == "recovering":
+                    session.query(JobModel).filter(JobModel.optimization_id == optimization_id).update(
+                        {JobModel.recovery: _interrupted_recovery(recovery)}, synchronize_session=False
+                    )
             session.commit()
             return rows > 0
         finally:
@@ -1398,40 +1590,39 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: ID of the job to remove.
+
+        Raises:
+            TreePurgeError: When a step log shard fails, or the run records a shard that the map does not
+                have; the job stays.
         """
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id == optimization_id).delete()
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id == optimization_id).delete()
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id == optimization_id
-            ).delete()
-            session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
-            self._close_deleted_job_budgets(session, [optimization_id])
+            delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
+            mark_run_packs(session, [optimization_id], self.step_log_shards)
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
+            # The cascade stops at the main database, so the other step log shards delete the steps, as
+            # the last step before the main commit. The databases have no two-phase commit: a main
+            # commit that still fails leaves the shard steps deleted and the job in place.
+            purge_run_shards([optimization_id], self.step_log_shards)
             session.commit()
         finally:
             session.close()
         self._evict_job_counters([optimization_id])
 
-    def _close_deleted_job_budgets(self, session: Session, optimization_ids: list[str]) -> None:
-        """Close the execution budgets of jobs about to be deleted.
-
-        Budgets and ledger rows are financial history with no foreign key to
-        ``jobs``, so they are kept; this releases unstarted holds and drops the
-        link that would otherwise point at a deleted job.
+    def _job_embeddings(self, optimization_ids: list[str]) -> ColumnElement[bool] | None:
+        """Select the embedding rows that a job delete removes.
 
         Args:
-            session: The open delete session the caller commits.
             optimization_ids: Job ids being deleted.
+
+        Returns:
+            The rows of these jobs, or ``None`` when embeddings are off.
         """
-        BudgetService(engine=self._engine).close_for_deleted_jobs(list(optimization_ids), session=session)
+        if not settings.embeddings_enabled:
+            return None
+        return JobEmbeddingModel.optimization_id.in_(optimization_ids)
 
     def _evict_job_counters(self, optimization_ids: list[str]) -> None:
         """Drop the per-job in-memory bookkeeping for deleted jobs.
@@ -1495,45 +1686,26 @@ class RemoteDBJobStore:
 
         Returns:
             The number of job rows actually deleted.
+
+        Raises:
+            TreePurgeError: When a step log shard fails, or a run records a shard that the map does not
+                have; the jobs stay.
         """
         if not optimization_ids:
             return 0
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id.in_(optimization_ids)).delete(
-                    synchronize_session=False
-                )
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id.in_(optimization_ids)
-            ).delete(synchronize_session=False)
-            session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            self._close_deleted_job_budgets(session, optimization_ids)
+            delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
+            # The job cascade drops the steps, so their packs are marked first, or their bytes in shared
+            # packs stay forever (SKY-733).
+            mark_run_packs(session, optimization_ids, self.step_log_shards)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))
                 .delete(synchronize_session=False)
             )
+            # As in delete_job: the other shards delete the steps last, right before the main commit.
+            purge_run_shards(optimization_ids, self.step_log_shards)
             session.commit()
         finally:
             session.close()
@@ -1879,6 +2051,7 @@ class RemoteDBJobStore:
                     }
                     fenced_generation = job.execution_generation
                     previous_status = job.status
+                    fenced_recovery = job.recovery
                     session.commit()
                     job = (
                         session.query(JobModel)
@@ -1892,6 +2065,9 @@ class RemoteDBJobStore:
                         .one_or_none()
                     )
                     if job is None:
+                        _leave_sweep_recovery(
+                            session, optimization_id, fenced_generation, _interrupted_recovery(fenced_recovery)
+                        )
                         return None
                 budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.pending_operations or budget.reserved_cents:
@@ -1917,27 +2093,44 @@ class RemoteDBJobStore:
                         )
                     known = [bound for bound in bounds if bound is not None]
                     resumed_from = min(known) if known else None
+                    interrupted = (
+                        int(interrupted) if interrupted is not None else int(job.execution_budget_generation or 0) - 1
+                    )
                     budget_service.waive_interrupted_work(
                         job.execution_budget_id,
                         job.username,
-                        generation=(
-                            int(interrupted)
-                            if interrupted is not None
-                            else int(job.execution_budget_generation or 0) - 1
-                        ),
+                        generation=interrupted,
                         settled_after=resumed_from,
                     )
                     budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.state == "closed" and budget.available_cents > 0:
                     budget = budget_service.resume_admission(
-                        job.execution_budget_id, job.username, expected_generation=job.execution_budget_generation
+                        job.execution_budget_id,
+                        job.username,
+                        expected_generation=job.execution_budget_generation,
+                        automatic=automatic,
                     )
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
+                    if automatic:
+                        # A user's stop can close admission after the reads above, and it
+                        # wins over the budget stop (SKY-814). This read holds the budget
+                        # row lock until the commit below.
+                        budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                        if budget.blocked_reason in USER_STOP_REASONS:
+                            _end_user_stopped_requeue(
+                                session,
+                                optimization_id,
+                                int(job.execution_generation or 0),
+                                _interrupted_recovery(job.recovery, interrupted),
+                                budget.blocked_reason,
+                            )
+                            return None
                     if budget.blocked_reason is None:
                         budget_service.stop_admission(
                             job.execution_budget_id,
                             job.username,
                             reason="budget_reached",
+                            session=session,
                         )
                     _mark_resume_budget_stop(job)
                     ended_generation = int(job.execution_generation or 0)
@@ -1945,7 +2138,40 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
+                if automatic:
+                    # A user's stop can close admission after the reads above. This
+                    # read holds the budget row lock until the requeue commits, so a
+                    # later stop waits and then finds the run pending (SKY-814).
+                    budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        _end_user_stopped_requeue(
+                            session,
+                            optimization_id,
+                            int(job.execution_generation or 0),
+                            _interrupted_recovery(job.recovery, interrupted),
+                            budget.blocked_reason,
+                        )
+                        return None
+                    kept_recovery = _interrupted_recovery(job.recovery, interrupted)
             held_generation = int(job.execution_generation or 0)
+            # SQLite has no row lock, so a user's cancel or pause can land after the
+            # reads above. This compare-and-set requeues only the row as it was read,
+            # so the user's status write is never lost (SKY-814). A user stop closed
+            # admission before its status write, so the budget stays closed.
+            claimed = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status == job.status,
+                    JobModel.execution_generation == held_generation,
+                )
+                .update({JobModel.execution_generation: held_generation + 1}, synchronize_session=False)
+            )
+            if not claimed:
+                recovery = _interrupted_recovery(job.recovery)
+                session.rollback()
+                _leave_sweep_recovery(session, optimization_id, held_generation, recovery)
+                return None
             job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None
@@ -2055,6 +2281,16 @@ class RemoteDBJobStore:
                     )
                     if not ended:
                         session.rollback()
+                        return None
+                    # The rollback ended the budget row lock, so a user's stop can
+                    # close admission since. The user's stop wins over the failure,
+                    # and the run must not fail or notify (SKY-814).
+                    budget = budget_service.get(budget_id, username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        session.rollback()
+                        _end_user_stopped_requeue(
+                            session, optimization_id, held_generation, kept_recovery, budget.blocked_reason
+                        )
                         return None
                     # The resume above can reopen admission. Close it in the same
                     # transaction as the failure, so a run that another sweep
@@ -2647,19 +2883,7 @@ class RemoteDBJobStore:
                         "interrupted_budget_generation": int(interrupted),
                         **({"cause": cause} if cause else {}),
                     }
-            if self.update_job_if_status(
-                identifier,
-                ("running", "validating"),
-                expected_generation=generation,
-                status="failed",
-                stop_reason="interrupted",
-                completed_at=now.isoformat(),
-                message=message,
-                recovery=ended_recovery,
-                claimed_by=None,
-                claimed_at=None,
-                lease_expires_at=None,
-            ):
+            if self._fail_orphan(identifier, generation, message, ended_recovery, now):
                 if ended_recovery is not None:
                     logger.warning(
                         "Orphaned run %s had no usage settlement progress for %s; it stopped as interrupted",
@@ -2669,6 +2893,84 @@ class RemoteDBJobStore:
                 self._note_ended_orphan(identifier, generation)
                 handled += 1
         return handled
+
+    def _fail_orphan(
+        self, optimization_id: str, generation: int, message: str, recovery: dict[str, Any] | None, now: datetime
+    ) -> bool:
+        """Fail an orphaned run that the sweep cannot recover, unless the user stopped it.
+
+        The user's cancel or pause closes admission before its status write,
+        and the API can stop between the two. The user's stop wins over the
+        sweep, so the sweep then writes the user's status and does not fail the
+        run (SKY-814). The job row lock, then the budget row lock, keep a later
+        stop from landing between the check and the failure.
+
+        Args:
+            optimization_id: The orphaned run.
+            generation: The execution generation that the sweep read.
+            message: The failure message.
+            recovery: The marker that the failed run keeps.
+            now: Time of the current sweep.
+
+        Returns:
+            Whether the sweep failed the run.
+        """
+        session = self._get_session()
+        try:
+            job = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .with_for_update()
+                .one_or_none()
+            )
+            if job is None:
+                return False
+            if job.execution_budget_id is not None:
+                try:
+                    budget = BudgetService(engine=self._engine).get(
+                        job.execution_budget_id, job.username, session=session
+                    )
+                except BudgetError:
+                    # The requeue can fail on the same budget error; the run still fails.
+                    budget = None
+                if budget is not None and budget.blocked_reason in USER_STOP_REASONS:
+                    _end_user_stopped_requeue(
+                        session,
+                        optimization_id,
+                        generation,
+                        recovery if recovery is not None else _interrupted_recovery(job.recovery),
+                        budget.blocked_reason,
+                    )
+                    return False
+            ended = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .update(
+                    {
+                        JobModel.status: "failed",
+                        JobModel.stop_reason: "interrupted",
+                        JobModel.completed_at: now,
+                        JobModel.message: message,
+                        JobModel.recovery: recovery,
+                        JobModel.claimed_by: None,
+                        JobModel.claimed_at: None,
+                        JobModel.lease_expires_at: None,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return ended > 0
+        finally:
+            session.close()
 
     def _wake_waiting_runs(self) -> int:
         """Move each paused run whose ``wake_at`` passed back to ``pending``, so a worker claims it.
@@ -2859,7 +3161,15 @@ class RemoteDBJobStore:
         return self._claim_next_job_fallback(worker_id, lease_seconds)
 
     def _claim_next_job_postgres(self, worker_id: str, lease_seconds: float) -> JobRecord | None:
-        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``."""
+        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
+        """
         sql = text(
             """
             UPDATE jobs
@@ -2912,6 +3222,13 @@ class RemoteDBJobStore:
         Holds an exclusive transaction so concurrent claims are serialized at
         the engine level. Not race-safe across processes but adequate for
         single-process test runs.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
         """
         session = self._get_session()
         try:
@@ -3069,6 +3386,9 @@ class RemoteDBJobStore:
     ) -> bool:
         """Publish progress only while its source worker owns the active generation.
 
+        A keyed event that the job already stores adds no row; it still
+        refreshes the latest metrics.
+
         Args:
             optimization_id: Job receiving the event.
             message: Event name.
@@ -3081,26 +3401,25 @@ class RemoteDBJobStore:
         """
         session = self._get_session()
         try:
-            source = (
-                session.query(JobModel)
-                .filter(
-                    JobModel.optimization_id == source_optimization_id,
-                    JobModel.execution_generation == generation,
-                    JobModel.status.in_(["running", "validating"]),
-                )
+            # Both jobs lock in key order, as a run or account delete locks its jobs (SKY-733).
+            jobs = {
+                job.optimization_id: job
+                for job in session.query(JobModel)
+                .filter(JobModel.optimization_id.in_(sorted({source_optimization_id, optimization_id})))
+                .order_by(JobModel.optimization_id)
                 .with_for_update()
-                .one_or_none()
-            )
-            if source is None:
+            }
+            source = jobs.get(source_optimization_id)
+            if (
+                source is None
+                or source.execution_generation != generation
+                or source.status not in {"running", "validating"}
+            ):
                 return False
-            target = source if source_optimization_id == optimization_id else session.get(JobModel, optimization_id)
+            target = jobs.get(optimization_id)
             if target is None or target.status not in {"running", "validating"}:
                 return False
-            session.add(
-                ProgressEventModel(
-                    optimization_id=optimization_id, timestamp=datetime.now(UTC), event=message, metrics=metrics
-                )
-            )
+            _add_progress_event(session, optimization_id, message, metrics, datetime.now(UTC))
             target.latest_metrics = {**(target.latest_metrics or {}), **metrics}
             session.commit()
         finally:
@@ -3176,6 +3495,8 @@ class RemoteDBJobStore:
     ) -> bool:
         """Insert one progress event if the parent job still exists.
 
+        A keyed event whose key the job already stores adds no row.
+
         Args:
             optimization_id: ID of the job emitting the event.
             message: Human-readable event marker, or ``None``.
@@ -3190,16 +3511,9 @@ class RemoteDBJobStore:
             exists = session.query(JobModel.optimization_id).filter(JobModel.optimization_id == optimization_id).first()
             if exists is None:
                 return False
-            session.add(
-                ProgressEventModel(
-                    optimization_id=optimization_id,
-                    timestamp=timestamp,
-                    event=message,
-                    metrics=metrics,
-                )
-            )
+            inserted = _add_progress_event(session, optimization_id, message, metrics, timestamp)
             session.commit()
-            return True
+            return inserted
         finally:
             session.close()
 
@@ -3273,6 +3587,12 @@ class RemoteDBJobStore:
     def _trim_progress_events(self, optimization_id: str) -> None:
         """Delete the oldest excess progress events for a job in one batch.
 
+        The trim deletes only unkeyed rows down to the cap: a replay of a
+        deleted key would add it again (SKY-808). It deletes a structural row
+        only for the excess that all non-structural rows, keyed ones included,
+        cannot cover. Past the hard cap of ``PROGRESS_EVENTS_HARD_CAP_FACTOR``
+        times the cap, it also deletes the oldest keyed rows.
+
         Args:
             optimization_id: ID of the job whose retained progress rows should
                 be brought back down to the configured cap.
@@ -3282,30 +3602,70 @@ class RemoteDBJobStore:
             event_count = (
                 session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id == optimization_id).count()
             )
-            excess = event_count - self._progress_events_cap
-            if excess <= 0 or self._is_auto_run(session, optimization_id):
+            cap = self._progress_events_cap
+            if event_count <= cap or self._is_auto_run(session, optimization_id):
                 return
 
-            # One ordered DELETE replaces the prior count→select→top-up→delete
-            # round trips. Structural events sort last (flag 1) so they are
-            # evicted only when non-structural rows alone cannot cover the
-            # excess — identical preference to the old two-phase selection.
-            structural_last = case(
-                (ProgressEventModel.event.in_(STRUCTURAL_PROGRESS_EVENTS), 1),
-                else_=0,
+            _, keyed_sql = PROGRESS_EVENT_KEY_SQL[session.get_bind().dialect.name]
+            keyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 1")
+            unkeyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 0")
+            non_structural = or_(
+                ProgressEventModel.event.is_(None), ProgressEventModel.event.not_in(STRUCTURAL_PROGRESS_EVENTS)
             )
-            old_ids = (
-                session.query(ProgressEventModel.id)
-                .filter(ProgressEventModel.optimization_id == optimization_id)
-                .order_by(structural_last.asc(), ProgressEventModel.timestamp.asc(), ProgressEventModel.id.asc())
-                .limit(excess)
+            event_count -= self._delete_oldest_progress_events(
+                session, optimization_id, event_count - cap, and_(unkeyed, non_structural)
             )
-            session.query(ProgressEventModel).filter(ProgressEventModel.id.in_(old_ids.scalar_subquery())).delete(
-                synchronize_session=False
-            )
+            if event_count > cap:
+                # Kept keyed non-structural rows still count against the excess, so a
+                # structural row goes only when non-structural rows cannot cover it.
+                keyed_non_structural = (
+                    session.query(ProgressEventModel)
+                    .filter(ProgressEventModel.optimization_id == optimization_id, keyed, non_structural)
+                    .count()
+                )
+                structural_excess = event_count - cap - keyed_non_structural
+                if structural_excess > 0:
+                    event_count -= self._delete_oldest_progress_events(
+                        session, optimization_id, structural_excess, unkeyed
+                    )
+            hard_excess = event_count - cap * PROGRESS_EVENTS_HARD_CAP_FACTOR
+            if hard_excess > 0:
+                self._delete_oldest_progress_events(session, optimization_id, hard_excess, true())
             session.commit()
         finally:
             session.close()
+
+    @staticmethod
+    def _delete_oldest_progress_events(
+        session: Session, optimization_id: str, limit: int, condition: ColumnElement[bool] | TextClause
+    ) -> int:
+        """Delete up to ``limit`` of a job's oldest progress rows that match a condition.
+
+        Args:
+            session: Open database session.
+            optimization_id: ID of the job whose rows are trimmed.
+            limit: Largest number of rows to delete.
+            condition: Extra filter on the rows that the trim may delete.
+
+        Returns:
+            The number of deleted rows.
+        """
+        # Structural rows sort last, so a filter that admits them deletes non-structural rows first.
+        structural_last = case(
+            (ProgressEventModel.event.in_(STRUCTURAL_PROGRESS_EVENTS), 1),
+            else_=0,
+        )
+        old_ids = (
+            session.query(ProgressEventModel.id)
+            .filter(ProgressEventModel.optimization_id == optimization_id, condition)
+            .order_by(structural_last.asc(), ProgressEventModel.timestamp.asc(), ProgressEventModel.id.asc())
+            .limit(limit)
+        )
+        return (
+            session.query(ProgressEventModel)
+            .filter(ProgressEventModel.id.in_(old_ids.scalar_subquery()))
+            .delete(synchronize_session=False)
+        )
 
     @staticmethod
     def _is_auto_run(session: Session, optimization_id: str) -> bool:

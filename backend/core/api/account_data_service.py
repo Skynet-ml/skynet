@@ -19,9 +19,13 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-Nothing here makes a live call to Stripe, OpenRouter, or any other provider;
-severing the local link is the whole of the operation. Deprovisioning the
-upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
+This module makes no outside call. The tree purge here only locks, marks and
+plans the account's step log packs; the router deletes the unused packs from
+the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
+OpenRouter, or any other provider; severing the local link is the whole of
+the operation.
+Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
+to a follow-up.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
     AgentEnginePreferenceModel,
@@ -59,10 +64,8 @@ from ..storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
-    GepaCheckpointModel,
     JobEmbeddingModel,
     JobModel,
-    LogEntryModel,
     McpAuthCodeModel,
     McpGrantModel,
     McpTokenModel,
@@ -72,7 +75,6 @@ from ..storage.models import (
     OptimizationShareGrantModel,
     OptimizationShareLinkModel,
     PackageRegistryPreferenceModel,
-    ProgressEventModel,
     PushSubscriptionModel,
     SetupDraftModel,
     SlackConnectionModel,
@@ -103,10 +105,13 @@ class AccountDeletionSummary:
         deleted_rows: Rows hard-deleted across every table the account owned.
         anonymized_rows: Retained rows whose identity link was severed
             (financial, audit, and telemetry records).
+        trees: The tree purge, whose unused packs
+            :func:`tree_purge.delete_unused_packs` deletes after the commit.
     """
 
     deleted_rows: int
     anonymized_rows: int
+    trees: tree_purge.TreePurgeSummary
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -520,12 +525,28 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     are hard-deleted; financial, audit, and telemetry rows are anonymized in
     place. See the module docstring for why those three survive.
 
+    Lock order: the jobs in key order, their run rows, the wallet and the
+    budgets, the tree packs, then the user row. A run delete and a resume lock
+    the job before the wallet, so the jobs come first. No writer locks the
+    user row and then a wallet or budget, so the wallet can come before the
+    user row; a writer that does would deadlock with this delete (SKY-733).
+
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.
 
     Returns:
-        Counts of hard-deleted and anonymized rows.
+        Counts of hard-deleted and anonymized rows. The summary also holds the
+        tree purge, whose unused packs the caller deletes after the commit.
+
+    Raises:
+        TreePurgeError: When the account has tree packs to delete and
+            ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
+            built (for example, boto3 is missing or no region is set). Also
+            when the compactor keeps moving the account's packs for
+            ``PACK_LOCK_TRIES`` tries; a retry can succeed. Also when a step
+            log shard fails, or a run records a shard that the map does not
+            have; the message names the shard, and a retry can succeed.
     """
     deleted = 0
     anonymized = 0
@@ -551,14 +572,18 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         anonymized += result.rowcount or 0
 
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
+    # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
+    # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
+    deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
     if job_ids:
-        _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
+    # Before the jobs go: their cascade would delete the steps without their pack keys.
+    # The pack objects go after the commit (delete_unused_packs): a rollback must keep the packs its rows point at.
+    trees = tree_purge.purge_user(session, username, job_ids)
+    deleted += trees.deleted_rows
+    if job_ids:
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))
-    _run_delete(delete(JobEmbeddingModel).where(JobEmbeddingModel.user_id == username))
     _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.created_by == username))
     _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.grantee_username == username))
     _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.created_by == username))
@@ -708,4 +733,10 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
-    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized)
+    # The other step log shards commit here, as the last step before the caller's main commit, so every
+    # main-database statement above already ran when they commit. The databases have no two-phase commit:
+    # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
+    # deletes it. purge_user ran every check that can fail the deletion before this point.
+    deleted += tree_purge.purge_user_shards(trees)
+
+    return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

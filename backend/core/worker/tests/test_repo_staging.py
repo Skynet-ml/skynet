@@ -207,7 +207,9 @@ instructions = "docs/intent.md"
 editable = ["src/geocode"]
 protected = ["src/geocode/eval"]
 """
-_FILES = {"optimize.toml": _CONSTRAINTS, "docs/intent.md": "Pick the place the sender means.\n"}
+# The metric scores only what a [run] or a target stage gives it, so a contract needs one (SKY-761).
+_RUN = '\n[run]\nentry = "run.py:main"\n'
+_FILES = {"optimize.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place the sender means.\n"}
 
 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
@@ -335,7 +337,7 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
     proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
-    files = {**_FILES, "optimize.toml": _CONSTRAINTS + proposer}
+    files = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + proposer}
     monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
@@ -359,8 +361,14 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
 @pytest.mark.parametrize(
     ("files", "message"),
     [
-        ({"optimize.toml": 'version = 1\n[paths]\neditable = ["tests"]\n'}, "outside the approved editable paths"),
-        ({"optimize.toml": 'version = 1\n[services]\ngeocoder = ["search"]\n'}, "cannot grant services"),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["tests"]\n'},
+            "outside the approved editable paths",
+        ),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n'},
+            "cannot grant services",
+        ),
     ],
 )
 def test_staging_refuses_a_file_that_asks_for_more(
@@ -409,7 +417,7 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     """
     files = {
         "optimize.toml": (
-            "version = 1\n[proposer]\n"
+            'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
             f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
             f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
         ),
@@ -479,7 +487,7 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
     payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -499,7 +507,7 @@ def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_defa
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": "version = 1\n"}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     payload = {**_payload("c" * 40), "proposer": {"max_tool_calls": 100}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -519,7 +527,7 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
         proposer: The request's proposer, without a harness.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
     staged.cleanup()
@@ -528,7 +536,7 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
 
 
-_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
 @pytest.mark.parametrize(
@@ -638,7 +646,10 @@ def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeyp
         monkeypatch: Pytest fixture for the fake fetch.
     """
     files = {
-        "optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n',
+        "optimize.toml": (
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n'
+        ),
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
     }
 
@@ -667,7 +678,7 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
-_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + "\n[outcome]\ntarget = 0.9\n"}
+_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget = 0.9\n"}
 
 
 def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
@@ -709,7 +720,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert staged.require_version is True
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
 
@@ -724,7 +735,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
     """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
 
     staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
     staged.cleanup()
@@ -733,9 +744,21 @@ def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
 
 
+def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+    no_run = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        _stage_with(no_run, monkeypatch, resumed)
+
+
 _RULED = {
     **_FILES,
-    "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
+    "optimize.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',
     "docs/rules.md": "- Do not hardcode answers for dataset cases.\n- Do not call an outside geocoding service.\n",
 }
 
@@ -794,10 +817,12 @@ def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest
 
 def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     """The contract can come from the repository tree or from the draft files."""
-    _, staged = _stage_with({"optimize.toml": "version = 1\n"}, monkeypatch, require_constraints=True)
+    _, staged = _stage_with(
+        {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
+    )
     staged.cleanup()
     drafted = _payload("c" * 40)
-    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     _, staged = _stage_with({}, monkeypatch, drafted, require_constraints=True)
     staged.cleanup()
     assert staged.constrained is True
@@ -1005,7 +1030,10 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
     payload = _payload("c" * 40)
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
     payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
-    toml = 'version = 1\n[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    toml = (
+        'version = 1\n[run]\nentry = "run.py:main"\n'
+        '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    )
 
     _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
 
@@ -3278,7 +3306,8 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
             "eval/labels.json",
         ),
         (
-            'version = 1\n[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
             ".optimize/exploits/cheat.py",
         ),
     ],

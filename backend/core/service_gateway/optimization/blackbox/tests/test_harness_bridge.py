@@ -2024,6 +2024,21 @@ def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_
     assert (done.returncode, done.stdout, done.stderr) == (0, b"status 141 0\n", b"")
 
 
+def test_a_name_that_starts_with_two_dots_can_be_hidden(tmp_path: Path) -> None:
+    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots."""
+    hashes = harness_bridge.hidden_hashes(["..data"])
+
+    assert harness_bridge.hashed_kind(hashes, "..data/answers.csv") is not None
+    assert harness_bridge.hashed_kind(hashes, "../..data/answers.csv") is None
+    assert harness_bridge.hashed_kind(hashes, "..") is None
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    policy = harness_bridge.guard_policy(workspace, ["..data"], tmp_path / "refusals.jsonl")
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "..data/answers.csv"}) is not None
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": f"{workspace}/..data/answers.csv"}) is not None
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "../outside.csv"}) is None
+
+
 def test_a_setup_that_runs_too_long_stops_with_every_process_it_started(tmp_path: Path) -> None:
     """The setup's whole process group stops at the deadline, and the message names the command (SKY-753).
 

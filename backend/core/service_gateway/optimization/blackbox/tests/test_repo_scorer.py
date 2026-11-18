@@ -4765,7 +4765,7 @@ def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: 
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
-    """A run without ``[run]`` scores the tree directly and passes no output (E38)."""
+    """A run without ``[run]`` passes no output to the metric (E38)."""
     metric = (
         "import json\ndef score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': json.dumps(output)}\n"
     )
