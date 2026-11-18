@@ -1367,6 +1367,9 @@ def outcome_report(shape: Shape, outcome: RunOutcome, model_wait_seconds: float)
         row["ok"] = row["ok"] and row["gpu_placement_checked"]
     if outcome.error:
         row["error"] = outcome.error
+    elif shape.gpu and not row["gpu_placement_checked"]:
+        # The run itself raised nothing, so the gate message needs this reason to name the failed check.
+        row["error"] = "GPU placement not checked on every box"
     return row
 
 
@@ -1419,7 +1422,9 @@ def run(config: ReferenceShapesConfig) -> ScenarioResult:
         "shapes": rows,
     }
     result.slo_violations = [
-        f"{name} did not finish correct and replayable" for name, row in rows.items() if not row["ok"]
+        f"{name} did not finish correct and replayable" + (f": {row['error']}" if "error" in row else "")
+        for name, row in rows.items()
+        if not row["ok"]
     ]
     result.slo_passed = not result.slo_violations
     return result

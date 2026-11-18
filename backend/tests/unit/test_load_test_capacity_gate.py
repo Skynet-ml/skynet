@@ -345,6 +345,18 @@ def test_swarm_gate_reads_the_raw_figures_and_reports_them_rounded(
     assert result.extras["passes"][-1][key] == value
 
 
+def test_swarm_gate_compares_the_step_wait_with_the_unrounded_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a step wait p99 just over the raw limit fails, although it is below the limit rounded to 2 decimals.
+
+    Args:
+        monkeypatch: Replaces ``run_pass`` and sets the backend.
+    """
+    # The raw limit is 66.6666 ms and the rounded limit is 66.67 ms.
+    config = _swarm_config(flush_window_seconds=0.033333)
+    violations = _gate(monkeypatch, config, step_wait_ms={"mean": 50.0, "p50": 50.0, "p99": 66.668, "max": 70.0})
+    assert violations == ["2-shard step wait p99 is 66.668 ms, above 66.67 ms"]
+
+
 def test_swarm_gate_fails_a_lost_step_on_the_one_shard_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the 1-shard pass also fails the gate when it stored fewer steps than it committed.
 
@@ -1291,9 +1303,11 @@ def test_swarm_refuses_a_server_off_loopback(monkeypatch: pytest.MonkeyPatch, tm
     server = _FakeServer(address)
     monkeypatch.setattr(swarm_10k, "create_engine", lambda url, connect_args: server)
     monkeypatch.setattr(swarm_10k, "_reset", _no_start)
-    with pytest.raises(RuntimeError, match="not loopback"):
+    with pytest.raises(RuntimeError, match="not loopback") as refused:
         swarm_10k.run_pass(_swarm_config(db_url="postgresql://user@localhost/swarm"), 2, tmp_path)
     assert server.disposed
+    for remedy in ("natively", "--network host", "Unix socket"):
+        assert remedy in str(refused.value)
 
 
 @pytest.mark.parametrize("address", [None, "127.0.0.1", "::1"])
@@ -1439,6 +1453,7 @@ def test_gpu_check_fails_a_run_that_is_ok_otherwise() -> None:
     row = reference_shapes.outcome_report(shape, outcome, 1.0)
     assert row["gpu_placement_checked"] is False
     assert row["ok"] is False
+    assert row["error"] == "GPU placement not checked on every box"
 
 
 def test_run_with_a_seq_gap_is_not_ok() -> None:
@@ -1728,7 +1743,7 @@ def test_chaos_gate_fails_a_run_that_is_not_ok(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_reference_shapes_metric_counts_an_unchecked_gpu_placement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that the reference run records an error when only the GPU placement check fails.
+    """Check that the reference run records an error and names the GPU check when only that check fails.
 
     Args:
         monkeypatch: Replaces ``run_shape`` with made-up outcomes and keeps the boxes local.
@@ -1755,14 +1770,17 @@ def test_reference_shapes_metric_counts_an_unchecked_gpu_placement(monkeypatch: 
     monkeypatch.delenv("LOAD_TEST_BOX_IMAGE", raising=False)
     monkeypatch.setattr(reference_shapes, "run_shape", made_run)
     result = reference_shapes.run(reference_shapes.ReferenceShapesConfig(rounds=1, model_wait_seconds=1.0))
-    gpu_shapes = sum(1 for shape in reference_shapes.SHAPES if shape.gpu)
-    assert gpu_shapes == 1
+    gpu_shapes = [shape.name for shape in reference_shapes.SHAPES if shape.gpu]
+    assert len(gpu_shapes) == 1
     assert result.errors == 1
     assert result.status_codes.get(500) == 1
+    assert result.slo_violations == [
+        f"{gpu_shapes[0]} did not finish correct and replayable: GPU placement not checked on every box"
+    ]
 
 
 def test_chaos_gate_metric_counts_an_unchecked_gpu_placement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that the chaos gate records an error for a GPU run whose only failed check is the placement.
+    """Check that the chaos gate records an error and names the GPU check for a run that fails only that check.
 
     Args:
         monkeypatch: Runs one made-up GPU shape run that fires each kill kind, and stops the chaos job.
@@ -1799,6 +1817,9 @@ def test_chaos_gate_metric_counts_an_unchecked_gpu_placement(monkeypatch: pytest
     assert result.extras["runs_ok"] == 0
     assert result.errors == 1
     assert result.status_codes.get(500) == 1
+    assert result.slo_violations[0] == (
+        f"made-0 ({shape.name}) did not finish correct and replayable: GPU placement not checked on every box"
+    )
 
 
 def test_chaos_gate_fails_when_a_kill_kind_never_fires(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3071,7 +3092,7 @@ def test_swarm_driver_fails_a_step_that_did_not_land(
 
 
 def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that a knob flag sets its environment variable and a knob with no flag keeps its value.
+    """Check that a knob flag sets or replaces its environment variable and a knob with no flag keeps its value.
 
     ``_ensure_env`` writes ``os.environ`` directly, and ``monkeypatch.delenv`` records nothing for an unset
     name, so ``mock.patch.dict`` restores the environment that the call changes.
@@ -3091,6 +3112,8 @@ def test_run_all_sets_each_scenario_knob_from_its_flag(monkeypatch: pytest.Monke
     for name in defaults + [env_name for _, env_name, _ in run_all._SCENARIO_KNOBS]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LOAD_TEST_CHAOS_RUNS_PER_SHAPE", "7")
+    # The flag must replace a value that the environment already holds.
+    monkeypatch.setenv("LOAD_TEST_CHAOS_SEED", "1")
     monkeypatch.setattr(sys, "argv", ["run_all", "--swarm-agents=10000", "--chaos-seed=5"])
     before = dict(os.environ)
     with mock.patch.dict(os.environ):

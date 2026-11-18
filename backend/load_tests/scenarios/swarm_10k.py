@@ -82,6 +82,11 @@ all shards share the database. Its name must start with
 job that is not a swarm run (an id that does not start with ``swarm-``).
 Each invocation puts its own stamp in its run ids and worker ids, and deletes
 only the rows and packs of those ids, so it keeps the rows of any other swarm.
+The server must also see the connection on a loopback address or a Unix
+socket. A Docker Postgres with a published port sees its container address
+(such as ``172.17.0.1``), so the swarm refuses it: run the throwaway
+Postgres natively, in Docker with ``--network host``, or through a Unix
+socket.
 A session advisory lock allows one swarm pass per database. The lock is per
 database, so it does not stop a pass on another database of the same server.
 The objects go to a local folder, unless ``LOAD_TEST_SWARM_S3_BUCKET`` names a
@@ -392,7 +397,11 @@ def _check_server_addr(engine: Engine) -> None:
         address = connection.execute(text("SELECT inet_server_addr()")).scalar()
     # NULL means a Unix socket, which is local by definition.
     if address is not None and not ipaddress.ip_address(str(address).split("/")[0]).is_loopback:
-        raise RuntimeError(f"LOAD_TEST_SWARM_DB_URL reached server address {address}, which is not loopback")
+        raise RuntimeError(
+            f"LOAD_TEST_SWARM_DB_URL reached server address {address}, which is not loopback: run the throwaway"
+            " Postgres natively, in Docker with --network host, or through a Unix socket"
+            " (a published Docker port shows the container address)"
+        )
 
 
 def _check_throwaway(engine: Engine) -> None:
@@ -1264,7 +1273,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
     gated = passes[-1]
     on_s3 = bool(os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip())
     target_backend = config.db_url is not None and on_s3
-    max_wait_ms = round(1000 * MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds, 2)
+    # The gate compares with the unrounded limit; only the report and the message show it rounded.
+    max_wait_ms = 1000 * MAX_STEP_WAIT_P99_WINDOWS * config.flush_window_seconds
     min_steady_seconds = steady_floor_seconds(config)
     gated_violations = []
     if gated["commits_per_second"] < TARGET_COMMITS_PER_SECOND:
@@ -1279,7 +1289,8 @@ def run(config: SwarmConfig) -> ScenarioResult:
         )
     if gated["step_wait_ms"]["p99"] > max_wait_ms:
         gated_violations.append(
-            f"{gated['shards']}-shard step wait p99 is {gated['step_wait_ms']['p99']} ms, above {max_wait_ms} ms"
+            f"{gated['shards']}-shard step wait p99 is {gated['step_wait_ms']['p99']} ms,"
+            f" above {round(max_wait_ms, 2)} ms"
         )
     if gated["commit_call_ms"]["p99"] > MAX_COMMIT_CALL_P99_MS:
         gated_violations.append(
@@ -1322,7 +1333,7 @@ def run(config: SwarmConfig) -> ScenarioResult:
         "model": "mock reply in the step body",
         "target_commits_per_second": TARGET_COMMITS_PER_SECOND,
         "offered_commits_per_second": round(TARGET_COMMITS_PER_SECOND * OFFERED_LOAD_MARGIN, 1),
-        "max_step_wait_p99_ms": max_wait_ms,
+        "max_step_wait_p99_ms": round(max_wait_ms, 2),
         "max_commit_call_p99_ms": MAX_COMMIT_CALL_P99_MS,
         "min_steady_seconds": round(min_steady_seconds, 3),
         "gated_pass_shards": gated["shards"],
