@@ -96,7 +96,7 @@ Le dépôt peut contenir un fichier `serve.py` avec `def serve(input)`. Skynet l
 
 ### Secrets
 
-Ajoutez des secrets, par exemple les clés d'API dont votre code a besoin. Chaque secret arrive à votre code et à votre évaluateur sous forme de variable d'environnement de même nom. L'agent de code ne peut pas les voir. Skynet masque leurs valeurs dans les journaux.
+Ajoutez des secrets, par exemple les clés d'API dont votre code a besoin. Votre code et votre évaluateur ne reçoivent pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à un rôle seulement par une table `[services.<name>]` que le rôle liste dans `[run] services` ou `[metric] services`. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'agent de code ne peut pas les voir. Skynet masque leurs valeurs dans les journaux.
 
 ### Vérification
 

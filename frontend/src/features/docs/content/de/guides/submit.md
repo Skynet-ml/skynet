@@ -96,7 +96,7 @@ Das Repository kann eine Datei `serve.py` mit `def serve(input)` haben. Skynet s
 
 ### Secrets
 
-Fügen Sie Secrets hinzu, zum Beispiel API-Schlüssel, die Ihr Code braucht. Jedes Secret erreicht Ihren Code und Ihren Scorer als Umgebungsvariable mit demselben Namen. Der Coding-Agent kann sie nicht sehen. Skynet verbirgt ihre Werte in den Logs.
+Fügen Sie Secrets hinzu, zum Beispiel API-Schlüssel, die Ihr Code braucht. Ihr Code und Ihr Scorer erhalten keine Secrets des Durchlaufs als Umgebungsvariablen. Ein Secret erreicht eine Rolle nur über eine Tabelle `[services.<name>]`, die die Rolle in `[run] services` oder `[metric] services` nennt. Schreiben Sie das Secret als `${NAME}` in die `headers` der Tabelle. Der Coding-Agent kann sie nicht sehen. Skynet verbirgt ihre Werte in den Logs.
 
 ### Prüfung
 

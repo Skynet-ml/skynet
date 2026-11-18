@@ -96,7 +96,7 @@ Il repository può avere un file `serve.py` con `def serve(input)`. Skynet lo us
 
 ### Secret
 
-Aggiungi i secret, come le chiavi API di cui ha bisogno il tuo codice. Ogni segreto arriva al tuo codice e al tuo scorer come variabile d'ambiente con lo stesso nome. L'agente di programmazione non può vederli. Skynet nasconde i loro valori nei log.
+Aggiungi i secret, come le chiavi API di cui ha bisogno il tuo codice. Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. L'agente di programmazione non può vederli. Skynet nasconde i loro valori nei log.
 
 ### Controllo
 
