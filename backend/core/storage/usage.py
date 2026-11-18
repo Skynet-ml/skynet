@@ -313,9 +313,17 @@ def compute_user_storage(engine: Engine, username: str, shards: ShardMap | None 
         )
         trees = scalar(trees_sum)
         for name in shards.names():
-            if name != MAIN:
+            if name == MAIN:
+                continue
+            # Fail open: the storage quota is a soft limit, and one down shard must not fail every user's
+            # quota check and usage page. The count misses that shard's trees until it answers again.
+            try:
                 with Session(shards.engine(name)) as shard_session:
                     trees += int(shard_session.execute(trees_sum).scalar() or 0)
+            except Exception:
+                logger.warning(
+                    "step log shard %s did not answer the storage count; it is left out", name, exc_info=True
+                )
         agent_chats = scalar(
             select(
                 func.coalesce(

@@ -769,3 +769,27 @@ def test_storage_with_no_shard_map_refuses_a_shard_config(store: _SQLiteJobStore
 
     with pytest.raises(ValueError, match="shard map"):
         compute_user_storage(store.engine, "alice")
+
+
+def test_a_step_log_shard_that_does_not_answer_is_left_out_of_the_storage_count(
+    store: _SQLiteJobStore, tmp_path: Path
+) -> None:
+    """A down shard does not fail the count: the quota is a soft limit, so the other shards still count (SKY-731).
+
+    Args:
+        store: SQLite-backed store.
+        tmp_path: Pytest's temporary folder.
+    """
+    shard = create_engine(f"sqlite:///{tmp_path / 's2.sqlite'}")
+    Base.metadata.create_all(shard, tables=[TreeObjectModel.__table__])
+    # SQLite cannot open a file in a folder that does not exist, so each query on this shard fails.
+    down = create_engine(f"sqlite:///{tmp_path / 'missing' / 's3.sqlite'}")
+    store._step_log_shards = ShardMap(store.engine, {"s2": shard, "s3": down})
+    _add_tree(store.engine, "alice", "a" * 64, 100)
+    _add_tree(shard, "alice", "b" * 64, 40)
+
+    usage = store.compute_user_storage("alice")
+
+    assert usage.total == 140
+    shard.dispose()
+    down.dispose()

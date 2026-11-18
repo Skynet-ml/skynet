@@ -8,6 +8,8 @@ disposable PostgreSQL databases: set ``APP_TEST_DB_URL`` (main) and
 
 from __future__ import annotations
 
+import threading
+import time
 import zlib
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,6 +20,7 @@ from alembic.script import ScriptDirectory
 from pydantic import SecretStr
 from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from core.config import app_env, settings
@@ -462,6 +465,125 @@ def test_a_map_with_no_shard_refuses_a_run_that_another_pod_put_on_a_shard(
     assert _step_runs(main) == {"run-1"}
 
 
+def test_the_jobs_lookup_of_a_map_with_no_shard_has_a_partial_index(main: Engine) -> None:
+    """The check of a map with no extra shard reads the partial index, not every ``jobs`` row."""
+    indexes = {index["name"]: index for index in inspect(main).get_indexes("jobs")}
+
+    assert indexes["ix_jobs_step_log_shard"]["column_names"] == ["step_log_shard"]
+    with main.connect() as connection:
+        plan = " ".join(
+            str(row[-1])
+            for row in connection.execute(
+                text(
+                    "EXPLAIN QUERY PLAN SELECT optimization_id FROM jobs "
+                    "WHERE step_log_shard IS NOT NULL AND step_log_shard != 'main' LIMIT 1"
+                )
+            )
+        )
+    assert "ix_jobs_step_log_shard" in plan
+
+
+def test_a_run_with_a_shard_this_pod_lacks_fails_alone_and_the_other_runs_land(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore
+) -> None:
+    """A run that records an unknown shard fails its own waiters once; a healthy run on another shard still lands."""
+    healthy = _a_run_on(two_shard_log.shards, "s2")
+    lost = next(run for run in RUNS if run != healthy and _recorded(main, run) is None)
+    _set_shard(main, lost, "s9")
+    dropped = _commit(two_shard_log, lost, 0)
+    kept = _commit(two_shard_log, healthy, 0)
+    errors: list[Exception] = []
+
+    def wait_for_dropped() -> None:
+        """Wait on the dropped step during the flush and keep the error it raises."""
+        try:
+            two_shard_log.durable(dropped, 1, timeout=5)
+        except Exception as error:
+            errors.append(error)
+
+    waiter = two_shard_log._waiters[(dropped, 1)]
+    waiting = threading.Thread(target=wait_for_dropped)
+    waiting.start()
+    # The flush must open the waiter while the thread waits on it, not before the thread reads it.
+    deadline = time.monotonic() + 5
+    while not waiter._cond._waiters and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(KeyError, match="s9"):
+        two_shard_log.flush()
+    waiting.join(timeout=5)
+
+    two_shard_log.durable(kept, 1, timeout=5)
+    assert _rows(shard, kept) == 1
+    assert [type(error) for error in errors] == [RuntimeError]
+    assert "no step log shard" in str(errors[0])
+    # A later ``durable`` call finds no waiter, and the run's shard is still unknown.
+    with pytest.raises(KeyError, match="s9"):
+        two_shard_log.durable(dropped, 1, timeout=5)
+    assert two_shard_log._pending == []
+    two_shard_log.flush()
+
+
+def test_a_failed_shard_lookup_requeues_only_its_run(
+    main: Engine, shard: Engine, two_shard_log: StepLogStore, monkeypatch
+) -> None:
+    """When the lookup of one run's shard fails, only that run waits; it lands on the next flush."""
+    healthy, slow = _a_run_on(two_shard_log.shards, "s2"), _a_run_on(two_shard_log.shards, MAIN)
+    lookup = two_shard_log.shards.shard_of
+    broken = True
+
+    def fail_one_run(run_id: str) -> str:
+        """Fail the lookup of one run while the main database does not answer it.
+
+        Args:
+            run_id: The job id.
+
+        Returns:
+            The run's shard.
+
+        Raises:
+            OSError: For the failed run while the lookup is down.
+        """
+        if run_id == slow and broken:
+            raise OSError("lookup down")
+        return lookup(run_id)
+
+    monkeypatch.setattr(two_shard_log.shards, "shard_of", fail_one_run)
+    waiting = _commit(two_shard_log, slow, 0)
+    kept = _commit(two_shard_log, healthy, 0)
+
+    with pytest.raises(OSError, match="lookup down"):
+        two_shard_log.flush()
+
+    two_shard_log.durable(kept, 1, timeout=5)
+    assert _pending_ids(two_shard_log) == [waiting]
+    broken = False
+    two_shard_log.flush()
+    two_shard_log.durable(waiting, 1, timeout=5)
+    assert _rows(main, waiting) == 1
+
+
+def test_a_down_fallback_shard_is_a_miss_for_a_tree_object_read(
+    main: Engine, objects: LocalObjectStore, tmp_path: Path
+) -> None:
+    """After a miss on the run's own shard, a down shard is skipped; a down own shard still raises."""
+    # SQLite cannot open a file in a folder that does not exist, so each query on this shard fails.
+    down = create_engine(f"sqlite:///{tmp_path / 'missing' / 's2.sqlite'}")
+    shards = ShardMap(main, {"s2": down})
+    store = StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=shards)
+    try:
+        reader, other = _a_run_on(shards, MAIN), _a_run_on(shards, "s2")
+        store.put_object(reader, "c" * 64, b"tree bytes")
+        store.flush()
+
+        assert store.get_object(reader, "c" * 64) == b"tree bytes"
+        assert store.get_object(reader, "d" * 64) is None
+        with pytest.raises(OperationalError):
+            store.get_object(other, "d" * 64)
+    finally:
+        store.close()
+        down.dispose()
+
+
 @pytest.mark.parametrize(("down", "up"), [("s2", MAIN), (MAIN, "s2")])
 def test_a_failed_shard_does_not_stop_the_flushes_of_the_other_shard(
     main: Engine, shard: Engine, two_shard_log: StepLogStore, monkeypatch, down: str, up: str
@@ -710,8 +832,8 @@ def test_a_store_closes_only_the_shard_engines_that_it_created(
     shards.dispose()
 
 
-def test_shard_engines_on_postgresql_get_connect_and_statement_timeouts(main: Engine, monkeypatch) -> None:
-    """A PostgreSQL shard engine fails fast when the shard hangs; a SQLite one gets no PostgreSQL option."""
+def test_shard_engines_on_postgresql_get_connect_statement_and_tcp_timeouts(main: Engine, monkeypatch) -> None:
+    """A PostgreSQL shard engine fails fast when the shard hangs or the network cuts it; SQLite gets no such option."""
     made: dict[str, dict[str, Any]] = {}
 
     def record(url: str, **options: Any) -> Engine:
@@ -738,6 +860,11 @@ def test_shard_engines_on_postgresql_get_connect_and_statement_timeouts(main: En
     assert made["postgresql+psycopg"]["connect_args"] == {
         "connect_timeout": shard_map_mod.SHARD_CONNECT_TIMEOUT_SECONDS,
         "options": f"-c statement_timeout={shard_map_mod.SHARD_STATEMENT_TIMEOUT_MS}",
+        "tcp_user_timeout": shard_map_mod.SHARD_TCP_USER_TIMEOUT_MS,
+        "keepalives": 1,
+        "keepalives_idle": shard_map_mod.SHARD_KEEPALIVES_IDLE_SECONDS,
+        "keepalives_interval": shard_map_mod.SHARD_KEEPALIVES_INTERVAL_SECONDS,
+        "keepalives_count": shard_map_mod.SHARD_KEEPALIVES_COUNT,
     }
     assert "connect_args" not in made["sqlite"]
 

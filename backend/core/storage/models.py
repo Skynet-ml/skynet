@@ -1318,6 +1318,14 @@ class JobModel(Base):
         # the alembic migration so two concurrent submits with the same key
         # cannot both create rows.
         Index("ix_jobs_username_idempotency_key", "username", "idempotency_key"),
+        # Each new shard map with no extra shard looks for a job that records a shard (SKY-731).
+        # Partial, so the lookup does not scan ``jobs``, and the index is empty while no run records a shard.
+        Index(
+            "ix_jobs_step_log_shard",
+            "step_log_shard",
+            postgresql_where=text("step_log_shard IS NOT NULL"),
+            sqlite_where=text("step_log_shard IS NOT NULL"),
+        ),
     )
 
 

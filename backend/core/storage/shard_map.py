@@ -45,6 +45,12 @@ SHARD_POOL_OVERFLOW = 5
 # A shard that hangs must not hold a flush, or the ``jobs`` row locks behind it, without limit.
 SHARD_CONNECT_TIMEOUT_SECONDS = 10
 SHARD_STATEMENT_TIMEOUT_MS = 30_000
+# The statement timeout runs on the server, so it does not end a wait on a connection that the network cut.
+# These client-side TCP limits drop such a connection after about the same 30 seconds.
+SHARD_TCP_USER_TIMEOUT_MS = 30_000
+SHARD_KEEPALIVES_IDLE_SECONDS = 10
+SHARD_KEEPALIVES_INTERVAL_SECONDS = 5
+SHARD_KEEPALIVES_COUNT = 4
 
 
 class ShardMap:
@@ -213,7 +219,7 @@ class ShardMap:
 
 
 def _shard_engine(url: str) -> Engine:
-    """Create the engine of one shard, with time limits on PostgreSQL.
+    """Create the engine of one shard, with server-side and TCP time limits on PostgreSQL.
 
     Args:
         url: The shard database URL.
@@ -229,6 +235,11 @@ def _shard_engine(url: str) -> Engine:
             connect_args={
                 "connect_timeout": SHARD_CONNECT_TIMEOUT_SECONDS,
                 "options": f"-c statement_timeout={SHARD_STATEMENT_TIMEOUT_MS}",
+                "tcp_user_timeout": SHARD_TCP_USER_TIMEOUT_MS,
+                "keepalives": 1,
+                "keepalives_idle": SHARD_KEEPALIVES_IDLE_SECONDS,
+                "keepalives_interval": SHARD_KEEPALIVES_INTERVAL_SECONDS,
+                "keepalives_count": SHARD_KEEPALIVES_COUNT,
             },
         )
     return create_engine(url, **options)

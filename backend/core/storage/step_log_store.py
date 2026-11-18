@@ -202,6 +202,8 @@ class _Waiter(threading.Event):
     failure: str | None = None
     # Set when the last flush of ``close`` failed: no flusher is left to open the waiter.
     closed: bool = False
+    # Set when the step's run records a shard that this pod does not have: the step is dropped, with no retry.
+    error: str | None = None
 
 
 def _encode_body(body: dict[str, Any]) -> bytes:
@@ -490,7 +492,8 @@ class StepLogStore:
             TimeoutError: When the flush does not commit in time.
             KeyError: When the store knows no such step and it has no row.
             RuntimeError: When the last flush of :meth:`close` failed before
-                the step was durable.
+                the step was durable, or the flush could not route the step's run
+                to a shard on this pod.
         """
         key = (step_id, execution_generation)
         with self._cond:
@@ -501,6 +504,8 @@ class StepLogStore:
                 raise TimeoutError(f"step {step_id} is not durable yet")
             if waiter.closed:
                 raise RuntimeError(f"the step log closed before step {step_id} was durable")
+            if waiter.error is not None:
+                raise RuntimeError(waiter.error)
             failure = waiter.failure
         elif failure is None:
             with self._shards.for_run(_run_of(step_id)) as session:
@@ -575,13 +580,20 @@ class StepLogStore:
         # The run's own shard first; another run of the account can have stored the object on another shard.
         first = self._shards.shard_of(run_id)
         for name in (first, *(name for name in self._shards.names() if name != first)):
-            with Session(self._shards.engine(name)) as session:
-                row = session.scalars(
-                    select(TreeObjectModel).where(
-                        TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner
-                    )
-                ).first()
-                location = None if row is None else (row.pack_key, row.pack_offset, row.pack_length)
+            try:
+                with Session(self._shards.engine(name)) as session:
+                    row = session.scalars(
+                        select(TreeObjectModel).where(
+                            TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner
+                        )
+                    ).first()
+                    location = None if row is None else (row.pack_key, row.pack_offset, row.pack_length)
+            except Exception:
+                # The run's own shard answered, so a down fallback shard is only a miss: it must not fail other shards.
+                if name == first:
+                    raise
+                logger.warning("step log shard %s did not answer a tree object read", name, exc_info=True)
+                continue
             if location is not None:
                 return self._objects.get(*location)
         return None
@@ -595,8 +607,13 @@ class StepLogStore:
         the written pack. The next flush records the kept pack first, with no
         new PUT, and until then writes no new pack for that shard.
 
+        Each run is routed on its own. When the lookup of a run's shard fails,
+        that run's entries go back to the buffer. When the run records a shard
+        that this pod's map does not have, its entries are dropped and its
+        waiters fail, so they do not fail every later flush.
+
         Raises:
-            Exception: The first shard's error, after every other shard flushed.
+            Exception: The first error, after every shard that could flush flushed.
         """
         with self._flush_lock:
             with self._cond:
@@ -605,12 +622,11 @@ class StepLogStore:
                 kept = sorted(self._unapplied)
             if not batch and not kept:
                 return
-            try:
-                groups = dict(self._by_shard(batch))
-            except Exception:
-                self._requeue(batch, first_at)
-                raise
-            errors: list[Exception] = []
+            groups, retry, unroutable, errors = self._by_shard(batch)
+            self._requeue(retry, first_at)
+            if unroutable:
+                logger.error("step log flush dropped %d entries that have no shard on this pod", len(unroutable))
+                self._settle(unroutable, [], error="the step's run has no step log shard on this pod")
             for shard in sorted({*groups, *kept}):
                 try:
                     self._flush_shard(shard, groups.get(shard, []), first_at)
@@ -661,19 +677,45 @@ class StepLogStore:
 
     def _by_shard(
         self, batch: list[tuple[_Step | _Object, bytes]]
-    ) -> list[tuple[str, list[tuple[_Step | _Object, bytes]]]]:
+    ) -> tuple[
+        dict[str, list[tuple[_Step | _Object, bytes]]],
+        list[tuple[_Step | _Object, bytes]],
+        list[tuple[_Step | _Object, bytes]],
+        list[Exception],
+    ]:
         """Split a batch by the shard of each entry's run, in commit order inside each shard.
 
         Args:
             batch: The buffered entries with their bytes.
 
         Returns:
-            The shard names, sorted, each with its entries.
+            The entries by shard; the entries to try again, whose shard lookup
+            failed; the entries whose run records a shard that this pod does
+            not have; and one error for each run that was not routed.
         """
+        routes: dict[str, str | Exception] = {}
         groups: dict[str, list[tuple[_Step | _Object, bytes]]] = {}
+        retry: list[tuple[_Step | _Object, bytes]] = []
+        unroutable: list[tuple[_Step | _Object, bytes]] = []
+        errors: list[Exception] = []
         for item, data in batch:
-            groups.setdefault(self._shards.shard_of(item.run_id), []).append((item, data))
-        return sorted(groups.items())
+            route = routes.get(item.run_id)
+            if route is None:
+                try:
+                    route = self._shards.shard_of(item.run_id)
+                except Exception as error:
+                    route = error
+                    errors.append(error)
+                routes[item.run_id] = route
+            if isinstance(route, str):
+                groups.setdefault(route, []).append((item, data))
+            # A shard that this pod's map does not know stays unknown until a deploy: a retry would fail each flush.
+            # A pod with no map at all (``RuntimeError``) fails every run alike, so its entries wait for the fix.
+            elif isinstance(route, KeyError):
+                unroutable.append((item, data))
+            else:
+                retry.append((item, data))
+        return groups, retry, unroutable, errors
 
     def _requeue(self, entries: list[tuple[_Step | _Object, bytes]], first_at: float | None) -> None:
         """Put entries that no pack recorded back at the front of the buffer, and wake the flusher.
@@ -690,12 +732,15 @@ class StepLogStore:
             # An outside flush took the batch while the flusher slept on an empty buffer with no deadline.
             self._cond.notify_all()
 
-    def _settle(self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]]) -> None:
+    def _settle(
+        self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]], error: str | None = None
+    ) -> None:
         """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
 
         Args:
             batch: The entries of the recorded pack.
             stale: The manifest entries of the batch's steps that did not land.
+            error: The reason when the batch is dropped with no pack; each waiter raises it.
         """
         with self._cond:
             # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
@@ -719,6 +764,7 @@ class StepLogStore:
                 waiter = self._waiters.pop(step_key, None)
                 if waiter is not None:
                     waiter.failure = verdicts.get(step_key)
+                    waiter.error = error
                     waiter.set()
 
     def recover(self) -> int:
