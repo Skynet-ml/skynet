@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import math
+import posixpath
+import re
+from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from gepa.oa.config import OptimizeAnythingConfig
@@ -11,13 +15,42 @@ from gepa.oa.engines.best_of_n import BestOfNEngine as UpstreamBestOfN
 from ....exceptions import ServiceError
 from ..budget_stop import BudgetReached
 from .feedback import emit_candidate
+from .harness_bridge import hashed_kind
 from .native_runtime import run_native_engine
-from .protocol import EngineContext, EvalServer, Result, Task
+from .protocol import EngineContext, EvalServer, RepoSeed, Result, Task
 from .upstream import local_result, reflection_endpoint, upstream_server
 
 # Top train samples re-scored on the validation split; each costs one scorer
 # run per validation case, so the cap keeps sampling the bulk of the budget.
 _MAX_FINALISTS = 3
+# The whole repository brief: path rules, file blocks, notices and the line
+# breaks between them. Upstream sends the brief in every sample's prompt, so
+# the cap bounds each model call.
+_BRIEF_MAX_BYTES = 64_000
+# A repository can name thousands of paths in one rule (for example every LFS
+# file as read-only), so each rule lists a few and counts the rest.
+_BRIEF_MAX_PATHS = 50
+# Paths have no length bound, so each rule's list also stops at a byte budget:
+# three full rules still leave most of the brief for file content.
+_BRIEF_MAX_PATH_BYTES = _BRIEF_MAX_BYTES // 8
+# The tree entries carry no size, so a repository of many large or binary files
+# would make the brief read about a thousand whole blobs on each resume.
+_BRIEF_MAX_READS = 256
+# Upstream's reply parser ends the candidate at the first run of three
+# backticks anywhere in the reply, also inside a line, so a repository diff
+# spells each such run as a token that Skynet turns back before scoring. A
+# literal ``<<`` is doubled, so file text that looks like a token stays text
+# and the round trip is exact. Both patterns share one run bound, so each
+# token the encoder writes decodes; a longer run splits into several tokens.
+# The reply is untrusted: the bound keeps a token of 16 bytes from decoding to
+# more than 99, so the decoded diff stays a few times the reply's size, and a
+# token above the bound stays text.
+_ESCAPE = re.compile("<<|`{3,99}")
+_UNESCAPE = re.compile(r"<<<<|<<(\d{1,2}) backticks>>")
+# The model writes the hunk header, so its counts are untrusted: the digits are
+# bounded, and a gap larger than a few stripped lines gets no padding at all.
+_HUNK_HEADER = re.compile(r"^@@ -\d{1,9}(?:,(\d{1,9}))? \+\d{1,9}(?:,(\d{1,9}))? @@", re.MULTILINE)
+_MAX_STRIPPED_LINES = 16
 
 
 class _SampleStream:
@@ -83,6 +116,45 @@ class _SampleStream:
         )
 
 
+class _UnescapingServer:
+    """Give the scorer a repository sample with its backtick tokens turned back into backticks.
+
+    Every other attribute comes from the wrapped upstream server unchanged.
+    """
+
+    def __init__(self, server: Any) -> None:
+        """Wrap the upstream server that upstream's sampling loop scores on.
+
+        Args:
+            server: The upstream eval server.
+        """
+        self._server = server
+
+    def __getattr__(self, name: str) -> Any:
+        """Return the wrapped server's attribute.
+
+        Args:
+            name: The attribute name.
+
+        Returns:
+            The attribute.
+        """
+        return getattr(self._server, name)
+
+    def evaluate(self, candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score the sample as a real diff.
+
+        Args:
+            candidate: The sample as upstream parsed it, with backtick tokens.
+            example: The case to score on, if any.
+            **kwargs: Passed to the wrapped server.
+
+        Returns:
+            The wrapped server's score and feedback.
+        """
+        return self._server.evaluate(_as_patch(candidate), example, **kwargs)
+
+
 class BestOfNEngine:
     """Adapt the upstream independent-sampling baseline without rewriting its loop."""
 
@@ -104,13 +176,26 @@ class BestOfNEngine:
         """
         if not task.str_mode:
             raise ServiceError("Best-of-N supports text starting points only.")
-        if ctx.native_options is not None and ctx.native_options.repo is not None:
-            # A repository sample is a patch a coding agent writes in the native
-            # runtime's checkout; upstream's text sampler cannot edit a checkout.
+        on_loop = ctx.repo_seed is not None and ctx.read_file is not None and ctx.list_files is not None
+        if ctx.native_options is not None and ctx.native_options.repo is not None and not on_loop:
             return run_native_engine("best_of_n_repo", task, server, ctx)
+        # SKY-721: on the worker engine loop a repository run samples here
+        # too, so each sample is one model step with no box open, and only
+        # the scorer's commands open boxes. Its candidate is the patch text.
+        # Until the cutover (SKY-728), production builds no loop context, so a
+        # repository run without it keeps the native coding-agent engine.
+        if on_loop:
+            brief = _repository_brief(ctx.repo_seed, ctx.read_file, ctx.list_files)
+            task = replace(task, background="\n\n".join(part for part in (task.background, brief) if part))
+        sampled = task
+        if on_loop and isinstance(task.seed_candidate, str) and task.seed_candidate:
+            # Upstream shows the seed in a fence and keeps it as the result when
+            # no sample completes, and the result is unescaped below, so the
+            # seed goes in encoded like the brief's file text.
+            sampled = replace(task, seed_candidate=_escape_backticks(task.seed_candidate))
         finalists = _validation_finalists(task, server)
         sampling = server.lane(server.remaining - finalists * len(task.valset))
-        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
+        upstream = upstream_server(sampled, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
         result = None
         budget_stop = None
         try:
@@ -123,7 +208,7 @@ class BestOfNEngine:
                         engine_config={"model": "openai/app-reflection", "lm_kwargs": connection},
                     )
                 )
-                result = engine.run(upstream.task, upstream)
+                result = engine.run(upstream.task, _UnescapingServer(upstream) if on_loop else upstream)
         except BudgetReached as exc:
             budget_stop = exc
         if budget_stop is None:
@@ -134,6 +219,8 @@ class BestOfNEngine:
             raise ServiceError("Best-of-N did not produce a result.")
         engine.process_result(result, upstream.output_dir)
         adapted = local_result(result, server)
+        if on_loop:
+            adapted.best_candidate = _as_patch(adapted.best_candidate)
         # Upstream logs a sample with no scored case at -inf; it is not evaluated.
         evaluated = any(math.isfinite(row.get("score", -math.inf)) for row in result.metadata.get("bon_cost_log", []))
         if budget_stop is not None:
@@ -153,6 +240,231 @@ class BestOfNEngine:
         if finalists:
             return _select_on_validation(task, server, sampling, adapted, finalists)
         return adapted
+
+
+def _repository_brief(
+    seed: RepoSeed,
+    read_file: Callable[[str, str], bytes | None],
+    list_files: Callable[[str, str], list[str] | None],
+) -> str:
+    """Brief the model on the repository: the candidate's form, the path rules and the files it may change.
+
+    Upstream's prompt is fixed, so the brief goes in the task's background,
+    which upstream sends unchanged in every sample's prompt. The files come
+    from the seed tree with no box. The worker host leaves the run's hidden
+    paths out of both readers, so the brief never sees a hidden file.
+
+    Args:
+        seed: The run's repository seed tree and path rules.
+        read_file: Reads one file of a tree; ``None`` for a hidden, folder or missing path.
+        list_files: Lists the files under a folder of a tree, sorted; ``None`` when the path is not a folder.
+
+    Returns:
+        The brief text.
+    """
+    # The seed contract: the engine never learns a hidden name (E61), so the
+    # path rules leave out each hidden path and each path inside a hidden folder.
+    editable_paths = [path for path in map(posixpath.normpath, seed.editable_paths) if _visible(seed, path)]
+    fixed = [path for path in map(posixpath.normpath, seed.readonly_paths) if _visible(seed, path)]
+    # A constrained path may change, but only within the rules of the repository's constraints file.
+    constrained = sorted({path for path in map(posixpath.normpath, seed.constrained_paths) if _visible(seed, path)})
+    editable = _path_list(["the whole repository" if path == "." else f"`{path}`" for path in editable_paths])
+    lines = [
+        "This run optimizes a repository. Each candidate is a unified diff (git diff format) against the "
+        "repository root; an empty diff keeps the repository as it is.",
+        "Inside the diff, write each run of three or more backticks as `<<N backticks>>`, where N is the "
+        "length of the run and at most 99 (split a longer run into several tokens), and write each literal "
+        "`<<` as `<<<<`, as the file contents below do. Skynet turns each token back into backticks and each "
+        "`<<<<` back into `<<`.",
+        f"You may change: {editable or 'nothing'}.",
+    ]
+    if fixed:
+        lines.append("Do not change: " + _path_list([f"`{path}`" for path in fixed]) + ".")
+    if constrained:
+        lines.append(
+            "You may change these paths only within the rules of the constraints file: "
+            + _path_list([f"`{path}`" for path in constrained])
+            + "."
+        )
+    shown: dict[str, None] = {}
+    for path in (*editable_paths, *constrained):
+        for name in list_files(seed.tree_id, path) or [path]:
+            if not any(name == other or name.startswith(f"{other}/") for other in fixed):
+                shown[name] = None
+    names = list(shown)
+    # Each line after the first costs its "\n" too, and the room keeps space
+    # for the closing count line, so the joined brief stays within the cap.
+    closing = f"{len(names)} more files are not shown."
+    room = _BRIEF_MAX_BYTES - len("\n".join(lines).encode()) - len(closing.encode()) - 1
+    for index, path in enumerate(names):
+        # A file gets no read once not even its short notice fits, so a
+        # repository of many skipped files reads no file past the room.
+        entry = ""
+        if index < _BRIEF_MAX_READS and len(_not_text(path).encode()) + 1 <= room:
+            data = read_file(seed.tree_id, path)
+            if data is None:
+                continue
+            entry = _file_entry(path, data, room - 1)
+        if not entry or len(entry.encode()) + 1 > room:
+            lines.append(f"{len(names) - index} more files are not shown.")
+            break
+        room -= len(entry.encode()) + 1
+        lines.append(entry)
+    return "\n".join(lines)
+
+
+def _path_list(labels: list[str]) -> str:
+    """Join the first path labels of a rule, and count the rest.
+
+    Args:
+        labels: The rule's path labels, in order.
+
+    Returns:
+        At most :data:`_BRIEF_MAX_PATHS` labels within :data:`_BRIEF_MAX_PATH_BYTES`, then ``and N more``.
+    """
+    shown: list[str] = []
+    size = 0
+    for label in labels[:_BRIEF_MAX_PATHS]:
+        size += len(label.encode()) + 2
+        if size > _BRIEF_MAX_PATH_BYTES:
+            break
+        shown.append(label)
+    rest = len(labels) - len(shown)
+    return ", ".join([*shown, f"and {rest} more"] if rest else shown)
+
+
+def _not_text(path: str) -> str:
+    """Return the notice for a file the brief cannot show as text.
+
+    Args:
+        path: The file path.
+
+    Returns:
+        The notice line.
+    """
+    return f"`{path}` is not text, so it is not shown."
+
+
+def _file_entry(path: str, data: bytes, room: int) -> str:
+    """Return a file's brief entry: its fenced, escaped content when it fits the room, else a notice.
+
+    Args:
+        path: The file path.
+        data: The file bytes.
+        room: The bytes left for the entry itself.
+
+    Returns:
+        The content block, the binary notice or the "no room" notice.
+    """
+    no_room = f"`{path}` is not shown: the brief has no room for it."
+    # Escaping shortens only a run of 17 or more backticks, so a file larger
+    # than the room almost never fits, and the brief does not decode or escape it.
+    if len(data) > room:
+        return no_room
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return _not_text(path)
+    # A NUL byte is valid UTF-8, but it marks a binary file.
+    if "\x00" in text:
+        return _not_text(path)
+    # A longer fence here would invite a longer fence in the reply, which upstream cannot parse.
+    block = "\n".join([f"Current content of `{path}`:", "```", _escape_backticks(text), "```"])
+    if len(block.encode()) <= room:
+        return block
+    return no_room
+
+
+def _escape_backticks(text: str) -> str:
+    """Spell each run of three or more backticks as its token, and each literal ``<<`` as ``<<<<``.
+
+    Args:
+        text: File text.
+
+    Returns:
+        The text with no run of three backticks; :func:`_unescape_backticks` gives back the exact text.
+    """
+    return _ESCAPE.sub(lambda match: "<<<<" if match.group() == "<<" else f"<<{len(match.group())} backticks>>", text)
+
+
+def _as_patch(text: str) -> str:
+    """Turn a repository sample back into a diff that ``git apply`` accepts.
+
+    Upstream's reply parser strips the final newlines, and ``git apply``
+    refuses a diff with no final newline as a corrupt patch. The strip also
+    drops a blank context line at the end of the last hunk when the model
+    wrote it as an empty line, so the hunk falls short of its header.
+
+    Args:
+        text: A repository sample as upstream parsed it.
+
+    Returns:
+        The sample as a real diff that ends with a newline, or ``""``.
+    """
+    patch = _unescape_backticks(text)
+    if not patch:
+        return patch
+    if not patch.endswith("\n"):
+        patch += "\n"
+    return patch + "\n" * _stripped_context_lines(patch)
+
+
+def _stripped_context_lines(patch: str) -> int:
+    """Count the empty context lines that the strip took from the end of the last hunk.
+
+    Args:
+        patch: A diff that ends with a newline.
+
+    Returns:
+        How many lines the last hunk lacks against its header, when only empty context lines can explain the
+        gap and the gap is at most :data:`_MAX_STRIPPED_LINES`; otherwise ``0``, so a complete, malformed or
+        hostile diff stays as it is.
+    """
+    headers = list(_HUNK_HEADER.finditer(patch))
+    if not headers:
+        return 0
+    last = headers[-1]
+    old_missing = 1 if last.group(1) is None else int(last.group(1))
+    new_missing = 1 if last.group(2) is None else int(last.group(2))
+    # The first part is the rest of the header line, and the last is the empty text after the final newline.
+    for line in patch[last.end() :].split("\n")[1:-1]:
+        if line == "" or line.startswith(" "):
+            old_missing -= 1
+            new_missing -= 1
+        elif line.startswith("-"):
+            old_missing -= 1
+        elif line.startswith("+"):
+            new_missing -= 1
+        else:
+            # A "\\ No newline at end of file" marker lands here: no context line can follow it in a real diff,
+            # so the strip never took a line from a hunk that holds one.
+            return 0
+    return old_missing if old_missing == new_missing and 0 < old_missing <= _MAX_STRIPPED_LINES else 0
+
+
+def _unescape_backticks(text: str) -> str:
+    """Turn each backtick token back into its run of backticks, and each ``<<<<`` back into ``<<``.
+
+    Args:
+        text: A repository sample as upstream parsed it.
+
+    Returns:
+        The sample as a real diff.
+    """
+    return _UNESCAPE.sub(lambda match: "<<" if match.group(1) is None else "`" * int(match.group(1)), text)
+
+
+def _visible(seed: RepoSeed, path: str) -> bool:
+    """Return whether a normalized path is neither hidden nor inside a hidden folder.
+
+    Args:
+        seed: The run's repository seed, with its hidden-path hashes.
+        path: The normalized repository-relative path.
+
+    Returns:
+        ``True`` when the brief may name the path.
+    """
+    return hashed_kind(seed.hidden_hashes, path) is None
 
 
 def _validation_finalists(task: Task, server: EvalServer) -> int:

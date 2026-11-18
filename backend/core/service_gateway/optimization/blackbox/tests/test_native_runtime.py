@@ -59,7 +59,7 @@ from ..native_runtime import (
     native_task_payload,
     run_native_engine,
 )
-from ..protocol import EvalServer, Result, ScorerAbortError, Task
+from ..protocol import EvalServer, RepoSeed, Result, ScorerAbortError, Task
 from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
@@ -194,14 +194,28 @@ class ReadinessSession(FakeSession):
     """Report dependency checks without executing an optimizer or an evaluator."""
 
     def __init__(self, *, fail: bool = False, pending: bool = False, bootstrap: CommandResult | None = None) -> None:
-        """Select a runtime readiness failure, a scripted bootstrap result or unresolved final sandbox usage."""
+        """Select a runtime readiness failure, a scripted bootstrap result or unresolved final sandbox usage.
+
+        Args:
+            fail: Whether the readiness probe fails.
+            pending: Whether the final sandbox usage stays unresolved.
+            bootstrap: A scripted result for the first command, if any.
+        """
         super().__init__()
         self.fail = fail
         self.pending = pending
         self.bootstrap = bootstrap
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Capture offline runtime probes and return the required explicit success marker."""
+        """Capture offline runtime probes and return the required explicit success marker.
+
+        Args:
+            command: The runtime probe command.
+            **kwargs: The command options.
+
+        Returns:
+            The scripted bootstrap result for the first command, else the readiness marker.
+        """
         self.calls.append((command, kwargs))
         if self.bootstrap is not None and len(self.calls) == 1:
             return self.bootstrap
@@ -263,7 +277,12 @@ def test_native_readiness_checks_selected_isolation_without_search(
 def test_native_readiness_does_not_hide_failure_or_pending_usage(
     monkeypatch: pytest.MonkeyPatch, pending: bool
 ) -> None:
-    """Fail readiness for missing dependencies and keep unresolved usage pending."""
+    """Fail readiness for missing dependencies and keep unresolved usage pending.
+
+    Args:
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        pending: Whether the final sandbox usage stays unresolved; otherwise readiness fails.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "verified-source")
     session = ReadinessSession(fail=not pending, pending=pending)
     options = NativeOptions(
@@ -378,7 +397,15 @@ def test_native_transport_preserves_engine_choice_and_scores_once(
     calls: list[tuple[str, Any]] = []
 
     def score(candidate: str, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record the actual evaluator call."""
+        """Record the actual evaluator call.
+
+        Args:
+            candidate: The candidate text.
+            example: The case.
+
+        Returns:
+            A fixed score and feedback.
+        """
         calls.append((candidate, example))
         return 0.75, {"feedback": "improved"}
 
@@ -429,7 +456,13 @@ def test_protected_managed_runtime_does_not_nest_upstream_jail(tmp_path: Path, m
 def test_repository_tree_and_rules_reach_every_repository_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine_id: str
 ) -> None:
-    """Upload the packed tree chunk by chunk with its rules; with no proposer hosts the box gets no registry."""
+    """Upload the packed tree chunk by chunk with its rules; with no proposer hosts the box gets no registry.
+
+    Args:
+        tmp_path: Folder for the packed tree chunks and the artifacts.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        engine_id: The repository engine under test.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     chunks = [tmp_path / "tree.0000.b64", tmp_path / "tree.0001.b64"]
     for index, chunk in enumerate(chunks):
@@ -845,18 +878,36 @@ def test_a_contained_autosaddler_fallback_only_checks_the_codex_requirements_fil
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
 def test_repository_only_engines_refuse_a_text_run(tmp_path: Path, engine_id: str) -> None:
-    """GEPA's and Best-of-N's agent samplers edit a checkout, so a text run never reaches them."""
+    """GEPA's and Best-of-N's agent samplers edit a checkout, so a text run never reaches them.
+
+    Args:
+        tmp_path: Artifact destination.
+        engine_id: The repository-only engine.
+    """
     ctx = _context(tmp_path, FakeRuntime(FakeSession()))
     with pytest.raises(ServiceError, match="needs a repository checkout"):
         run_native_engine(engine_id, Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
 
 
 def test_gepa_hands_a_repository_run_to_the_native_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """GEPA on a repository runs in the native sandbox, with the coding agent as its proposer."""
+    """GEPA on a repository runs in the native sandbox, with the coding agent as its proposer.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest's monkeypatch, to replace the native runtime.
+    """
     calls: list[str] = []
 
     def fake_native(engine_id: str, *_: object) -> Result:
-        """Record which native engine GEPA asked for."""
+        """Record which native engine GEPA asked for.
+
+        Args:
+            engine_id: The native engine GEPA asked for.
+            *_: The rest of the call, unused.
+
+        Returns:
+            A scored empty result.
+        """
         calls.append(engine_id)
         return Result(best_candidate="", best_score=1.0, total_evals=1)
 
@@ -871,24 +922,83 @@ def test_gepa_hands_a_repository_run_to_the_native_runtime(tmp_path: Path, monke
 def test_best_of_n_hands_a_repository_run_to_the_native_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Best-of-N on a repository samples coding-agent versions in the native sandbox."""
+    """Best-of-N on a repository samples coding-agent versions in the native sandbox.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to replace the native runtime.
+    """
     calls: list[str] = []
 
     def fake_native(engine_id: str, *_: object) -> Result:
-        """Record which native engine Best-of-N asked for."""
+        """Record which native engine Best-of-N asked for.
+
+        Args:
+            engine_id: The native engine that Best-of-N asked for.
+            *_: The task, server and context, which the fake ignores.
+
+        Returns:
+            A fixed result with a score of 1.0.
+        """
         calls.append(engine_id)
         return Result(best_candidate="", best_score=1.0, total_evals=1)
 
     monkeypatch.setattr(best_of_n, "run_native_engine", fake_native)
     ctx = _context(tmp_path, FakeRuntime(FakeSession()))
     ctx.native_options = replace(ctx.native_options, repo={"chunks": [], "editable_paths": ["."], "readonly_paths": []})
+    # Production's context until the cutover (SKY-728): no engine loop seed or file readers.
+    ctx.repo_seed = ctx.read_file = ctx.list_files = None
     result = best_of_n.BestOfNEngine().run(Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
     assert calls == ["best_of_n_repo"]
     assert result.best_score == 1.0
 
 
+@pytest.mark.parametrize("missing", ["repo_seed", "read_file", "list_files"])
+def test_best_of_n_hands_a_repository_run_to_the_native_runtime_without_any_one_loop_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """Best-of-N samples on the engine loop only with all three readers, so a context that lacks one goes native.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to replace the native runtime.
+        missing: The loop reader that the context lacks.
+    """
+    calls: list[str] = []
+
+    def fake_native(engine_id: str, *_: object) -> Result:
+        """Record which native engine Best-of-N asked for.
+
+        Args:
+            engine_id: The native engine that Best-of-N asked for.
+            *_: The task, server and context, which the fake ignores.
+
+        Returns:
+            A fixed result with a score of 1.0.
+        """
+        calls.append(engine_id)
+        return Result(best_candidate="", best_score=1.0, total_evals=1)
+
+    monkeypatch.setattr(best_of_n, "run_native_engine", fake_native)
+    ctx = _context(tmp_path, FakeRuntime(FakeSession()))
+    ctx.native_options = replace(ctx.native_options, repo={"chunks": [], "editable_paths": ["."], "readonly_paths": []})
+    ctx.repo_seed = RepoSeed("tree", editable_paths=(".",))
+    ctx.read_file = lambda _tree, _path: None
+    ctx.list_files = lambda _tree, _path: None
+    setattr(ctx, missing, None)
+
+    result = best_of_n.BestOfNEngine().run(Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert calls == ["best_of_n_repo"]
+    assert result.best_score == 1.0
+
+
 def test_gepa_agent_proposer_needs_a_repository(tmp_path: Path) -> None:
-    """Text runs keep GEPA's reflection model; the agent proposer exists only for checkouts."""
+    """Text runs keep GEPA's reflection model; the agent proposer exists only for checkouts.
+
+    Args:
+        tmp_path: Artifact destination.
+    """
     ctx = _context(tmp_path, FakeRuntime(FakeSession()))
     with pytest.raises(ServiceError, match="needs a repository checkout"):
         run_native_engine("gepa_repo", Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
@@ -917,6 +1027,12 @@ def test_real_native_runner_unpacks_the_repository_for_its_engine(
     """The runner rebuilds the checkout, and the agent's edit reaches the parent as a diff.
 
     GEPA scores the unedited commit first; AutoResearch scores only what its agent submits.
+
+    Args:
+        tmp_path: Folder for the source repository, its archive and the runner's work.
+        engine_id: The repository engine the runner drives.
+        agent: The fake coding agent script.
+        starts: The changed paths of each candidate the engine scores before the agent's edit.
     """
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
@@ -988,14 +1104,24 @@ def test_real_native_runner_unpacks_the_repository_for_its_engine(
 
 
 def test_parent_scorer_abort_survives_child_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The original parent failure propagates after available usage is retained and teardown runs."""
+    """The original parent failure propagates after available usage is retained and teardown runs.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     ctx = _context(tmp_path, FakeRuntime(session))
     error = ScorerAbortError("dataset service is unavailable")
 
     def score(candidate: str, example: Any) -> tuple[float, dict[str, Any]]:
-        """Reject evaluation with the exact exception the caller must receive."""
+        """Reject evaluation with the exact exception the caller must receive.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case, unused.
+        """
         raise error
 
     with pytest.raises(ScorerAbortError) as raised:
@@ -1011,7 +1137,15 @@ def test_parent_scorer_abort_survives_child_transport(tmp_path: Path, monkeypatc
 def test_native_timeout_and_missing_usage_fail_without_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: bool, incomplete: bool, match: str
 ) -> None:
-    """A failed native execution never switches to a different local algorithm."""
+    """A failed native execution never switches to a different local algorithm.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        timeout: Whether the fake session times out.
+        incomplete: Whether the fake session reports incomplete usage.
+        match: The expected error text.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession(timeout=timeout, incomplete_usage=incomplete)
     ctx = _context(tmp_path, FakeRuntime(session))
@@ -1022,7 +1156,12 @@ def test_native_timeout_and_missing_usage_fail_without_fallback(
 
 
 def test_native_run_lives_as_long_as_its_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run has no wall-clock cap of its own; only the sandbox's platform lifetime bounds it."""
+    """A run has no wall-clock cap of its own; only the sandbox's platform lifetime bounds it.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive and the sandbox lifetime setting.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     monkeypatch.setattr(native_runtime.settings, "vercel_sandbox_max_lifetime_seconds", 86_400.0)
     session = FakeSession()
@@ -1039,7 +1178,13 @@ def test_native_run_lives_as_long_as_its_sandbox(tmp_path: Path, monkeypatch: py
 def test_supervisor_stop_is_not_reported_as_a_reply_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: Any
 ) -> None:
-    """A run stopped by its supervisor keeps that reason instead of a fake evaluator timeout."""
+    """A run stopped by its supervisor keeps that reason instead of a fake evaluator timeout.
+
+    Args:
+        tmp_path: Working folder for the mailbox.
+        monkeypatch: Pytest fixture for the working folder.
+        runner: The runner module whose mailbox is tested.
+    """
     monkeypatch.chdir(tmp_path)
     mailbox = runner.EvaluatorMailbox("nonce", 60.0)
     threading.Timer(0.2, mailbox.stopped.set).start()
@@ -1052,7 +1197,14 @@ def test_supervisor_stop_is_not_reported_as_a_reply_timeout(
 def test_box_mailbox_turns_a_null_parent_score_into_no_score(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sent: float | None, expected: float
 ) -> None:
-    """A metric error reaches the box as null and the upstream engine sees its own no-score value (SKY-367)."""
+    """A metric error reaches the box as null and the upstream engine sees its own no-score value (SKY-367).
+
+    Args:
+        tmp_path: Working folder for the mailbox and its rpc folder.
+        monkeypatch: Pytest fixture for the working folder.
+        sent: The score the parent sends, or None for a metric error.
+        expected: The score the upstream engine must see.
+    """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "rpc").mkdir()
     mailbox = native_runner.EvaluatorMailbox("nonce", 5.0)
@@ -1086,7 +1238,13 @@ def test_native_usage_ledger_survives_lane_replacement() -> None:
 def test_native_without_aggregate_preserves_only_an_existing_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: str | None
 ) -> None:
-    """An unscored empty output cannot become the result of a seedless run."""
+    """An unscored empty output cannot become the result of a seedless run.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        seed: The run's seed candidate, or None for a seedless run.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     session.no_incumbent = True
@@ -1106,7 +1264,13 @@ def test_native_without_aggregate_preserves_only_an_existing_seed(
 def test_parent_rpc_checks_cumulative_budget_at_both_boundaries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
 ) -> None:
-    """A known spending stop propagates even when RPC runs outside DSPy's context."""
+    """A known spending stop propagates even when RPC runs outside DSPy's context.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        boundary: Whether the budget stop comes before or after the scorer call.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     ctx = _context(tmp_path, FakeRuntime(session))
@@ -1120,7 +1284,15 @@ def test_parent_rpc_checks_cumulative_budget_at_both_boundaries(
             raise failure
 
     def score(candidate: str, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record whether paid evaluation was admitted."""
+        """Record whether paid evaluation was admitted.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case, unused.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         events.append("score")
         return 1.0, {}
 
@@ -1133,7 +1305,12 @@ def test_parent_rpc_checks_cumulative_budget_at_both_boundaries(
 
 
 def test_linux_cancellation_uses_procfs_when_ps_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kill only the runner's descendants using kernel parent ids without procps."""
+    """Kill only the runner's descendants using kernel parent ids without procps.
+
+    Args:
+        tmp_path: Stand-in procfs root.
+        monkeypatch: Pytest fixture for the procfs root, the process id, kill and ps.
+    """
     for pid, parent in ((100, 1), (101, 100), (102, 101), (200, 1)):
         directory = tmp_path / str(pid)
         directory.mkdir()
@@ -1144,7 +1321,12 @@ def test_linux_cancellation_uses_procfs_when_ps_is_unavailable(tmp_path: Path, m
     monkeypatch.setattr(native_runner.os, "kill", lambda pid, signal: killed.append(pid))
 
     def no_ps(*args: Any, **kwargs: Any) -> None:
-        """Reject accidental use of a binary absent from minimal images."""
+        """Reject accidental use of a binary absent from minimal images.
+
+        Args:
+            *args: The subprocess arguments, unused.
+            **kwargs: The subprocess keyword arguments, unused.
+        """
         raise AssertionError("ps is unavailable")
 
     monkeypatch.setattr(native_runner.subprocess, "run", no_ps)
@@ -1153,7 +1335,11 @@ def test_linux_cancellation_uses_procfs_when_ps_is_unavailable(tmp_path: Path, m
 
 
 def test_usage_prefers_cli_summaries_and_deduplicates_transcript_messages(tmp_path: Path) -> None:
-    """Session mirrors and repeated assistant updates do not inflate token usage."""
+    """Session mirrors and repeated assistant updates do not inflate token usage.
+
+    Args:
+        tmp_path: Folder for the CLI summaries and transcripts.
+    """
     summary = {"session_id": "mh", "modelUsage": {"claude-test": {"inputTokens": 10, "outputTokens": 4}}}
     (tmp_path / "iter1_stdout.json").write_text(json.dumps(summary))
     mh_message = {
@@ -1183,7 +1369,11 @@ def test_usage_prefers_cli_summaries_and_deduplicates_transcript_messages(tmp_pa
 
 
 def test_usage_counts_summary_turns_when_the_transcript_is_missing(tmp_path: Path) -> None:
-    """A CLI summary with no mirrored transcript still contributes its request count."""
+    """A CLI summary with no mirrored transcript still contributes its request count.
+
+    Args:
+        tmp_path: Folder for the CLI summary.
+    """
     summary = {
         "session_id": "solo",
         "num_turns": 7,
@@ -1196,7 +1386,11 @@ def test_usage_counts_summary_turns_when_the_transcript_is_missing(tmp_path: Pat
 
 
 def test_artifact_restore_rejects_parent_traversal(tmp_path: Path) -> None:
-    """An upstream-produced artifact cannot write outside the job artifact directory."""
+    """An upstream-produced artifact cannot write outside the job artifact directory.
+
+    Args:
+        tmp_path: Artifact destination.
+    """
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w:gz") as archive:
         member = tarfile.TarInfo("../escape.txt")
@@ -1219,7 +1413,13 @@ def test_artifact_restore_rejects_parent_traversal(tmp_path: Path) -> None:
     ],
 )
 def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine_id: str, variant: str) -> None:
-    """Exercise real upstream HTTP evaluation and session artifacts without any model or sandbox costs."""
+    """Exercise real upstream HTTP evaluation and session artifacts without any model or sandbox costs.
+
+    Args:
+        tmp_path: Folder for the fake CLI and the runner's work.
+        engine_id: The upstream engine the runner drives.
+        variant: The fake CLI's script: success, abort or a repeated candidate.
+    """
     abort = variant == "abort"
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -1314,7 +1514,13 @@ def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine
 
 @pytest.mark.parametrize(("stop", "stop_at"), [("budget", 3), ("error", 3), ("budget", 5)])
 def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str, stop_at: int) -> None:
-    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529)."""
+    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529).
+
+    Args:
+        tmp_path: Folder for the source repository, its archive and the runner's work.
+        stop: The parent stop: a budget stop or an error.
+        stop_at: The scorer request that gets the stop.
+    """
     source = tmp_path / "source" / "src"
     source.mkdir(parents=True)
     (source / "app.py").write_text("x = 1\n")
@@ -1821,7 +2027,12 @@ def test_autosaddler_runner_files_bundle_the_scenario_plugin() -> None:
 def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Send the AutoSaddler runner and plugin, accept a parts candidate and record the upstream revision."""
+    """Send the AutoSaddler runner and plugin, accept a parts candidate and record the upstream revision.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture that fails any use of the GEPA archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", MagicMock(side_effect=AssertionError("unused")))
     session = FakeSession()
     session.candidate = {"system": "better", "user": "ask"}
@@ -1829,7 +2040,15 @@ def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
     calls: list[tuple[Any, Any]] = []
 
     def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record the parts candidate the parent scored."""
+        """Record the parts candidate the parent scored.
+
+        Args:
+            candidate: The parts candidate.
+            example: The case.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         calls.append((candidate, example))
         return 0.75, {}
 
@@ -1853,7 +2072,12 @@ def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
 def test_autosaddler_transport_rejects_a_candidate_of_the_wrong_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse to score text when the task carries named parts instead of crashing the scorer."""
+    """Refuse to score text when the task carries named parts instead of crashing the scorer.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     runtime = FakeRuntime(session)
@@ -1930,7 +2154,12 @@ def test_the_guest_gets_the_input_and_no_expected_key(case: dict[str, Any], gues
 
 @pytest.mark.parametrize("engine_id", ["autoresearch", "meta_harness"])
 def test_real_native_runner_drives_upstream_through_a_pi_proposer(tmp_path: Path, engine_id: str) -> None:
-    """Run the unchanged upstream engines against a non-Claude harness through the ``claude`` shim."""
+    """Run the unchanged upstream engines against a non-Claude harness through the ``claude`` shim.
+
+    Args:
+        tmp_path: Folder for the fake Pi CLI and the runner's work.
+        engine_id: The upstream engine the runner drives.
+    """
     binary = tmp_path / "bin"
     binary.mkdir()
     (binary / "python3").symlink_to(sys.executable)
@@ -2038,7 +2267,12 @@ def test_bootstrap_installs_only_the_selected_proposer_harness() -> None:
 def test_run_native_engine_serializes_the_proposer_without_the_gateway_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ship the chosen harness launch and knobs in the payload while the key only travels through the env."""
+    """Ship the chosen harness launch and knobs in the payload while the key only travels through the env.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     runtime = FakeRuntime(session)
@@ -2061,7 +2295,12 @@ def test_run_native_engine_serializes_the_proposer_without_the_gateway_key(
 def test_run_native_engine_hands_the_reasoning_effort_to_the_proposer_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The optimization model's effort reaches the config the proposer CLI reads in the sandbox."""
+    """The optimization model's effort reaches the config the proposer CLI reads in the sandbox.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     ctx = _context(tmp_path, FakeRuntime(session))
@@ -2257,7 +2496,15 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
     seen: list[dict[str, Any] | None] = []
 
     def evaluator(candidate: str, example: Any = None) -> tuple[float, dict[str, Any]]:
-        """Record the event scope the scorer would run in."""
+        """Record the event scope the scorer would run in.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case, unused.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         seen.append(sandbox_log._scope.get())
         return 1.0, {}
 
@@ -2295,7 +2542,15 @@ def test_the_guest_train_set_has_no_expected_but_the_parent_scores_the_full_case
     scored: list[Any] = []
 
     def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record the case the parent scored."""
+        """Record the case the parent scored.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case the parent scored.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         scored.append(example)
         return 0.5, {}
 
@@ -2339,7 +2594,15 @@ def test_the_parent_restores_cases_from_the_list_it_started_with() -> None:
     scored: list[Any] = []
 
     def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record the case the parent scored."""
+        """Record the case the parent scored.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case the parent scored.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         scored.append(example)
         return 1.0, {}
 
@@ -2359,7 +2622,15 @@ def test_the_parent_scores_each_request_in_the_engine_box_scope() -> None:
     boxes: list[str | None] = []
 
     def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
-        """Record the box tag that the scorer's calls carry."""
+        """Record the box tag that the scorer's calls carry.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case, unused.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         boxes.append(current_tags().get("box"))
         return 1.0, {}
 
@@ -2377,12 +2648,25 @@ def test_the_parent_scores_each_request_in_the_engine_box_scope() -> None:
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:
-    """Each evaluation is labelled with the registered candidate id and the case's position."""
+    """Each evaluation is labelled with the registered candidate id and the case's position.
+
+    Args:
+        tmp_path: Working folder for the eval server.
+    """
     labels: list[tuple[Any, Any]] = []
     mailbox = _RecordingMailbox()
 
     def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        """Record the labels the request would carry."""
+        """Record the labels the request would carry.
+
+        Args:
+            candidate: The candidate, unused.
+            example: The case, unused.
+            **kwargs: Other evaluation arguments, unused.
+
+        Returns:
+            A fixed score and no feedback.
+        """
         labels.append((mailbox.labels.candidate_id, mailbox.labels.case))
         return 1.0, {}
 
@@ -2406,7 +2690,16 @@ def test_a_sweep_fills_a_null_case_with_the_scored_mean(tmp_path: Path) -> None:
     mailbox = _RecordingMailbox()
 
     def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        """Score by vowel density, and give the parent's null on case ``c``."""
+        """Score by vowel density, and give the parent's null on case ``c``.
+
+        Args:
+            candidate: The candidate text.
+            example: The case, or None.
+            **kwargs: Other evaluation arguments, unused.
+
+        Returns:
+            The vowel density, or negative infinity on case ``c``, and no feedback.
+        """
         if example == {"id": "c"}:
             return float("-inf"), {}
         return sum(ch in "aeiou" for ch in candidate) / len(candidate), {}
@@ -2443,7 +2736,16 @@ def _null_on(nulls: dict[str, set[str]]) -> _RecordingMailbox:
     mailbox = _RecordingMailbox()
 
     def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        """Give negative infinity, as the mailbox does for a parent null, on the chosen cases."""
+        """Give negative infinity, as the mailbox does for a parent null, on the chosen cases.
+
+        Args:
+            candidate: The candidate text.
+            example: The case, or None.
+            **kwargs: Other evaluation arguments, unused.
+
+        Returns:
+            The vowel density, or negative infinity on a chosen case, and no feedback.
+        """
         if example is not None and example["id"] in nulls.get(candidate, set()):
             return float("-inf"), {}
         return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
@@ -2657,7 +2959,16 @@ def test_autoresearch_incumbent_ignores_a_crashed_resweep_of_a_ranked_version(tm
     sweeps: dict[str, int] = {}
 
     def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        """Score case ``a`` 0.2 and ``b`` 0.8, with a null on ``a`` in the version's second sweep."""
+        """Score case ``a`` 0.2 and ``b`` 0.8, with a null on ``a`` in the version's second sweep.
+
+        Args:
+            candidate: The version's text.
+            example: The case.
+            **kwargs: Other evaluation arguments, unused.
+
+        Returns:
+            The case's score, or negative infinity for the null, and no feedback.
+        """
         if example["id"] == "a":
             sweeps[candidate] = sweeps.get(candidate, 0) + 1
             return (float("-inf"), {}) if sweeps[candidate] == 2 else (0.2, {})
@@ -2755,7 +3066,12 @@ class _OrderedSession(FakeSession):
     """Record how many runner commands ran before the requirements step."""
 
     def __init__(self, *, own_writer: bool = False, readback: str = _CODEX_REQUIREMENTS_READBACK) -> None:
-        """Optionally give the session its own requirements writer, as a remote child session has."""
+        """Optionally give the session its own requirements writer, as a remote child session has.
+
+        Args:
+            own_writer: Whether the session has its own requirements writer.
+            readback: The file read-back the session reports.
+        """
         super().__init__()
         self.readback = readback
         self.before: list[int] = []
@@ -2769,7 +3085,15 @@ class _OrderedSession(FakeSession):
         self.writer_calls += 1
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Note the position of the requirements step, then run the scripted dialogue."""
+        """Note the position of the requirements step, then run the scripted dialogue.
+
+        Args:
+            command: The command to run.
+            **kwargs: The command options.
+
+        Returns:
+            The scripted command result.
+        """
         if CODEX_REQUIREMENTS_PATH in command:
             self.before.append(len(self.calls))
         return super().run(command, **kwargs)
@@ -2805,6 +3129,14 @@ def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
     """Each box kind has the root-owned file in place after setup and before the Codex runner starts.
 
     A box whose image ships the file needs no root command at all (SKY-389).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        contained: Whether the runtime is an outer box.
+        own_writer: Whether the session has its own requirements writer, as a remote child session has.
+        readback: The file read-back the session reports.
+        expected: The requirements commands the box must run before the runner.
     """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = _OrderedSession(own_writer=own_writer, readback=readback)
@@ -2830,7 +3162,14 @@ def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
 def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, readback: str
 ) -> None:
-    """A bad read-back fails closed: the runner command never runs and the box closes."""
+    """A bad read-back fails closed: the runner command never runs and the box closes.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+        contained: Whether the runtime is an outer box.
+        readback: The bad file read-back the session reports.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     session.readback = readback
@@ -2853,7 +3192,13 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
 def test_a_host_cli_codex_proposer_skips_the_codex_requirements_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool
 ) -> None:
-    """A host_cli proposer runs the host-agent shim, so no box checks or writes the file."""
+    """A host_cli proposer runs the host-agent shim, so no box checks or writes the file.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive, the harness settings and the host launch.
+        contained: Whether the runtime is an outer box.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     runtime = FakeRuntime(session)
@@ -2873,7 +3218,12 @@ def test_a_host_cli_codex_proposer_skips_the_codex_requirements_file(
 
 
 def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only a Codex proposer needs the file, so a Pi run never asks for root."""
+    """Only a Codex proposer needs the file, so a Pi run never asks for root.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     ctx = _context(tmp_path, FakeRuntime(session))
@@ -2887,7 +3237,12 @@ def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeyp
 def test_a_codex_proposer_loads_the_routed_proposer_mcp_servers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Give Codex the routed [proposer] servers by relay url, and the relay token only in the box env (SKY-610)."""
+    """Give Codex the routed [proposer] servers by relay url, and the relay token only in the box env (SKY-610).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive, the budget stop and the relay url.
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     # The parent's budget authority is not part of this unit run.
     monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
@@ -3064,7 +3419,15 @@ def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest
         """Raise a cancel during the engine command."""
 
         def run(self, command: str, **kwargs: Any) -> CommandResult:
-            """Pass the install, then raise the cancel."""
+            """Pass the install, then raise the cancel.
+
+            Args:
+                command: The command to run.
+                **kwargs: The command options.
+
+            Returns:
+                The scripted result of the install command.
+            """
             if self.calls:
                 raise CancelledError("cancelled")
             return super().run(command, **kwargs)
@@ -3091,7 +3454,12 @@ def test_a_mailbox_setup_failure_still_closes_the_box(tmp_path: Path, monkeypatc
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
 
     def broken_mailbox(*_args: Any, **_kwargs: Any) -> None:
-        """Fail like a mailbox that cannot start."""
+        """Fail like a mailbox that cannot start.
+
+        Args:
+            *_args: Mailbox arguments, unused.
+            **_kwargs: Mailbox keyword arguments, unused.
+        """
         raise RuntimeError("mailbox setup failed")
 
     monkeypatch.setattr(native_runtime, "_EvaluatorMailbox", broken_mailbox)
