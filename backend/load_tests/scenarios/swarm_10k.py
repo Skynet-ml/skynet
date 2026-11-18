@@ -78,7 +78,7 @@ The database is one SQLite file per shard, unless ``LOAD_TEST_SWARM_DB_URL``
 names a throwaway Postgres on ``localhost``, ``127.0.0.1`` or ``::1``; there
 all shards share the database. Its name must start with
 ``THROWAWAY_DB_PREFIX`` (``loadtest``), and its ``jobs`` table must hold no
-row of another run. Each invocation puts its own stamp in its run ids and
+job that is not a swarm run (an id that does not start with ``swarm-``). Each invocation puts its own stamp in its run ids and
 worker ids, and deletes only the rows and packs of those ids, so it keeps the
 rows of any other swarm. A session advisory lock allows one swarm pass per
 database. The lock is per database, so it does not stop a pass on another
@@ -395,7 +395,7 @@ def _check_server_addr(engine: Engine) -> None:
 
 
 def _check_throwaway(engine: Engine) -> None:
-    """Refuse a Postgres database whose name does not mark it as a throwaway, or that holds another run's job.
+    """Refuse a Postgres database whose name does not mark it as a throwaway, or that holds a job that is not a swarm run.
 
     This is a third guard after ``_check_server_addr``: a loopback address does not prove a throwaway.
 

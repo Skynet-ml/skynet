@@ -612,7 +612,7 @@ def test_a_failed_loop_start_closes_its_step_log(tmp_path: Path, monkeypatch: py
         real_close(self)
 
     def refuse(*args: Any, **kwargs: Any) -> None:
-        """Fail the loop start, as a refused lease reservation does.
+        """Fail the loop start, as a ValueError from ``EngineLoop`` does.
 
         Args:
             *args: Not used.
