@@ -40,6 +40,18 @@ export function harnessPickerValue(proposer: BlackboxProposer): BlackboxHarness 
   return proposer.harness ?? "";
 }
 
+/**
+ * What the closed proposer header shows: the picked harness with its logo,
+ * or the server-default text, because an unset harness is not sent (SKY-753).
+ */
+export function proposerHeader(
+  proposer: BlackboxProposer,
+): { harness: BlackboxHarness } | { labelKey: "submit.v2.optimizer.proposer.harness_default" } {
+  return proposer.harness
+    ? { harness: proposer.harness }
+    : { labelKey: "submit.v2.optimizer.proposer.harness_default" };
+}
+
 /** The inclusive range the backend accepts for `max_tool_calls`. */
 export const MAX_TOOL_CALLS_LIMITS = { min: 1, max: 1_000 } as const;
 

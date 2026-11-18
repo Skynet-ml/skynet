@@ -50,6 +50,7 @@ import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-w
 import {
   DEFAULT_PROPOSER,
   harnessPickerValue,
+  proposerHeader,
   proposerKnobs,
   usesNativeProposer,
 } from "../../lib/engine-contract";
@@ -117,6 +118,7 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
     { ...proposer, harness: proposer.harness ?? DEFAULT_PROPOSER.harness },
     nativeProposer,
   );
+  const header = proposerHeader(proposer);
   const fitHarness = (config: ModelConfig) =>
     limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
   // A harness, host CLI or engine change can leave a stored effort the new
@@ -289,13 +291,13 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
           onOpenChange={setProposerOpen}
           trailing={
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              {proposer.harness ? (
+              {"harness" in header ? (
                 <>
-                  <HarnessLogo harness={proposer.harness} size={14} />
-                  {harnessLabel(proposer.harness)}
+                  <HarnessLogo harness={header.harness} size={14} />
+                  {harnessLabel(header.harness)}
                 </>
               ) : (
-                t("submit.v2.optimizer.proposer.harness_default")
+                t(header.labelKey)
               )}
             </span>
           }

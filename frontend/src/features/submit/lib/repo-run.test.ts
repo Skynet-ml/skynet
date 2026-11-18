@@ -23,7 +23,7 @@ const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseTe
   "./repo-run.ts"
 );
 const { prepareModelConfig } = await import("./model-config.ts");
-const { harnessPickerValue } = await import("./engine-contract.ts");
+const { harnessPickerValue, proposerHeader } = await import("./engine-contract.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
 
@@ -114,6 +114,17 @@ test("the harness picker starts empty, so picking Codex sends Codex (SKY-753)", 
   state.optimizer.proposer = { ...state.optimizer.proposer, harness: "codex" };
   assert.equal(harnessPickerValue(state.optimizer.proposer), "codex");
   assert.equal(repoRunRequest(state, options)?.proposer?.harness, "codex");
+});
+
+test("the closed proposer header shows the server default until the user picks a harness (SKY-753)", () => {
+  const state = repoState();
+  // The request sends no harness yet, so the header must not claim Codex.
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), {
+    labelKey: "submit.v2.optimizer.proposer.harness_default",
+  });
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
+  assert.deepEqual(proposerHeader(state.optimizer.proposer), { harness: "pi" });
 });
 
 test("a repository Skynet created is flagged in the run request", () => {
