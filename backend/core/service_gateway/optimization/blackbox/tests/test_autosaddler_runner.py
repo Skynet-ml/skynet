@@ -1159,6 +1159,38 @@ def test_long_tool_output_says_what_was_cut(tmp_path: Path, monkeypatch: pytest.
     assert autosaddler_runner.clip("read_file", "short") == "short"
 
 
+def test_a_file_read_keeps_its_clock_times(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file read shows the file's date-times as they are, so a write back does not corrupt the file.
+
+    A command output still hides its clock times, because they differ between a run and its resume.
+
+    Args:
+        tmp_path: The process folder.
+        monkeypatch: Replaces the upstream outcome types.
+    """
+    _plain_outcomes(monkeypatch)
+    workspace = tmp_path / "session"
+    workspace.mkdir()
+    text = "Create Date: 2026-11-17 10:20:30.123456\n"
+    (workspace / "rev.py").write_text(text)
+    channel, writer = _channel(
+        {
+            "text": "",
+            "cost_cents": "1",
+            "tool_calls": [_call("read_file", path="rev.py"), _call("run_command", command="date")],
+        },
+        {"tree_id": "t1"},
+        {"exit_code": 0, "stdout": "2026-11-18T01:02:03Z", "stderr": "", "timed_out": False, "tree_id": "t2"},
+        {"text": "done", "cost_cents": "1", "tool_calls": []},
+    )
+
+    autosaddler_runner.StepTransport(channel, tmp_path, None, None).converse(workspace, "go")
+
+    read, command = _requests(writer)[-1]["prompt"][-2:]
+    assert read["content"] == text
+    assert command["content"] == "exit code 0\nstdout:\n<time>\nstderr:\n"
+
+
 def test_a_session_runs_tools_until_the_model_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool loop sends each tool result back, and a command runs on a tree of the workspace.
 

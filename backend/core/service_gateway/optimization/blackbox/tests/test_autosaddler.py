@@ -302,6 +302,7 @@ def _loop(
     generation: int,
     die_at: int | None = None,
     hidden: dict[str, str] | None = None,
+    run_dir: Path | None = None,
 ) -> tuple[EngineLoop, _Model]:
     """Start the run at a generation and build a loop over local boxes and the fake model.
 
@@ -314,6 +315,7 @@ def _loop(
         generation: The job's execution generation.
         die_at: The model call in which the worker dies.
         hidden: The run's hidden-path hashes.
+        run_dir: The loop's run folder; a new folder for each generation when not given.
 
     Returns:
         The loop and its model.
@@ -337,7 +339,7 @@ def _loop(
         metrics=RuntimeBoxSource(LocalSubprocessRuntime(), _SPEC),
         model=model,
         model_max_cents=2,
-        run_dir=tmp_path / f"loop-{generation}",
+        run_dir=run_dir or tmp_path / f"loop-{generation}",
         hidden_hashes=hidden,
     )
     return loop, model
@@ -597,6 +599,44 @@ def test_a_killed_run_resumes_from_its_last_step(
     assert _steps(engine) == [(kind, 1) for kind in _KINDS[:3]] + [(kind, 2) for kind in _KINDS[3:]]
 
 
+def test_a_resume_in_the_same_run_folder_replays_from_its_last_step(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A resume that uses the killed run's folder clears the old files and replays the committed steps.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    seed_tree, metric_tree = _tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len")
+    run_dir = tmp_path / "loop"
+    first, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, die_at=2, run_dir=run_dir)
+    with pytest.raises(_WorkerDiedError):
+        _session_engine(tmp_path).run(
+            Task("seed"), first.server(_scorer(seed_tree, metric_tree), max_evals=4), first.context()
+        )
+    assert (run_dir / "autosaddler").is_dir()
+
+    with Session(engine) as session:
+        session.execute(update(JobModel).where(JobModel.optimization_id == RUN_ID).values(execution_generation=2))
+        session.commit()
+    loop, model = _loop(owner, engine, step_log, trees, tmp_path, generation=2, run_dir=run_dir)
+    result = _session_engine(tmp_path).run(
+        Task("seed"), loop.server(_scorer(seed_tree, metric_tree), max_evals=4), loop.context()
+    )
+
+    assert (result.best_candidate, result.best_score) == ("seedx", 5.0)
+    assert model.calls == 1
+    assert _steps(engine) == [(kind, 1) for kind in _KINDS[:3]] + [(kind, 2) for kind in _KINDS[3:]]
+
+
 def test_a_spent_budget_fails_before_the_child_starts(
     owner: tuple[User, int],
     engine: Engine,
@@ -828,6 +868,33 @@ def test_a_candidate_with_the_wrong_shape_is_never_scored(
 
     with pytest.raises(ServiceError, match="wrong shape"):
         _runner(tmp_path, script).run(Task("seed"), server, loop.context())
+
+    assert scored == []
+    assert server.used == 0
+
+
+@pytest.mark.parametrize("index", [-1, 2])
+def test_a_case_index_outside_the_cases_is_never_scored(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path, index: int
+) -> None:
+    """An evaluation request that names a negative case or the case past the last fails the run unscored.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        index: The case index that the child sends; the task has two cases.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    scored: list[Any] = []
+    server = loop.server(lambda _loop, _candidate, case: (scored.append(case), (1.0, {}))[1], max_evals=1)
+    request = json.dumps({"op": "evaluate", "candidate": "seed", "example": {"id": index}})
+    script = f"import sys\nsys.stdin.readline()\nprint({request!r}, flush=True)\nsys.stdin.readline()\n"
+
+    with pytest.raises(ServiceError, match="unknown case"):
+        _runner(tmp_path, script).run(Task("seed", cases=["a", "b"]), server, loop.context())
 
     assert scored == []
     assert server.used == 0

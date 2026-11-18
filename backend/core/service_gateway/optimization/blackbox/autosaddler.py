@@ -127,7 +127,9 @@ class AutoSaddlerEngine:
         assert_metric_absent(document_text, task)
         workdir = Path(ctx.run_dir) / "autosaddler"
         # A resume replays the run from its start, so the child must not see the files of an earlier try.
-        shutil.rmtree(workdir, ignore_errors=True)
+        # No ``ignore_errors``: a folder that is not removed must fail here, not run the child on stale files.
+        if workdir.exists():
+            shutil.rmtree(workdir)
         workdir.mkdir(parents=True)
         with (workdir / "runner.log").open("w", encoding="utf-8") as log:
             child = subprocess.Popen(

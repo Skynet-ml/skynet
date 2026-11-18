@@ -564,17 +564,20 @@ def fix_clocks() -> None:
                         setattr(module, key, tick)
 
 
-def scrub(text: str, root: Path) -> str:
+def scrub(text: str, root: Path, *, times: bool = True) -> str:
     """Remove the parts of a text that differ between a run and its resume.
 
     Args:
         text: Text for the model.
         root: This process's folder, which the worker makes new for each run.
+        times: Whether to also hide clock times. A workspace file is the same in a run and its resume, and a
+            ``<time>`` in its text would corrupt the file when the model writes it back.
 
     Returns:
-        The text with ``root`` as ``/work`` and each clock time as ``<time>``.
+        The text with ``root`` as ``/work`` and, when ``times``, each clock time as ``<time>``.
     """
-    return _TIMESTAMP.sub("<time>", text.replace(str(root), _WORK_ROOT))
+    text = text.replace(str(root), _WORK_ROOT)
+    return _TIMESTAMP.sub("<time>", text) if times else text
 
 
 def candidate_value(components: Mapping[str, str]) -> str | dict[str, str]:
@@ -1669,7 +1672,10 @@ class StepTransport:
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": clip(call.get("name"), scrub(self.tool(workspace, call), self.root)),
+                    "content": clip(
+                        call.get("name"),
+                        scrub(self.tool(workspace, call), self.root, times=call.get("name") != "read_file"),
+                    ),
                 }
                 for call in calls
             )
