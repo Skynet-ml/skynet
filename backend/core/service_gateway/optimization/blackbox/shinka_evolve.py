@@ -79,8 +79,8 @@ _CHILD_MEMORY_BYTES = 8 * 1024**3
 _CHILD_CPU_SECONDS = 6 * 3600
 # macOS refuses to lower the address-space limit; the workers run Linux.
 _MEMORY_LIMITED = sys.platform == "linux"
-# Between a reply and its next line the child only builds prompts and parses the
-# reply; the worker scores versions and calls the model with no timer running.
+# Between two lines the child only starts, builds prompts and parses replies;
+# the worker scores versions and calls the model with no timer running.
 _IDLE_SECONDS = 30 * 60.0
 # A stopped child only reports its scored versions and writes its result.
 _DRAIN_SECONDS = 60.0
@@ -261,12 +261,17 @@ class ShinkaEvolveEngine:
             assert child.stdin is not None
             assert child.stdout is not None
             killer = _GroupKiller(child.pid)
+            # The same limit bounds the child's start (tree unpack, git, upstream
+            # import), which writes no line until its first request.
+            killer.arm(_IDLE_SECONDS)
             try:
                 try:
                     for line in child.stdout:
+                        # The limit pauses only while the worker handles the line: a
+                        # progress or log line must not leave a hung child unbounded.
                         killer.cancel()
-                        if requests.line(line.rstrip("\n"), child.stdin):
-                            killer.arm(_IDLE_SECONDS)
+                        requests.line(line.rstrip("\n"), child.stdin)
+                        killer.arm(_IDLE_SECONDS)
                 except (BudgetReached, BudgetExhaustedError):
                     # A group member that holds the pipe and ignores the stop
                     # would block the worker, so the drain has a time limit.
@@ -293,9 +298,7 @@ class ShinkaEvolveEngine:
                     child.stdin.close()
                 child.stdout.close()
         if killer.fired:
-            raise ServiceError(
-                f"ShinkaEvolve wrote nothing for {_IDLE_SECONDS:g} seconds after a reply, so the worker stopped it."
-            )
+            raise ServiceError(f"ShinkaEvolve wrote nothing for {_IDLE_SECONDS:g} seconds, so the worker stopped it.")
         return returncode
 
     @staticmethod
@@ -462,7 +465,13 @@ class _Requests:
                 if prefix == _RPC_PREFIX:
                     if replies is None:
                         return False
-                    reply = self._request(json.loads(body))
+                    try:
+                        request = json.loads(body)
+                    except ValueError:
+                        request = None
+                    if not isinstance(request, dict):
+                        raise ServiceError("ShinkaEvolve sent a malformed request.")
+                    reply = self._request(request)
                 else:
                     # A broken log or progress line must not stop the run the
                     # way a broken request does, so it stays as plain output.
@@ -475,7 +484,12 @@ class _Requests:
                         return False
                     reply = handle(data)
                 if reply is not None and replies is not None:
-                    text = json.dumps(reply, default=side_info_json_default, allow_nan=False)
+                    try:
+                        text = json.dumps(reply, default=side_info_json_default, allow_nan=False)
+                    except (TypeError, ValueError):
+                        # Such as a NaN score: the child stops on an evaluation
+                        # error and retries a failed model call.
+                        text = json.dumps({"id": reply.get("id"), "error": "The worker returned an invalid reply."})
                     # A child that already exited reports its own failure in its result.
                     try:
                         replies.write(text + "\n")

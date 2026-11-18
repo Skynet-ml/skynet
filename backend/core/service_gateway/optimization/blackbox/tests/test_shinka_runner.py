@@ -7,6 +7,7 @@ import io
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -1647,6 +1648,28 @@ def test_a_symlink_mode_with_odd_blanks_or_line_ends_is_refused(line: str) -> No
         shinka_runner.refuse_unsafe_patch(patch)
 
 
+def test_the_patch_check_reads_the_whole_patch_from_inside_a_repository_subfolder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read git's summary of every path, also when the runner's folder is inside another repository.
+
+    Inside a repository, ``git apply`` drops the paths outside the current
+    folder, so its summary would miss the symlink.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into a repository's subfolder and turns off the text check.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path / "repo")], check=True)
+    (tmp_path / "repo/sub").mkdir()
+    monkeypatch.chdir(tmp_path / "repo/sub")
+    # Only git's summary can see the mode now.
+    monkeypatch.setattr(shinka_runner, "_PATCH_MODE", re.compile(r"(?!)"))
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.refuse_unsafe_patch(_symlink_patch("/etc"))
+
+
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1709,6 +1732,58 @@ class _IdleRunner:
 
     def run(self) -> None:
         """End at once."""
+
+
+def test_execute_rejects_a_version_that_writes_through_a_shipped_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject, without scoring, a version that writes through a symlink the tree ships, in the scorer ``execute`` builds.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream and the reply stream.
+    """
+    scorers: list[shinka_runner.ProgramScorer] = []
+
+    class RecordingScorer(shinka_runner.ProgramScorer):
+        """Record each scorer that ``execute`` builds."""
+
+        def __init__(self, **fields: Any) -> None:
+            """Build the scorer and record it.
+
+            Args:
+                **fields: The scorer's arguments.
+            """
+            super().__init__(**fields)
+            scorers.append(self)
+
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/app.py").write_text("x = 1\n")
+    (source / "scoring").mkdir()
+    (source / "scoring/metric.py").write_text("SCORE = 1\n")
+    (source / "src/cfg").symlink_to("../scoring")
+    chunks = _ship(tmp_path, source)
+    monkeypatch.chdir(tmp_path)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", _IdleRunner)
+    monkeypatch.setattr(shinka_runner, "ProgramScorer", RecordingScorer)
+    monkeypatch.setattr(shinka_runner, "install_repo_mode", lambda bundle, runner: None)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "seed_randomness", lambda seed: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    shinka_runner.execute({**_repo_payload(tmp_path, "", chunks), "transport": "stdio"})
+    program = tmp_path / "results" / "gen_1" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_bundle.encode_bundle({"src/cfg/metric.py": "SCORE = 100\n"}))
+
+    answer = scorers[0].score_program(str(program))
+
+    assert answer["metrics"]["text_feedback"].startswith("Rejected without scoring")
+    assert "crosses a symlink" in answer["error"]
+    checkout = tmp_path / "shinka-run" / "repo-checkout"
+    assert (checkout / "scoring/metric.py").read_text() == "SCORE = 1\n"
 
 
 def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(

@@ -50,6 +50,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import traceback
@@ -1090,9 +1091,24 @@ def refuse_unsafe_patch(patch: Any) -> None:
     text = patch.replace("\r\n", "\n").replace("\r", "\n")
     # Git's own reading of the patch, raw line endings included. The image's
     # base layer installs git (backend/Dockerfile), and a missing git raises here.
-    summary = subprocess.run(
-        ["git", "apply", "--summary", "-"], input=patch, capture_output=True, text=True, check=False
-    ).stdout
+    # Inside a repository git drops the paths outside the current folder and
+    # reads that repository's config, so it runs in an empty folder with no config.
+    with tempfile.TemporaryDirectory() as empty:
+        env = {
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CEILING_DIRECTORIES": str(Path(empty).parent),
+        }
+        summary = subprocess.run(
+            ["git", "apply", "--summary", "-"],
+            input=patch,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=empty,
+            env=env,
+        ).stdout
     for mode in [*_PATCH_MODE.findall(text), *_SUMMARY_MODE.findall(summary)]:
         if mode not in _FILE_MODES:
             raise ValueError(f"The seed version sets file mode {mode}; only regular files may change.")

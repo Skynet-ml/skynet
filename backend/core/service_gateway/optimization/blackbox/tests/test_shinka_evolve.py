@@ -676,7 +676,7 @@ def _requests(
 
 
 def test_a_broken_log_or_progress_line_stays_as_plain_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a log or progress frame the engine cannot read as plain output, and keep a broken request fatal.
+    """Keep a log or progress frame the engine cannot read as plain output, and fail the run on a broken request.
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -693,8 +693,9 @@ def test_a_broken_log_or_progress_line_stays_as_plain_output(tmp_path: Path, mon
 
     assert plain == ["{broken", "[1", "3"]
     assert replies.getvalue() == ""
-    with pytest.raises(ValueError):
-        requests.line("APP_NATIVE_RPC n {broken", replies)
+    for body in ("{broken", "[1]"):
+        with pytest.raises(ServiceError, match="malformed request"):
+            requests.line(f"APP_NATIVE_RPC n {body}", replies)
 
 
 def test_a_scorer_runs_inside_the_version_and_case_labels(tmp_path: Path) -> None:
@@ -730,6 +731,24 @@ def test_a_scorer_runs_inside_the_version_and_case_labels(tmp_path: Path) -> Non
     assert (scope["candidate"], scope["case"]) == ("3", "0")
     assert (tags["candidate"], tags["case"]) == ("3", "0")
     assert '"score": 1.0' in replies.getvalue()
+
+
+def test_a_reply_that_json_cannot_encode_goes_back_as_an_error(tmp_path: Path) -> None:
+    """Send an error reply when the score cannot be encoded, so the child stops instead of the worker crashing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: (float("nan"), {}))
+    replies = io.StringIO()
+
+    sent = requests.line(
+        'APP_NATIVE_RPC n {"id": "0", "kind": "evaluate", "candidate": "seed", "example": {"id": 0}, "candidate_id": 3}',
+        replies,
+    )
+
+    assert sent is True
+    assert json.loads(replies.getvalue()) == {"id": "0", "error": "The worker returned an invalid reply."}
 
 
 def _model_request(request_id: str) -> str:
@@ -1002,7 +1021,8 @@ def test_a_stopped_run_also_kills_the_evaluation_jobs_its_child_started(
         tmp_path,
         f"""
         job = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(600)"],
+            # Finite, so a job the stop misses fails the test instead of hanging it.
+            [sys.executable, "-c", "import time; time.sleep(20)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1100,6 +1120,34 @@ def test_the_child_gets_the_memory_and_cpu_limits(monkeypatch: pytest.MonkeyPatc
     assert limits == [(resource.RLIMIT_AS, (memory, memory)), (resource.RLIMIT_CPU, (cpu, cpu))]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Only Linux lowers the address-space limit.")
+def test_the_real_child_runs_under_the_memory_and_cpu_limits(tmp_path: Path) -> None:
+    """Read the limits inside the real child, so the limits reach the process that parses model replies.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    limits = tmp_path / "limits.json"
+    python = _scripted_child(
+        tmp_path,
+        f"""
+        import resource
+
+        open({str(limits)!r}, "w").write(
+            json.dumps([resource.getrlimit(resource.RLIMIT_AS), resource.getrlimit(resource.RLIMIT_CPU)])
+        )
+        """,
+    )
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine(python).run(
+            Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
+        )
+
+    memory, cpu = shinka_evolve._CHILD_MEMORY_BYTES, shinka_evolve._CHILD_CPU_SECONDS
+    assert json.loads(limits.read_text()) == [[memory, memory], [cpu, cpu]]
+
+
 def test_a_child_past_its_cpu_limit_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Kill a child that spins past its CPU limit, so a reply that makes a parser loop cannot hold the host.
 
@@ -1126,10 +1174,28 @@ def test_a_child_past_its_cpu_limit_is_killed(tmp_path: Path, monkeypatch: pytes
     assert time.monotonic() - started < 30
 
 
-def test_a_child_that_writes_nothing_after_a_reply_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kill the child's group and fail the run when the child goes quiet after a reply.
+@pytest.mark.parametrize(
+    "before",
+    [
+        "",
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0", "candidate": "x"})
+        sys.stdin.readline()
+        """,
+        """
+        emit("APP_NATIVE_RPC ", {"kind": "evaluate", "id": "0", "candidate": "x"})
+        sys.stdin.readline()
+        emit("APP_NATIVE_PROGRESS ", {"event": "case_scored", "candidate_id": 0, "score": 1.0, "total": 1})
+        emit("APP_NATIVE_LOG ", {"message": "scored"})
+        """,
+    ],
+    ids=["before-its-first-line", "after-a-reply", "after-a-progress-line"],
+)
+def test_a_child_that_goes_quiet_is_killed(before: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill the child's group and fail the run when the child writes nothing for the idle limit.
 
     Args:
+        before: What the child does before it goes quiet.
         tmp_path: Pytest's temporary folder.
         monkeypatch: Sets a short idle limit.
     """
@@ -1140,9 +1206,11 @@ def test_a_child_that_writes_nothing_after_a_reply_is_killed(tmp_path: Path, mon
         import os
 
         open({str(child_pid)!r}, "w").write(str(os.getpid()))
-        emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0", "candidate": "x"}})
-        sys.stdin.readline()
-        time.sleep(600)
+        """
+        + before
+        + """
+        # Longer than the time limit below, so a missed kill fails the test, not hangs it.
+        time.sleep(20)
         """,
     )
     monkeypatch.setattr(shinka_evolve, "_IDLE_SECONDS", 0.5)
@@ -1153,7 +1221,7 @@ def test_a_child_that_writes_nothing_after_a_reply_is_killed(tmp_path: Path, mon
             Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
         )
 
-    assert time.monotonic() - started < 30
+    assert time.monotonic() - started < 10
     assert _wait_until_dead(int(child_pid.read_text()))
 
 
@@ -1206,7 +1274,8 @@ def test_a_stopped_child_whose_group_holds_the_pipe_is_killed_after_the_drain_li
         tmp_path,
         f"""
         # It keeps the child's output open and ignores the closed reply stream.
-        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
+        # Longer than the time limit below, so a missed drain limit fails the test, not hangs it.
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"], stdin=subprocess.DEVNULL)
         open({str(holder_pid)!r}, "w").write(str(holder.pid))
         emit("APP_NATIVE_RPC ", {{"kind": "evaluate", "id": "0"}})
         sys.stdin.read()
@@ -1223,7 +1292,7 @@ def test_a_stopped_child_whose_group_holds_the_pipe_is_killed_after_the_drain_li
                 Task("seed"), EvalServer(lambda candidate, case: (1.0, {}), max_evals=5), _context(tmp_path)
             )
         pid = int(holder_pid.read_text())
-        assert time.monotonic() - started < 30
+        assert time.monotonic() - started < 10
         assert _wait_until_dead(pid)
     finally:
         if pid:
