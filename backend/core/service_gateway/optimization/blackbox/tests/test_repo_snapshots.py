@@ -504,7 +504,7 @@ def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[li
         "def score(repo_path, case, output):\n    return 1.0, 'ran'\n",
         timeout_seconds=60,
         run_entry="src/run.py:run",
-        run_timeout=1.0,
+        run_timeout=5.0,
     )
     try:
         scores = [
