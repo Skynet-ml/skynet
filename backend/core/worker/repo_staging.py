@@ -102,6 +102,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     run_log_emitter,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_runtime import BOX_GIT_ENV
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
@@ -1762,6 +1763,22 @@ def _suite_patch(archive: Path, files: dict[str, str], workdir: Path) -> str:
         shutil.rmtree(root, ignore_errors=True)
 
 
+# The scratch root holds files from the job's suite, so git must read no
+# config, attributes or ignore files under it: a planted ``.gitconfig`` or
+# ``.config/git/`` file would run code on the worker host through an alias,
+# hook or fsmonitor (SKY-812). The calls make no commit, so git needs no
+# identity from a config file.
+_SCRATCH_GIT_ENV = {
+    "HOME": "/nonexistent",
+    "XDG_CONFIG_HOME": "/nonexistent",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+    **BOX_GIT_ENV,
+}
+
+
 def _git(cwd: Path, *arguments: str) -> str:
     """Run git in a scratch repository with no user or system config.
 
@@ -1778,7 +1795,7 @@ def _git(cwd: Path, *arguments: str) -> str:
         check=True,
         capture_output=True,
         text=True,
-        env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cwd)},
+        env={"PATH": os.environ.get("PATH", ""), **_SCRATCH_GIT_ENV},
     ).stdout
 
 

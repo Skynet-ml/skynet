@@ -6,7 +6,9 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -4011,3 +4013,34 @@ def test_a_snapshot_with_no_outcome_sets_no_rule(
         staged.cleanup()
 
     assert ("record" in result["details"]) is recorded
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_suite_scratch_git_reads_no_config_from_the_scratch_root(tmp_path: Path) -> None:
+    """A ``.gitconfig`` or ``.config/git/config`` in the suite scratch root runs nothing on the worker (SKY-812).
+
+    The control run uses the old environment, with ``HOME`` at the scratch
+    root, and fires the planted fsmonitor command, so the plant is live.
+
+    Args:
+        tmp_path: Pytest fixture.
+    """
+    marker = tmp_path / "marker"
+    root = tmp_path / "root"
+    planted = f"[core]\n\tfsmonitor = \"touch '{marker}'; false\"\n"
+    (root / ".config" / "git").mkdir(parents=True)
+    (root / ".gitconfig").write_text(planted, encoding="utf-8")
+    (root / ".config" / "git" / "config").write_text(planted, encoding="utf-8")
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    old_env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(root)}
+    for arguments in (["init", "--quiet"], ["add", "--all"]):
+        subprocess.run(["git", *arguments], cwd=root, env=old_env, check=True, capture_output=True)
+    assert marker.exists()
+    marker.unlink()
+    shutil.rmtree(root / ".git")
+
+    repo_staging._git(root, "init", "--quiet")
+    repo_staging._git(root, "add", "--all")
+    assert repo_staging._git(root, "write-tree").strip()
+
+    assert not marker.exists()
