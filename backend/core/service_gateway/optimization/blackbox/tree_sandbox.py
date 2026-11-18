@@ -17,8 +17,8 @@ A step's process must not live into the next step of a warm box, where it
 could write into the unpacked tree. No simple way kills every such process on
 every provider: a candidate can leave its process group and session. So the
 step goes back healthy only when it can show that no process is left: the
-command did not time out, and a ``ps`` scan after the pack finds no process
-that the scan before the unpack did not see. A box without ``ps`` or with
+command did not time out, and a scan of /proc after the pack finds no process
+that the scan before the unpack did not see. A box whose scan fails or that has
 other new processes goes back unhealthy, and the next step gets a new box.
 
 The box user can write a folder on the box PATH (``/app/.venv/bin`` on
@@ -124,12 +124,17 @@ _SCAN_STDERR_CHARS = 200
 _CLEAN_ENV = '/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" LANG="$LANG" LC_ALL="$LC_ALL" BOX_PATH="$PATH"'
 _CLEAN_BASH = " /bin/bash --noprofile --norc -c "
 _CLEAN_SHELL = _CLEAN_ENV + _CLEAN_BASH
-# Prints a "state <hash>" line, then one "pid start-time" line for each process, except the scan's own shell,
-# its ancestors and its children (ps, awk, sort), and the kernel threads (pid 2 and its children, only when
-# pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A pid with its start time names one
-# process, also when the pid is used again. The hash covers the metadata of each file in the box PATH folders
-# and of the shell profile files. stat -L follows a link to its target. The change time of a file changes on
-# each write, and the box user cannot set it back. stat has GNU flags in a box and BSD flags on a macOS host.
+# Prints a "state <hash>" line, then one "pid start-ticks" line for each process, except the scan's own shell,
+# its ancestors and its children (the loop, awk and sort), and the kernel threads (pid 2 and its children, only
+# when pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A pid with its start time names one
+# process, also when the pid is used again. The scan reads /proc/<pid>/stat itself, because the box image
+# (python:3.12-slim) has no ps. The name in a stat line can hold spaces and parens, so the fields come after the
+# last ")": the parent pid is field 4 and the start time in clock ticks is field 22. A process that ends during
+# the read has no stat file any more and is skipped. Any other read failure, a bad line or no process at all
+# fails the scan. SCAN_PROC_ROOT is for tests only: env -i in PROCESS_SCAN drops it, so the box cannot set it.
+# The hash covers the metadata of each file in the box PATH folders and of the shell profile files. stat -L
+# follows a link to its target. The change time of a file changes on each write, and the box user cannot set it
+# back. stat has GNU flags in a box and BSD flags on a macOS host.
 # A root scan under sudo gets root's HOME and PATH, so it checks the home of the user that sudo names and the
 # image's box PATH. A provider that already runs as root sets no SUDO_UID and keeps the box values.
 SCAN_SCRIPT = (
@@ -141,11 +146,15 @@ SCAN_SCRIPT = (
     ' state=$({ printf "%s\\n" "$BOX_PATH" | tr : "\\n" | while IFS= read -r d; do'
     ' find -H "$d" -maxdepth 1 -exec stat "${fmt[@]}" {} +; done;'
     ' for f in .bash_profile .bash_login .profile .bashrc; do stat "${fmt[@]}" "$HOME/$f"; done; } 2>&1 | cksum);'
-    ' echo "state $state"; k=0; if [ "$(cat /proc/2/comm 2>/dev/null)" = kthreadd ]; then k=2; fi;'
-    " ps -A -o pid= -o ppid= -o lstart= | awk -v me=$$ -v k=$k '"
-    "{parent[$1] = $2; line[$1] = $0} END {p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
-    " for (pid in line) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
-    ' {text = line[pid]; sub(/^ *[0-9]+ +[0-9]+ +/, "", text); sub(/ +$/, "", text); print pid, text}}'
+    ' echo "state $state"; proc=${SCAN_PROC_ROOT:-/proc}; k=0;'
+    ' if [ "$(cat "$proc/2/comm" 2>/dev/null)" = kthreadd ]; then k=2; fi; shopt -s nullglob;'
+    ' for f in "$proc"/[0-9]*/stat; do if ! { IFS= read -r l < "$f"; } 2>/dev/null; then'
+    ' [ -e "$f" ] && exit 1; continue; fi; [[ $l == *")"* ]] || exit 1;'
+    ' printf "%s%s\\n" "${l%% *}" "${l##*)}"; done | awk -v me=$$ -v k=$k \''
+    "$1 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $21 !~ /^[0-9]+$/ {bad = 1} {parent[$1] = $3; start[$1] = $21}"
+    " END {if (bad || !NR) exit 1; p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
+    " for (pid in start) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
+    " print pid, start[pid]}"
     "' | LC_ALL=C sort"
 )
 # sudo keeps APP_ENTRY_PATH (the image's sudoers has !env_reset) and sets SUDO_UID; env -i would drop both.
@@ -332,7 +341,7 @@ def _processes(box: SandboxSession) -> frozenset[str] | None:
     lines = frozenset(result.stdout.splitlines())
     if result.ok and not result.timed_out and lines:
         return lines
-    # The first stderr line names the cause, such as a box without ps. The box controls that text, so a cap
+    # The first stderr line names the cause, such as a box without /proc. The box controls that text, so a cap
     # keeps a long line out of the log.
     first = next(iter(result.stderr.splitlines()), "")[:_SCAN_STDERR_CHARS]
     logger.warning(

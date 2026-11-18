@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -30,6 +31,7 @@ from core.sandbox.errors import SandboxInfraError
 from core.sandbox.grants import Grant, GrantError
 from core.sandbox.placement import MODAL, VERCEL, Placement
 from core.sandbox.trees import BoxFailureError, GrantDeniedError
+from core.service_gateway.optimization.blackbox import tree_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from core.service_gateway.optimization.blackbox.tree_sandbox import (
@@ -56,6 +58,78 @@ _LEASES: list[BoxLease[Any]] = []
 _TICKERS: list[_Ticker] = []
 # Stands for the settlement's context scopes, such as settled_charges and the usage scope.
 _RUN_SCOPE: contextvars.ContextVar[str] = contextvars.ContextVar("run_scope")
+# The scan reads /proc, which a macOS host does not have; these tests need the host's real processes.
+_HOST_PROC = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the host has no /proc")
+
+
+def _stat_line(pid: int | str, ppid: int | str, start: int | str, name: str = "a) (b c") -> str:
+    """Return a /proc/<pid>/stat line with a name that holds spaces and parens.
+
+    Args:
+        pid: Field 1.
+        ppid: Field 4, the parent pid.
+        start: Field 22, the start time in clock ticks.
+        name: The process name, field 2 without its parens.
+
+    Returns:
+        The line, with its newline.
+    """
+    return f"{pid} ({name}) S {ppid} " + "0 " * 17 + f"{start} 0 0\n"
+
+
+def _fake_proc(root: Path, rows: Sequence[tuple[int, int, int]] = ((1, 0, 5),), kthreadd: bool = False) -> Path:
+    """Write a fake /proc tree with one stat file for each row.
+
+    Args:
+        root: The folder that stands for /proc.
+        rows: The pid, parent pid and start ticks of each process.
+        kthreadd: Name pid 2 kthreadd in its comm file.
+
+    Returns:
+        The root.
+    """
+    root.mkdir(exist_ok=True)
+    for pid, ppid, start in rows:
+        (root / str(pid)).mkdir()
+        (root / str(pid) / "stat").write_text(_stat_line(pid, ppid, start))
+    if kthreadd:
+        (root / "2" / "comm").write_text("kthreadd\n")
+    return root
+
+
+def _scan_with(proc: Path) -> str:
+    """Return the process scan command that reads a fake /proc tree.
+
+    The real command runs under env -i, which drops SCAN_PROC_ROOT, so the
+    test puts the value inside that env -i.
+
+    Args:
+        proc: The fake /proc tree.
+
+    Returns:
+        The command.
+    """
+    return PROCESS_SCAN.replace("/usr/bin/env -i ", f"/usr/bin/env -i SCAN_PROC_ROOT={shlex.quote(str(proc))} ", 1)
+
+
+def _run_scan(proc: Path, extra: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the scan script on a fake /proc tree.
+
+    Args:
+        proc: The fake /proc tree.
+        extra: More of the scan's environment.
+
+    Returns:
+        The finished scan.
+    """
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
+        env={"PATH": "/usr/bin:/bin", "SCAN_PROC_ROOT": str(proc), **(extra or {})},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -2119,6 +2193,7 @@ def test_a_step_that_times_out_gives_its_box_back_unhealthy(trees: TreeStore, st
     assert runtime.boxes[0].closed
 
 
+@_HOST_PROC
 def test_a_step_that_leaves_a_background_job_gives_its_box_back_unhealthy(
     trees: TreeStore, step_log: StepLogStore
 ) -> None:
@@ -2145,6 +2220,7 @@ def test_a_step_that_leaves_a_background_job_gives_its_box_back_unhealthy(
     assert runtime.boxes[0].closed
 
 
+@_HOST_PROC
 def test_the_process_scan_sees_a_background_job_and_not_itself() -> None:
     """A job that a command leaves running is a new line in the next scan, and two scans in a row see no own process."""
     box = LocalSubprocessRuntime().open(_SPEC)
@@ -2386,8 +2462,14 @@ def test_a_scan_that_a_stray_process_replays_as_the_box_user_cannot_keep_the_box
     assert len(runtime.boxes) == (2 if capable else 1)
 
 
-def test_a_local_box_scans_without_root() -> None:
-    """The local subprocess box refuses sudo, so its scan runs as the test's user and still gives its lines."""
+def test_a_local_box_scans_without_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The local subprocess box refuses sudo, so its scan runs as the test's user and still gives its lines.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+        monkeypatch: Points the scan at the fake /proc tree.
+    """
+    monkeypatch.setattr(tree_sandbox, "PROCESS_SCAN", _scan_with(_fake_proc(tmp_path / "proc")))
     box = LocalSubprocessRuntime().open(_SPEC)
     try:
         lines = _processes(box)
@@ -2440,6 +2522,7 @@ def test_a_root_scan_under_sudo_checks_the_box_user_folders_or_fails(
     home.mkdir()
     (home / ".profile").write_text("echo hi\n")
     root_home.mkdir()
+    proc = _fake_proc(tmp_path / "proc")
 
     def scan(extra: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
         """Run the scan script with the fake tools first on PATH.
@@ -2452,7 +2535,7 @@ def test_a_root_scan_under_sudo_checks_the_box_user_folders_or_fails(
         """
         return subprocess.run(
             ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
-            env={"PATH": f"{tools}:/usr/bin:/bin", **extra},
+            env={"PATH": f"{tools}:/usr/bin:/bin", "SCAN_PROC_ROOT": str(proc), **extra},
             capture_output=True,
             text=True,
             timeout=30,
@@ -2525,7 +2608,8 @@ def _state(box: SandboxSession) -> str:
     Returns:
         The line that starts with ``state``.
     """
-    result = box.run(PROCESS_SCAN, timeout_seconds=30)
+    with tempfile.TemporaryDirectory() as folder:
+        result = box.run(_scan_with(_fake_proc(Path(folder) / "proc")), timeout_seconds=30)
     assert result.ok
     return next(line for line in result.stdout.splitlines() if line.startswith("state "))
 
@@ -2560,33 +2644,18 @@ def test_the_scan_state_changes_when_a_path_folder_or_a_profile_changes(tmp_path
     assert len({first, planted, rewritten, profiled}) == 4
 
 
-@pytest.mark.parametrize(("comm", "expected"), [("kthreadd", {"1"}), ("sleep", {"1", "2", "3"})])
-def test_the_scan_skips_pid_2_only_when_it_is_kthreadd(tmp_path: Path, comm: str, expected: set[str]) -> None:
+@pytest.mark.parametrize(("kthreadd", "expected"), [(True, {"1"}), (False, {"1", "2", "3"})])
+def test_the_scan_skips_pid_2_only_when_it_is_kthreadd(tmp_path: Path, kthreadd: bool, expected: set[str]) -> None:
     """On Docker and gVisor pid 2 can be a normal process, so the scan keeps it and its children.
 
     Args:
-        tmp_path: Scratch folder; it holds the fake ps and cat.
-        comm: The name that /proc/2/comm gives.
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+        kthreadd: The comm file of pid 2 names kthreadd.
         expected: The pids that the scan must print.
     """
-    folder = tmp_path / "bin"
-    folder.mkdir()
-    lines = "".join(f"{pid:>5} {ppid:>5} Tue Nov 17 00:00:0{pid} 2026\n" for pid, ppid in ((1, 0), (2, 0), (3, 2)))
-    (folder / "ps").write_text(f"#!/bin/sh\nprintf '%s' '{lines}'\n")
-    (folder / "cat").write_text(
-        f'#!/bin/sh\nif [ "$1" = /proc/2/comm ]; then echo {comm}; else exec /bin/cat "$@"; fi\n'
-    )
-    for tool in ("ps", "cat"):
-        (folder / tool).chmod(0o755)
+    proc = _fake_proc(tmp_path / "proc", ((1, 0, 5), (2, 0, 6), (3, 2, 7)), kthreadd=kthreadd)
 
-    result = subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
-        env={"PATH": f"{folder}:/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_scan(proc)
 
     assert result.returncode == 0
     assert {line.split()[0] for line in result.stdout.splitlines() if not line.startswith("state ")} == expected
@@ -2596,20 +2665,26 @@ def test_the_scan_skips_its_own_shell_its_ancestors_and_its_children(tmp_path: P
     """The scan's shell, the processes above it and the tools that it starts change with each scan, so none prints.
 
     Args:
-        tmp_path: Scratch folder; it holds the fake ps.
+        tmp_path: Scratch folder; it holds the fake /proc tree.
     """
-    folder = tmp_path / "bin"
-    folder.mkdir()
-    # ps runs as a child of the scan's shell, so $PPID is that shell and $$ is one of its children.
-    # The shell's parent 77777 stands for the caller's process.
-    (folder / "ps").write_text(
-        '#!/bin/sh\nprintf \'%5s %5s Tue Nov 17 00:00:00 2026\\n\' 1 0 4242 1 77777 1 "$PPID" 77777 "$$" "$PPID"\n'
+    proc = _fake_proc(tmp_path / "proc", ((1, 0, 5), (4242, 1, 100), (77777, 1, 50)))
+    # The wrapper writes the stat files of its own pid and of a child, then execs the scan, which keeps that pid.
+    # Its parent 77777 stands for the caller's process.
+    wrapper = (
+        'mkdir "$P/$$" "$P/55555"; printf "%s\\n" "$$ (sh) S 77777 $Z 60 0 0" > "$P/$$/stat";'
+        ' printf "%s\\n" "55555 (awk) S $$ $Z 70 0 0" > "$P/55555/stat";'
+        ' exec /bin/bash --noprofile --norc -c "$SCAN"'
     )
-    (folder / "ps").chmod(0o755)
 
     result = subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
-        env={"PATH": f"{folder}:/usr/bin:/bin"},
+        ["/bin/bash", "--noprofile", "--norc", "-c", wrapper],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "SCAN_PROC_ROOT": str(proc),
+            "P": str(proc),
+            "Z": "0 " * 16 + "0",
+            "SCAN": SCAN_SCRIPT,
+        },
         capture_output=True,
         text=True,
         timeout=30,
@@ -2617,7 +2692,128 @@ def test_the_scan_skips_its_own_shell_its_ancestors_and_its_children(tmp_path: P
     )
 
     assert result.returncode == 0
-    assert {line.split()[0] for line in result.stdout.splitlines() if not line.startswith("state ")} == {"1", "4242"}
+    assert [line for line in result.stdout.splitlines() if not line.startswith("state ")] == ["1 5", "4242 100"]
+
+
+def test_the_scan_names_each_process_by_its_pid_and_start_ticks(tmp_path: Path) -> None:
+    """The fields come after the last paren, so a name with spaces and parens does not move them.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+    """
+    proc = _fake_proc(tmp_path / "proc", ((1, 0, 5),))
+    (proc / "300").mkdir()
+    (proc / "300" / "stat").write_text(_stat_line(300, 1, 987654, name="x) S 1 2 (y"))
+
+    result = _run_scan(proc)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[1:] == ["1 5", "300 987654"]
+
+
+def test_the_scan_skips_a_process_that_ends_during_the_read(tmp_path: Path) -> None:
+    """A process that ends after the folder list has no stat file any more, which is no scan failure.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+    """
+    proc = _fake_proc(tmp_path / "proc")
+    (proc / "400").mkdir()
+    (proc / "400" / "stat").symlink_to(tmp_path / "gone")
+
+    result = _run_scan(proc)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[1:] == ["1 5"]
+
+
+def _unreadable(proc: Path) -> None:
+    """Add a stat file that exists and that the scan cannot read.
+
+    Args:
+        proc: The fake /proc tree.
+    """
+    (proc / "500").mkdir()
+    (proc / "500" / "stat").write_text(_stat_line(500, 1, 9))
+    (proc / "500" / "stat").chmod(0)
+
+
+def _bad_line(proc: Path) -> None:
+    """Add a stat line with no paren.
+
+    Args:
+        proc: The fake /proc tree.
+    """
+    (proc / "500").mkdir()
+    (proc / "500" / "stat").write_text("500 a S 1\n")
+
+
+def _bad_start(proc: Path) -> None:
+    """Add a stat line whose start field is not a number.
+
+    Args:
+        proc: The fake /proc tree.
+    """
+    (proc / "500").mkdir()
+    (proc / "500" / "stat").write_text(_stat_line(500, 1, "x"))
+
+
+def _no_process(proc: Path) -> None:
+    """Remove every process from the fake /proc tree.
+
+    Args:
+        proc: The fake /proc tree.
+    """
+    (proc / "1" / "stat").unlink()
+    (proc / "1").rmdir()
+
+
+@pytest.mark.parametrize("damage", [_unreadable, _bad_line, _bad_start, _no_process])
+def test_the_scan_fails_when_it_cannot_read_every_process(tmp_path: Path, damage: Callable[[Path], None]) -> None:
+    """A stat file that does not read, a bad line or an empty /proc fails the scan, so the box is not kept.
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake /proc tree.
+        damage: Changes the fake /proc tree.
+    """
+    proc = _fake_proc(tmp_path / "proc")
+    damage(proc)
+
+    result = _run_scan(proc)
+
+    assert result.returncode != 0
+
+
+def test_the_process_scan_passes_the_sudo_values_into_the_clean_shell_and_drops_the_proc_root(
+    tmp_path: Path,
+) -> None:
+    """env -i drops the box env, so the wrapper passes SUDO_UID and APP_ENTRY_PATH by name, and nothing else.
+
+    Args:
+        tmp_path: Scratch folder; it stands for the box user's home.
+    """
+    script = shlex.quote(SCAN_SCRIPT)
+    assert PROCESS_SCAN.endswith(script)
+    probe = shlex.quote('printf "%s|%s|%s" "$SUDO_UID" "$ENTRY_PATH" "$SCAN_PROC_ROOT"')
+    outer = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "SUDO_UID": "1001",
+        "APP_ENTRY_PATH": "/app/.venv/bin:/usr/bin",
+        "SCAN_PROC_ROOT": str(tmp_path),
+    }
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", PROCESS_SCAN[: -len(script)] + probe],
+        env=outer,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "1001|/app/.venv/bin:/usr/bin|"
 
 
 @pytest.mark.parametrize("profile", [".profile", ".bashrc", ".bash_profile", ".bash_login"])
@@ -2688,6 +2884,7 @@ def test_the_scan_state_with_gnu_stat_covers_each_file_size(tmp_path: Path) -> N
     (folder / "tool").write_text("aaaa\n")
     home = tmp_path / "home"
     home.mkdir()
+    proc = str(_fake_proc(tmp_path / "proc"))
 
     def state() -> str:
         """Return the state line of one scan with the fake stat first on PATH.
@@ -2697,7 +2894,7 @@ def test_the_scan_state_with_gnu_stat_covers_each_file_size(tmp_path: Path) -> N
         """
         result = subprocess.run(
             ["/bin/bash", "--noprofile", "--norc", "-c", SCAN_SCRIPT],
-            env={"PATH": f"{tools}:/usr/bin:/bin", "BOX_PATH": str(folder), "HOME": str(home)},
+            env={"PATH": f"{tools}:/usr/bin:/bin", "BOX_PATH": str(folder), "HOME": str(home), "SCAN_PROC_ROOT": proc},
             capture_output=True,
             text=True,
             timeout=30,
