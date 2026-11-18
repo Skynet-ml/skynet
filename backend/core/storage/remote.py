@@ -24,7 +24,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
 from .. import run_log
-from ..billing.budgets import BudgetConflictError, BudgetError, BudgetInFlightError, BudgetService
+from ..billing.budgets import (
+    USER_STOP_REASONS,
+    BudgetConflictError,
+    BudgetError,
+    BudgetInFlightError,
+    BudgetService,
+)
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_TAGGING,
@@ -39,6 +45,7 @@ from ..constants import (
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
 )
+from ..i18n import CANCELLATION_REASON, PAUSE_REASON
 from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialClaim, TrialFingerprintError, TrialStatus
 from ..worker.checkpoint_compat import CheckpointCompatibilityError, validate_checkpoint
 from .agent_run_store import PostgresAgentRunStore
@@ -101,6 +108,101 @@ def _mark_resume_budget_stop(job: JobModel) -> None:
     job.completed_at = datetime.now(UTC)
     job.message = "The remaining authorized budget cannot cover resuming this run."
     job.recovery = None
+
+
+def _interrupted_recovery(recovery: Any, generation: Any = None) -> dict[str, Any] | None:
+    """Build the marker of a run that a requeue gave up, so a later manual resume waives its crash.
+
+    Skynet pays for the crash (SKY-406 D3): a manual resume waives the
+    interrupted generation, and a run with no checkpoint restarts fresh.
+
+    Args:
+        recovery: The run's recovery marker as the requeue read it.
+        generation: The interrupted budget generation that the requeue waived;
+            ``None`` takes the generation of ``recovery``.
+
+    Returns:
+        The ``interrupted`` marker, or ``None`` when no interrupted generation is known.
+    """
+    previous = recovery if isinstance(recovery, dict) else {}
+    if generation is None:
+        generation = previous.get("interrupted_budget_generation")
+    if generation is None:
+        return None
+    cause = previous.get("cause")
+    return {
+        "state": "interrupted",
+        "interrupted_budget_generation": int(generation),
+        **({"cause": cause} if cause else {}),
+    }
+
+
+def _leave_sweep_recovery(
+    session: Session, optimization_id: str, generation: int, recovery: dict[str, Any] | None
+) -> None:
+    """Replace the ``recovering`` marker of a run that a requeue gave up, and commit.
+
+    On SQLite, a status write can land between the requeue's reads and its
+    claim. A write that does not pass ``ends_recovery``, such as a worker's,
+    leaves the sweep's ``recovering`` marker, and the UI hides the status of a
+    run whose marker says ``recovering`` (SKY-814).
+
+    Args:
+        session: The requeue's session.
+        optimization_id: The run that the requeue gave up.
+        generation: The generation that the requeue fenced; a run past it
+            belongs to another writer, which keeps its marker.
+        recovery: The marker the run keeps, from ``_interrupted_recovery``.
+    """
+    session.query(JobModel).filter(
+        JobModel.optimization_id == optimization_id,
+        JobModel.execution_generation == generation,
+    ).update({JobModel.recovery: recovery}, synchronize_session=False)
+    session.commit()
+
+
+def _end_user_stopped_requeue(
+    session: Session, optimization_id: str, generation: int, recovery: dict[str, Any] | None, reason: str
+) -> None:
+    """Give up a requeue to the user's cancel or pause, write the user's status, and commit.
+
+    The route closes admission before its status write, and the API can stop
+    between the two, so the sweep writes the user's status itself. When the
+    route's write landed first, the compare-and-set misses and only the
+    sweep's ``recovering`` marker ends (SKY-814).
+
+    Args:
+        session: The requeue's session, with no write of the requeue pending.
+        optimization_id: The run that the user stopped.
+        generation: The execution generation that the requeue holds.
+        recovery: The marker the run keeps, from ``_interrupted_recovery``.
+        reason: The user's stop reason on the closed budget.
+    """
+    paused = reason == "user_paused"
+    ended = (
+        session.query(JobModel)
+        .filter(
+            JobModel.optimization_id == optimization_id,
+            JobModel.status.in_(("running", "validating")),
+            JobModel.execution_generation == generation,
+        )
+        .update(
+            {
+                JobModel.status: "paused" if paused else "cancelled",
+                JobModel.message: PAUSE_REASON if paused else CANCELLATION_REASON,
+                JobModel.completed_at: datetime.now(UTC),
+                JobModel.recovery: recovery,
+                JobModel.claimed_by: None,
+                JobModel.claimed_at: None,
+                JobModel.lease_expires_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not ended:
+        _leave_sweep_recovery(session, optimization_id, generation, recovery)
+        return
+    session.commit()
 
 
 logger = logging.getLogger(__name__)
@@ -1253,7 +1355,13 @@ class RemoteDBJobStore:
             session.close()
 
     def update_job_if_status(
-        self, optimization_id: str, expected: tuple[str, ...], *, expected_generation: int | None = None, **kwargs: Any
+        self,
+        optimization_id: str,
+        expected: tuple[str, ...],
+        *,
+        expected_generation: int | None = None,
+        ends_recovery: bool = False,
+        **kwargs: Any,
     ) -> bool:
         """Update a job only while its status is one of ``expected`` (compare-and-set).
 
@@ -1268,6 +1376,10 @@ class RemoteDBJobStore:
             expected: Status values the row must currently hold for the write to
                 apply.
             expected_generation: Execution fence required for worker-owned writes.
+            ends_recovery: Whether a user's stop writes the status. Then a
+                ``recovering`` marker becomes ``interrupted``, or ``None`` when
+                no interrupted generation is known, in the same transaction.
+                Any other marker stays.
             **kwargs: Column values to overwrite.
 
         Returns:
@@ -1306,6 +1418,15 @@ class RemoteDBJobStore:
             if expected_generation is not None:
                 query = query.filter(JobModel.execution_generation == expected_generation)
             rows = query.update(update_values, synchronize_session=False)
+            if rows and ends_recovery:
+                # Sweeps skip a stopped run, so a sweep's recovering marker would stay
+                # and hide the user's status in the UI. The interrupted marker keeps the
+                # crash waivable for a later manual resume (SKY-814).
+                recovery = session.query(JobModel.recovery).filter(JobModel.optimization_id == optimization_id).scalar()
+                if isinstance(recovery, dict) and recovery.get("state") == "recovering":
+                    session.query(JobModel).filter(JobModel.optimization_id == optimization_id).update(
+                        {JobModel.recovery: _interrupted_recovery(recovery)}, synchronize_session=False
+                    )
             session.commit()
             return rows > 0
         finally:
@@ -1878,6 +1999,7 @@ class RemoteDBJobStore:
                     }
                     fenced_generation = job.execution_generation
                     previous_status = job.status
+                    fenced_recovery = job.recovery
                     session.commit()
                     job = (
                         session.query(JobModel)
@@ -1891,6 +2013,9 @@ class RemoteDBJobStore:
                         .one_or_none()
                     )
                     if job is None:
+                        _leave_sweep_recovery(
+                            session, optimization_id, fenced_generation, _interrupted_recovery(fenced_recovery)
+                        )
                         return None
                 budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.pending_operations or budget.reserved_cents:
@@ -1916,27 +2041,44 @@ class RemoteDBJobStore:
                         )
                     known = [bound for bound in bounds if bound is not None]
                     resumed_from = min(known) if known else None
+                    interrupted = (
+                        int(interrupted) if interrupted is not None else int(job.execution_budget_generation or 0) - 1
+                    )
                     budget_service.waive_interrupted_work(
                         job.execution_budget_id,
                         job.username,
-                        generation=(
-                            int(interrupted)
-                            if interrupted is not None
-                            else int(job.execution_budget_generation or 0) - 1
-                        ),
+                        generation=interrupted,
                         settled_after=resumed_from,
                     )
                     budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.state == "closed" and budget.available_cents > 0:
                     budget = budget_service.resume_admission(
-                        job.execution_budget_id, job.username, expected_generation=job.execution_budget_generation
+                        job.execution_budget_id,
+                        job.username,
+                        expected_generation=job.execution_budget_generation,
+                        automatic=automatic,
                     )
                 if budget.available_cents <= 0 or budget.blocked_reason is not None:
+                    if automatic:
+                        # A user's stop can close admission after the reads above, and it
+                        # wins over the budget stop (SKY-814). This read holds the budget
+                        # row lock until the commit below.
+                        budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                        if budget.blocked_reason in USER_STOP_REASONS:
+                            _end_user_stopped_requeue(
+                                session,
+                                optimization_id,
+                                int(job.execution_generation or 0),
+                                _interrupted_recovery(job.recovery, interrupted),
+                                budget.blocked_reason,
+                            )
+                            return None
                     if budget.blocked_reason is None:
                         budget_service.stop_admission(
                             job.execution_budget_id,
                             job.username,
                             reason="budget_reached",
+                            session=session,
                         )
                     _mark_resume_budget_stop(job)
                     ended_generation = int(job.execution_generation or 0)
@@ -1944,7 +2086,40 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
+                if automatic:
+                    # A user's stop can close admission after the reads above. This
+                    # read holds the budget row lock until the requeue commits, so a
+                    # later stop waits and then finds the run pending (SKY-814).
+                    budget = budget_service.get(job.execution_budget_id, job.username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        _end_user_stopped_requeue(
+                            session,
+                            optimization_id,
+                            int(job.execution_generation or 0),
+                            _interrupted_recovery(job.recovery, interrupted),
+                            budget.blocked_reason,
+                        )
+                        return None
+                    kept_recovery = _interrupted_recovery(job.recovery, interrupted)
             held_generation = int(job.execution_generation or 0)
+            # SQLite has no row lock, so a user's cancel or pause can land after the
+            # reads above. This compare-and-set requeues only the row as it was read,
+            # so the user's status write is never lost (SKY-814). A user stop closed
+            # admission before its status write, so the budget stays closed.
+            claimed = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status == job.status,
+                    JobModel.execution_generation == held_generation,
+                )
+                .update({JobModel.execution_generation: held_generation + 1}, synchronize_session=False)
+            )
+            if not claimed:
+                recovery = _interrupted_recovery(job.recovery)
+                session.rollback()
+                _leave_sweep_recovery(session, optimization_id, held_generation, recovery)
+                return None
             job.execution_generation = held_generation + 1
             job.stop_reason = None
             job.recovery = None
@@ -2054,6 +2229,16 @@ class RemoteDBJobStore:
                     )
                     if not ended:
                         session.rollback()
+                        return None
+                    # The rollback ended the budget row lock, so a user's stop can
+                    # close admission since. The user's stop wins over the failure,
+                    # and the run must not fail or notify (SKY-814).
+                    budget = budget_service.get(budget_id, username, session=session)
+                    if budget.blocked_reason in USER_STOP_REASONS:
+                        session.rollback()
+                        _end_user_stopped_requeue(
+                            session, optimization_id, held_generation, kept_recovery, budget.blocked_reason
+                        )
                         return None
                     # The resume above can reopen admission. Close it in the same
                     # transaction as the failure, so a run that another sweep
@@ -2646,19 +2831,7 @@ class RemoteDBJobStore:
                         "interrupted_budget_generation": int(interrupted),
                         **({"cause": cause} if cause else {}),
                     }
-            if self.update_job_if_status(
-                identifier,
-                ("running", "validating"),
-                expected_generation=generation,
-                status="failed",
-                stop_reason="interrupted",
-                completed_at=now.isoformat(),
-                message=message,
-                recovery=ended_recovery,
-                claimed_by=None,
-                claimed_at=None,
-                lease_expires_at=None,
-            ):
+            if self._fail_orphan(identifier, generation, message, ended_recovery, now):
                 if ended_recovery is not None:
                     logger.warning(
                         "Orphaned run %s had no usage settlement progress for %s; it stopped as interrupted",
@@ -2668,6 +2841,84 @@ class RemoteDBJobStore:
                 self._note_ended_orphan(identifier, generation)
                 handled += 1
         return handled
+
+    def _fail_orphan(
+        self, optimization_id: str, generation: int, message: str, recovery: dict[str, Any] | None, now: datetime
+    ) -> bool:
+        """Fail an orphaned run that the sweep cannot recover, unless the user stopped it.
+
+        The user's cancel or pause closes admission before its status write,
+        and the API can stop between the two. The user's stop wins over the
+        sweep, so the sweep then writes the user's status and does not fail the
+        run (SKY-814). The job row lock, then the budget row lock, keep a later
+        stop from landing between the check and the failure.
+
+        Args:
+            optimization_id: The orphaned run.
+            generation: The execution generation that the sweep read.
+            message: The failure message.
+            recovery: The marker that the failed run keeps.
+            now: Time of the current sweep.
+
+        Returns:
+            Whether the sweep failed the run.
+        """
+        session = self._get_session()
+        try:
+            job = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .with_for_update()
+                .one_or_none()
+            )
+            if job is None:
+                return False
+            if job.execution_budget_id is not None:
+                try:
+                    budget = BudgetService(engine=self._engine).get(
+                        job.execution_budget_id, job.username, session=session
+                    )
+                except BudgetError:
+                    # The requeue can fail on the same budget error; the run still fails.
+                    budget = None
+                if budget is not None and budget.blocked_reason in USER_STOP_REASONS:
+                    _end_user_stopped_requeue(
+                        session,
+                        optimization_id,
+                        generation,
+                        recovery if recovery is not None else _interrupted_recovery(job.recovery),
+                        budget.blocked_reason,
+                    )
+                    return False
+            ended = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.optimization_id == optimization_id,
+                    JobModel.status.in_(("running", "validating")),
+                    JobModel.execution_generation == generation,
+                )
+                .update(
+                    {
+                        JobModel.status: "failed",
+                        JobModel.stop_reason: "interrupted",
+                        JobModel.completed_at: now,
+                        JobModel.message: message,
+                        JobModel.recovery: recovery,
+                        JobModel.claimed_by: None,
+                        JobModel.claimed_at: None,
+                        JobModel.lease_expires_at: None,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return ended > 0
+        finally:
+            session.close()
 
     def _wake_waiting_runs(self) -> int:
         """Move each paused run whose ``wake_at`` passed back to ``pending``, so a worker claims it.
