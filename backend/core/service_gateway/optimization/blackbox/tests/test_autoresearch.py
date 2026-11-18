@@ -6,6 +6,7 @@ a scripted fake model and a pure Python scorer: no network and no paid call.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import functools
 import json
@@ -23,7 +24,7 @@ from gepa.oa.config import OptimizeAnythingConfig
 from sqlalchemy.engine import Engine
 
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
-from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
+from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MINIBATCH
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxProposer
 from core.service_gateway.optimization.blackbox import autoresearch as ar_mod
@@ -42,7 +43,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop, ModelCallBilledError, ModelCallFailedError
+from core.worker.engine_loop import EngineLoop, LoopStoppedError, ModelCallBilledError, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -61,8 +62,8 @@ trees = loop_tests.trees
 owner = loop_tests.owner
 
 _CASES = [{"id": "a"}, {"id": "b"}]
-# A scripted turn: the tool call to make in a round, or ``None`` for a final reply.
-Turn = Callable[[int], dict[str, Any] | None]
+# A scripted turn: the tool call, or the tool calls, to make in a round, or ``None`` for a final reply.
+Turn = Callable[[int], dict[str, Any] | list[dict[str, Any]] | None]
 # The model calls a test lets run; a session that never stops fails the test here, not in a hang.
 _MAX_CALLS = 40
 
@@ -151,7 +152,7 @@ class _Researcher:
             tools: The tool definitions.
 
         Returns:
-            The scripted tool call of this turn, or a final reply.
+            The scripted tool calls of this turn, or a final reply.
 
         Raises:
             _WorkerDiedError: In the call at ``die_at``.
@@ -173,7 +174,8 @@ class _Researcher:
         turn = sum(message["role"] == "assistant" for message in prompt)
         step = self.script[turn] if turn < len(self.script) else self.rest
         call = None if step is None else step(n)
-        return ModelReply("done" if call is None else "", self.cost, [] if call is None else [call])
+        calls = [] if call is None else call if isinstance(call, list) else [call]
+        return ModelReply("" if calls else "done", self.cost, calls)
 
 
 def _score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
@@ -976,7 +978,7 @@ def test_a_model_call_that_fails_on_every_attempt_ends_the_session_as_an_error(
 def test_a_long_command_output_is_cut(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A command output past ``OUTPUT_CHARS`` keeps its head and tail, so the next prompt stays bounded.
+    """A Hebrew output past ``OUTPUT_BYTES`` keeps its head and tail with no escapes, so the prompt stays bounded.
 
     Args:
         owner: Alice and her budget generation.
@@ -985,21 +987,22 @@ def test_a_long_command_output_is_cut(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    big = f"python3 -c \"print('a' * {loop_tools.OUTPUT_CHARS + 50})\""
+    big = f"python3 -c \"print('\u05d0' * {loop_tools.OUTPUT_BYTES})\""
     model = _Researcher([_bash(big), *_ROUND])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
     _run(loop)
 
     stdout = _tool_result(model, 1)["stdout"]
-    assert len(stdout) < loop_tools.OUTPUT_CHARS + 50
-    assert "[... 51 characters cut ...]" in stdout
+    assert loop_tools.prompt_bytes(stdout) <= loop_tools.OUTPUT_BYTES
+    assert "characters cut ...]" in stdout
+    assert "\u05d0" in model.calls[1][-1]["content"]
 
 
 def test_a_long_evaluate_result_is_cut(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """An evaluate result past ``OUTPUT_CHARS`` keeps its head and tail, so the next prompt stays bounded.
+    """An evaluate result past ``OUTPUT_BYTES`` keeps its head and tail, so the next prompt stays bounded.
 
     Args:
         owner: Alice and her budget generation.
@@ -1021,7 +1024,7 @@ def test_a_long_evaluate_result_is_cut(
             The length and the long text.
         """
         del loop, case
-        return float(len(str(candidate))), {"log": "z" * loop_tools.OUTPUT_CHARS}
+        return float(len(str(candidate))), {"log": "z" * loop_tools.OUTPUT_BYTES}
 
     model = _Researcher()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
@@ -1030,7 +1033,7 @@ def test_a_long_evaluate_result_is_cut(
 
     result = model.calls[2][-1]
     assert result["role"] == "tool"
-    assert len(result["content"]) < loop_tools.OUTPUT_CHARS + 100
+    assert loop_tools.prompt_bytes(result["content"]) <= loop_tools.OUTPUT_BYTES
     assert "characters cut ...]" in result["content"]
 
 
@@ -1042,7 +1045,7 @@ def test_a_prompt_past_its_cap_stops_the_session_and_the_run_goes_on(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A round whose transcript passes ``MAX_PROMPT_CHARS`` asks the model no more; the next round still runs.
+    """A round whose transcript passes ``MAX_PROMPT_BYTES`` asks the model no more; the next round still runs.
 
     Args:
         owner: Alice and her budget generation.
@@ -1052,7 +1055,7 @@ def test_a_prompt_past_its_cap_stops_the_session_and_the_run_goes_on(
         tmp_path: Pytest's temporary folder.
         monkeypatch: Pytest's monkeypatch.
     """
-    monkeypatch.setattr(ar_mod, "MAX_PROMPT_CHARS", 3_000)
+    monkeypatch.setattr(loop_tools, "MAX_PROMPT_BYTES", 3_000)
     model = _Researcher([*_ROUND, _bash("python3 -c \"print('y' * 3000)\"")], rest=_bash("true"))
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -1114,7 +1117,7 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
 ) -> None:
     """Every version crashes on one case: the result keeps the best filled mean's version, with no score.
 
-    A NaN or infinite case score is a crash, as a metric error is (SKY-751).
+    A NaN or infinite case score is a crash, as a metric error is (SKY-751), so no scorer note carries it.
 
     Args:
         bad: The crashed case's score: a metric error, NaN or infinity.
@@ -1134,10 +1137,10 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
             case: The case.
 
         Returns:
-            The score, or ``bad`` for a crash, and no side information.
+            The score, or ``bad`` for a crash, and a note.
         """
         del loop
-        return (bad if case == _CASES[1] else float(len(str(candidate)))), {}
+        return (bad if case == _CASES[1] else float(len(str(candidate)))), {"feedback": "note"}
 
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     events: list[tuple[str, dict[str, Any]]] = []
@@ -1150,6 +1153,8 @@ def test_a_best_version_with_a_crashed_case_has_no_score(
         (None, []),
         (None, []),
     ]
+    notes = [data["score"] for kind, data in events if kind == PROGRESS_MINIBATCH]
+    assert notes == [5.0, 6.0]
 
 
 def test_a_repeated_case_id_is_scored_once_and_the_mean_is_over_distinct_cases(
@@ -1430,3 +1435,216 @@ def test_a_lab_file_the_local_file_system_refuses_stays_behind(
 
     assert sorted(path.name for path in (_lab(tmp_path) / "work").iterdir()) == ["c1.txt", "c2.txt", "seed.txt"]
     assert result.best_candidate == "seedxx"
+
+
+def test_a_model_call_that_fails_after_a_tool_call_ends_only_the_round(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Tool output can push the prompt past the model's context, so the failure ends the round and the run goes on.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher(fail_at=frozenset({2, 3, 4}))
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop)
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert result.metadata["rounds"] == 2
+    round_one = ["model", "command", "model", *["model"] * loop_tools.MODEL_ATTEMPTS]
+    assert [kind for _, kind, _ in _steps(engine)] == [*round_one, "model", "command", "model", "model"]
+
+
+def test_billed_failed_calls_that_reach_the_cost_cap_stop_the_retries_as_out_of_budget(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Two replies and two billed failures reach a cap of four cents: no third attempt, and no proposer error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher(billed_at=frozenset({2, 3, 4}))
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, native_options=_options(max_token_cost=0.04))
+
+    assert model.attempts == 4
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "model", "model", "model"]
+    assert result.best_candidate == "seedx"
+    assert result.metadata["proposer_cost_usd"] == 0.04
+    assert result.metadata["rounds"] == 1
+
+
+def test_a_command_past_its_byte_cap_gets_an_error_result_and_opens_no_box(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A command over ``MAX_COMMAND_BYTES`` as UTF-8, though under the argument cap in characters, never runs.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    long = "true # " + "א" * (loop_tools.MAX_COMMAND_BYTES // 2)
+    model = _Researcher([lambda n: {"id": "long", "name": "bash", "arguments": {"command": long}}, *_ROUND])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    assert _tool_result(model, 1)["error"].startswith(f"Keep the command at most {loop_tools.MAX_COMMAND_BYTES} bytes")
+    assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
+    assert boxes.opened == 2
+
+
+def test_one_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A reply with two calls more than ``max_tool_calls`` commits ``max_tool_calls`` commands, then stops.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    calls = [{"id": f"b{i}", "name": "bash", "arguments": {"command": "true"}} for i in range(5)]
+    many: Turn = lambda n: calls  # noqa: E731
+    model = _Researcher([many])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(RuntimeError, match="without scoring any candidate through the evaluate tool"):
+        _run(loop, native_options=_options(max_tool_calls=3))
+
+    assert len(model.calls) == 1
+    assert boxes.opened == 3
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "command", "command"]
+
+
+def test_an_argument_at_the_depth_bound_is_read_and_one_past_it_is_refused() -> None:
+    """Arguments nested exactly ``MAX_ARGUMENT_DEPTH`` levels are read; one level more is refused."""
+    at_bound = {"pad": functools.reduce(lambda inner, _: [inner], range(loop_tools.MAX_ARGUMENT_DEPTH - 1), 0)}
+    past_bound = {"pad": [at_bound["pad"]]}
+
+    assert loop_tools.arguments({"arguments": at_bound}) == at_bound
+    assert loop_tools.refused_arguments({"arguments": at_bound}, "bash") is None
+    assert loop_tools.arguments({"arguments": past_bound}) is None
+    assert loop_tools.refused_arguments({"arguments": past_bound}, "bash") is not None
+
+
+def test_an_output_of_exactly_the_cut_limit_is_not_cut() -> None:
+    """An output whose prompt bytes equal ``OUTPUT_BYTES`` stays whole; one byte more gets cut."""
+    quotes = loop_tools.prompt_bytes("")
+    exact = "a" * (loop_tools.OUTPUT_BYTES - quotes)
+
+    assert loop_tools.prompt_bytes(exact) == loop_tools.OUTPUT_BYTES
+    assert loop_tools.clip(exact) == exact
+    assert "characters cut ...]" in loop_tools.clip(exact + "a")
+
+
+def test_a_tie_on_the_best_score_keeps_the_first_candidate(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no cases, a later candidate with the same score does not replace the best one.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    server = loop.server(lambda _loop, _candidate, _case: (1.0, {}), max_evals=20)
+    adapter = ar_mod._UpstreamServer(server, Task("seed"), loop.context())
+
+    adapter.evaluate("first")
+    adapter.evaluate("second")
+
+    assert (adapter.best_candidate, adapter.best_score) == ("first", 1.0)
+
+
+def test_a_stop_during_a_command_step_ends_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A user or budget stop in a command goes up to the run, and no later model step commits.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def stop(tree: str, command: str, env: Any) -> Any:
+        """Stop the loop as a user stop or a refused budget does.
+
+        Args:
+            tree: Not used.
+            command: Not used.
+            env: Not used.
+
+        Raises:
+            LoopStoppedError: Always.
+        """
+        del tree, command, env
+        raise LoopStoppedError("The user stopped the run.")
+
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    ctx = dataclasses.replace(loop.context(stop_at_score=6.0), run_command=stop)
+
+    with pytest.raises(LoopStoppedError, match="The user stopped the run"):
+        AutoResearchEngine().run(Task("seed", cases=list(_CASES)), loop.server(_score, max_evals=20), ctx)
+
+    assert len(model.calls) == 1
+    assert [kind for _, kind, _ in _steps(engine)] == ["model"]
+
+
+def test_a_stop_during_an_evaluate_step_ends_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A user or budget stop in the scorer goes up to the run, not to the agent as the budget marker.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def stop(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Stop the loop as a user stop or a refused budget does.
+
+        Args:
+            loop: Not used.
+            candidate: Not used.
+            case: Not used.
+
+        Raises:
+            LoopStoppedError: Always.
+        """
+        del loop, candidate, case
+        raise LoopStoppedError("The user stopped the run.")
+
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(LoopStoppedError, match="The user stopped the run"):
+        _run(loop, score=stop)
+
+    assert len(model.calls) == 2
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "model"]

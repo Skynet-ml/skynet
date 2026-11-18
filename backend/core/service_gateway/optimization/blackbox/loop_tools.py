@@ -3,14 +3,15 @@
 Meta-Harness (SKY-722) and AutoResearch (SKY-725) run their proposer sessions as
 tool loops on the engine context. Both use the budget view and the proposer
 refusal here. AutoResearch also uses the bash tool call, model retry and output
-cut here; Meta-Harness keeps its own, which bound the prompt in UTF-8 bytes.
+cut here. Meta-Harness keeps its own copy: its tests replace those names on its
+module. Both bound the prompt in UTF-8 bytes, as SKY-722 decided.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -23,13 +24,17 @@ from .native_runtime import NativeOptions
 from .protocol import EngineContext, EvalServer, ModelReply
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
-# prompt hashes that a replay checks, bounded.
-OUTPUT_CHARS = 30_000
+# prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
+# measures it: a cut in characters lets one result of Hebrew or control characters fill ``MAX_PROMPT_BYTES``.
+OUTPUT_BYTES = 30_000
 # Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
 # never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
 # parser, ``json.dumps`` and the next prompt hash raise RecursionError.
 MAX_ARGUMENT_CHARS = 200_000
 MAX_ARGUMENT_DEPTH = 32
+# Every box provider runs the command as one argv string, and Linux refuses an argv string over 128 KiB
+# (MAX_ARG_STRLEN) with E2BIG. A command under this bound gets to the box; a longer one gets an error result.
+MAX_COMMAND_BYTES = 100_000
 _REFUSED_ARGUMENTS = "{}"
 # A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
 # the same calls in the same order.
@@ -37,9 +42,12 @@ MODEL_ATTEMPTS = 3
 # A rate limit (429) often clears in seconds, so a wait between attempts keeps a short burst from failing all of them.
 MODEL_RETRY_WAIT_SECONDS = 10.0
 # Every turn sends the whole transcript again, and each command can add up to two clipped outputs. This cap, and
-# the proposer's ``max_tool_calls``, keep the prompt inside the model's context. The prompt length depends only on
-# the committed replies and results, so a resume stops a session at the same place.
-MAX_PROMPT_CHARS = 400_000
+# the proposer's ``max_tool_calls``, keep the prompt inside the model's context. The prompt size depends only on
+# the committed replies and results, so a resume stops a session at the same place. A byte-level token holds at
+# least one byte, so UTF-8 bytes bound the tokens of any output (Hebrew, base64 or binary-ish text can be about one
+# token a character). A 200k-token context, less 64k tokens of answer and 8k for the tool and message framing,
+# leaves 128k (SKY-722).
+MAX_PROMPT_BYTES = 128_000
 
 # Tests replace this, so a retry test does not wait.
 _sleep = time.sleep
@@ -88,7 +96,7 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
     if _too_deep(value):
         return None, True
     # The protocol gives valid JSON object arguments as a mapping, so the text bound above never sees them.
-    if isinstance(value, dict) and len(json.dumps(value)) > MAX_ARGUMENT_CHARS:
+    if isinstance(value, dict) and len(json.dumps(value, ensure_ascii=False)) > MAX_ARGUMENT_CHARS:
         return None, True
     return value, False
 
@@ -122,7 +130,7 @@ def refused_arguments(call: Mapping[str, Any], tool: str) -> str | None:
         f"Send the {tool} tool arguments as JSON of at most {MAX_ARGUMENT_CHARS} characters, "
         f"nested at most {MAX_ARGUMENT_DEPTH} levels."
     )
-    return json.dumps({"error": error})
+    return json.dumps({"error": error}, ensure_ascii=False)
 
 
 def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
@@ -139,11 +147,12 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     value = call.get("arguments")
     if not isinstance(value, str):
         # Sorted keys give the same text for a live reply and for its replay from the step log. ``run_bash`` refuses
-        # arguments past the depth or length bound, so the transcript holds an empty object in their place.
+        # arguments past the depth or length bound, so the transcript holds an empty object in their place. ``_parse``
+        # measures the arguments with no escapes, so Hebrew text does not count six characters a letter.
         if _too_deep(value):
             value = _REFUSED_ARGUMENTS
         else:
-            value = json.dumps(value, sort_keys=True)
+            value = json.dumps(value, sort_keys=True, ensure_ascii=False)
             if len(value) > MAX_ARGUMENT_CHARS:
                 value = _REFUSED_ARGUMENTS
     return {
@@ -175,8 +184,57 @@ def _too_deep(value: Any) -> bool:
     return False
 
 
+def prompt_bytes(text: str) -> int:
+    """Measure a stream as the session measures it in the prompt.
+
+    The tool result is the JSON of the output, and the session measures the JSON of the messages, so the stream
+    is encoded twice: a control character takes 7 bytes, not 1.
+
+    Args:
+        text: The stream.
+
+    Returns:
+        The UTF-8 bytes of the stream, encoded twice as JSON, with its quotes.
+    """
+    return len(json.dumps(json.dumps(text, ensure_ascii=False), ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
+
+def messages_bytes(messages: list[dict[str, Any]]) -> int:
+    """Measure the prompt of a session in UTF-8 bytes.
+
+    Args:
+        messages: The session's messages.
+
+    Returns:
+        The UTF-8 bytes of the messages as JSON with no escapes.
+    """
+    # ``surrogatepass`` keeps the measure from raising on any text that a command printed.
+    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
+
+def _fit(chars: Iterator[str], budget: int) -> int:
+    """Count the characters, in order, whose prompt bytes fit in ``budget``.
+
+    Args:
+        chars: The characters.
+        budget: The prompt bytes they may take, without quotes.
+
+    Returns:
+        How many of the first characters fit.
+    """
+    quotes = prompt_bytes("")
+    count = 0
+    for char in chars:
+        # JSON escapes each code point alone, so the sizes add up, and a cut between code points always encodes.
+        budget -= prompt_bytes(char) - quotes
+        if budget < 0:
+            break
+        count += 1
+    return count
+
+
 def clip(text: str) -> str:
-    """Cut a tool output to ``OUTPUT_CHARS``: keep its head and tail, with a note on what was cut.
+    """Cut a tool output to ``OUTPUT_BYTES`` in the prompt: keep its head and tail, with a note on what was cut.
 
     Args:
         text: The output.
@@ -184,30 +242,40 @@ def clip(text: str) -> str:
     Returns:
         The output unchanged when it fits, else its head, a note and its tail.
     """
-    if len(text) <= OUTPUT_CHARS:
+    # Each character takes at least one prompt byte, so the length check spares a huge output the full encode.
+    if len(text) <= OUTPUT_BYTES and prompt_bytes(text) <= OUTPUT_BYTES:
         return text
-    half = OUTPUT_CHARS // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters cut ...]\n{text[-half:]}"
+    # The note for a cut of every character is the longest note, so the result always fits.
+    half = (OUTPUT_BYTES - prompt_bytes(f"\n[... {len(text)} characters cut ...]\n")) // 2
+    head = _fit(iter(text), half)
+    tail = _fit(reversed(text), half)
+    return f"{text[:head]}\n[... {len(text) - head - tail} characters cut ...]\n{text[len(text) - tail :]}"
 
 
 def call_model(
-    ctx: EngineContext, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
-) -> tuple[ModelReply | ModelCallFailedError, Decimal]:
+    ctx: EngineContext,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    spent: Decimal,
+    max_budget_usd: float | None,
+) -> tuple[ModelReply | ModelCallFailedError | None, Decimal]:
     """Call the model with the tools, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
 
     Each attempt is one ``model`` step, so a resume replays the same failures and the same retries. A live
     failure waits ``MODEL_RETRY_WAIT_SECONDS`` before the next attempt; a replayed failure made no call, so it
     does not wait. A failed attempt that the provider billed carries its committed cost, live and on a replay,
-    so the proposer cap counts it the same way both times.
+    so the proposer cap counts it the same way both times, and no retry starts once the cap is reached.
 
     Args:
         ctx: The engine context, with its model call.
         messages: The session's messages.
         tools: The tool definitions.
+        spent: The session's committed spend before this call, in cents.
+        max_budget_usd: Proposer spend still allowed, in dollars, or ``None``.
 
     Returns:
-        The reply, or the last :class:`ModelCallFailedError` when every attempt failed, and the summed cost of
-        the failed attempts, in cents.
+        The reply, the last :class:`ModelCallFailedError` when every attempt failed, or ``None`` when the billed
+        failures reached the proposer cap; and the summed cost of the failed attempts, in cents.
     """
     assert ctx.call_model is not None
     failure = ModelCallFailedError("unknown")
@@ -218,6 +286,8 @@ def call_model(
         except ModelCallFailedError as error:
             failure = error
             failed_cents += error.cost_cents
+        if max_budget_usd is not None and float(spent + failed_cents) / 100 >= max_budget_usd:
+            return None, failed_cents
         # The loop raises a live failure from the model's own error, and a replayed failure with no cause.
         if failure.__cause__ is not None and attempt < MODEL_ATTEMPTS - 1:
             _sleep(MODEL_RETRY_WAIT_SECONDS)
@@ -244,19 +314,23 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     command = parsed.get("command") if isinstance(parsed, dict) else None
     if call.get("name") != "bash" or not isinstance(command, str):
         # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
-        return json.dumps({"error": misuse}), tree
+        return json.dumps({"error": misuse}, ensure_ascii=False), tree
+    if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
+        error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
+        return json.dumps({"error": error}, ensure_ascii=False), tree
     try:
         result, tree = ctx.run_command(tree, command, ())
     except (TreeRejectedError, BoxFailureError) as error:
         # The step committed the failure, so a resume raises it again and gets the same result here.
-        return json.dumps({"error": f"The command failed and changed nothing: {error}"}), tree
+        return json.dumps({"error": f"The command failed and changed nothing: {error}"}, ensure_ascii=False), tree
     output = {
         "exit_code": result.exit_code,
         "stdout": clip(result.stdout),
         "stderr": clip(result.stderr),
         "timed_out": result.timed_out,
     }
-    return json.dumps(output), tree
+    # The session measures the prompt with no escapes, so an escape here makes a Hebrew letter take 7 bytes, not 2.
+    return json.dumps(output, ensure_ascii=False), tree
 
 
 def refuse_unsupported_proposer(options: NativeOptions, engine: str) -> None:

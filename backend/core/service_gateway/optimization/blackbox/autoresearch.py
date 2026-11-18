@@ -40,7 +40,6 @@ from ....models.blackbox import BlackboxProposer
 from ....worker.engine_loop import ModelCallFailedError
 from . import loop_tools, native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
-from .loop_tools import MAX_PROMPT_CHARS
 from .native_runtime import assert_metric_absent, native_task_payload, run_native_engine, sanitize_side_info
 from .protocol import (
     BudgetExhaustedError,
@@ -386,7 +385,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         The cost cap counts only committed costs, and the write-up grace, the no-evaluation watchdog, the
         tool-call cap and the prompt cap count model turns, tool calls and committed text, so a resume makes the
         same choices. As in the native harness, the session stops before the tool call past the cap; the run then
-        goes on to the native stop rules. A model call that fails on every attempt ends the session as an error.
+        goes on to the native stop rules. Billed failed model calls that reach the cost cap end the session as out
+        of budget. A model call that fails on every attempt after the session made a tool call ends only the
+        session, as the prompt cap does; one before any tool call cannot come from tool output, so it is an error.
 
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
@@ -439,13 +440,21 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 write_up += 1
             # The prompt cap keeps the transcript inside the model's context. A reply with tool calls makes at least
             # one call, so the tool-call cap bounds the turns.
-            if len(json.dumps(messages, ensure_ascii=False)) > MAX_PROMPT_CHARS:
+            if loop_tools.messages_bytes(messages) > loop_tools.MAX_PROMPT_BYTES:
                 killed = True
                 break
-            reply, failed_cents = loop_tools.call_model(ctx, messages, [BASH_TOOL, EVALUATE_TOOL])
+            reply, failed_cents = loop_tools.call_model(
+                ctx, messages, [BASH_TOOL, EVALUATE_TOOL], spent, max_budget_usd
+            )
             spent += failed_cents
+            if reply is None:
+                exhausted = True
+                break
             if isinstance(reply, ModelCallFailedError):
-                failed = True
+                # Untrusted tool output can still push the prompt past the model's context, so after a tool call
+                # the failure ends only this round; the next round starts from a new transcript.
+                killed = tool_calls > 0
+                failed = not killed
                 text = str(reply)
                 break
             idle_turns += 1
@@ -499,7 +508,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             call: The tool call.
 
         Returns:
-            The tool result as JSON text, cut to ``OUTPUT_CHARS`` as a command output is.
+            The tool result as JSON text, cut to ``OUTPUT_BYTES`` as a command output is.
         """
         assert self._ctx.read_file is not None
         refused = loop_tools.refused_arguments(call, EVALUATE_TOOL["name"])
