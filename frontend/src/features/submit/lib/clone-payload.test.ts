@@ -8,8 +8,8 @@ registerHooks({
     if (specifier.startsWith("@/")) {
       return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
     }
-    if (specifier === "./run-floor" || specifier === "./engine-contract") {
-      return { shortCircuit: true, url: new URL(`${specifier}.ts`, context.parentURL).href };
+    if (specifier === "./run-floor") {
+      return { shortCircuit: true, url: new URL("./run-floor.ts", context.parentURL).href };
     }
     return nextResolve(specifier, context);
   },

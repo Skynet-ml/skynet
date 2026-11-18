@@ -97,21 +97,21 @@ empty part fails the setup check, and the message names the key.
 - `setup` runs once in each proposer box, in the repository checkout where
   the command runs, before the first proposer session, also in a protected
   run. The run keeps a copy of the files that `setup` adds in the git
-  folder, also the files that `.gitignore` names (such as
-  `node_modules/`). GEPA and Best-of-N reset the checkout before and after
-  each version, and AutoSaddler gives each session a new worktree. Each later
-  session gets the kept copy back, and `setup` does not run again. A file
-  of the version at the same path stays, and the copy does not replace it.
-  The copy keeps symbolic links as links. A file that holds the absolute
-  path of the first checkout (for example a Python virtual environment)
-  can fail in an AutoSaddler worktree, because each worktree has a
-  different path. The copy uses disk space in the box, and each later
-  session spends time to copy it. The files it adds never join a version. It has 30 minutes, but never more than the
-  time that the proposer session has left: the setup time counts inside the
-  session's time limit. If it fails or runs out of time, the run stops, and
-  the message names the command and its output.
-  When `setup` ends, the run stops every process that it left running.
-  When the run stops a proposer session, it also stops a `setup` that runs.
+  folder, also the files that `.gitignore` names (such as `node_modules/`).
+  GEPA and Best-of-N reset the checkout before and after each version, and
+  AutoSaddler gives each session a new worktree. Each later session gets the
+  kept copy back, and `setup` does not run again. A file of the version at
+  the same path stays, and the copy does not replace it. The copy keeps
+  symbolic links as links. A file that holds the absolute path of the first
+  checkout (for example a Python virtual environment) can fail in an
+  AutoSaddler worktree, because each worktree has a different path. The copy
+  uses disk space in the box, and each later session spends time to copy it.
+  The files it adds never join a version. It has 30 minutes, but never more
+  than the time that the proposer session has left: the setup time counts
+  inside the session's time limit. If it fails or runs out of time, the run
+  stops, and the message names the command and its output. When `setup`
+  ends, the run stops every process that it left running. When the run stops
+  a proposer session, it also stops a `setup` that runs.
 - `setup` can write only files that git does not track. If it changes,
   adds to the index or removes a tracked file, the run stops. The message
   names the command and the changed files, because the change would join
