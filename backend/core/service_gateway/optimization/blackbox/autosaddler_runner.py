@@ -1,13 +1,31 @@
-"""Sandbox-side runner that drives the pinned upstream AutoSaddler v2 engine.
+"""Runner that drives the pinned upstream AutoSaddler v2 engine, in the worker or in a native box.
 
-This file is copied verbatim into an isolated sandbox next to the app
-plugin assets. It imports no backend application code; the parent owns the
-scorer and its cases. Everything the app contributes is expressed through
-the upstream ports: a scenario whose evaluator scores candidates through the
-parent-owned budget over the same filesystem mailbox the other native engines
-use, an evidence builder that surfaces the scorer's per-case feedback, and a
-prompt pack composed from the upstream methodology plus the app plugin.
-The engine loop, policies and run store are upstream's own.
+The file has two modes. It imports no backend application code in either.
+
+- Worker mode (``--worker``, SKY-723). The worker starts this file with the
+  isolated AutoSaddler interpreter, as ``python -I``, so Skynet's own
+  ``autosaddler`` module can not shadow upstream's. The process holds no
+  capability of its own: each model call, box command, tree read and tree
+  write, and each evaluation is one request to the worker over this process's
+  stdin and stdout (see ``autosaddler.py``). The worker runs each model call
+  and command as one engine-loop step.
+- Native mode (a payload file argument). The native runtime copies this file
+  into an isolated sandbox next to the app plugin assets. The parent owns the
+  scorer and its cases and answers evaluations over the filesystem mailbox
+  the other native engines use; an app agent harness runs each session. This
+  mode stays until the SKY-728 cutover.
+
+Everything the app contributes is expressed through the upstream ports: a
+scenario whose evaluator scores candidates through the worker's evaluator
+budget, an evidence builder that surfaces the scorer's per-case feedback, a
+prompt pack composed from the upstream methodology plus the app plugin, and a
+transport that runs each upstream session as a model tool loop. The engine
+loop, policies and run store are upstream's own.
+
+A resume runs this process again from its start, and the worker answers each
+committed step from its log. So the requests must be the same in each run: the
+ids are seeded, the run folder paths and clock times never reach a prompt, and
+the requests go one at a time.
 
 The prompt-pack wiring and plugin prompts are adapted from microsoft/AutoSaddler
 under the MIT License; see ``autosaddler_plugin/NOTICE.md`` and
@@ -21,9 +39,13 @@ import base64
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import math
 import os
+import random
+import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -34,8 +56,11 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta, tzinfo
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
-from typing import Any
+from types import SimpleNamespace
+from typing import IO, Any
 
 try:
     from autosaddler.v2.core import domain as as_domain
@@ -52,7 +77,7 @@ try:
     from autosaddler.v2.providers.base import BaseAgentProvider, TransportOutcome
     from autosaddler.v2.providers.workspace_renderer import WorkspaceRenderer
     from autosaddler.v2.storage.local import LocalRunStore
-except ImportError:  # Upstream needs Python 3.12; parent-side tests still import the helpers.
+except ImportError:  # Upstream needs Python 3.12; worker-side tests still import the helpers.
     as_domain = as_policies = as_ports = as_assets = None
     AutoSaddlerEngine = RunState = ComponentMapHarnessSpace = GitHarnessSpace = GitVerificationVerdict = None
     build_history_bundle = SessionSpec = LocalRunStore = None
@@ -60,7 +85,7 @@ except ImportError:  # Upstream needs Python 3.12; parent-side tests still impor
 
 try:
     from . import harness_bridge, repo_tree
-except ImportError:  # In the sandbox this file runs as a script beside its sibling modules.
+except ImportError:  # This file runs as a script beside its sibling modules.
     _sibling_modules = {}
     for _sibling in ("harness_bridge", "repo_tree"):
         _spec = importlib.util.spec_from_file_location(_sibling, Path(__file__).with_name(f"{_sibling}.py"))
@@ -78,6 +103,8 @@ _LOG_PREFIX = "APP_NATIVE_LOG "
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _PROC_ROOT = Path("/proc")
 _TOKEN_NAMES = ("prompt_tokens", "completion_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+# The worker passes this flag; the native box passes its payload file instead.
+WORKER_FLAG = "--worker"
 _PLUGIN_NAME = "app"
 _PLUGIN_ROOT = Path(__file__).resolve().parent / "autosaddler_plugin"
 _SINGLE_COMPONENT = "candidate"
@@ -95,10 +122,79 @@ _CAPABILITIES = frozenset({"read_workspace", "edit_workspace", "load_skills"})
 _HARNESS_CAPABILITY_TOOLS = dict.fromkeys(
     ("read_workspace", "edit_workspace", "run_commands", "load_skills", "network"), ()
 )
-_HARNESS_SKILL_DIRECTORY = ".agents/skills"
+# The worker-mode renderer names these tools in the instruction file; the transport below serves them.
+_CAPABILITY_TOOLS = {
+    "read_workspace": ("list_files", "read_file"),
+    "edit_workspace": ("write_file",),
+    "run_commands": ("run_command",),
+    "load_skills": ("read_file",),
+}
+_SKILL_DIRECTORY = ".agents/skills"
+# Under ``.autosaddler`` so it never collides with a repository's own instruction file.
+_INSTRUCTION_FILE = ".autosaddler/INSTRUCTIONS.md"
 _GIT_IDENTITY = ("-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false")
 # Repository runs read their prompts and skills from this plugin subfolder.
 _REPO_ASSETS = "repo/"
+_MODEL_LABEL = "engine-loop"
+_MAX_TURNS = 40
+_TOOL_OUTPUT_CHARS = 16_000
+# The model sees this in place of the process's own folder, which differs between a run and its resume.
+_WORK_ROOT = "/work"
+_CLOCK_START = datetime(2000, 1, 1, tzinfo=UTC)
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List the files below a workspace folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Workspace-relative folder."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read one workspace file as text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Workspace-relative file."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write one workspace file, and make its folders.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run a shell command in a fresh box over a copy of the workspace, with no network. "
+                "Its file changes do not come back to the workspace."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+]
 
 
 class EvaluationStopped(BaseException):
@@ -184,6 +280,224 @@ class EvaluatorMailbox:
         """
         with self._write_lock:
             print(f"{prefix}{self.nonce} {json.dumps(payload, default=str, allow_nan=False)}", flush=True)
+
+
+class WorkerChannel:
+    """Call the worker: one JSON request line out, one JSON reply line back, one call at a time."""
+
+    def __init__(self, reader: IO[str], writer: IO[str]) -> None:
+        """Bind the channel to the worker's pipes.
+
+        Args:
+            reader: The replies from the worker.
+            writer: The requests to the worker.
+        """
+        self.reader = reader
+        self.writer = writer
+        self.error: EvaluationStopped | None = None
+        self.total_evals = 0
+        # The lock keeps each request and its reply together on the pipes when a call comes from a thread. It
+        # does not order the steps: upstream runs one session at a time, and the evaluator admits one case at a
+        # time (``max_concurrency=1``), so the calls come in one order.
+        self._lock = threading.Lock()
+
+    def call(self, op: str, **fields: Any) -> dict[str, Any]:
+        """Send one request and wait for its reply.
+
+        Args:
+            op: The request kind.
+            **fields: The request fields.
+
+        Returns:
+            The worker's reply.
+
+        Raises:
+            EvaluationStopped: When the worker closed the channel.
+        """
+        with self._lock:
+            self.writer.write(json.dumps({"op": op, **fields}, sort_keys=True, allow_nan=False) + "\n")
+            self.writer.flush()
+            line = self.reader.readline()
+        if not line:
+            raise EvaluationStopped("The worker closed the channel.")
+        return json.loads(line)
+
+    def emit(self, prefix: str, payload: dict[str, Any]) -> None:
+        """Send one progress event or run-log record, as :meth:`EvaluatorMailbox.emit` does in a box.
+
+        Args:
+            prefix: ``_PROGRESS_PREFIX`` or ``_LOG_PREFIX``.
+            payload: The event or the record.
+        """
+        if prefix == _PROGRESS_PREFIX:
+            self.call("progress", event=_json_finite(payload))
+        else:
+            self.call("log", record=_json_finite(payload))
+
+    def evaluate(
+        self, candidate: str | dict[str, str], example: Any = None, candidate_id: int | None = None
+    ) -> tuple[float, dict[str, Any]]:
+        """Evaluate only through the worker's budget and scorer.
+
+        Args:
+            candidate: Text candidate, named parts, or a repository patch.
+            example: Visible training or development case.
+            candidate_id: The version number the run view shows, if it has one.
+
+        Returns:
+            The score, NaN for a metric error, and the scorer's feedback.
+
+        Raises:
+            EvaluationStopped: When the worker refuses the evaluation; ``BudgetStopped`` for a spent budget.
+        """
+        if self.error is not None:
+            raise self.error
+        reply = self.call("evaluate", candidate=candidate, example=example, candidate_id=candidate_id)
+        if "error" in reply:
+            kind = BudgetStopped if reply.get("stop_reason") == "budget_reached" else EvaluationStopped
+            self.error = kind(str(reply["error"]))
+            raise self.error
+        self.total_evals += 1
+        score = reply.get("score")
+        return (math.nan if score is None else float(score)), dict(reply.get("info") or {})
+
+    def put_files(self, files: Mapping[str, bytes], base_tree_id: str | None) -> str:
+        """Write files over a tree in the worker's tree store.
+
+        Args:
+            files: The file bytes by ``/``-separated path.
+            base_tree_id: The tree to start from, or ``None``.
+
+        Returns:
+            The new tree id.
+
+        Raises:
+            ValueError: When the tree store refuses the files.
+        """
+        reply = self.call(
+            "put_files",
+            files={path: base64.b64encode(data).decode("ascii") for path, data in sorted(files.items())},
+            base_tree_id=base_tree_id,
+        )
+        if "error" in reply:
+            raise ValueError(str(reply["error"]))
+        return str(reply["tree_id"])
+
+    def list_files(self, tree_id: str, path: str) -> list[str] | None:
+        """List the files below a folder of a tree in the worker's tree store.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated folder; ``""`` is the tree's root.
+
+        Returns:
+            The sorted file paths from the tree's root, without the run's hidden paths; ``None`` when the
+            path is not a folder.
+        """
+        paths = self.call("list_files", tree_id=tree_id, path=path).get("paths")
+        return None if paths is None else [str(name) for name in paths]
+
+    def read_file(self, tree_id: str, path: str) -> bytes | None:
+        """Read one file of a tree in the worker's tree store.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated file path.
+
+        Returns:
+            The bytes, or ``None`` when the path is no file in the tree.
+        """
+        data = self.call("read_file", tree_id=tree_id, path=path).get("data")
+        return None if data is None else base64.b64decode(data)
+
+
+def open_channel() -> WorkerChannel:
+    """Take this process's stdout for the channel, and send every other print to stderr.
+
+    Upstream and git may print; a stray line on the channel would break it.
+
+    Returns:
+        The channel over stdin and the original stdout.
+    """
+    writer = os.fdopen(os.dup(1), "w", encoding="utf-8")
+    os.dup2(2, 1)
+    return WorkerChannel(sys.stdin, writer)
+
+
+def seed_ids(seed: int = 0) -> None:
+    """Make random values and ``uuid4`` ids the same in a run and in its resume.
+
+    Args:
+        seed: The seed.
+    """
+    random.seed(seed)
+    ids = random.Random(seed)
+    original = uuid.uuid4
+
+    def fixed() -> uuid.UUID:
+        """Return the next seeded id.
+
+        Returns:
+            A version 4 UUID from the seeded generator.
+        """
+        return uuid.UUID(int=ids.getrandbits(128), version=4)
+
+    # Upstream's engine module binds ``uuid4`` by name when it is imported (``from uuid import uuid4``), which
+    # is before this runs, so each module that holds the original gets the seeded one too.
+    for module in list(sys.modules.values()):
+        if getattr(module, "__dict__", {}).get("uuid4") is original:
+            module.uuid4 = fixed  # type: ignore[union-attr]
+
+
+def fix_clocks() -> None:
+    """Give upstream's modules a counted clock, so a run and its resume write the same event records.
+
+    Upstream puts clock times and wall seconds into its events, and its history manifest hashes the events into
+    a file that the box and the model see, where a scrub can not reach. Upstream reads the clock only for these
+    records; session time limits are in this runner's transport. A git commit id also holds the commit time, so
+    every commit, the runner's and upstream's, gets the fixed start as its time.
+    """
+    os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = _CLOCK_START.isoformat()
+    ticks = itertools.count()
+
+    class CountedDatetime(datetime):
+        """A ``datetime`` whose ``now`` counts one second for each call from a fixed start."""
+
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> CountedDatetime:
+            """Return the next counted time.
+
+            Args:
+                tz: The time zone of the result; ``None`` gives a naive time.
+
+            Returns:
+                The fixed start plus one second for each earlier call.
+            """
+            moment = cls.fromtimestamp((_CLOCK_START + timedelta(seconds=next(ticks))).timestamp(), tz or UTC)
+            return moment if tz is not None else moment.replace(tzinfo=None)
+
+    counted_time = SimpleNamespace(**{**vars(time), "monotonic": lambda: float(next(ticks))})
+    for name, module in list(sys.modules.items()):
+        if name.split(".")[0] != "autosaddler":
+            continue
+        names = getattr(module, "__dict__", {})
+        if names.get("time") is time:
+            module.time = counted_time  # type: ignore[union-attr]
+        if names.get("datetime") is datetime:
+            module.datetime = CountedDatetime  # type: ignore[union-attr]
+
+
+def scrub(text: str, root: Path) -> str:
+    """Remove the parts of a text that differ between a run and its resume.
+
+    Args:
+        text: Text for the model.
+        root: This process's folder, which the worker makes new for each run.
+
+    Returns:
+        The text with ``root`` as ``/work`` and each clock time as ``<time>``.
+    """
+    return _TIMESTAMP.sub("<time>", text.replace(str(root), _WORK_ROOT))
 
 
 def candidate_value(components: Mapping[str, str]) -> str | dict[str, str]:
@@ -321,11 +635,11 @@ def workspace_patch(workspace: Path, base: str, changed_paths: Sequence[Any]) ->
         return _git_output(workspace, "diff", "--cached", "--binary", "--no-color", "--no-ext-diff", base, env=env)
 
 
-def rule_blocker(mailbox: EvaluatorMailbox) -> Callable[[str], None]:
-    """Build the callback that sends a path-rule block to the parent's run log.
+def rule_blocker(mailbox: EvaluatorMailbox | WorkerChannel) -> Callable[[str], None]:
+    """Build the callback that sends a path-rule block to the parent's or the worker's run log.
 
     Args:
-        mailbox: Parent connection.
+        mailbox: Parent connection in a box, or the worker connection.
 
     Returns:
         A function taking the block's reason.
@@ -361,6 +675,41 @@ def refusal_logger(mailbox: EvaluatorMailbox) -> Callable[[dict[str, str]], None
         mailbox.emit(_LOG_PREFIX, harness_bridge.refusal_record(refusal))
 
     return refuse
+
+
+def checkout_seed(channel: WorkerChannel, tree_id: str, destination: Path) -> str:
+    """Copy the seed tree into a new Git checkout, and commit it as the base of every version.
+
+    The worker lists and reads the tree with no box and no step, and leaves out the run's hidden paths. The
+    listing gives no file mode, so the checkout has no executable bits; a version's patch is against this
+    checkout, so it carries no mode change.
+
+    Args:
+        channel: Worker connection.
+        tree_id: The seed tree.
+        destination: The new checkout folder.
+
+    Returns:
+        The base commit.
+
+    Raises:
+        RuntimeError: When the worker can not list the seed tree.
+    """
+    paths = channel.list_files(tree_id, "")
+    if paths is None:
+        raise RuntimeError("Could not list the seed tree.")
+    destination.mkdir(parents=True)
+    for path in paths:
+        data = channel.read_file(tree_id, path)
+        if data is None:
+            continue
+        target = destination / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    _git_output(destination, "init", "--quiet")
+    _git_output(destination, "add", "--all", "--force")
+    _git_output(destination, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "base")
+    return _git_output(destination, "rev-parse", "HEAD").strip()
 
 
 def repo_verifier(
@@ -412,30 +761,39 @@ def repo_space(
     repo: Mapping[str, Any],
     seed_patch: Any,
     run_dir: Path,
-    proposer: dict[str, Any],
-    mailbox: EvaluatorMailbox,
+    proposer: dict[str, Any] | None,
+    mailbox: EvaluatorMailbox | WorkerChannel,
 ) -> tuple[Any, str]:
-    """Unpack the shipped repository and open upstream's Git candidate space on it.
+    """Check out the repository and open upstream's Git candidate space on it.
 
     Args:
-        repo: Parent payload's ``repo`` entry: tree chunks, path rules and
+        repo: Payload's ``repo`` entry: tree chunks in a box or the seed tree in the worker, path rules and
             whether a constraints file governs the run.
         seed_patch: Starting version as a patch against the fetched commit, or empty.
         run_dir: Upstream run directory.
-        proposer: Serialized harness launch, whose workspace files never join a version.
-        mailbox: Parent connection that receives path-rule blocks.
+        proposer: Serialized harness launch in a box, whose workspace files never join a version; ``None`` in
+            the worker.
+        mailbox: Parent connection in a box, or the worker connection, which also reads the seed tree; both
+            receive path-rule blocks.
 
     Returns:
-        The Git harness space and the fetched commit every version is diffed against.
+        The Git harness space and the commit every version is diffed against.
     """
-    checkout = repo_tree.unpack_tree((Path(chunk) for chunk in repo["chunks"]), Path("repo-checkout").resolve())
-    base = _git_output(checkout, "rev-parse", repo_tree.BASE_REF).strip()
-    # Harnesses read skills rendered into the mutation worktree, a
-    # folder upstream does not treat as its own; left unexcluded, they would
-    # count as the agent's change. Every worktree shares this exclude file.
+    if isinstance(mailbox, WorkerChannel):
+        checkout = Path("repo-checkout").resolve()
+        base = checkout_seed(mailbox, str(repo["tree_id"]), checkout)
+        workspace_files = [_INSTRUCTION_FILE]
+    else:
+        checkout = repo_tree.unpack_tree((Path(chunk) for chunk in repo["chunks"]), Path("repo-checkout").resolve())
+        base = _git_output(checkout, "rev-parse", repo_tree.BASE_REF).strip()
+        workspace_files = harness_bridge.workspace_files(proposer)
+    # Harnesses read skills rendered into the mutation worktree, a folder
+    # upstream does not treat as its own, and the worker renderer writes its
+    # instruction file there; left unexcluded, they would count as the
+    # agent's change. Every worktree shares this exclude file.
     with (checkout / ".git/info/exclude").open("a", encoding="utf-8") as exclude:
-        exclude.write(f"\n/{_HARNESS_SKILL_DIRECTORY}/\n")
-    repo_tree.exclude_paths(checkout, harness_bridge.workspace_files(proposer))
+        exclude.write(f"\n/{_SKILL_DIRECTORY}/\n")
+    repo_tree.exclude_paths(checkout, workspace_files)
     start = base
     if isinstance(seed_patch, str) and seed_patch.strip():
         repo_tree.apply_patch(checkout, seed_patch)
@@ -464,7 +822,7 @@ class AppEvaluator:
     def __init__(
         self,
         *,
-        mailbox: EvaluatorMailbox,
+        mailbox: EvaluatorMailbox | WorkerChannel,
         harness_space: Any,
         store_run_dir: Path,
         max_concurrency: int,
@@ -476,7 +834,7 @@ class AppEvaluator:
         """Bind the evaluator to the parent transport and run layout.
 
         Args:
-            mailbox: Parent evaluation transport.
+            mailbox: Parent evaluation transport in a box, or the worker connection.
             harness_space: Upstream space holding candidate text or repository versions.
             store_run_dir: Upstream run directory used for relative artifact references.
             max_concurrency: Parallel scorer requests the parent admits.
@@ -607,13 +965,25 @@ class AppEvaluator:
             attempt_id, _attempt_number = sink.start(
                 candidate_id=candidate_id, case_id=case.case_id, repetition=repetition
             )
+            worker = isinstance(self.mailbox, WorkerChannel)
             started = time.monotonic()
             try:
-                score, info = await asyncio.to_thread(self.mailbox.evaluate, value, case.payload.get("example"))
+                if worker:
+                    score, info = await asyncio.to_thread(
+                        self.mailbox.evaluate, value, case.payload.get("example"), self.versions.get(candidate_id)
+                    )
+                else:
+                    score, info = await asyncio.to_thread(self.mailbox.evaluate, value, case.payload.get("example"))
             except EvaluationStopped:
                 sink.fail(attempt_id, "evaluation_stopped", as_domain.Cost(rollouts=1))
                 raise
-            cost = as_domain.Cost(rollouts=1, wall_seconds=time.monotonic() - started)
+            # No wall time in the worker: it reaches the history the model reads, and a resume must send the
+            # same prompts.
+            cost = (
+                as_domain.Cost(rollouts=1)
+                if worker
+                else as_domain.Cost(rollouts=1, wall_seconds=time.monotonic() - started)
+            )
             # Upstream only diagnoses an iteration that has failing training
             # cases, so anything short of a full score must read as a task
             # failure; a non-numeric score is the scorer breaking, not the
@@ -1142,6 +1512,261 @@ class AppPromptPack:
         return payload.decode("utf-8")
 
 
+class StepTransport:
+    """Run one rendered AutoSaddler session as a model tool loop: each model reply and command is one step.
+
+    This is the tool loop of Cloudflare's Agents SDK: the model asks for a
+    tool, the host runs it and sends the result back, until the model answers
+    with text. File tools act on the local session workspace and are no steps.
+    A command runs in a box over a copy of the workspace.
+    """
+
+    def __init__(self, channel: WorkerChannel, root: Path, base_tree_id: str | None, repo_base: str | None) -> None:
+        """Bind the transport to the worker and to the run's trees.
+
+        Args:
+            channel: Worker connection.
+            root: This process's folder, which the model sees as ``/work``.
+            base_tree_id: The seed tree a command workspace starts from, ``None`` for text runs.
+            repo_base: The base commit of a repository run, whose tree is ``base_tree_id``.
+        """
+        self.channel = channel
+        self.root = root
+        self.base_tree_id = base_tree_id
+        self.repo_base = repo_base
+
+    async def run(self, session: Any, timeout_seconds: float) -> Any:
+        """Run the session's tool loop and report its cost.
+
+        The instruction file the renderer wrote carries the system context.
+        The engine loop bounds each step, so the session has no clock deadline:
+        a deadline would make a resume differ from its run.
+
+        Args:
+            session: Rendered session with workspace, prompt and identifiers.
+            timeout_seconds: Not used; see above.
+
+        Returns:
+            Transport outcome whose raw response is the model's final text.
+        """
+        return await asyncio.to_thread(self.converse, Path(session.workspace), str(session.task_prompt))
+
+    def converse(self, workspace: Path, task_prompt: str) -> Any:
+        """Call the model until it answers with no tool call, or until the turn limit.
+
+        Args:
+            workspace: The session workspace.
+            task_prompt: The session's task prompt.
+
+        Returns:
+            Transport outcome with the final text and the session's cost.
+        """
+        instructions = workspace / _INSTRUCTION_FILE
+        system = instructions.read_text(encoding="utf-8") if instructions.is_file() else ""
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": scrub(system, self.root)},
+            {"role": "user", "content": scrub(task_prompt, self.root)},
+        ]
+        cost_cents = Decimal(0)
+        for _ in range(_MAX_TURNS):
+            reply = self.channel.call("model", prompt=messages, tools=_TOOLS)
+            if "error" in reply:
+                return self._outcome(f"The model call failed: {reply['error']}", cost_cents, failed=True)
+            cost_cents += Decimal(str(reply["cost_cents"]))
+            calls = list(reply.get("tool_calls") or [])
+            if not calls:
+                return self._outcome(str(reply["text"]), cost_cents, failed=False)
+            messages.append({"role": "assistant", "content": reply["text"], "tool_calls": calls})
+            messages.extend(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": clip(
+                        (call.get("function") or {}).get("name"), scrub(self.tool(workspace, call), self.root)
+                    ),
+                }
+                for call in calls
+            )
+        return self._outcome(f"The session reached its limit of {_MAX_TURNS} model turns.", cost_cents, failed=True)
+
+    def tool(self, workspace: Path, call: Mapping[str, Any]) -> str:
+        """Run one tool call; a bad call becomes an error text for the model, not a failure.
+
+        Args:
+            workspace: The session workspace.
+            call: ``{"id", "function": {"name", "arguments"}}``, the arguments as JSON text or an object.
+
+        Returns:
+            The tool's output.
+        """
+        function = call.get("function") or {}
+        name = function.get("name")
+        try:
+            arguments = function.get("arguments") or {}
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            if name == "list_files":
+                folder = _inside(workspace, str(arguments.get("path") or "."))
+                return "\n".join(
+                    path.relative_to(workspace).as_posix()
+                    for path in sorted(folder.rglob("*"))
+                    if path.is_file() and ".git" not in path.relative_to(workspace).parts
+                )
+            if name == "read_file":
+                return _inside(workspace, str(arguments["path"])).read_text(encoding="utf-8", errors="replace")
+            if name == "write_file":
+                target = _inside(workspace, str(arguments["path"]))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(str(arguments["content"]), encoding="utf-8")
+                return f"Wrote {target.relative_to(workspace).as_posix()}."
+            if name == "run_command":
+                tree_id = self.channel.put_files(self.workspace_files(workspace), self.base_tree_id)
+                command = str(arguments["command"])
+                deleted = self.deleted_paths(workspace)
+                if deleted:
+                    # The box starts from the seed tree, and a tree write can not delete a file.
+                    command = f"rm -f -- {' '.join(shlex.quote(path) for path in deleted)}\n{command}"
+                result = self.channel.call("command", tree_id=tree_id, command=command)
+                if "error" in result:
+                    return f"Error: the box failed: {result['error']}"
+                return (
+                    f"exit code {result['exit_code']}{' (timed out)' if result['timed_out'] else ''}\n"
+                    f"stdout:\n{result['stdout']}\nstderr:\n{result['stderr']}"
+                )
+        except (KeyError, TypeError, ValueError, OSError) as error:
+            return f"Error: {type(error).__name__}: {error}"
+        return f"Error: unknown tool {name!r}."
+
+    def workspace_files(self, workspace: Path) -> dict[str, bytes]:
+        """Collect the workspace files a command box needs over the base tree.
+
+        In a repository run the box starts from the seed tree, so only the
+        files that differ from the base commit go up.
+
+        Args:
+            workspace: The session workspace.
+
+        Returns:
+            The file bytes by workspace-relative path.
+        """
+        if self.repo_base is not None and (workspace / ".git").exists():
+            changed = _git_output(workspace, "diff", "--name-only", "--no-renames", "-z", self.repo_base).split("\0")
+            changed += _git_output(workspace, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+            paths = sorted({workspace / name for name in changed if name})
+        else:
+            paths = sorted(path for path in workspace.rglob("*") if ".git" not in path.relative_to(workspace).parts)
+        return {
+            path.relative_to(workspace).as_posix(): path.read_bytes()
+            for path in paths
+            if path.is_file() and not path.is_symlink()
+        }
+
+    def deleted_paths(self, workspace: Path) -> list[str]:
+        """List the files that the workspace deleted from the seed of a repository run.
+
+        Args:
+            workspace: The session workspace.
+
+        Returns:
+            The workspace-relative paths, sorted; empty for a text run.
+        """
+        if self.repo_base is None or not (workspace / ".git").exists():
+            return []
+        output = _git_output(workspace, "diff", "--name-only", "--no-renames", "--diff-filter=D", "-z", self.repo_base)
+        return sorted(name for name in output.split("\0") if name)
+
+    def _outcome(self, text: str, cost_cents: Decimal, *, failed: bool) -> Any:
+        """Build the upstream outcome of one session.
+
+        Args:
+            text: The final reply, or why the session failed.
+            cost_cents: What the session's model steps cost.
+            failed: Whether the session failed.
+
+        Returns:
+            The upstream transport outcome.
+        """
+        cost = float(cost_cents / 100) or None
+        # Upstream's usage record refuses a cost with no unit; model step costs are in US dollars.
+        usage = SessionUsage(
+            input_tokens=0,
+            output_tokens=0,
+            model=_MODEL_LABEL,
+            provider_cost=cost,
+            provider_cost_unit="usd" if cost is not None else None,
+            duration_seconds=0.0,
+            status="failed" if failed else "success",
+            error_type="ModelSession" if failed else None,
+            usage_incomplete=False,
+        )
+        return TransportOutcome(raw_response=text, usage=(usage,))
+
+
+def clip(name: Any, text: str) -> str:
+    """Cut a long tool output to the model's limit, and say what was cut.
+
+    A file read keeps its start, so the model knows that it does not have the whole file. A command keeps its
+    end, where the result and the errors are.
+
+    Args:
+        name: The tool name.
+        text: The tool output.
+
+    Returns:
+        The text, with a notice line when it was cut.
+    """
+    cut = len(text) - _TOOL_OUTPUT_CHARS
+    if cut <= 0:
+        return text
+    if name == "read_file":
+        return (
+            f"{text[:_TOOL_OUTPUT_CHARS]}\n[The file goes on: {cut} more characters were cut. Do not write this "
+            "file back from this text.]"
+        )
+    return f"[The first {cut} characters were cut.]\n{text[-_TOOL_OUTPUT_CHARS:]}"
+
+
+def _inside(workspace: Path, path: str) -> Path:
+    """Resolve a model-given path, and refuse one outside the workspace or in ``.git``.
+
+    Args:
+        workspace: The session workspace.
+        path: The workspace-relative path; ``/work/...`` is read as relative too.
+
+    Returns:
+        The absolute path.
+
+    Raises:
+        ValueError: When the path leaves the workspace or enters ``.git``.
+    """
+    base = workspace.resolve()
+    target = (base / path.removeprefix(_WORK_ROOT + "/").lstrip("/")).resolve()
+    if not target.is_relative_to(base) or ".git" in target.relative_to(base).parts:
+        raise ValueError(f"The path {path!r} is outside the workspace.")
+    return target
+
+
+def step_provider(channel: WorkerChannel, root: Path, base_tree_id: str | None, repo_base: str | None) -> Any:
+    """Build the upstream provider whose sessions run as engine-loop steps.
+
+    Args:
+        channel: Worker connection.
+        root: This process's folder.
+        base_tree_id: The seed tree of a repository run, else ``None``.
+        repo_base: The base commit of a repository run, else ``None``.
+
+    Returns:
+        A ``BaseAgentProvider`` rendering the instruction file the transport reads.
+    """
+    renderer = WorkspaceRenderer(
+        provider=_PLUGIN_NAME,
+        instruction_file=_INSTRUCTION_FILE,
+        skill_directory=_SKILL_DIRECTORY,
+        capability_tools=_CAPABILITY_TOOLS,
+    )
+    return BaseAgentProvider(renderer, StepTransport(channel, root, base_tree_id, repo_base))
+
+
 class HarnessTransport:
     """Run one rendered AutoSaddler session through an app agent harness."""
 
@@ -1221,7 +1846,7 @@ def harness_provider(
     renderer = WorkspaceRenderer(
         provider=str(proposer["harness"]),
         instruction_file=str(proposer.get("instructions_file") or "AGENTS.md"),
-        skill_directory=_HARNESS_SKILL_DIRECTORY,
+        skill_directory=_SKILL_DIRECTORY,
         capability_tools=_HARNESS_CAPABILITY_TOOLS,
     )
     return BaseAgentProvider(renderer, HarnessTransport(proposer, model, on_refusal))
@@ -1563,6 +2188,146 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     return _json_finite(document)
 
 
+def execute_worker(payload: dict[str, Any], channel: WorkerChannel) -> dict[str, Any]:
+    """Run the pinned upstream engine once in the worker, one step at a time, and describe the outcome.
+
+    Args:
+        payload: Worker configuration and task.
+        channel: Worker connection.
+
+    Returns:
+        Result envelope, or a failure envelope.
+
+    Raises:
+        ValueError: When the payload targets another engine or leaks test examples.
+        RuntimeError: When upstream is not importable in this interpreter.
+    """
+    if payload.get("engine_id") != "autosaddler":
+        raise ValueError("Unsupported native optimizer.")
+    task = payload.get("task", {})
+    if task.get("test_set") is not None:
+        raise ValueError("Held-out examples must not enter the native optimizer.")
+    if AutoSaddlerEngine is None:
+        raise RuntimeError("The pinned upstream autosaddler package is not importable in this runtime.")
+    root = Path.cwd().resolve()
+    repo = payload.get("repo")
+    examples = visible_examples(task.get("train_set"))
+    train_cases = build_cases("train", examples)
+    development_cases = build_cases("development", examples)
+    run_dir = root / "autosaddler-run"
+    # A fixed run id: it reaches the prompts, and a resume must send the same prompts.
+    store = LocalRunStore(run_dir=run_dir, run_id="app-run")
+    if repo is None:
+        components = baseline_components(task.get("seed_candidate"))
+        harness_space: Any = ComponentMapHarnessSpace(
+            baseline=components,
+            store_root=run_dir / "candidates",
+            materialization_root=run_dir / "materialized",
+        )
+        repo_base = None
+        component_names = tuple(components)
+        readonly_paths = None
+    else:
+        harness_space, repo_base = repo_space(repo, task.get("seed_candidate"), run_dir, None, channel)
+        component_names = tuple(str(path) for path in repo["editable_paths"])
+        readonly_paths = tuple(str(path) for path in repo["readonly_paths"])
+    prefix = "" if repo is None else _REPO_ASSETS
+    evaluator = AppEvaluator(
+        mailbox=channel,
+        harness_space=harness_space,
+        store_run_dir=run_dir,
+        # One evaluation at a time: a step's place in the log must not depend on thread timing.
+        max_concurrency=1,
+        stop_at_score=payload.get("stop_at_score"),
+        fingerprint=as_domain.sha256_digest(as_domain.canonical_json({"evaluator": "app-parent-scorer"})),
+        development_case_ids=[case.case_id for case in development_cases],
+        repo_base=repo_base,
+    )
+    scenario = as_ports.ScenarioComponents(
+        name=_PLUGIN_NAME,
+        version="1",
+        harness_space=harness_space,
+        evaluator=evaluator,
+        evidence_builder=AppEvidenceBuilder(store, {case.case_id: case for case in train_cases}),
+        prompt_pack=AppPromptPack(
+            store=store,
+            component_names=component_names,
+            objective=task.get("objective"),
+            background=task.get("background"),
+            readonly_paths=readonly_paths,
+        ),
+        train_cases=train_cases,
+        development_cases=development_cases,
+        required_capabilities=_CAPABILITIES,
+        resolved_entities={
+            **as_assets.prompt_source_entities(plugin_root=_PLUGIN_ROOT, plugin_name=_PLUGIN_NAME),
+            "resolved/prompts/compositions.json": composition_record(prefix),
+            "resolved/scenario_runtime.json": {
+                "schema_version": "app-autosaddler-scenario/v1",
+                "components": list(component_names),
+                "train_case_ids": [case.case_id for case in train_cases],
+                "development_case_ids": [case.case_id for case in development_cases],
+            },
+        },
+    )
+    provider = step_provider(channel, root, None if repo is None else str(repo["tree_id"]), repo_base)
+    max_evals = int(payload["max_evals"])
+    max_iterations = payload.get("max_iterations") or max_evals
+    policies = as_policies.PolicyBundle(
+        task_selection=as_policies.FixedTaskSelectionPolicy(batch_size=min(2, len(train_cases))),
+        acceptance=as_policies.MatchedValidStrictImprovement(),
+        development=as_policies.FullOnAcceptDevelopment(),
+        ranking=as_policies.MeanDevelopmentRanking(),
+        budget=as_policies.BudgetPolicy(max_rollouts=max_evals, max_iterations=int(max_iterations)),
+    )
+    store.initialize(
+        resolved_config={
+            "schema_version": "app-autosaddler-run/v1",
+            "engine": "autosaddler",
+            "provider": {"type": _PLUGIN_NAME, "model": _MODEL_LABEL},
+            "optimization": {
+                "task_selection": {"type": "fixed", "batch_size": policies.task_selection.batch_size},
+                "acceptance": {"type": "matched_valid_strict_improvement"},
+                "development": {"type": "full_on_accept"},
+                "ranking": {"type": "mean_development"},
+                "budget": {"max_rollouts": max_evals, "max_iterations": int(max_iterations)},
+                "stop_at_score": payload.get("stop_at_score"),
+            },
+        },
+        resolved_entities=scenario.resolved_entities,
+    )
+    engine = AutoSaddlerEngine(store=store, scenario=scenario, provider=provider, policies=policies)
+    seed = harness_space.seed()
+    document: dict[str, Any] = {}
+    try:
+        result = engine.run()
+        selected = store.read_json("result.json")
+        document.update(
+            {
+                "best_candidate": evaluator.value_of(_candidate(store, result.selected_candidate_id)),
+                "best_score": result.development_score,
+                "metadata": {
+                    "autosaddler_run_id": result.run_id,
+                    "selected_candidate_id": result.selected_candidate_id,
+                    "iterations": result.iterations,
+                    "selection": selected if isinstance(selected, dict) else None,
+                },
+            }
+        )
+    except TargetReached as exc:
+        document.update(evaluator.best_development or {})
+        document["metadata"] = {"stop_reason": "target_reached", "detail": str(exc)}
+    except BudgetStopped:
+        document["stop_reason"] = "budget_reached"
+        document.update(_incumbent(store, evaluator, seed))
+    except (Exception, EvaluationStopped) as exc:
+        # The worker keeps stderr in the run folder, so the traceback survives with the envelope.
+        traceback.print_exc()
+        document["error"] = f"{type(exc).__name__}: {exc}"
+    document["total_evals"] = channel.total_evals
+    return _json_finite(document)
+
+
 def _candidate(store: Any, candidate_id: str) -> Any:
     """Look up a finalized candidate in the upstream event log.
 
@@ -1577,17 +2342,39 @@ def _candidate(store: Any, candidate_id: str) -> Any:
 
 
 def main() -> int:
-    """Run one native engine invocation from its JSON input file.
+    """Run one engine invocation: in the worker with ``--worker``, else in a box from its JSON input file.
 
     Returns:
-        Zero for a completed run, one for a persisted failure envelope.
+        Zero for a completed run, one for a failure envelope.
     """
+    if sys.argv[1:] == [WORKER_FLAG]:
+        return worker_main()
     try:
         payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
         result = execute(payload)
     except Exception as exc:
         result = {"error": f"{type(exc).__name__}: {exc}", "usage_by_model": {}, "usage_complete": False}
     Path("native_result.json").write_text(json.dumps(result, default=str, allow_nan=False), encoding="utf-8")
+    return 1 if result.get("error") else 0
+
+
+def worker_main() -> int:
+    """Read the worker's payload line, run the engine, and send the result line.
+
+    Returns:
+        Zero for a completed run, one for a failure envelope.
+    """
+    channel = open_channel()
+    seed_ids()
+    fix_clocks()
+    try:
+        payload = json.loads(sys.stdin.readline())
+        result = execute_worker(payload, channel)
+    except Exception as exc:
+        traceback.print_exc()
+        result = {"error": f"{type(exc).__name__}: {exc}"}
+    channel.writer.write(json.dumps({"op": "result", "result": result}, default=str, allow_nan=False) + "\n")
+    channel.writer.flush()
     return 1 if result.get("error") else 0
 
 
