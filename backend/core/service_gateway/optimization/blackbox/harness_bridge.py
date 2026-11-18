@@ -26,13 +26,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import IO, Any
 
 Usage = dict[str, int]
 
@@ -385,34 +386,53 @@ def run_setup(command: list[str], checkout: Path, timeout_seconds: float = SETUP
             exits with an error, so no session starts without its setup.
     """
     label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=checkout,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            errors="replace",
-            start_new_session=True,
-        )
-    except OSError as error:
-        raise RuntimeError(f"{label} could not start: {error}") from error
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        # A package install leaves children behind; the group kill stops them with the setup.
+    if sys.platform == "linux" and sys.executable:
+        # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
+        command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
+    # Files, not pipes: a background child keeps an inherited pipe open, and a
+    # read to its end would wait for that child instead of for the setup.
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=checkout,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise RuntimeError(f"{label} could not start: {error}") from error
+        root_start = _start_time(process.pid)
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            # A package install leaves children behind; the stop reaches them with the setup.
+            _stop_group(process, signal.SIGKILL, root_start)
+            process.wait()
+            raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.") from None
+        # A process the setup left in the background (a watcher, a server) must not
+        # run beside the proposer sessions, so the group stops after a finished setup too.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.") from None
-    # A process the setup left in the background (a watcher, a server) must not
-    # run beside the proposer sessions, so the group stops after a finished setup too.
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    if process.returncode != 0:
-        detail = (stderr or stdout).strip()[-2000:]
-        raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
+        if process.returncode != 0:
+            detail = (_tail(stderr_file) or _tail(stdout_file)).strip()[-2000:]
+            raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
+
+
+def _tail(file: IO[bytes]) -> str:
+    """Read the end of a setup's output file.
+
+    A package install can write megabytes, and the error keeps only the end.
+
+    Args:
+        file: The output file, at any position.
+
+    Returns:
+        The last 8 KiB of the file as text.
+    """
+    file.seek(max(0, file.seek(0, os.SEEK_END) - 8192))
+    return file.read().decode(errors="replace")
 
 
 def _checkout_git(arguments: list[str], checkout: Path) -> str:
@@ -1351,7 +1371,7 @@ class _Monitor:
             _stop_group(self.process, signal.SIGTERM, self.root_start)
 
 
-def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | None) -> None:
+def _stop_group(process: subprocess.Popen[Any], signum: int, root_start: int | None) -> None:
     """Signal the harness shell and every child it spawned, once each.
 
     Args:

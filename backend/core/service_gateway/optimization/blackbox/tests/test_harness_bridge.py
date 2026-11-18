@@ -2139,6 +2139,58 @@ def test_a_finished_setup_stops_the_processes_it_left_in_the_background(tmp_path
         pytest.fail("The setup's background process still runs.")
 
 
+def test_a_setup_ends_when_its_process_ends_and_not_when_a_background_child_closes_its_output(
+    tmp_path: Path,
+) -> None:
+    """A background child that keeps the setup's stdout does not hold the setup until its timeout (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    started = time.monotonic()
+
+    harness_bridge.run_setup(["sh", "-c", "echo built; sleep 30 &"], tmp_path, timeout_seconds=20)
+
+    assert time.monotonic() - started < 10
+
+
+def test_a_failed_setup_names_its_output_in_the_error(tmp_path: Path) -> None:
+    """The error of a failed setup carries the end of its output (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+    """
+    with pytest.raises(RuntimeError, match=r"failed with exit code 3: no such package"):
+        harness_bridge.run_setup(["sh", "-c", "echo no such package >&2; exit 3"], tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_a_finished_setup_stops_a_process_that_left_its_group(tmp_path: Path) -> None:
+    """A setup child that calls ``setsid`` stays under the subreaper and stops with the setup (SKY-753).
+
+    Args:
+        tmp_path: The checkout and the child's pid file.
+    """
+    pid_file = tmp_path / "job.pid"
+    tool = (
+        "import os, subprocess; os.setsid(); "
+        "job = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"open({str(pid_file)!r}, 'w').write(str(job.pid))"
+    )
+    job = None
+    try:
+        harness_bridge.run_setup(["sh", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(tool)}"], tmp_path)
+        job = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _alive(job):
+            assert time.monotonic() < deadline, "the setup's detached job outlived the setup"
+            time.sleep(0.05)
+    finally:
+        if job is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(job, signal.SIGKILL)
+
+
 def test_the_setups_files_in_a_folder_of_the_parent_version_stay_out_of_the_version(tmp_path: Path) -> None:
     """A setup that writes into an untracked folder the parent version added excludes only its own files (SKY-753).
 
