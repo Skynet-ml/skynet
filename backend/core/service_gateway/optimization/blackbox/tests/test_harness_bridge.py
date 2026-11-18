@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import http.server
 import json
@@ -2600,6 +2601,49 @@ def test_a_reset_checkout_gets_the_setups_ignored_output_back(tmp_path: Path) ->
     # Git ignores the folder already, so it needs no exclude line.
     exclude = checkout / ".git/info/exclude"
     assert "/node_modules/" not in (exclude.read_text().splitlines() if exclude.exists() else [])
+
+
+def test_a_later_session_copies_the_setup_output_without_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parallel sessions copy the kept output at the same time; only the first setup holds the lock (SKY-753).
+
+    Args:
+        tmp_path: The checkout.
+        monkeypatch: Pytest monkeypatch.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "tracked.txt").write_text("tracked")
+    for arguments in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--no-verify", "-m", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *arguments], cwd=checkout, check=True
+        )
+    harness_bridge.ensure_setup([sys.executable, "-c", "open('dep.txt', 'w').write('d')"], checkout)
+    subprocess.run(["git", "clean", "-fdxq"], cwd=checkout, check=True)
+    copy = harness_bridge._copy_path
+    lock_free: list[bool] = []
+
+    def copy_while_another_session_locks(source: Path, target: Path) -> None:
+        """Take the setup lock from another open file, as a parallel session does, then copy.
+
+        Args:
+            source: The kept copy.
+            target: The path in the checkout.
+        """
+        with (checkout / ".git" / harness_bridge.SETUP_STATE / "lock").open("a") as other:
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_free.append(True)
+            except BlockingIOError:
+                lock_free.append(False)
+        copy(source, target)
+
+    monkeypatch.setattr(harness_bridge, "_copy_path", copy_while_another_session_locks)
+    harness_bridge.ensure_setup([sys.executable, "-c", "raise SystemExit(1)"], checkout)
+
+    assert lock_free == [True]
+    assert (checkout / "dep.txt").read_text() == "d"
 
 
 def test_a_setup_that_makes_a_commit_stops_with_its_command(tmp_path: Path) -> None:

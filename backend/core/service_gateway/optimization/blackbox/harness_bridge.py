@@ -687,7 +687,11 @@ def ensure_setup(command: list[str], checkout: Path, timeout_seconds: float = SE
         fcntl.flock(lock, fcntl.LOCK_EX)
         record = state / "done.json"
         if record.exists():
-            for path in json.loads(record.read_text(encoding="utf-8"))["output"]:
+            kept = json.loads(record.read_text(encoding="utf-8"))["output"]
+            # The first session writes the whole copy before done.json, and nothing changes it after,
+            # so later sessions copy it unlocked and do not wait in line for each other.
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            for path in kept:
                 name = path.rstrip("/")
                 # A file that the version holds at the same path wins over the setup's copy.
                 if not os.path.lexists(checkout / name):

@@ -105,8 +105,8 @@ empty part fails the setup check, and the message names the key.
   The copy keeps symbolic links as links. A file that holds the absolute
   path of the first checkout (for example a Python virtual environment)
   can fail in an AutoSaddler worktree, because each worktree has a
-  different path. The copy uses disk space in the box. The files it
-  adds never join a version. It has 30 minutes, but never more than the
+  different path. The copy uses disk space in the box, and each later
+  session spends time to copy it. The files it adds never join a version. It has 30 minutes, but never more than the
   time that the proposer session has left: the setup time counts inside the
   session's time limit. If it fails or runs out of time, the run stops, and
   the message names the command and its output.
