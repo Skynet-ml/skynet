@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from ..protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
@@ -17,7 +19,9 @@ from ..protocol import (
     candidate_key,
     engine_score,
     fill_unscored,
+    openai_tools,
     score_batch,
+    tool_calls_from_openai,
 )
 from ..runner import normalize_score
 from .mocks import vowel_scorer
@@ -353,6 +357,102 @@ def test_fill_unscored_gives_a_null_case_its_versions_scored_mean() -> None:
     assert fill_unscored(candidates, [0.2, None, 0.6, None, None]) == pytest.approx([0.2, 0.4, 0.6, UNSCORED, UNSCORED])
 
 
+def test_fill_unscored_gives_a_failed_run_version_no_score() -> None:
+    """A version with a failed [run] case is UNSCORED on every case and ranks below a lower scored version (SKY-751)."""
+    candidates = ["crash", "crash", "crash", "low", "low", "low"]
+    failed = {"status": RUN_FAILED_STATUS}
+    infos = [{}, {}, failed, {}, {}, {}]
+
+    filled = fill_unscored(candidates, [0.9, 0.9, None, 0.3, 0.3, 0.3], infos)
+
+    assert filled[:3] == [UNSCORED] * 3
+    assert filled[3:] == pytest.approx([0.3] * 3)
+    assert sum(filled[3:]) > sum(filled[:3])
+
+
+def test_fill_unscored_keeps_a_scorers_own_run_failed_status_with_a_score() -> None:
+    """A scorer's own ``run_failed`` status next to a real score is not a failed [run] entry (SKY-221, SKY-751)."""
+    assert fill_unscored(["a", "a"], [0.4, 0.6], [{"status": RUN_FAILED_STATUS}, {}]) == pytest.approx([0.4, 0.6])
+
+
+def test_a_scorers_own_run_failed_status_with_a_finite_score_keeps_its_score() -> None:
+    """Only a failed [run] entry, which sends no score, drops a score; a real score with that status stays (SKY-751)."""
+    server = EvalServer(lambda c, e: (0.4, {"feedback": "ok", "status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score == pytest.approx(0.4)
+    assert info == {"feedback": "ok", "status": RUN_FAILED_STATUS}
+    assert server.mean_score("x") == pytest.approx(0.4)
+    assert server.run_failed("x") is False
+    assert server.metric_error("x") is None
+
+
+def test_nested_server_marks_an_unscored_failed_run_as_no_score() -> None:
+    """An Auto lane gets a failed [run] case as UNSCORED; it stays a run failure with no score (SKY-751)."""
+    server = EvalServer(lambda c, e: (UNSCORED, {"status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score is None
+    assert info["status"] == RUN_FAILED_STATUS
+    assert server.metric_error("x") is not None
+    assert server.best_candidate is None
+
+
+def test_a_failed_run_after_a_clean_case_marks_the_version_as_run_failed() -> None:
+    """A version scored on a clean case, then a failed [run] case, keeps the run-failed mark (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 2:
+            return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+        return 0.7, {"feedback": "ok"}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    assert server.mean_score("c") is None
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
+def test_a_failed_run_after_a_metric_error_marks_the_version_as_run_failed() -> None:
+    """A metric error on one case, then a failed [run] case, still marks the version as run-failed (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 1:
+            return None, {"error": "metric boom"}
+        return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
 def test_score_batch_keeps_order_and_metric_error_status() -> None:
     """A batch scores each pair once, keeps the order, and still marks the filled case as a metric error."""
     server = EvalServer(lambda c, e: _crashing("boom" if e == 2 else c, e), max_evals=10)
@@ -375,3 +475,98 @@ def test_score_batch_keeps_order_and_metric_error_status() -> None:
         assert [score for score, _ in results] == [-2.0, -2.0, -4.0]
         assert results[1][1]["status"] == METRIC_ERROR
     assert server.used == 6
+
+
+# An assistant message as LiteLLM's ``response.choices[0].message.model_dump()`` gives it.
+_OPENAI_MESSAGE: dict[str, Any] = {
+    "role": "assistant",
+    "content": None,
+    "tool_calls": [
+        {
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "ls -la"}'},
+        },
+        {"id": "call_def", "type": "function", "function": {"name": "bash", "arguments": ""}},
+    ],
+}
+
+
+def test_openai_tools_converts_flat_definitions() -> None:
+    """A flat definition becomes an OpenAI function tool whose ``parameters`` is the input schema."""
+    schema = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+    tools = openai_tools([{"name": "bash", "description": "Run a command.", "input_schema": schema}])
+
+    assert tools == [
+        {"type": "function", "function": {"name": "bash", "description": "Run a command.", "parameters": schema}}
+    ]
+
+
+def test_tool_calls_from_openai_parses_arguments_and_keeps_ids() -> None:
+    """Each call keeps its id and name, and its JSON arguments become a dict; empty arguments are an empty dict."""
+    assert tool_calls_from_openai(_OPENAI_MESSAGE) == [
+        {"id": "call_abc", "name": "bash", "arguments": {"command": "ls -la"}},
+        {"id": "call_def", "name": "bash", "arguments": {}},
+    ]
+
+
+@pytest.mark.parametrize("message", [{"role": "assistant", "content": "done"}, {"tool_calls": None}])
+def test_tool_calls_from_openai_gives_no_calls_for_a_plain_reply(message: dict[str, Any]) -> None:
+    """A reply that asks for no tool gives no calls."""
+    assert tool_calls_from_openai(message) == []
+
+
+@pytest.mark.parametrize("arguments", ['{"command": ', "[1, 2]"])
+def test_tool_calls_from_openai_keeps_raw_text_that_is_no_json_object(arguments: str) -> None:
+    """Bad JSON, or JSON that is no object, stays raw text, so the engine can answer it with an error result."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": arguments}]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"command": "ls"}, {"command": "ls"}),
+        (["ls"], '["ls"]'),
+        (7, "7"),
+        (0, "0"),
+        (False, "false"),
+        ([], "[]"),
+        ({}, {}),
+        (None, {}),
+        ("", {}),
+    ],
+)
+def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, expected: Any) -> None:
+    """A dict stays as it is, missing arguments are ``{}``, and any other value becomes its JSON text.
+
+    A value that is no text does not raise, so no reply is lost, and a falsy one keeps its value.
+    """
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
+
+
+def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
+    """A flat definition sent in OpenAI form, and the OpenAI call it gets, convert back to the flat shapes."""
+    definition = {"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}
+    sent = openai_tools([definition])[0]["function"]
+    call = {"id": "call_1", "name": sent["name"], "arguments": {"command": "pytest -q"}}
+    message = {
+        "tool_calls": [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])},
+            }
+        ]
+    }
+
+    assert {"name": sent["name"], "description": sent["description"], "input_schema": sent["parameters"]} == definition
+    assert tool_calls_from_openai(message) == [call]

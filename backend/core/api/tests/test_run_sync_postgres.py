@@ -22,7 +22,7 @@ import core.storage.remote as remote_mod
 
 from ...config import app_env
 from ...service_gateway import run_sync
-from ...storage.models import Base
+from ...storage.models import PROGRESS_EVENT_KEY, Base
 from ...storage.remote import RemoteDBJobStore
 from ..routers.optimizations.sync import _check_readable
 
@@ -132,6 +132,20 @@ def test_import_stores_jsonb_that_reads_back(store: _SchemaJobStore) -> None:
         ).one()
     assert tuple(kinds) == ("object", "object")
     assert len(store.get_progress_events(new_id)) == 1
+
+
+def test_import_keeps_the_first_event_of_a_repeated_key(store: _SchemaJobStore) -> None:
+    """A bundle that repeats an event key imports the first event only, not a database error (SKY-808)."""
+    bundle = _bundle()
+    bundle["events"] = [
+        {"timestamp": "2026-10-01T10:01:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "a", "n": 1}},
+        {"timestamp": "2026-10-01T10:02:00+00:00", "event": "tick", "metrics": {}},
+        {"timestamp": "2026-10-01T10:03:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "a", "n": 2}},
+        {"timestamp": "2026-10-01T10:04:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "b", "n": 3}},
+    ]
+    new_id = run_sync.import_run(store, "bob", bundle, check_row=_check_readable)
+    events = store.get_progress_events(new_id)
+    assert [(e["event"], e["metrics"].get("n")) for e in events] == [("step", 1), ("tick", None), ("step", 3)]
 
 
 def test_too_deep_bundle_writes_no_row(store: _SchemaJobStore) -> None:

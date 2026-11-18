@@ -1227,6 +1227,8 @@ export type NotificationTab = "focused" | "everything";
 
 interface NotificationFacts {
   score?: number | null;
+  /** A finished run whose final version has no score (SKY-751). */
+  no_score?: boolean | null;
   /** Score change versus the run's baseline. */
   delta?: number | null;
   /** Dollars spent. */

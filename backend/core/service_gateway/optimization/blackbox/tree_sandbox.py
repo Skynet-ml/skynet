@@ -90,6 +90,7 @@ from ....sandbox.trees import (
     GrantDeniedError,
     MetricFailedError,
     TreeRejectedError,
+    TreeSandboxError,
     tar_to_tree,
     tree_to_tar,
 )
@@ -424,6 +425,10 @@ def _box_alive(box: SandboxSession) -> bool:
         return False
 
 
+class StepCommittedError(TreeSandboxError):
+    """Signal a step that committed, then failed in its durable wait: the next step must take the next seq."""
+
+
 class BoxSession:
     """Hold one box from a source for the caller's commands and checks, and give it back once."""
 
@@ -638,7 +643,15 @@ class TreeSandbox:
             raise
         return session
 
-    def run(self, step: StepRef, tree_id: str, command: str, grants: Sequence[Grant]) -> tuple[CommandResult, str]:
+    def run(
+        self,
+        step: StepRef,
+        tree_id: str,
+        command: str,
+        grants: Sequence[Grant],
+        *,
+        refuse: Callable[[str], bool] | None = None,
+    ) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
 
         Args:
@@ -646,6 +659,7 @@ class TreeSandbox:
             tree_id: The workspace tree the command starts from.
             command: The shell command; it runs in the tree's folder.
             grants: The box's network grants.
+            refuse: Tells, before the step commits, whether the tree after the command must not be kept.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -656,8 +670,9 @@ class TreeSandbox:
             BoxFailureError: When the box fails, dies or does not go back;
                 retry the step.
             TreeRejectedError: When the box's tree does not pack, is over a
-                size limit or is not a valid tree; do not retry.
+                size limit, is not a valid tree or is refused; do not retry.
             FenceLostError: When the run generation is no longer current.
+            StepCommittedError: When the step committed and then did not become durable.
             LookupError: When the run cannot see the tree.
             BudgetReached: And the other budget errors; the run stops.
         """
@@ -692,6 +707,9 @@ class TreeSandbox:
             return (result, new_tree_id), before is not None and after is not None and after <= before
 
         result, new_tree_id = self._in_box(self._candidates, step, grants, work)
+        if refuse is not None and refuse(new_tree_id):
+            # The message names no path, so it does not show which path is refused.
+            raise TreeRejectedError(step.step_id, "The command wrote a path that it may not write.")
         body = {
             "command": command,
             "exit_code": result.exit_code,
@@ -732,6 +750,7 @@ class TreeSandbox:
             MetricFailedError: When the metric fails or prints no finite number.
             TreeRejectedError: When the outputs tree holds a link; do not retry.
             FenceLostError: When the run generation is no longer current.
+            StepCommittedError: When the step committed and then did not become durable.
             LookupError: When the run cannot see a tree.
             BudgetReached: And the other budget errors; the run stops.
         """
@@ -956,6 +975,7 @@ class TreeSandbox:
 
         Raises:
             FenceLostError: When this step or an earlier step of the agent failed the fence.
+            StepCommittedError: When the step committed and its durable wait failed another way.
         """
         try:
             step_id = self._step_log.commit(
@@ -968,6 +988,12 @@ class TreeSandbox:
                 body=body,
                 tree_id=tree_id,
             )
-            self._step_log.durable(step_id, step.execution_generation)
+            try:
+                self._step_log.durable(step_id, step.execution_generation)
+            except StepFenceError:
+                raise
+            except Exception as error:
+                # The commit returned, so the seq is taken: a retry at it would get the old id and store nothing.
+                raise StepCommittedError(step.step_id, f"The step committed, then {type(error).__name__}.") from error
         except StepFenceError as error:
             raise FenceLostError(step.step_id, f"The run generation changed at step {error.step_id}.") from error

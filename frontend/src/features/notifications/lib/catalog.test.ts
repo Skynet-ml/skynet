@@ -71,6 +71,13 @@ test("a finished line carries the score and the delta", () => {
   });
 });
 
+test("a finished run with no final score says so, never 0", () => {
+  assert.deepEqual(itemLine(item({ facts: { no_score: true, duration: 60 } }), fmt), {
+    key: "notifications.item.finished_no_score",
+    params: {},
+  });
+});
+
 test("a missing number falls back to the plain wording", () => {
   assert.deepEqual(itemLine(item({ event_type: "failed" }), fmt), {
     key: "notifications.item.failed_plain",
