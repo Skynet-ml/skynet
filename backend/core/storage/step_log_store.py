@@ -202,7 +202,7 @@ class _Waiter(threading.Event):
     failure: str | None = None
     # Set when the last flush of ``close`` failed: no flusher is left to open the waiter.
     closed: bool = False
-    # Set when the step's run records a shard that this pod does not have: the step is dropped, with no retry.
+    # Set when this pod's map cannot route the step's run: the step is dropped, with no retry.
     error: str | None = None
 
 
@@ -291,6 +291,8 @@ class StepLogStore:
                 ASCII, has a ``/``, or is ``.`` or ``..``; or when the window is
                 not above 0 or is above ``threading.TIMEOUT_MAX``, or the size
                 cap is below 1; or when the shard map is over another main engine.
+            RuntimeError: When the map has no extra shard and a job records
+                another shard: the worker must not start with a wrong map.
         """
         # ``.`` and ``..`` put packs outside ``packs/<worker_id>/``, where recovery never lists them.
         if (
@@ -304,6 +306,12 @@ class StepLogStore:
         shards = ShardMap.from_settings(engine) if shards is None else shards
         if shards.main is not engine:
             raise ValueError("the shard map is over another main engine")
+        try:
+            shards.check()
+        except Exception:
+            if self._owns_shards:
+                shards.dispose()
+            raise
         self._engine = engine
         self._shards = shards
         self._objects = objects
@@ -564,7 +572,11 @@ class StepLogStore:
 
         Returns:
             The stored bytes, or ``None`` when the run is unknown or its owner
-            does not have the object.
+            does not have the object on any shard.
+
+        Raises:
+            Exception: The first shard's error, when no shard that answered has
+                the object: a down shard can hold it, so it is not a miss.
         """
         with self._cond:
             buffered = self._tree_objects.get((run_id, object_id))
@@ -579,6 +591,7 @@ class StepLogStore:
             return None
         # The run's own shard first; another run of the account can have stored the object on another shard.
         first = self._shards.shard_of(run_id)
+        errors: list[Exception] = []
         for name in (first, *(name for name in self._shards.names() if name != first)):
             try:
                 with Session(self._shards.engine(name)) as session:
@@ -588,14 +601,15 @@ class StepLogStore:
                         )
                     ).first()
                     location = None if row is None else (row.pack_key, row.pack_offset, row.pack_length)
-            except Exception:
-                # The run's own shard answered, so a down fallback shard is only a miss: it must not fail other shards.
-                if name == first:
-                    raise
+            except Exception as error:
+                # Another shard can still have the object, so a down shard does not stop the read.
                 logger.warning("step log shard %s did not answer a tree object read", name, exc_info=True)
+                errors.append(error)
                 continue
             if location is not None:
                 return self._objects.get(*location)
+        if errors:
+            raise errors[0]
         return None
 
     def flush(self) -> None:
@@ -609,8 +623,9 @@ class StepLogStore:
 
         Each run is routed on its own. When the lookup of a run's shard fails,
         that run's entries go back to the buffer. When the run records a shard
-        that this pod's map does not have, its entries are dropped and its
-        waiters fail, so they do not fail every later flush.
+        that this pod's map does not have, or this pod has no map while a job
+        records a shard, its entries are dropped and its waiters fail, so they
+        do not fail every later flush.
 
         Raises:
             Exception: The first error, after every shard that could flush flushed.
@@ -690,8 +705,8 @@ class StepLogStore:
 
         Returns:
             The entries by shard; the entries to try again, whose shard lookup
-            failed; the entries whose run records a shard that this pod does
-            not have; and one error for each run that was not routed.
+            failed; the entries whose run this pod's map cannot route; and one
+            error for each run that was not routed.
         """
         routes: dict[str, str | Exception] = {}
         groups: dict[str, list[tuple[_Step | _Object, bytes]]] = {}
@@ -709,9 +724,9 @@ class StepLogStore:
                 routes[item.run_id] = route
             if isinstance(route, str):
                 groups.setdefault(route, []).append((item, data))
-            # A shard that this pod's map does not know stays unknown until a deploy: a retry would fail each flush.
-            # A pod with no map at all (``RuntimeError``) fails every run alike, so its entries wait for the fix.
-            elif isinstance(route, KeyError):
+            # A shard that this pod's map does not know (``KeyError``), or a job shard on a pod with no map
+            # (``RuntimeError``), stays so until a deploy: a retry would fail each flush and hang each waiter.
+            elif isinstance(route, KeyError | RuntimeError):
                 unroutable.append((item, data))
             else:
                 retry.append((item, data))

@@ -10,16 +10,12 @@ from __future__ import annotations
 
 import os
 from logging.config import fileConfig
-from pathlib import Path
 
-from alembic.operations import Operations
-from alembic.runtime.migration import MigrationContext
-from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, engine_from_config, pool
+from sqlalchemy import engine_from_config, pool
 
 import core.storage.preflights  # noqa: F401  # registers WizardPreflightModel on Base.metadata
 from alembic import context
-from core.config import settings
+from core.storage.migrate import upgrade_step_log_shards
 from core.storage.models import Base
 
 config = context.config
@@ -42,9 +38,6 @@ if env_url:
     config.set_main_option("sqlalchemy.url", env_url)
 
 target_metadata = Base.metadata
-
-# The chain of the step log shard databases (SKY-731). It is not in ``versions`` so the main chain keeps one head.
-_STEP_LOG_VERSIONS = Path(__file__).resolve().parent / "step_log_versions"
 
 # Objects that live in the database but deliberately not in the ORM metadata,
 # so autogenerate must not propose dropping them:
@@ -111,12 +104,15 @@ def run_migrations_online() -> None:
     that connection already owns the transaction, so no ``begin_transaction`` is
     started here. A bare ``alembic`` CLI invocation has no such attribute and
     builds its own engine from ``REMOTE_DB_URL`` instead.
+
+    The step log shards (SKY-731) migrate after the main transaction commits.
+    On the boot path, ``core/storage/migrate.py`` runs them after it releases
+    the lock. On the CLI path, this function runs them after its own commit.
     """
     shared = config.attributes.get("connection")
     if shared is not None:
         context.configure(connection=shared, target_metadata=target_metadata, include_object=include_object)
         context.run_migrations()
-        upgrade_step_log_shards()
         return
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -127,37 +123,10 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata, include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
-    upgrade_step_log_shards()
-
-
-def upgrade_step_log_shards() -> None:
-    """Bring every ``STEP_LOG_SHARDS`` database to the head of the step log shard chain.
-
-    Each shard has its own ``alembic_version`` table and its own transaction.
-    A shard migration is idempotent, so a boot that fails after the main
-    database commits runs the shards again on the next boot.
-    """
-    if config.cmd_opts is not None and getattr(config.cmd_opts, "cmd", None) is not None:
-        command_name = config.cmd_opts.cmd[0].__name__
-        # A CLI downgrade or stamp acts on the main chain alone. The boot path always brings the shards up.
-        if command_name != "upgrade":
-            return
-    script = ScriptDirectory(str(_STEP_LOG_VERSIONS.parent), version_locations=[str(_STEP_LOG_VERSIONS)])
-    for _, url in sorted(settings.step_log_shards.items()):
-        engine = create_engine(url.get_secret_value(), poolclass=pool.NullPool)
-        try:
-            with engine.begin() as connection:
-                # Not command.upgrade: a second EnvironmentContext inside this one removes the alembic.context proxy.
-                # ``_upgrade_revs`` is private, but alembic 1.18.4 (pinned in uv.lock) has no public way to get the
-                # upgrade steps, and its own command.upgrade calls the same method. An alembic upgrade can rename it:
-                # test_shard_map.py checks it, so the test fails before a boot does.
-                migration = MigrationContext.configure(
-                    connection, opts={"script": script, "fn": lambda rev, _: script._upgrade_revs("head", rev)}
-                )
-                with Operations.context(migration):
-                    migration.run_migrations()
-        finally:
-            engine.dispose()
+    # A CLI downgrade or stamp acts on the main chain alone.
+    command_line = getattr(config.cmd_opts, "cmd", None) if config.cmd_opts is not None else None
+    if command_line is None or command_line[0].__name__ == "upgrade":
+        upgrade_step_log_shards()
 
 
 if context.is_offline_mode():

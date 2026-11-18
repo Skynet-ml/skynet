@@ -15,6 +15,11 @@ absent). Both steps run under the same advisory lock as ``create_all`` so
 concurrent replicas don't race, and are Postgres-only — SQLite test stores get
 ``None`` from the lock helper and skip Alembic, since their schema comes
 straight from the ORM models.
+
+The step log shard databases (SKY-731) migrate after the main transaction
+commits and its lock is released: a shard that hangs or fails cannot hold the
+main lock or roll back the main migrations. A shard failure fails the boot,
+and the next boot runs the shard migrations again; they are idempotent.
 """
 
 from __future__ import annotations
@@ -23,14 +28,21 @@ from pathlib import Path
 from typing import Any
 
 from alembic.config import Config
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from alembic import command
 
+from ..config import settings
 from .schema_lock import schema_bootstrap_lock
+from .shard_map import shard_engine
 
 # backend/core/storage/migrate.py -> backend/alembic.ini
 _ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+# The chain of the step log shard databases. It is not in ``versions`` so the main chain keeps one head.
+_STEP_LOG_VERSIONS = _ALEMBIC_INI.parent / "alembic" / "step_log_versions"
 
 
 def upgrade_if_adopted(engine: Any) -> None:
@@ -44,8 +56,11 @@ def upgrade_if_adopted(engine: Any) -> None:
             helper yields ``None`` and this returns without touching Alembic.
     """
     with schema_bootstrap_lock(engine) as conn:
-        if conn is not None and _is_adopted(conn):
+        upgraded = conn is not None and _is_adopted(conn)
+        if upgraded:
             command.upgrade(_alembic_config(conn), "head")
+    if upgraded:
+        upgrade_step_log_shards()
 
 
 def stamp_if_unadopted(engine: Any) -> None:
@@ -58,8 +73,11 @@ def stamp_if_unadopted(engine: Any) -> None:
             helper yields ``None`` and this returns without touching Alembic.
     """
     with schema_bootstrap_lock(engine) as conn:
-        if conn is not None and not _is_adopted(conn):
+        stamped = conn is not None and not _is_adopted(conn)
+        if stamped:
             command.stamp(_alembic_config(conn), "head")
+    if stamped:
+        upgrade_step_log_shards()
 
 
 def sync_migration_head(engine: Any) -> None:
@@ -70,6 +88,36 @@ def sync_migration_head(engine: Any) -> None:
     """
     upgrade_if_adopted(engine)
     stamp_if_unadopted(engine)
+
+
+def upgrade_step_log_shards() -> None:
+    """Bring every ``STEP_LOG_SHARDS`` database to the head of the step log shard chain.
+
+    Each shard has its own ``alembic_version`` table and its own transaction,
+    on an engine with the shard time limits. Call it with no main transaction
+    open, so a slow shard holds no main lock.
+
+    Raises:
+        RuntimeError: When a shard migration fails; it names the shard.
+    """
+    script = ScriptDirectory(str(_STEP_LOG_VERSIONS.parent), version_locations=[str(_STEP_LOG_VERSIONS)])
+    for name, url in sorted(settings.step_log_shards.items()):
+        engine = shard_engine(url.get_secret_value(), pooled=False)
+        try:
+            with engine.begin() as connection:
+                # Not command.upgrade: inside env.py, a second EnvironmentContext removes the alembic.context proxy.
+                # ``_upgrade_revs`` is private, but alembic 1.18.4 (pinned in uv.lock) has no public way to get the
+                # upgrade steps, and its own command.upgrade calls the same method. An alembic upgrade can rename it:
+                # test_shard_map.py checks it, so the test fails before a boot does.
+                migration = MigrationContext.configure(
+                    connection, opts={"script": script, "fn": lambda rev, _: script._upgrade_revs("head", rev)}
+                )
+                with Operations.context(migration):
+                    migration.run_migrations()
+        except Exception as error:
+            raise RuntimeError(f"step log shard {name} migration failed; the main database is migrated") from error
+        finally:
+            engine.dispose()
 
 
 def _alembic_config(conn: Any) -> Config:

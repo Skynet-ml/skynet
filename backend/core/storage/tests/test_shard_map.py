@@ -1,9 +1,9 @@
 """Tests for the step log shard map and the step log on two shards (SKY-731).
 
 Most tests use SQLite files: one main database with the ``jobs`` table and
-one shard database with only the step log tables. The last test needs two
-disposable PostgreSQL databases: set ``APP_TEST_DB_URL`` (main) and
-``APP_TEST_SHARD_DB_URL`` (shard). It runs the Alembic env on both.
+one shard database with only the step log tables. The Alembic tests need
+disposable PostgreSQL databases: set ``APP_TEST_DB_URL`` (main) and, for the
+test that migrates a shard, ``APP_TEST_SHARD_DB_URL`` (shard).
 """
 
 from __future__ import annotations
@@ -22,14 +22,17 @@ from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from core.config import app_env, settings
 from core.storage import shard_map as shard_map_mod
 from core.storage.migrate import sync_migration_head
 from core.storage.models import AgentStepModel, Base, JobModel, StoragePackModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
+from core.storage.schema_lock import SCHEMA_BOOTSTRAP_LOCK_KEY
 from core.storage.shard_map import MAIN, ShardMap
 from core.storage.step_log_store import StepFenceError, StepLogStore
+from core.worker.step_recovery import open_step_log
 
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 MAIN_DB_URL = app_env("APP_TEST_DB_URL")
@@ -37,6 +40,10 @@ SHARD_DB_URL = app_env("APP_TEST_SHARD_DB_URL")
 needs_two_postgres = pytest.mark.skipif(
     not (MAIN_DB_URL or "").startswith("postgresql") or not (SHARD_DB_URL or "").startswith("postgresql"),
     reason="Set APP_TEST_DB_URL and APP_TEST_SHARD_DB_URL to two disposable PostgreSQL databases.",
+)
+needs_postgres = pytest.mark.skipif(
+    not (MAIN_DB_URL or "").startswith("postgresql"),
+    reason="Set APP_TEST_DB_URL to a disposable PostgreSQL database.",
 )
 RUNS = [f"run-{index}" for index in range(12)]
 SHARD_TABLES = [AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
@@ -448,21 +455,44 @@ def _pending_ids(store: StepLogStore) -> list[str]:
 def test_a_map_with_no_shard_refuses_a_run_that_another_pod_put_on_a_shard(
     main: Engine, objects: LocalObjectStore
 ) -> None:
-    """A pod with no shard config must not read or write a sharded run on the main database."""
-    _set_shard(main, "run-0", "s2")
-
-    with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS"):
-        ShardMap(main).shard_of("run-1")
+    """A pod with no shard config must not write a sharded run on the main database; its steps fail, not hang."""
     store = StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=ShardMap(main))
     try:
-        _commit(store, "run-1", 0)
+        step_id = _commit(store, "run-1", 0)
+        waiter = store._waiters[(step_id, 1)]
+        _set_shard(main, "run-0", "s2")
+        # The start check passed before the record; a map that has not checked yet checks at the flush.
+        store.shards._single_checked = False
+
+        with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS"):
+            ShardMap(main).shard_of("run-1")
         with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS"):
             store.flush()
+
+        assert waiter.is_set()
+        assert waiter.error is not None
+        assert store._pending == []
         assert _step_runs(main) == set()
+        store.flush()
     finally:
         _set_shard(main, "run-0", MAIN)
         store.close()
-    assert _step_runs(main) == {"run-1"}
+    assert _step_runs(main) == set()
+
+
+def test_a_step_log_with_no_shard_map_does_not_start_when_a_job_records_a_shard(
+    main: Engine, objects: LocalObjectStore
+) -> None:
+    """The worker stops at start instead of taking work that it cannot write; with the record gone, it starts."""
+    _set_shard(main, "run-0", "s2")
+
+    with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS"):
+        StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=ShardMap(main))
+    with pytest.raises(RuntimeError, match="STEP_LOG_SHARDS"):
+        open_step_log(main, objects, "w1")
+
+    _set_shard(main, "run-0", MAIN)
+    StepLogStore(main, objects, "w1", flush_window_seconds=60.0, shards=ShardMap(main)).close()
 
 
 def test_the_jobs_lookup_of_a_map_with_no_shard_has_a_partial_index(main: Engine) -> None:
@@ -562,10 +592,10 @@ def test_a_failed_shard_lookup_requeues_only_its_run(
     assert _rows(main, waiting) == 1
 
 
-def test_a_down_fallback_shard_is_a_miss_for_a_tree_object_read(
+def test_a_down_shard_fails_a_tree_object_read_that_no_other_shard_answers(
     main: Engine, objects: LocalObjectStore, tmp_path: Path
 ) -> None:
-    """After a miss on the run's own shard, a down shard is skipped; a down own shard still raises."""
+    """A shard that answers with the object wins; with no hit, a down shard raises, so an outage is not a miss."""
     # SQLite cannot open a file in a folder that does not exist, so each query on this shard fails.
     down = create_engine(f"sqlite:///{tmp_path / 'missing' / 's2.sqlite'}")
     shards = ShardMap(main, {"s2": down})
@@ -576,7 +606,9 @@ def test_a_down_fallback_shard_is_a_miss_for_a_tree_object_read(
         store.flush()
 
         assert store.get_object(reader, "c" * 64) == b"tree bytes"
-        assert store.get_object(reader, "d" * 64) is None
+        assert store.get_object(other, "c" * 64) == b"tree bytes"
+        with pytest.raises(OperationalError):
+            store.get_object(reader, "d" * 64)
         with pytest.raises(OperationalError):
             store.get_object(other, "d" * 64)
     finally:
@@ -868,6 +900,11 @@ def test_shard_engines_on_postgresql_get_connect_statement_and_tcp_timeouts(main
     }
     assert "connect_args" not in made["sqlite"]
 
+    shard_map_mod.shard_engine("postgresql+psycopg://u@h/db", pooled=False)
+    assert made["postgresql+psycopg"]["poolclass"] is NullPool
+    assert "pool_size" not in made["postgresql+psycopg"]
+    assert made["postgresql+psycopg"]["connect_args"]["tcp_user_timeout"] == shard_map_mod.SHARD_TCP_USER_TIMEOUT_MS
+
 
 def test_the_alembic_upgrade_steps_of_the_shard_chain_still_resolve() -> None:
     """``alembic/env.py`` calls the private ``_upgrade_revs``; an alembic upgrade that renames it fails here."""
@@ -925,3 +962,34 @@ def test_alembic_migrates_the_main_database_and_the_step_log_tables_on_a_shard(
             connection.execute(text("DELETE FROM storage_packs"))
         main.dispose()
         shard.dispose()
+
+
+@needs_postgres
+def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migrations(monkeypatch) -> None:
+    """A down shard fails the boot with a named error; main stays at head and its bootstrap lock is free."""
+    main = create_engine(MAIN_DB_URL or "")
+    script = ScriptDirectory(str(BACKEND_DIR / "alembic"))
+    head = script.get_current_head()
+    try:
+        Base.metadata.create_all(main, tables=[t for t in Base.metadata.sorted_tables if "embedding" not in t.name])
+        monkeypatch.setattr(settings, "step_log_shards", {})
+        sync_migration_head(main)
+        with main.begin() as connection:
+            connection.execute(text("DROP INDEX IF EXISTS ix_jobs_step_log_shard"))
+            connection.execute(text("ALTER TABLE jobs DROP COLUMN step_log_shard"))
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = :rev"), {"rev": script.get_revision(head).down_revision}
+            )
+        # Port 1 refuses the connection at once, so the test does not wait for the connect timeout.
+        monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr("postgresql://localhost:1/none")})
+
+        with pytest.raises(RuntimeError, match="step log shard s2 migration failed"):
+            sync_migration_head(main)
+
+        with main.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == head
+            assert "step_log_shard" in {column["name"] for column in inspect(connection).get_columns("jobs")}
+            assert connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": SCHEMA_BOOTSTRAP_LOCK_KEY})
+            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": SCHEMA_BOOTSTRAP_LOCK_KEY})
+    finally:
+        main.dispose()
