@@ -386,8 +386,8 @@ A manual hold on a change or on a promotion still stops it.
   failure) leaves the batch. It waits for the next batch, with the reason
   in the PR and in Linear.
 - After GitHub confirms the batch merge, move each included issue to Done
-  and attach the batch merge commit. The merger never merges into `main` or
-  touches production.
+  and attach the batch merge commit. The orchestrator never merges into
+  `main` or touches production.
 
 ## Sources
 
