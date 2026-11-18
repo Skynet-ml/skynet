@@ -990,6 +990,24 @@ def test_a_diff_that_ends_with_empty_context_lines_still_applies_after_upstream_
     assert _as_patch(diff) == diff
 
 
+def test_an_empty_context_line_written_without_its_space_counts_inside_the_last_hunk(tmp_path: Path) -> None:
+    """A bare empty context line in the last hunk counts as context, so the stripped one at the end comes back.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    diff = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n a\n\n-b\n+B\n\n"
+    sample = _parse_candidate(f"```diff\n{diff}```")
+    assert sample is not None
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "README.md").write_text("a\n\nb\n\n")
+    apply_patch(checkout, _as_patch(sample))
+    assert (checkout / "README.md").read_text() == "a\n\nB\n\n"
+    assert _as_patch(sample) == diff
+
+
 @pytest.mark.parametrize(("count", "padding"), [("17", 16), ("18", 0), ("999999999", 0), ("9999999999999", 0)])
 def test_a_hunk_header_with_a_huge_count_gets_no_padding(count: str, padding: int) -> None:
     """The model writes the hunk header, so a count past what the strip can drop adds no line.
