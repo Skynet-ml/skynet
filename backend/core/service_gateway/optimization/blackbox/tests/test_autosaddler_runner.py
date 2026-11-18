@@ -263,7 +263,7 @@ def _run_worker(
     host = _ReplayHost(files) if host is None else host
     script = [] if wrapper is None else [str(wrapper)]
     child = subprocess.Popen(
-        [python, "-I", *script, autosaddler_runner.__file__, autosaddler_runner.WORKER_FLAG],
+        [python, "-s", "-P", *script, autosaddler_runner.__file__, autosaddler_runner.WORKER_FLAG],
         cwd=folder,
         env={"PATH": os.environ.get("PATH", ""), "HOME": str(folder), "LANG": "C.UTF-8", "PYTHONHASHSEED": "0"},
         stdin=subprocess.PIPE,
@@ -970,6 +970,153 @@ def test_upstream_modules_get_a_counted_clock_and_others_keep_the_real_one(monke
     assert runs[0] == runs[1]
     assert runs[0] == ["2000-01-01T00:00:00+00:00", 1.0, "2000-01-01T00:00:02+00:00", 3.0]
     assert os.environ["GIT_AUTHOR_DATE"] == os.environ["GIT_COMMITTER_DATE"] == "2000-01-01T00:00:00+00:00"
+
+
+def test_upstream_modules_get_a_counted_clock_for_every_clock_they_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wall time, counters, ns clocks, ``utcnow``, ``today`` and a bound ``datetime`` module all count.
+
+    Args:
+        monkeypatch: Adds the stand-in modules and the git date variables, and removes them after the test.
+    """
+    datetime_module = sys.modules["datetime"]
+
+    def read(module: ModuleType) -> list[object]:
+        """Read each clock once from a stand-in module.
+
+        Args:
+            module: The stand-in module.
+
+        Returns:
+            The values in the order they were read.
+        """
+        names: Any = module
+        return [
+            names.time.time(),
+            names.time.perf_counter(),
+            names.time.time_ns(),
+            names.time.monotonic_ns(),
+            names.time.perf_counter_ns(),
+            names.datetime.utcnow().isoformat(),
+            names.datetime.today().isoformat(),
+            names.datetime_module.datetime.now(UTC).isoformat(),
+            names.monotonic(),
+        ]
+
+    monkeypatch.delenv("GIT_AUTHOR_DATE", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_DATE", raising=False)
+    runs = []
+    for _ in range(2):
+        upstream = ModuleType("autosaddler.v2.core.stand_in")
+        names: Any = upstream
+        names.time, names.datetime, names.datetime_module, names.monotonic = (
+            time,
+            datetime,
+            datetime_module,
+            time.monotonic,
+        )
+        monkeypatch.setitem(sys.modules, upstream.__name__, upstream)
+        autosaddler_runner.fix_clocks()
+        runs.append(read(upstream))
+
+    start = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    assert runs[0] == runs[1]
+    assert runs[0] == [
+        start,
+        1.0,
+        int((start + 2) * 1e9),
+        3_000_000_000,
+        4_000_000_000,
+        "2000-01-01T00:00:05",
+        "2000-01-01T00:00:06",
+        "2000-01-01T00:00:07+00:00",
+        8.0,
+    ]
+    assert time.monotonic() > 8.0
+
+
+def test_the_real_upstream_modules_hold_no_real_clock_after_the_patch(tmp_path: Path) -> None:
+    """After ``fix_clocks``, no pinned upstream module holds the real ``time``, ``datetime`` or a clock function.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    python = _upstream_python()
+    if python is None:
+        pytest.skip(f"set {_PYTHON_ENV} to a Python 3.12 interpreter with the pinned autosaddler package")
+    probe = (
+        "import datetime, importlib.util, sys, time\n"
+        "spec = importlib.util.spec_from_file_location('autosaddler_runner', sys.argv[1])\n"
+        "runner = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(runner)\n"
+        "runner.fix_clocks()\n"
+        "real = (time, datetime, datetime.datetime, time.time, time.monotonic, time.perf_counter, time.time_ns)\n"
+        "held = sorted(\n"
+        "    f'{name}.{key}' for name, module in sys.modules.items() if name.split('.')[0] == 'autosaddler'\n"
+        "    for key, value in vars(module).items() if any(value is clock for clock in real)\n"
+        ")\n"
+        "assert not held, held\n"
+    )
+    script = tmp_path / "probe.py"
+    script.write_text(probe, encoding="utf-8")
+
+    done = subprocess.run(
+        [python, "-s", "-P", str(script), autosaddler_runner.__file__],
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "LANG": "C.UTF-8", "PYTHONHASHSEED": "0"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+
+
+def test_tool_arguments_reach_the_next_prompt_with_sorted_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live reply and its replay from the step log can order the argument keys differently; the prompt is the same.
+
+    Args:
+        tmp_path: The process folder.
+        monkeypatch: Replaces the upstream outcome types.
+    """
+    _plain_outcomes(monkeypatch)
+    prompts = []
+    for arguments in ({"path": "a.txt", "content": "x"}, {"content": "x", "path": "a.txt"}):
+        workspace = tmp_path / str(len(prompts))
+        workspace.mkdir()
+        channel, writer = _channel(
+            {"text": "", "cost_cents": "1", "tool_calls": [{"id": "c1", "name": "write_file", "arguments": arguments}]},
+            {"text": "done", "cost_cents": "1", "tool_calls": []},
+        )
+        autosaddler_runner.StepTransport(channel, tmp_path, None, None).converse(workspace, "go")
+        prompts.append(_requests(writer)[1]["prompt"])
+
+    assert prompts[0] == prompts[1]
+    assert prompts[0][2]["tool_calls"][0]["function"]["arguments"] == '{"content": "x", "path": "a.txt"}'
+
+
+@pytest.mark.parametrize("arguments", ["{bad", "[1]", [1], None])
+def test_tool_arguments_that_are_no_json_object_reach_the_next_prompt_as_an_empty_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: Any
+) -> None:
+    """A provider adapter that parses earlier tool arguments must not fail on raw text in the history.
+
+    Args:
+        tmp_path: The process folder.
+        monkeypatch: Replaces the upstream outcome types.
+        arguments: The raw text of arguments that are no JSON object, or a value that is no object.
+    """
+    _plain_outcomes(monkeypatch)
+    channel, writer = _channel(
+        {"text": "", "cost_cents": "1", "tool_calls": [{"id": "c1", "name": "list_files", "arguments": arguments}]},
+        {"text": "done", "cost_cents": "1", "tool_calls": []},
+    )
+
+    autosaddler_runner.StepTransport(channel, tmp_path, None, None).converse(tmp_path, "go")
+
+    prompt = _requests(writer)[1]["prompt"]
+    assert prompt[2]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert prompt[3]["content"].startswith("Error: TypeError")
 
 
 def test_long_tool_output_says_what_was_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

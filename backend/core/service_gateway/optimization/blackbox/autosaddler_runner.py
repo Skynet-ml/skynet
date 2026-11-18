@@ -3,7 +3,7 @@
 The file has two modes. It imports no backend application code in either.
 
 - Worker mode (``--worker``, SKY-723). The worker starts this file with the
-  isolated AutoSaddler interpreter, as ``python -I``, so Skynet's own
+  isolated AutoSaddler interpreter, as ``python -s -P``, so Skynet's own
   ``autosaddler`` module can not shadow upstream's. The process holds no
   capability of its own: each model call, box command, tree read and tree
   write, and each evaluation is one request to the worker over this process's
@@ -56,7 +56,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -197,16 +197,19 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         call: The flat ``{"id", "name", "arguments"}`` call.
 
     Returns:
-        ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
+        ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON object text;
+        arguments that are no JSON object read as ``{}``.
     """
     arguments = call.get("arguments")
-    # Sorted keys give the same text for a live reply and for its replay from the step log.
     return {
         "id": call.get("id"),
         "type": "function",
         "function": {
             "name": call.get("name"),
-            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True),
+            # Sorted keys give the same text for a live reply and for its replay from the step log. A provider
+            # adapter can parse the arguments of each earlier call, so raw text that is no JSON object would fail
+            # every later call; only the tool's error result tells the model about it.
+            "arguments": json.dumps(arguments, sort_keys=True) if isinstance(arguments, dict) else "{}",
         },
     }
 
@@ -441,6 +444,10 @@ def open_channel() -> WorkerChannel:
 def seed_ids(seed: int = 0) -> None:
     """Make random values and ``uuid4`` ids the same in a run and in its resume.
 
+    Upstream's other random sources need no seed: its policies seed their own ``random.Random``, and its
+    ``tempfile`` names are for files that it renames at once, so they never reach a request. Upstream and this
+    runner do not use ``secrets``, ``os.urandom`` or ``uuid1``.
+
     Args:
         seed: The seed.
     """
@@ -470,12 +477,31 @@ def fix_clocks() -> None:
     a file that the box and the model see, where a scrub can not reach. Upstream reads the clock only for these
     records; session time limits are in this runner's transport. A git commit id also holds the commit time, so
     every commit, the runner's and upstream's, gets the fixed start as its time.
+
+    The patch replaces names in upstream's modules only, not in ``time`` itself: asyncio and the runner's own
+    waits read ``time.monotonic`` and need the real clock. Upstream imports all its clock users before this runs.
     """
     os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = _CLOCK_START.isoformat()
     ticks = itertools.count()
 
+    def seconds() -> float:
+        """Return the next counted second.
+
+        Returns:
+            The number of earlier clock reads.
+        """
+        return float(next(ticks))
+
+    def epoch() -> float:
+        """Return the next counted wall time.
+
+        Returns:
+            The fixed start as epoch seconds, plus one second for each earlier clock read.
+        """
+        return _CLOCK_START.timestamp() + next(ticks)
+
     class CountedDatetime(datetime):
-        """A ``datetime`` whose ``now`` counts one second for each call from a fixed start."""
+        """A ``datetime`` whose clock reads count one second for each call from a fixed start."""
 
         @classmethod
         def now(cls, tz: tzinfo | None = None) -> CountedDatetime:
@@ -487,18 +513,55 @@ def fix_clocks() -> None:
             Returns:
                 The fixed start plus one second for each earlier call.
             """
-            moment = cls.fromtimestamp((_CLOCK_START + timedelta(seconds=next(ticks))).timestamp(), tz or UTC)
+            moment = cls.fromtimestamp(epoch(), tz or UTC)
             return moment if tz is not None else moment.replace(tzinfo=None)
 
-    counted_time = SimpleNamespace(**{**vars(time), "monotonic": lambda: float(next(ticks))})
+        @classmethod
+        def utcnow(cls) -> CountedDatetime:
+            """Return the next counted time as a naive UTC time.
+
+            Returns:
+                The fixed start plus one second for each earlier call.
+            """
+            return cls.now()
+
+        @classmethod
+        def today(cls) -> CountedDatetime:
+            """Return the next counted time as a naive time.
+
+            Returns:
+                The fixed start plus one second for each earlier call.
+            """
+            return cls.now()
+
+    counted = {
+        time.time: epoch,
+        time.time_ns: lambda: int(epoch() * 1e9),
+        time.monotonic: seconds,
+        time.monotonic_ns: lambda: int(seconds() * 1e9),
+        time.perf_counter: seconds,
+        time.perf_counter_ns: lambda: int(seconds() * 1e9),
+    }
+    counted_time = SimpleNamespace(**{**vars(time), **{clock.__name__: tick for clock, tick in counted.items()}})
+    datetime_module = sys.modules[datetime.__module__]
+    counted_datetime_module = SimpleNamespace(**{**vars(datetime_module), "datetime": CountedDatetime})
     for name, module in list(sys.modules.items()):
         if name.split(".")[0] != "autosaddler":
             continue
         names = getattr(module, "__dict__", {})
-        if names.get("time") is time:
-            module.time = counted_time  # type: ignore[union-attr]
-        if names.get("datetime") is datetime:
-            module.datetime = CountedDatetime  # type: ignore[union-attr]
+        for key, value in list(names.items()):
+            if value is time:
+                setattr(module, key, counted_time)
+            elif value is datetime_module:
+                setattr(module, key, counted_datetime_module)
+            elif value is datetime:
+                setattr(module, key, CountedDatetime)
+            else:
+                # A ``from time import monotonic`` binds the clock itself. Identity, since a module value may not
+                # hash.
+                for clock, tick in counted.items():
+                    if value is clock:
+                        setattr(module, key, tick)
 
 
 def scrub(text: str, root: Path) -> str:
