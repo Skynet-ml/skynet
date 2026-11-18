@@ -96,7 +96,7 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
     if _too_deep(value):
         return None, True
     # The protocol gives valid JSON object arguments as a mapping, so the text bound above never sees them.
-    if isinstance(value, dict) and len(json.dumps(value, ensure_ascii=False)) > MAX_ARGUMENT_CHARS:
+    if isinstance(value, dict) and _refused_text(json.dumps(value, ensure_ascii=False)):
         return None, True
     return value, False
 
@@ -133,6 +133,25 @@ def refused_arguments(call: Mapping[str, Any], tool: str) -> str | None:
     return json.dumps({"error": error}, ensure_ascii=False)
 
 
+def _refused_text(text: str) -> bool:
+    """Tell whether the JSON text of parsed arguments breaks the length bound or is not valid UTF-8.
+
+    Args:
+        text: The arguments as JSON with no escapes.
+
+    Returns:
+        ``True`` when the text is too long or holds a lone surrogate.
+    """
+    if len(text) > MAX_ARGUMENT_CHARS:
+        return True
+    # ``json.loads`` turns an escaped lone surrogate into one, which no UTF-8 encode, box or prompt can take.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
 def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     """Give one flat tool call of the engine loop in the OpenAI form that the next prompt's history holds.
 
@@ -145,15 +164,19 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     value = call.get("arguments")
-    if not isinstance(value, str):
-        # Sorted keys give the same text for a live reply and for its replay from the step log. ``run_bash`` refuses
-        # arguments past the depth or length bound, so the transcript holds an empty object in their place. ``_parse``
-        # measures the arguments with no escapes, so Hebrew text does not count six characters a letter.
+    # ``run_bash`` refuses arguments past the depth or length bound or not valid UTF-8, so the transcript holds an
+    # empty object in their place.
+    if isinstance(value, str):
+        if _refused_text(value):
+            value = _REFUSED_ARGUMENTS
+    else:
+        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_parse`` measures
+        # the arguments with no escapes, so Hebrew text does not count six characters a letter.
         if _too_deep(value):
             value = _REFUSED_ARGUMENTS
         else:
             value = json.dumps(value, sort_keys=True, ensure_ascii=False)
-            if len(value) > MAX_ARGUMENT_CHARS:
+            if _refused_text(value):
                 value = _REFUSED_ARGUMENTS
     return {
         "id": call.get("id"),
@@ -315,7 +338,8 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     if call.get("name") != "bash" or not isinstance(command, str):
         # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
         return json.dumps({"error": misuse}, ensure_ascii=False), tree
-    if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
+    # ``_parse`` refuses a lone surrogate first; ``surrogatepass`` keeps this measure from ever raising.
+    if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
         error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
         return json.dumps({"error": error}, ensure_ascii=False), tree
     try:

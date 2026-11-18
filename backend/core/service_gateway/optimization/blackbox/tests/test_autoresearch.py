@@ -1648,3 +1648,52 @@ def test_a_stop_during_an_evaluate_step_ends_the_run(
 
     assert len(model.calls) == 2
     assert [kind for _, kind, _ in _steps(engine)] == ["model", "command", "model"]
+
+
+def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Text arguments with an escaped lone surrogate parse to a command that cannot encode, so it never runs.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    text = '{"command": "echo \\ud800"}'
+    bad: Turn = lambda n: {"id": "bad", "name": "bash", "arguments": text}  # noqa: E731
+    model = _Researcher([bad, *_ROUND])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop)
+
+    assert _tool_result(model, 1)["error"].startswith("Send the bash tool arguments as JSON")
+    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == text
+    assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
+    assert boxes.opened == 2
+
+
+def test_mapping_arguments_with_a_lone_surrogate_get_the_bound_error_and_an_empty_transcript() -> None:
+    """The step commit refuses such a reply first (SKY-821); the tool loop still refuses it with no crash."""
+    call = {"id": "bad", "name": "bash", "arguments": {"command": "echo \ud800"}}
+
+    def run_command(tree: str, command: str, env: Any) -> Any:
+        """Fail the test: a refused command must not run.
+
+        Args:
+            tree: Not used.
+            command: Not used.
+            env: Not used.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the command ran")
+
+    output, tree = loop_tools.run_bash(SimpleNamespace(run_command=run_command), "t", call, misuse="misuse")
+
+    assert json.loads(output)["error"].startswith("Send the bash tool arguments as JSON")
+    assert tree == "t"
+    assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
