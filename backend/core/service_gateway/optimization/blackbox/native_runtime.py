@@ -152,8 +152,10 @@ class NativeOptions:
     sandbox_runtime: SandboxRuntime | None = None
     # A repository run's packed tree: ``chunks`` (files on this machine),
     # ``editable_paths``, ``readonly_paths``, ``constrained`` (a
-    # constraints file governs the run) and ``proposer_hosts`` (what the
-    # proposer box may reach besides the relay).
+    # constraints file governs the run), ``proposer_hosts`` (what the
+    # proposer box may reach besides the relay), ``file_proposer`` (the
+    # proposer runs the file's ``[proposer] entry``) and ``proposer_setup``
+    # (the file's ``[proposer] setup`` argument list).
     repo: dict[str, Any] | None = None
     # ShinkaEvolve's evolution settings, and its optimization models in bandit
     # order: each ``{"model", "url", "token"}`` names one scoped gateway route.
@@ -1131,6 +1133,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         host_agent_token=(options.budget_route or {}).get(HOST_AGENT_TOKEN_KEY),
         reasoning_effort=options.reasoning_effort,
         mcp_servers=tuple(mcp_route.get("servers") or ()),
+        exact_commands=bool((options.repo or {}).get("file_proposer")),
     )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
@@ -1225,6 +1228,9 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 # The Shinka bundle refuses the model's opens and edits of these (E62).
                 "hidden_hashes": dict(options.repo.get("hidden_hashes") or {}),
             }
+            # The guest runs it once in its checkout, also in a protected run, where the bootstrap installs nothing.
+            if options.repo.get("proposer_setup"):
+                payload["repo"]["proposer_setup"] = list(options.repo["proposer_setup"])
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)
         session.write_files(

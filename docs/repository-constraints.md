@@ -93,13 +93,21 @@ empty part fails the setup check, and the message names the key.
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
 - `setup` without `entry` fails the setup check.
+- `setup` runs once in the repository, before the first proposer session,
+  also in a protected run. If it fails, the run stops, and the message names
+  the command and its output.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
-  working directory is the repository. It gets the task file path in
+  working directory is the repository. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
   `APP_MODEL`, the model relay in `APP_GATEWAY_URL` and the relay key in
-  `APP_API_KEY`. The files it changes are the new version.
-- `optimize.toml` is always protected, so no version can change its own
-  proposer command.
+  `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
+  other custom-harness placeholders stay plain text. The files it changes are
+  the new version.
+- The run record names the command in a note: "The run uses the proposer
+  command in the contract file: ...".
+- `optimize.toml` is always protected, but the entry script is not. Keep the
+  script outside `[paths] editable`, or list it in `[paths] protected`, so no
+  version can change its own proposer.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
   check, and the run's tool-call limit does not apply to your command.
 

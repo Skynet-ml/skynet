@@ -135,6 +135,21 @@ function MiniGrid({ rows }: { rows: ConfigRow[] }) {
 }
 
 /**
+ * The harness a run's proposer uses. A stored run omits a harness it did not
+ * choose (SKY-753), so this is Codex. Staging writes the contract file's
+ * command as "custom". Before staging, a repository run may still get that
+ * command, so it shows no harness yet.
+ */
+export function runProposerHarness(
+  proposer: Partial<BlackboxProposer> | null,
+  target: Partial<BlackboxTarget>,
+): string | null {
+  if (!proposer) return null;
+  if (proposer.harness) return proposer.harness;
+  return target.repo && !target.repo.environment ? null : "codex";
+}
+
+/**
  * The score that stops a run's search: `[outcome] target` from optimize.toml
  * (SKY-691), or the retired `budget.stop_at_score` that runs stored before it carry.
  */
@@ -170,6 +185,7 @@ export function BlackboxConfigCard({
   // A single ShinkaEvolve run has no coding-agent proposer; its proposer block
   // only carries the agent editor's tool-call cap.
   const shinkaRun = strategy.mode === "single" && strategy.engine === "shinka_evolve";
+  const proposerHarness = runProposerHarness(proposer, target);
   const reflectionCard = toModelCard(payload.reflection_model_config);
   const taskCard = toModelCard(payload.task_model_config);
   const scorerModelCard = toModelCard(scorer.model);
@@ -336,14 +352,14 @@ export function BlackboxConfigCard({
     value: String(calls),
     icon: <Wrench />,
   });
-  if (proposer?.harness && !shinkaRun) {
+  if (proposer && proposerHarness && !shinkaRun) {
     optimizationRows.push({
       label: (
         <HelpTip text={tip("submit.blackbox.proposer")}>
           {msg("submit.blackbox.review.proposer")}
         </HelpTip>
       ),
-      value: harnessLabel(proposer.harness),
+      value: harnessLabel(proposerHarness),
       icon: <Robot />,
     });
     if (proposer.max_candidates_per_iter != null) {

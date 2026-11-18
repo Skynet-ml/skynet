@@ -560,6 +560,44 @@ def test_the_proposer_gets_hidden_path_hashes_and_never_their_names(
     assert harness_bridge.guard_check(policy, "read", {"file_path": "src/app.py"}) is None
 
 
+def test_a_files_proposer_ships_its_setup_to_the_checkout_and_keeps_its_command_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protected run sends the file's setup to the guest's checkout, and no placeholder fills the entry (SKY-753).
+
+    The bootstrap skips install steps in a protected run, so the setup must
+    not depend on it.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture and gateway stop.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    repo: dict[str, Any] = {
+        "chunks": [],
+        "editable_paths": ["."],
+        "readonly_paths": [],
+        "file_proposer": True,
+        "proposer_setup": ["npm", "ci"],
+    }
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="custom", run_command="node agent.js {model}"),
+        budget_route={"url": "https://gateway.example/v1", "token": "scoped"},
+        repo=repo,
+    )
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    document = json.loads(session.files["native_input.json"])
+    assert document["repo"]["proposer_setup"] == ["npm", "ci"]
+    assert document["proposer"]["run_command"] == "node agent.js {model}"
+    assert "npm ci" not in session.calls[0][0]
+
+
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
 def test_repository_only_engines_refuse_a_text_run(tmp_path: Path, engine_id: str) -> None:
     """GEPA's and Best-of-N's agent samplers edit a checkout, so a text run never reaches them."""

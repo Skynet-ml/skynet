@@ -21,7 +21,7 @@ registerHooks({
 });
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { BlackboxConfigCard, runStopScore } = await import("./BlackboxConfig");
+const { BlackboxConfigCard, runProposerHarness, runStopScore } = await import("./BlackboxConfig");
 
 const job = { optimization_id: "run-1", status: "running" } as OptimizationStatusResponse;
 
@@ -46,6 +46,31 @@ void describe("BlackboxConfigCard sandbox row", () => {
     for (const payload of [{}, { sandbox_provider: null }, { sandbox_provider: "" }]) {
       assert.doesNotMatch(render(payload), /submit\.v2\.optimizer\.sandbox\.label/);
     }
+  });
+});
+
+void describe("runProposerHarness", () => {
+  const staged = {
+    kind: "repo",
+    repo: { repository: "o/r", editable_paths: ["."], environment: {} },
+  } as never;
+  const unstaged = { kind: "repo", repo: { repository: "o/r", editable_paths: ["."] } } as never;
+
+  void it("is Codex when the run chose no harness and no contract command applies", () => {
+    assert.equal(runProposerHarness({ max_tool_calls: 5 }, {}), "codex");
+    assert.equal(runProposerHarness({ max_tool_calls: 5 }, staged), "codex");
+  });
+
+  void it("keeps the custom harness that staging wrote from the contract file", () => {
+    assert.equal(
+      runProposerHarness({ harness: "custom", run_command: "node agent.js" }, staged),
+      "custom",
+    );
+  });
+
+  void it("is none for a repository run that staging has not read yet, or with no proposer", () => {
+    assert.equal(runProposerHarness({}, unstaged), null);
+    assert.equal(runProposerHarness(null, {}), null);
   });
 });
 

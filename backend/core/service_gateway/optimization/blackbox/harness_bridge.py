@@ -41,6 +41,8 @@ KEY_ENV = "APP_API_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
 KEY_TOKEN = "__APP_API_KEY__"
+# The open standard's name for the task file; a custom command reads it (SKY-753).
+TASK_ENV = "ASCENT_TASK"
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
@@ -359,6 +361,35 @@ def workspace_files(proposer: dict[str, Any]) -> list[str]:
     if instructions and instructions != "CLAUDE.md":
         paths.append(str(instructions))
     return paths
+
+
+def run_setup(command: list[str], checkout: Path) -> None:
+    """Run the contract file's ``[proposer] setup`` once, in the repository checkout.
+
+    Args:
+        command: The exact argument list from ``optimize.toml``.
+        checkout: The unpacked repository the proposer works on.
+
+    Raises:
+        RuntimeError: When the command cannot start or exits with an error,
+            so the run stops before its first session.
+    """
+    label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
+    try:
+        done = subprocess.run(
+            command,
+            cwd=checkout,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise RuntimeError(f"{label} could not start: {error}") from error
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout).strip()[-2000:]
+        raise RuntimeError(f"{label} failed with exit code {done.returncode}: {detail}")
 
 
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
@@ -1447,6 +1478,7 @@ def run_session(
         ("SESSION_DIR", str(session_dir)),
     ):
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
+    env[TASK_ENV] = str(prompt_file.resolve())
     shell = shutil.which("bash") or "/bin/sh"
     command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
     if sys.platform == "linux" and sys.executable:

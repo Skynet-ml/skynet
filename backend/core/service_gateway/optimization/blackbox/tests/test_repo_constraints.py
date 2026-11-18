@@ -162,12 +162,12 @@ def test_a_contract_without_the_proposer_keys_keeps_the_runners_own_agent() -> N
 
 
 def test_the_file_proposer_applies_when_the_run_names_none() -> None:
-    """A run with no proposer of its own uses the file's command."""
+    """A run with no proposer of its own uses the file's command, and its record names it."""
     environment = effective_environment(parse_constraints(_OWN_PROPOSER), approved_editable=["."], approved_setup=None)
 
     assert environment.proposer_entry == ("node", "my agent.js")
     assert environment.proposer_setup == ("npm", "ci")
-    assert environment.notes == ()
+    assert environment.notes == ("The run uses the proposer command in the contract file: node 'my agent.js'",)
 
 
 def test_the_runs_own_proposer_wins_and_says_so() -> None:

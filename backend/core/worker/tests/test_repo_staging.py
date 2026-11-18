@@ -6,7 +6,6 @@ import dataclasses
 import hashlib
 import io
 import json
-import os
 import re
 import subprocess
 import sys
@@ -40,8 +39,8 @@ from core.i18n_keys import I18nKey
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxRunRequest, BlackboxTarget
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import runner
-from core.service_gateway.optimization.blackbox.harness import PROMPT_FILE, GatewayConfig, build_launch
+from core.service_gateway.optimization.blackbox import harness_bridge, runner
+from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -373,25 +372,30 @@ def test_staging_refuses_a_file_that_asks_for_more(
     assert not workdirs[0].exists()
 
 
-# The fake proposer writes the task it read where a version change would go; its setup leaves a marker.
+# The fake proposer writes the task file path, the task and its own arguments
+# where a version change would go; its setup appends one line each time it runs.
 _FAKE_AGENT = """
-import os, pathlib
+import os, pathlib, sys
 pathlib.Path("src").mkdir(exist_ok=True)
-task = pathlib.Path(os.environ["ASCENT_TASK"]).read_text()
-pathlib.Path("src/proposed.txt").write_text(os.environ["APP_MODEL"] + ":" + task)
+task = pathlib.Path(os.environ["ASCENT_TASK"])
+pathlib.Path("src/proposed.txt").write_text("\\n".join([str(task), task.read_text(), *sys.argv[1:]]))
 """
-_FAKE_SETUP = 'import pathlib; pathlib.Path("setup-ran").write_text("yes")'
+_FAKE_SETUP = 'import pathlib; open(pathlib.Path("setup-ran"), "a").write("ran\\n")'
 
 
 def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A request with no proposer gets the file's command as the custom proposer, and that command runs (SKY-753)."""
+    """A request with no proposer runs the file's setup once in the checkout, then its entry (SKY-753).
+
+    The run is protected, as every hosted run is: its bootstrap installs
+    nothing, so the setup reaches the guest through the repository payload.
+    """
     files = {
         "optimize.toml": (
             "version = 1\n[proposer]\n"
             f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
-            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py"]\n'
+            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
         ),
         "agent/fake.py": _FAKE_AGENT,
     }
@@ -410,8 +414,13 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     staged.cleanup()
 
     proposer = BlackboxRunRequest.model_validate(staged_payload).proposer
+    snapshot = staged_payload[repo_staging.REPO_SNAPSHOT_KEY]
     assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
-    assert staged_payload["target"]["repo"]["environment"]["notes"] == []
+    assert proposer.install_command is None
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'"
+    ]
+    # The launch as native_runtime builds it for a protected run.
     launch = build_launch(
         BlackboxTarget(
             kind="agent",
@@ -420,19 +429,38 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
             install_command=proposer.install_command,
             run_command=proposer.run_command,
         ),
-        GatewayConfig(url="https://gw.example/v1", api_key="k"),
+        GatewayConfig(url="https://gw.example/v1", api_key=harness_bridge.KEY_TOKEN),
+        protected=True,
+        exact_commands=snapshot["file_proposer"],
     )
-    (tmp_path / "agent").mkdir()
-    (tmp_path / "agent/fake.py").write_text(_FAKE_AGENT)
-    (tmp_path / PROMPT_FILE).parent.mkdir(parents=True)
-    (tmp_path / PROMPT_FILE).write_text("Make it faster.")
-    env = {**os.environ, **launch.env}
-    for command in (launch.install_command, launch.run_command):
-        assert command is not None
-        subprocess.run(command, shell=True, cwd=tmp_path, env=env, check=True)
+    checkout = tmp_path / "repo-checkout"
+    (checkout / "agent").mkdir(parents=True)
+    (checkout / "agent/fake.py").write_text(_FAKE_AGENT)
+    harness_bridge.run_setup(snapshot["proposer_setup"], checkout)
+    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
+    outcome = harness_bridge.run_session(
+        launch_payload(launch),
+        workspace=checkout,
+        prompt="Make it faster.",
+        model="openai/task",
+        session_dir=tmp_path / "session",
+    )
 
-    assert (tmp_path / "setup-ran").read_text() == "yes"
-    assert (tmp_path / "src/proposed.txt").read_text() == "openai/task:Make it faster."
+    assert outcome.returncode == 0, outcome.stderr
+    assert (checkout / "setup-ran").read_text() == "ran\n"
+    task_file, task, *arguments = (checkout / "src/proposed.txt").read_text().split("\n")
+    assert Path(task_file).is_absolute()
+    assert Path(task_file).is_file()
+    assert task == "Make it faster."
+    assert arguments == ["{model}"]
+
+
+def test_a_failing_files_setup_stops_the_run_with_its_command(tmp_path: Path) -> None:
+    """A setup that exits with an error names the file's command and its output."""
+    command = [sys.executable, "-c", "import sys; sys.exit('no lockfile')"]
+
+    with pytest.raises(RuntimeError, match=r"\[proposer\] setup command in optimize.toml .* exit code 1: no lockfile"):
+        harness_bridge.run_setup(command, tmp_path)
 
 
 def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,6 +475,25 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run's own proposer replaces the one in the contract file."
     ]
+
+
+@pytest.mark.parametrize("proposer", [{"run_command": "my-agent"}, {"install_command": "npm ci"}])
+def test_a_run_command_or_install_command_is_the_runs_own_proposer(
+    proposer: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request with its own run or install command but no harness keeps it over the file's command.
+
+    Args:
+        proposer: The request's proposer, without a harness.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
+    staged.cleanup()
+
+    assert staged_payload["proposer"] == proposer
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
 
 
 def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:

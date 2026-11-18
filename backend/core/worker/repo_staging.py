@@ -508,7 +508,8 @@ def stage_repository(
             **(result.get("proposer") or {}),
             "harness": BLACKBOX_HARNESS_CUSTOM,
             "run_command": shlex.join(environment.proposer_entry),
-            "install_command": shlex.join(environment.proposer_setup) if environment.proposer_setup else None,
+            # The guest runs the file's setup in its checkout (``proposer_setup`` below), not in the bootstrap.
+            "install_command": None,
         }
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
@@ -527,6 +528,8 @@ def stage_repository(
         # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
         "hidden_hashes": hidden_hashes(hidden),
         "outcome": record["outcome"],
+        "file_proposer": environment.proposer_entry is not None,
+        "proposer_setup": list(environment.proposer_setup or ()),
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -578,16 +581,21 @@ def _names_proposer(payload: Mapping[str, Any]) -> bool:
 
     The stored request keeps ``proposer.harness`` only when the client sent
     it (SKY-753), so a default does not replace ``[proposer] entry``. A host
-    CLI is the user's own choice too.
+    CLI, a run command and an install command are the user's own choice too.
 
     Args:
         payload: The stored run request.
 
     Returns:
-        True when the request sends ``proposer.harness`` or a host CLI.
+        True when the request sends ``proposer.harness``, a host CLI, a run
+        command or an install command.
     """
     proposer = payload.get("proposer")
-    return isinstance(proposer, dict) and ("harness" in proposer or proposer.get("host_cli") is not None)
+    return isinstance(proposer, dict) and (
+        "harness" in proposer
+        or proposer.get("host_cli") is not None
+        or bool(proposer.get("run_command") or proposer.get("install_command"))
+    )
 
 
 def _role_hosts(role: RoleEnvironment | None) -> tuple[str, ...]:

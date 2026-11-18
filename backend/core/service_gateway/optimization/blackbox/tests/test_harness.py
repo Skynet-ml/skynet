@@ -410,6 +410,16 @@ def test_custom_launch_names_the_task_file_and_keeps_the_model_variables() -> No
     assert launch.env["APP_API_KEY"] == "secret-key"
 
 
+def test_exact_custom_commands_keep_their_placeholders_as_text() -> None:
+    """A contract file's command is an exact argument list, so no placeholder fills it (SKY-753)."""
+    target = _target(BLACKBOX_HARNESS_CUSTOM, run_command="agent '{model}' {api_key}", install_command="setup {model}")
+
+    launch = build_launch(target, _GATEWAY, exact_commands=True)
+
+    assert launch.run_command == "agent '{model}' {api_key}"
+    assert launch.install_command == "setup {model}"
+
+
 def test_custom_launch_fills_placeholders() -> None:
     """A custom harness substitutes the model/gateway/file placeholders into its commands."""
     target = _target(

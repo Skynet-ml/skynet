@@ -1312,6 +1312,8 @@ def _run_job(
                     "constrained": bool(repo_snapshot.get("constrained")),
                     "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
                     "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
+                    "file_proposer": bool(repo_snapshot.get("file_proposer")),
+                    "proposer_setup": list(repo_snapshot.get("proposer_setup") or ()),
                 }
                 if target.repo is not None and repo_snapshot is not None
                 else None

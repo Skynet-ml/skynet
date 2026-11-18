@@ -358,6 +358,7 @@ def build_launch(
     host_agent_token: str | None = None,
     reasoning_effort: str | None = None,
     mcp_servers: tuple[str, ...] = (),
+    exact_commands: bool = False,
 ) -> HarnessLaunch:
     """Resolve the launch for a job's target: catalog harness or custom command.
 
@@ -374,6 +375,10 @@ def build_launch(
         reasoning_effort: The proposer model's effort level. Catalog harnesses apply it;
             a custom harness reads it from :data:`ENV_REASONING_EFFORT`.
         mcp_servers: The ``[proposer]`` MCP server names the box's proxy relays.
+        exact_commands: Keep a custom harness's commands as they are, with no
+            placeholder substitution. The ``[proposer] entry`` of a contract
+            file is an exact argument list, and its values come through the
+            environment (SKY-753).
 
     Returns:
         The launch.
@@ -392,7 +397,11 @@ def build_launch(
     if host_cli is not None:
         return host_cli_launch(model, gateway, host_cli, host_agent_token)
     if target.harness == BLACKBOX_HARNESS_CUSTOM:
-        run_command = _fill(target.run_command, model, gateway, protected=protected)
+        if exact_commands:
+            run_command, install_command = target.run_command or None, target.install_command or None
+        else:
+            run_command = _fill(target.run_command, model, gateway, protected=protected)
+            install_command = _fill(target.install_command, model, gateway, protected=protected)
         if run_command is None:
             raise ServiceError("A custom harness needs a run_command.")
         env = _base_env(model, gateway) | {ENV_TASK_FILE: PROMPT_FILE}
@@ -400,7 +409,7 @@ def build_launch(
             env.update(with_legacy_env({ENV_REASONING_EFFORT: reasoning_effort}))
         return HarnessLaunch(
             instructions_file="AGENTS.md",
-            install_command=_fill(target.install_command, model, gateway, protected=protected),
+            install_command=install_command,
             run_command=run_command,
             env=env,
             parse_output=parse_plain_output,

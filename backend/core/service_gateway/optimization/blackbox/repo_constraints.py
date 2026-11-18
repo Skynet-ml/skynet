@@ -55,6 +55,7 @@ import json
 import math
 import posixpath
 import re
+import shlex
 import socket
 import tarfile
 import tomllib
@@ -2193,6 +2194,11 @@ def effective_environment(
     use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
     if constraints.proposer_entry is not None and approved_proposer:
         notes.append("The run's own proposer replaces the one in the contract file.")
+    elif use_file_proposer:
+        # The run record has no proposer field, so this note is how the run detail names the proposer.
+        notes.append(
+            f"The run uses the proposer command in the contract file: {shlex.join(constraints.proposer_entry)}"
+        )
     return RepoEnvironment(
         editable_paths=editable,
         protected_paths=protected,

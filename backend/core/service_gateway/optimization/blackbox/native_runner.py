@@ -689,6 +689,8 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if repo is not None:
         checkout = repo_tree.unpack_tree((Path(chunk) for chunk in repo["chunks"]), Path("repo-checkout").resolve())
         repo_tree.exclude_paths(checkout, harness_bridge.workspace_files(proposer))
+        if repo.get("proposer_setup"):
+            harness_bridge.run_setup(list(repo["proposer_setup"]), checkout)
         config_values["repo"] = {
             "checkout": str(checkout),
             "base": repo_tree.BASE_REF,
