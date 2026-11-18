@@ -117,7 +117,9 @@ def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: 
 
     Every cancel that applies frees the budget holds of work that never
     started. A parked leg leaves such holds, and neither the wake nor a later
-    path frees them, so the cancel does it whatever status it read.
+    path frees them, so the cancel does it whatever status it read. It reads
+    the budget generation from the row after the write, because a resume can
+    fence a new generation before the write.
 
     Args:
         job_store: The active job store.
@@ -150,12 +152,16 @@ def _cancel_run(job_store: Any, optimization_id: str, job: dict[str, Any], now: 
             break
     if cancelled and job.get("execution_budget_id") is not None:
         try:
-            # The generation guard leaves the holds of a newer epoch alone, for
-            # example when a resume fenced the budget before this cancel.
+            # A manual resume between the first stop and the write fences a new
+            # generation and reopens admission, so the generation in ``job`` is
+            # stale. The row is cancelled now, so its current generation's
+            # unstarted holds belong to no worker.
+            generation = int((job_store.get_job(optimization_id) or {}).get("execution_budget_generation") or 0)
+            if generation != int(job.get("execution_budget_generation") or 0):
+                # Without this stop the close names the reopened budget ``job_failed``.
+                _stop_budget_admission(job_store, job, "user_cancelled")
             BudgetService(engine=job_store.engine).close_for_failed_job(
-                job["execution_budget_id"],
-                job["username"],
-                expected_generation=int(job.get("execution_budget_generation") or 0),
+                job["execution_budget_id"], job["username"], expected_generation=generation
             )
         except Exception:  # isolation boundary: the run is already cancelled, so the cancel still succeeds
             logger.exception(
