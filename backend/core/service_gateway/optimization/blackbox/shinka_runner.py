@@ -1735,7 +1735,7 @@ class AgentEditor:
                 continue
         files = bundle.normalize(files)
         if files == bundle.normalize(parent):
-            raise ValueError("The agent left every file as it was.")
+            raise ValueError("The proposer left every file as it was.")
         touched = sorted(set(parent) | set(files))
         patch = "".join(
             shinka_bundle.file_diff(path, bundle.current(parent, path), bundle.current(files, path)) for path in touched
@@ -1821,21 +1821,20 @@ class CommandEditor(AgentEditor):
         try:
             # git check-ignore fails on a path outside the checkout, and its message names the worker's scratch
             # folder. Refuse such paths first, with a message that names only the path.
-            for path in files:
-                checked_target(workspace, path)
+            targets = {path: checked_target(workspace, path) for path in files}
+            # The version's own ``.gitignore`` files decide what ``git add --all`` keeps, so the files are written
+            # before the ignore check, and the check and ``_collect`` read the same rules.
+            for path, text in files.items():
+                targets[path].parent.mkdir(parents=True, exist_ok=True)
+                targets[path].write_text(text, encoding="utf-8")
             # The command's tree holds its ignored output too, such as ``.pytest_cache``. An agent session's
             # ``git add`` leaves those out, so the rules must not refuse the version for them.
             ignored = _ignored_paths(workspace, list(files))
-            files = {path: text for path, text in files.items() if path not in ignored}
             for path in files:
-                problem = self.bundle.rule_problem(path)
+                problem = None if path in ignored else self.bundle.rule_problem(path)
                 if problem is not None:
                     report["error"] = self.bundle.refusal(path, problem)
                     return report
-            for path, text in files.items():
-                target = checked_target(workspace, path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text, encoding="utf-8")
             code, patch, changed = self._collect(parent_code, workspace)
         except ValueError as exc:
             report["error"] = str(exc)

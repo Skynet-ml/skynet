@@ -435,6 +435,8 @@ class EngineContext:
     put_files: PutFiles | None = None
     read_file: Callable[[str, str], bytes | None] | None = None
     list_files: ListFiles | None = None
+    # The content id of each visible file of a tree, by path; equal ids mean equal bytes.
+    file_ids: Callable[[str], dict[str, str]] | None = None
     repo_seed: RepoSeed | None = None
 
 

@@ -194,7 +194,7 @@ class ShinkaEvolveEngine:
                 )
             # The box may reach only a model route on the user's own key (BYOK), never the deployment's key. A
             # BYOK budget route listens on the worker's loopback gateway, which no box reaches, and the route
-            # does not name its charge policy. Until SKY-728 brings a metered relay, every run refuses (SKY-815).
+            # does not name its charge policy. So every run refuses; SKY-828 lifts this after SKY-728 (SKY-815).
             raise ServiceError(
                 "ShinkaEvolve cannot give the [proposer] entry command a model route on your own key yet. "
                 "Choose another engine, or remove [proposer] entry from optimize.toml."
@@ -553,7 +553,7 @@ class _Proposer:
         """
         repo = options.repo
         entry = (getattr(options.proposer, "run_command", None) or "").strip()
-        if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files) or not entry:
+        if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.file_ids) or not entry:
             raise ServiceError("ShinkaEvolve needs the engine loop's boxes and a command to run [proposer] entry.")
         assert ctx.repo_seed is not None
         self.ctx = ctx
@@ -562,14 +562,14 @@ class _Proposer:
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
         # The run's gateway holds the deployment's managed key, so the box gets no grant or address for it. A
-        # model route on the user's own key needs SKY-728's metered relay; the engine refuses the command until then.
+        # model route on the user's own key needs a metered relay; the engine refuses the command until SKY-828.
         self.grants = tuple(Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host)
         # The same name the managed proposer box sets (docs/repository-constraints.md).
         self.exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
         self.seed = ctx.repo_seed.tree_id
         self.base: str | None = None
-        self.seed_paths: set[str] = set()
-        self.base_paths: set[str] = set()
+        self.seed_ids: dict[str, str] = {}
+        self.base_ids: dict[str, str] = {}
 
     def propose(self, files: dict[str, str], task: str) -> dict[str, Any]:
         """Run the command once over the parent's tree, and return the version it leaves.
@@ -615,7 +615,7 @@ class _Proposer:
             return {"error": f"The [proposer] entry command left no usable version: {exc}"}
         if result.timed_out or result.exit_code != 0:
             return {"error": _command_failure("[proposer] entry", result)}
-        return {"files": self._version(after, files)}
+        return {"files": self._version(after, parent, files)}
 
     def _setup(self) -> str:
         """Run ``[proposer] setup`` once over the seed tree, before the first session, as SKY-753 does.
@@ -624,49 +624,61 @@ class _Proposer:
             The tree every session starts from: the seed, with the setup's output when the file names a setup.
 
         Raises:
-            ServiceError: When the setup command fails.
+            ServiceError: When the setup command fails, or changes or removes a file of the seed.
         """
         assert self.ctx.run_command is not None
-        assert self.ctx.list_files is not None
-        self.seed_paths = set(self.ctx.list_files(self.seed) or ())
+        assert self.ctx.file_ids is not None
+        self.seed_ids = self.ctx.file_ids(self.seed)
         if not self.setup:
-            self.base_paths = self.seed_paths
+            self.base_ids = self.seed_ids
             return self.seed
+        name = f"[proposer] setup command in optimize.toml ({shlex.join(self.setup)})"
         result, tree = self.ctx.run_command(self.seed, "\n".join([*self.exports, shlex.join(self.setup)]), self.grants)
         if result.timed_out or result.exit_code != 0:
+            raise ServiceError(_command_failure(name, result))
+        self.base_ids = self.ctx.file_ids(tree)
+        # Every session starts from the setup's tree, so a seed file it changed would enter every version.
+        changed = sorted(path for path, oid in self.seed_ids.items() if self.base_ids.get(path) != oid)
+        if changed:
             raise ServiceError(
-                _command_failure(f"[proposer] setup command in optimize.toml ({shlex.join(self.setup)})", result)
+                f"The {name} changed or removed files of the repository: {', '.join(changed)}."
+                " Those changes would enter every version. Make the setup write only new files."
             )
-        self.base_paths = set(self.ctx.list_files(tree) or ())
         return tree
 
-    def _version(self, after: str, parent: dict[str, str]) -> dict[str, str]:
+    def _version(self, after: str, parent_tree: str, parent: dict[str, str]) -> dict[str, str]:
         """Read the files of the command's tree that make up the new version.
 
         A version holds the text files that differ from the seed, as an agent session's workspace does. The
-        setup's own output and the task file are not part of it.
+        setup's own output and the task file are not part of it. The content ids tell which files the command
+        changed, so only those are read.
 
         Args:
             after: The tree the command left.
+            parent_tree: The tree the command started from.
             parent: The parent's files that differ from the seed.
 
         Returns:
             The version's files by path.
         """
-        assert self.ctx.list_files is not None
+        assert self.ctx.file_ids is not None
         assert self.ctx.read_file is not None
-        assert self.base is not None
+        parent_ids = self.ctx.file_ids(parent_tree)
         version: dict[str, str] = {}
-        for path in self.ctx.list_files(after) or ():
-            setup_output = path in self.base_paths and path not in self.seed_paths
+        for path, oid in self.ctx.file_ids(after).items():
+            setup_output = path in self.base_ids and path not in self.seed_ids
             # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
             git_part = any(part.lower() == ".git" for part in path.split("/"))
             if git_part or path == _TASK_PATH or (setup_output and path not in parent):
                 continue
+            if path in parent and parent_ids.get(path) == oid:
+                version[path] = parent[path]
+                continue
+            if path not in parent and self.base_ids.get(path) == oid:
+                continue
+            # The tree entry has no size, so the limit is checked on the bytes.
             data = self.ctx.read_file(after, path)
             if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:
-                continue
-            if path not in parent and path in self.base_paths and data == self.ctx.read_file(self.base, path):
                 continue
             try:
                 version[path] = data.decode("utf-8")

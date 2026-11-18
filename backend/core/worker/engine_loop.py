@@ -61,10 +61,11 @@ definitions and gives a :class:`ModelReply` with the text, the tool calls and
 the cost; the tools are part of the prompt hash that a replay matches.
 :meth:`EngineLoop.model` is the same call with no tools, and gives only the
 text. :meth:`EngineLoop.put_files`, :meth:`EngineLoop.read_file` and
-:meth:`EngineLoop.list_files` write, read and list trees with no box. A tree
+:meth:`EngineLoop.list_files` write, read and list trees with no box, and
+:meth:`EngineLoop.file_ids` gives the content id of each file. A tree
 write is no step: a tree id is the hash of its content, so a resume that
 writes the same files gets the same tree. The loop gets the run's hidden-path
-hashes once, when it is built, and ``read_file``, ``list_files`` and every
+hashes once, when it is built, and ``read_file``, ``list_files``, ``file_ids`` and every
 candidate box leave those paths out; no caller can turn that off. The loop
 always hides ``.optimize/exploits`` the same way, as the native runtime hides
 the exploit suite from the proposer. A tree with a symlink at a hidden path,
@@ -375,7 +376,7 @@ class EngineLoop:
         """Return the engine context of the loop: each model call and each command commits a step.
 
         Concurrency is 1: a step's place in the log must not depend on thread timing. ``read_file``,
-        ``list_files`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does. The
+        ``list_files``, ``file_ids`` and ``run_command`` leave out the loop's hidden paths, as :meth:`server` does. The
         context's ``repo_seed`` names the seed tree without its hidden paths, and keeps the seed's path rules.
 
         Args:
@@ -412,6 +413,7 @@ class EngineLoop:
                 put_files=self.put_files,
                 read_file=self.read_file,
                 list_files=self.list_files,
+                file_ids=self.file_ids,
                 **fields,
             )
 
@@ -673,6 +675,27 @@ class EngineLoop:
                 return None
             files = self._files(folder, prefix)
             return sorted(name for name in files if hashed_kind(self._hidden, name) is None)
+
+    def file_ids(self, tree_id: str) -> dict[str, str]:
+        """Map each file of a tree to its content id with no box, and leave out the paths that the loop hides.
+
+        Two files with the same content id have the same bytes, so a caller can find the changed files of two trees
+        without reading a blob.
+
+        Args:
+            tree_id: The tree.
+
+        Returns:
+            The content id of each file and executable, by ``/``-separated path from the tree's root.
+
+        Raises:
+            LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
+                :meth:`_check_links` tells; the loop keeps it.
+            LookupError: When the run cannot see the tree or one of its folders.
+        """
+        with self._stops():
+            self._check_links(tree_id)
+            return {path: oid for path, oid in self._file_ids(tree_id, "") if hashed_kind(self._hidden, path) is None}
 
     def remaining_cost_usd(self) -> float:
         """Read the run budget's room, and commit it as one step with no cost and no box.
@@ -1202,6 +1225,25 @@ class EngineLoop:
                 yield from self._files(entry.object_id, f"{prefix}{name}/")
             elif entry.mode in {"file", "exec"}:
                 yield f"{prefix}{name}"
+
+    def _file_ids(self, tree_id: str, prefix: str) -> Iterator[tuple[str, str]]:
+        """Give the path and content id of each file and executable in a folder, at any depth.
+
+        Args:
+            tree_id: The folder's tree id.
+            prefix: The folder's path from the tree's root, with a trailing ``/``, or ``""`` for the root.
+
+        Yields:
+            Each file path from the tree's root, with its content id.
+
+        Raises:
+            LookupError: When the run cannot see the folder or one below it.
+        """
+        for name, entry in self._entries(tree_id).items():
+            if entry.mode == "tree":
+                yield from self._file_ids(entry.object_id, f"{prefix}{name}/")
+            elif entry.mode in {"file", "exec"}:
+                yield f"{prefix}{name}", entry.object_id
 
     def _put_tree(self, tree_id: str | None, files: Mapping[tuple[str, ...], bytes], prefix: str = "") -> str:
         """Write files over one tree level, and each changed folder below it.

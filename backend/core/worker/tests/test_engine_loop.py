@@ -1773,6 +1773,25 @@ def test_list_files_lists_a_folder_and_gives_none_for_a_path_that_is_not_a_folde
     assert boxes.opened == 0
 
 
+def test_file_ids_give_equal_ids_for_equal_bytes_and_leave_out_hidden_paths(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The content ids tell changed files apart with no read, no step and no box, and hide what the loop hides."""
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval/"]))
+    tree = _store(trees, {"eval/metric.py": b"m", "src/a.py": b"a", "src/lib/b.py": b"b", ".optimize/exploits/x": b"x"})
+    ctx = loop.context()
+    assert ctx.file_ids is not None
+    after = loop.put_files({"src/a.py": b"changed"}, tree)
+
+    before_ids, after_ids = ctx.file_ids(tree), ctx.file_ids(after)
+
+    assert sorted(before_ids) == sorted(after_ids) == ["src/a.py", "src/lib/b.py"]
+    assert before_ids["src/lib/b.py"] == after_ids["src/lib/b.py"]
+    assert before_ids["src/a.py"] != after_ids["src/a.py"]
+    assert _steps(engine) == []
+    assert boxes.opened == 0
+
+
 def test_the_context_hides_the_hidden_paths_of_the_seed(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

@@ -14,6 +14,7 @@ import io
 import json
 import os
 import resource
+import shlex
 import signal
 import stat
 import sys
@@ -24,6 +25,7 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -2330,6 +2332,119 @@ def test_a_failed_proposer_command_is_a_failed_mutation_and_a_failed_setup_stops
         requests.line('APP_NATIVE_RPC n {"id": "2", "kind": "propose", "files": {"a": 1}, "task": "t"}', io.StringIO())
 
 
+def test_a_setup_that_changes_or_removes_a_seed_file_stops_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Stop the run and name the files when ``[proposer] setup`` changes or removes a seed file (SKY-815).
+
+    Every session starts from the setup's tree, so the change would enter every version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n", "kept.py": b"k\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    setup = ["sh", "-c", "printf x > main.py && rm other.py && printf new > new.txt"]
+    proposer = shinka_evolve._Proposer(ctx, _proposer_options("true", setup=setup))
+
+    with pytest.raises(ServiceError) as stopped:
+        proposer.propose({}, "task")
+
+    assert str(stopped.value) == (
+        f"The [proposer] setup command in optimize.toml ({shlex.join(setup)}) changed or removed files of the"
+        " repository: main.py, other.py. Those changes would enter every version. Make the setup write only new"
+        " files."
+    )
+
+
+def test_a_version_reads_only_the_files_the_command_changed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Compare content ids, and read no file that the command left as the parent or the setup had it (SKY-815).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    assert ctx.read_file is not None
+    real_read = ctx.read_file
+    reads: list[str] = []
+
+    def read_file(tree_id: str, path: str) -> bytes | None:
+        """Record each read and pass it on.
+
+        Args:
+            tree_id: The tree.
+            path: The file.
+
+        Returns:
+            The file bytes.
+        """
+        reads.append(path)
+        return real_read(tree_id, path)
+
+    ctx = replace(ctx, read_file=read_file)
+    options = _proposer_options("printf 'new\\n' > new.py", setup=["sh", "-c", "printf built > .cache.txt"])
+    proposer = shinka_evolve._Proposer(ctx, options)
+
+    files = proposer.propose({"main.py": "parent\n", "kept.py": "k\n"}, "task")
+
+    assert files == {"files": {"main.py": "parent\n", "kept.py": "k\n", "new.py": "new\n"}}
+    assert reads == ["new.py"]
+
+
+def _failed_command(tmp_path: Path, result: SimpleNamespace) -> dict[str, Any]:
+    """Run one proposal whose fake command gives the result.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        result: The command's result.
+
+    Returns:
+        The proposal's reply.
+    """
+    options = _proposer_options("node agent.js")
+    ctx = _box_context(options, tmp_path, run_command=lambda *args: (result, "after"))
+    return shinka_evolve._Proposer(ctx, options).propose({"main.py": "parent\n"}, "task")
+
+
+def test_a_command_that_runs_out_of_time_is_a_failed_mutation_also_with_exit_code_0(tmp_path: Path) -> None:
+    """Fail the mutation of a command that ran out of time, whatever its exit code (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    result = SimpleNamespace(timed_out=True, exit_code=0, stderr="", stdout="")
+
+    assert _failed_command(tmp_path, result) == {"error": "The [proposer] entry ran out of time."}
+
+
+def test_a_failed_command_keeps_the_end_of_a_long_stderr(tmp_path: Path) -> None:
+    """Keep the end of the command's stderr, where the error is, in the mutation's error (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    stderr = "START" + "x" * (shinka_evolve._COMMAND_ERROR_CHARS * 2) + "END"
+    result = SimpleNamespace(timed_out=False, exit_code=1, stderr=stderr, stdout="")
+
+    error = _failed_command(tmp_path, result)["error"]
+
+    assert error.endswith("xEND")
+    assert "START" not in error
+
+
 def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2415,7 +2530,7 @@ def test_a_file_proposer_is_refused_on_every_route(
 ) -> None:
     """Refuse the ``[proposer] entry`` command on BYOK, managed and routeless runs alike (SKY-815).
 
-    No run can give the box a model route on the user's own key until SKY-728's metered relay, and the box must
+    No run can give the box a model route on the user's own key until a metered relay (SKY-828), and the box must
     never reach the deployment's key.
 
     Args:
@@ -2468,6 +2583,7 @@ def _box_context(options: SimpleNamespace, tmp_path: Path, **fields: object) -> 
         put_files=lambda *args: "parent",  # type: ignore[arg-type,return-value]
         read_file=lambda *args: None,
         list_files=lambda *args: [],
+        file_ids=lambda *args: {},
         repo_seed=RepoSeed("tree"),
     )
     return replace(ctx, **fields)  # type: ignore[arg-type]

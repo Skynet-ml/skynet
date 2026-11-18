@@ -2288,6 +2288,34 @@ def test_the_command_editor_leaves_out_ignored_output_before_the_rules_check(tmp
     assert shinka_bundle.decode_bundle(written) == {"src/util.py": "SCALE = 5\n"}
 
 
+def test_the_command_editor_reads_the_ignore_rules_of_the_version(tmp_path: Path) -> None:
+    """Check ignored paths with the version's own ``.gitignore`` files, as ``git add --all`` does (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"src/.gitignore": "!keep.log\n", "src/keep.log": "kept\n", "src/util.py": "SCALE = 5\n"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore="*.log\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True, meta.get("last_error_msg")
+    written = (tmp_path / "results" / "gen_1" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == files
+
+
+def test_the_ignore_check_raises_when_git_fails(tmp_path: Path) -> None:
+    """Raise on a ``git check-ignore`` failure, such as a folder that is no checkout (SKY-815).
+
+    Args:
+        tmp_path: A folder that is no checkout.
+    """
+    with pytest.raises(RuntimeError, match="git check-ignore failed"):
+        shinka_runner._ignored_paths(tmp_path, ["a.py"])
+
+
 def test_the_command_editors_git_runs_no_hook_and_no_fsmonitor(tmp_path: Path) -> None:
     """Run git for the command editor with hooks and fsmonitor off, so no planted script runs (SKY-815).
 

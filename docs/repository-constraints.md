@@ -133,27 +133,14 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
-- ShinkaEvolve cannot use the command yet. Its command support runs only on
-  the worker's engine loop, which runs no run yet. So a single ShinkaEvolve
-  run with `entry` fails the setup check, and Auto leaves out its lane. The
-  rest of this item says how the command will run when the refusal ends.
-  The engine also refuses every run with `entry` for now. The command may
-  reach a model only on your own model key, never on Skynet's key, and its
-  box has no such model route until a metered relay lands. Until then the
-  box gets no model address and no model credential. The engine also refuses
-  `entry` together with `[proposer] services` or `[proposer] mcp`.
-  ShinkaEvolve keeps its search, and the command replaces
-  its model. For each mutation, the run runs the command once in the
-  proposer's box, on the tree of the parent version. `ASCENT_TASK` holds the
-  text that ShinkaEvolve would send its model. The tree that the command
-  leaves is the new version, and the run scores it in its own metric box.
-  `setup` runs once, before the first mutation. The new version is always
-  the full tree, also when ShinkaEvolve asks for a diff. The version holds
-  the text files that differ from the start: the run does not keep deleted
-  files, binary files, files over 64 KB, the output of `setup`, files that
-  your `.gitignore` rules ignore, or Git metadata (a path with a `.git`
-  part). A failed command is a failed mutation, and ShinkaEvolve keeps its
-  message.
+- ShinkaEvolve refuses `entry` today. The command may reach a model only on
+  your own model key, never on Skynet's key, and its box has no such model
+  route until a metered relay lands. Its command support also runs only on
+  the worker's engine loop, which runs no run yet. In that support, `setup`
+  runs once, in its own box. Only the files that it writes into the
+  repository carry over to each command box: the box is disposable, and the
+  tree is the truth. If `setup` changes or removes a file of the repository,
+  the run stops, and the message names the files.
 - The command runs only in a repository checkout. AutoSaddler also starts
   reflect sessions in a plain folder, which edit no repository. The default
   proposer agent answers those sessions, without `setup`, and the box
