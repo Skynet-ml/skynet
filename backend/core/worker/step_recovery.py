@@ -49,7 +49,12 @@ def open_step_log(engine: Engine, objects: ObjectStore, worker_id: str) -> StepL
         The open step log.
     """
     store = StepLogStore(engine, objects, worker_id)
-    store.recover()
+    try:
+        store.recover()
+    except Exception:
+        # The caller gets no store to close, so its flusher thread and shard engines would stay open.
+        store.close()
+        raise
     return store
 
 
@@ -57,18 +62,24 @@ def last_committed_step(engine: Engine, store: StepLogStore, run_id: str, agent_
     """Return the agent's newest committed step, the point its next worker continues from.
 
     Only stored rows count: a buffered step of a dead worker is not
-    committed, and the fence keeps a stale one from ever landing.
+    committed, and the fence keeps a stale one from ever landing. The rows
+    are read on the run's shard.
 
     Args:
-        engine: Engine with the step log tables.
-        store: The step log that reads the step body.
+        engine: Engine with the jobs table; the store's shard map is over it.
+        store: The step log that routes the read and reads the step body.
         run_id: The job id.
         agent_id: The agent whose log to read.
 
     Returns:
         The step fields and ``body``, or ``None`` when the agent committed no step.
+
+    Raises:
+        ValueError: When the store's shard map is over another main engine.
     """
-    with Session(engine) as session:
+    if store.shards.main is not engine:
+        raise ValueError("the step log is over another main engine")
+    with store.shards.for_run(run_id) as session:
         step_id = session.scalar(
             select(AgentStepModel.step_id)
             .where(AgentStepModel.run_id == run_id, AgentStepModel.agent_id == agent_id)

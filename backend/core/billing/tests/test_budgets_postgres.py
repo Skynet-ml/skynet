@@ -6,6 +6,7 @@ import importlib.util
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
@@ -21,6 +22,7 @@ from core.billing.budgets import BudgetConflictError, BudgetInFlightError, Budge
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
+    AgentStepModel,
     Base,
     BillingCustomerModel,
     BillingProviderKeyModel,
@@ -28,9 +30,16 @@ from core.storage.models import (
     ExecutionOperationModel,
     ExecutionUsageEvidenceModel,
     JobModel,
+    StoragePackModel,
+    TreeObjectModel,
     WalletLedgerModel,
+    WorkspaceModel,
 )
+from core.storage.object_store import LocalObjectStore
 from core.storage.preflights import PreflightStore, WizardPreflightModel
+from core.storage.step_log_store import StepLogStore
+from core.storage.workspace_store import WorkspaceStore
+from core.worker.actors import LeaseExhaustedError, StepResult, User
 
 TEST_DB_URL = app_env("APP_BUDGET_TEST_DB_URL")
 pytestmark = pytest.mark.skipif(
@@ -57,6 +66,10 @@ def database() -> Iterator[Engine]:
             ExecutionUsageEvidenceModel,
             AgentConversationModel,
             JobModel,
+            AgentStepModel,
+            StoragePackModel,
+            TreeObjectModel,
+            WorkspaceModel,
         )
     ]
     try:
@@ -450,3 +463,74 @@ def test_lease_keys_match_exactly_on_postgres(database: Engine) -> None:
     assert len(_lease(service, budget.id, key="pool", slices=1)) == 1
     with pytest.raises(BudgetConflictError):
         _lease(service, budget.id, key="a", slices=1)
+
+
+def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engine, tmp_path: Path) -> None:
+    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="workspace")
+    budget = service.attach_to_job(budget.id, "alice", "run-1", expected_revision=budget.revision)
+    with Session(database) as session:
+        session.add(JobModel(optimization_id="run-1", username="alice", execution_generation=1))
+        session.commit()
+    user = User("alice", engine=database, budgets=service)
+    WorkspaceStore(database).set_budget(user.workspace().id, budget.id)
+    step_log = StepLogStore(database, LocalObjectStore(tmp_path / "objects"), "worker-1", flush_window_seconds=0.05)
+    run = user.workspace().start_run(
+        "run-1",
+        step_log=step_log,
+        execution_generation=1,
+        budget_generation=budget.generation,
+        grant_list_id="grants-1",
+        chunk_cents=2,
+        lease_slices=8,
+    )
+    agents = [run.spawn(f"agent-{index}") for index in range(1000)]
+    paid: list[str] = []
+
+    def drive(index: int) -> None:
+        """Run up to three paid steps of one agent, then close its lease.
+
+        Args:
+            index: The agent's position.
+        """
+        agent = agents[index]
+
+        def work() -> StepResult:
+            """Record the paid call and report its fixed cost.
+
+            Returns:
+                A model step result.
+            """
+            paid.append(agent.agent_id)
+            return StepResult(body={}, cost_cents=Decimal("0.5"))
+
+        try:
+            for _ in range(3):
+                agent.step("model", 1, work)
+        except LeaseExhaustedError:
+            pass
+        finally:
+            agent.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(drive, range(len(agents))))
+        run.close()
+    finally:
+        step_log.close()
+
+    reserved, settled = _budget_units(database, budget.id)
+    assert reserved == 0
+    assert 0 < settled <= 40 * CENT_SCALE
+    assert settled == len(paid) * CENT_SCALE // 2
+    with Session(database) as session:
+        assert session.scalar(select(func.count()).select_from(AgentStepModel)) == len(paid)
+        step_keys = session.scalar(
+            select(func.count())
+            .select_from(ExecutionUsageEvidenceModel)
+            .where(ExecutionUsageEvidenceModel.evidence_key.like("run-1:%"))
+        )
+        assert step_keys == len(paid)
+        billed = service.get(budget.id, "alice").billed_cents
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 50 - billed

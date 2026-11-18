@@ -12,17 +12,45 @@ edge adds them, and neither the box nor the grant-list id sees them.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import Field, dataclass, field, replace
 from types import MappingProxyType
+from typing import Any, ClassVar, Protocol, TypeVar
 
 from core.billing.operation_pricing import json_fingerprint
 from core.models.blackbox import REPO_SECRET_HOST_PATTERN
 
 from .capabilities import NetworkMode, SandboxSpecError, network_mode
-from .resources import SandboxSpec
 
 # The one grant host that opens all egress. It cannot carry a credential.
 OPEN_EGRESS = "*"
+
+
+class _EgressSpec(Protocol):
+    """Match a frozen spec dataclass with the egress fields that a grant policy replaces.
+
+    Both ``core.sandbox.resources.SandboxSpec`` and the blackbox contract's
+    ``SandboxSpec`` match, so :meth:`ResolvedGrants.apply` keeps the type it gets.
+    """
+
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
+    @property
+    def network_disabled(self) -> bool:
+        """Return whether the box has no network."""
+        ...
+
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        """Return the only hosts the box may reach; empty means any host."""
+        ...
+
+    @property
+    def inject_headers(self) -> Mapping[str, Mapping[str, str]]:
+        """Return the headers the edge adds to requests for each host."""
+        ...
+
+
+SpecT = TypeVar("SpecT", bound=_EgressSpec)
 
 
 class GrantError(SandboxSpecError):
@@ -66,14 +94,15 @@ class ResolvedGrants:
     allowed_hosts: tuple[str, ...] = ()
     inject_headers: Mapping[str, Mapping[str, str]] = field(default_factory=dict, repr=False)
 
-    def apply(self, spec: SandboxSpec) -> SandboxSpec:
+    def apply(self, spec: SpecT) -> SpecT:
         """Replace the egress fields of a spec with this policy.
 
         Args:
-            spec: The sandbox spec to open.
+            spec: The sandbox spec to open: this package's spec or the
+                blackbox contract's spec.
 
         Returns:
-            The spec with this policy's network mode, hosts and headers.
+            The spec, of the same type, with this policy's network mode, hosts and headers.
         """
         return replace(
             spec,

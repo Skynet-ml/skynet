@@ -1104,12 +1104,13 @@ def test_a_kept_pack_that_the_sweep_claimed_fails_its_waiters(make_store, engine
     store = make_store()
     apply = store._apply
 
-    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
         """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
 
         The claim goes in before the failure: the flusher retries a kept pack at once.
 
         Args:
+            shard: The shard name.
             pack_key: The pack key.
             *args: The pack size and manifest.
 
@@ -1180,12 +1181,13 @@ def test_a_lost_pack_fences_the_later_steps_of_its_agents(make_store, engine, ob
     apply = store._apply
     later: list[str] = []
 
-    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
         """Commit the agent's next step, insert the sweep's claim row, restore the real write, then fail this call.
 
         The next step goes in while the pack is kept, so it waits in the pending batch of the retry.
 
         Args:
+            shard: The shard name.
             pack_key: The pack key.
             *args: The pack size and manifest.
 
@@ -1236,7 +1238,7 @@ def test_a_caller_that_waits_on_a_dropped_step_gets_the_fence_error(make_store, 
         """Wait until the caller waits on the later step, then run the real write.
 
         Args:
-            *args: The pack key, size and manifest.
+            *args: The shard, pack key, size and manifest.
 
         Returns:
             The real write's result.
@@ -1244,10 +1246,11 @@ def test_a_caller_that_waits_on_a_dropped_step_gets_the_fence_error(make_store, 
         waiting.wait(5)
         return apply(*args)
 
-    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
         """Commit the agent's next step, mark the wait on it, insert the sweep's claim row, then fail this call.
 
         Args:
+            shard: The shard name.
             pack_key: The pack key.
             *args: The pack size and manifest.
 
@@ -1320,10 +1323,11 @@ def test_the_objects_of_a_lost_pack_go_into_the_next_pack(make_store, engine, mo
     data = b"blob\0lost"
     later: list[str] = []
 
-    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
         """Commit a step that names the object, insert the sweep's claim row, restore the real write, then fail.
 
         Args:
+            shard: The shard name.
             pack_key: The pack key.
             *args: The pack size and manifest.
 
@@ -1368,10 +1372,11 @@ def test_the_object_of_a_lost_pack_stays_readable_when_the_next_put_fails(
     object_id = "f" * 64
     data = b"blob\0kept"
 
-    def claim_and_fail(pack_key: str, *args: Any) -> Any:
+    def claim_and_fail(shard: str, pack_key: str, *args: Any) -> Any:
         """Insert the sweep's claim row for the pack, restore the real write, then fail this call.
 
         Args:
+            shard: The shard name.
             pack_key: The pack key.
             *args: The pack size and manifest.
 
