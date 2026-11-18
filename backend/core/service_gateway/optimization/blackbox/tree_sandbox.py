@@ -56,7 +56,8 @@ caller a :class:`BoxSession`: commands with their own ``env``, ``on_output``,
 ``sudo`` and timeout, the box itself for checks, and one release. It needs no
 tree store and commits no step, so a caller such as ``RepoScorer`` that keeps
 its own records uses the same box path as :meth:`TreeSandbox.run` and
-:meth:`TreeSandbox.score`.
+:meth:`TreeSandbox.score`. It refuses a lease that keeps boxes warm, because
+it gives the box back with no process scan.
 """
 
 from __future__ import annotations
@@ -126,7 +127,9 @@ _CLEAN_BASH = " /bin/bash --noprofile --norc -c "
 _CLEAN_SHELL = _CLEAN_ENV + _CLEAN_BASH
 # Prints a "state <hash>" line, then one "pid start-ticks" line for each process, except the scan's own shell,
 # its ancestors and its children (the loop, awk and sort), and the kernel threads (pid 2 and its children, only
-# when pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A pid with its start time names one
+# when pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A process of the box user can rename
+# itself kthreadd, so pid 2 must also have the PF_KTHREAD bit (0x00200000) in its flags, field 9, which only the
+# kernel sets. mawk has no bitwise operators, so awk tests the bit with division. A pid with its start time names one
 # process, also when the pid is used again. The scan reads /proc/<pid>/stat itself, because the box image
 # (python:3.12-slim) has no ps. The name in a stat line can hold spaces and parens, so the fields come after the
 # last ")": the parent pid is field 4 and the start time in clock ticks is field 22. A process that ends during
@@ -152,7 +155,8 @@ SCAN_SCRIPT = (
     ' [ -e "$f" ] && exit 1; continue; fi; [[ $l == *")"* ]] || exit 1;'
     ' printf "%s%s\\n" "${l%% *}" "${l##*)}"; done | awk -v me=$$ -v k=$k \''
     "$1 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $21 !~ /^[0-9]+$/ {bad = 1} {parent[$1] = $3; start[$1] = $21}"
-    " END {if (bad || !NR) exit 1; p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
+    " $1 == 2 {flags = $8} END {if (bad || !NR) exit 1; if (int(flags / 2097152) % 2 != 1) k = 0;"
+    " p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
     " for (pid in start) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
     " print pid, start[pid]}"
     "' | LC_ALL=C sort"
@@ -603,10 +607,15 @@ class TreeSandbox:
             The session that holds the started box.
 
         Raises:
+            ValueError: When the source keeps boxes warm.
             Exception: The source's acquire error or the start's error, raw.
             BudgetReached: And the other budget errors of the release after
                 a failed start, in place of the start's own error.
         """
+        if isinstance(source, BoxLease) and source.keeps_warm:
+            # A session gives the box back with no process scan and keys it by the bare agent id, so a stray
+            # process of one session, or of another run's agent with the same id, could reach the next session.
+            raise ValueError("A box session needs a source that does not keep boxes warm.")
         session = BoxSession(source, source.acquire(agent_id, grants))
         if start is None:
             return session
@@ -798,7 +807,8 @@ class TreeSandbox:
             BudgetReached: And the other budget errors, from the work or the release.
         """
         try:
-            session = self.open_session(source, step.box_key, grants)
+            # Not open_session, which refuses a warm lease: run() scans the processes of a warm box itself.
+            session = BoxSession(source, source.acquire(step.box_key, grants))
         except _BUDGET_ERRORS:
             raise
         except GrantError as error:
