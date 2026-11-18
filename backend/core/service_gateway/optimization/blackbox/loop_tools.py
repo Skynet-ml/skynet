@@ -1,10 +1,9 @@
 """Share the tool-loop parts of the agent engines that run in the worker engine loop.
 
 Meta-Harness (SKY-722) and AutoResearch (SKY-725) run their proposer sessions as
-tool loops on the engine context. Both use the budget view and the proposer
-refusal here. AutoResearch also uses the bash tool call, model retry and output
-cut here. Meta-Harness keeps its own copy: its tests replace those names on its
-module. Both bound the prompt in UTF-8 bytes, as SKY-722 decided.
+tool loops on the engine context. Both use the budget view, the proposer
+refusal, the command run, the model retry, the output cut and the prompt byte
+measure here. Both bound the prompt in UTF-8 bytes, as SKY-722 decided.
 """
 
 from __future__ import annotations
@@ -361,7 +360,23 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     command = parsed.get("command") if isinstance(parsed, dict) else None
     if not isinstance(command, str):
         return json.dumps({"error": misuse}, ensure_ascii=False), tree
-    # ``_parse`` refuses a lone surrogate first; ``surrogatepass`` keeps this measure from ever raising.
+    return run_command(ctx, tree, command)
+
+
+def run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
+    """Run one command over the tree, inside the command bound, and cut its outputs for the prompt.
+
+    Args:
+        ctx: The engine context, with its command call.
+        tree: The workspace tree.
+        command: The shell command.
+
+    Returns:
+        The tool result as JSON text, and the tree after the command.
+    """
+    assert ctx.run_command is not None
+    # ``_parse`` or the step commit (SKY-821) refuses a lone surrogate first; ``surrogatepass`` keeps this measure
+    # from ever raising.
     if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
         error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
         return json.dumps({"error": error}, ensure_ascii=False), tree

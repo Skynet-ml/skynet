@@ -29,10 +29,11 @@ from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MI
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxProposer
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
+from core.service_gateway.optimization.blackbox import loop_tools, native_engines
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
-from core.service_gateway.optimization.blackbox import native_engines
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, OUTPUT_BYTES, MetaHarnessEngine
+from core.service_gateway.optimization.blackbox.loop_tools import OUTPUT_BYTES
+from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, MetaHarnessEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
@@ -80,7 +81,7 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
         The waits, in seconds, in order.
     """
     waits: list[float] = []
-    monkeypatch.setattr(meta_mod, "_sleep", waits.append)
+    monkeypatch.setattr(loop_tools, "_sleep", waits.append)
     return waits
 
 
@@ -883,7 +884,7 @@ def test_a_long_command_output_is_cut_to_its_head_and_tail(
     assert stdout == second["stdout"]
     kept = (80_000 - 50_042) // 2
     assert stdout == "a" * kept + "\n[... 50042 characters cut ...]\n" + "b" * kept
-    assert meta_mod._prompt_bytes(stdout) <= OUTPUT_BYTES
+    assert loop_tools.prompt_bytes(stdout) <= OUTPUT_BYTES
     assert first["stderr"] == "e"
 
 
@@ -896,10 +897,10 @@ def test_an_output_is_cut_to_its_bytes_in_the_prompt(letter: str) -> None:
     """
     text = "<" + letter * 100_000 + ">"
 
-    clipped = meta_mod._clip(text)
+    clipped = loop_tools.clip(text)
 
-    assert clipped == meta_mod._clip(text)
-    assert OUTPUT_BYTES - 64 <= meta_mod._prompt_bytes(clipped) <= OUTPUT_BYTES
+    assert clipped == loop_tools.clip(text)
+    assert OUTPUT_BYTES - 64 <= loop_tools.prompt_bytes(clipped) <= OUTPUT_BYTES
     assert clipped.startswith("<" + letter)
     assert clipped.endswith(letter + ">")
 
@@ -911,7 +912,7 @@ def test_a_huge_output_is_cut_without_encoding_all_of_it(monkeypatch: pytest.Mon
         monkeypatch: Records the length of each text that the cut measures.
     """
     measured: list[int] = []
-    real_prompt_bytes = meta_mod._prompt_bytes
+    real_prompt_bytes = loop_tools.prompt_bytes
 
     def prompt_bytes(text: str) -> int:
         """Record the text length, then measure the text.
@@ -925,9 +926,9 @@ def test_a_huge_output_is_cut_without_encoding_all_of_it(monkeypatch: pytest.Mon
         measured.append(len(text))
         return real_prompt_bytes(text)
 
-    monkeypatch.setattr(meta_mod, "_prompt_bytes", prompt_bytes)
+    monkeypatch.setattr(loop_tools, "prompt_bytes", prompt_bytes)
 
-    clipped = meta_mod._clip("\x01" * 1_000_000)
+    clipped = loop_tools.clip("\x01" * 1_000_000)
 
     assert max(measured) < 100
     assert real_prompt_bytes(clipped) <= OUTPUT_BYTES
@@ -960,7 +961,7 @@ def test_one_command_of_control_and_hebrew_output_leaves_room_for_the_next_model
     )
     # The reply and the result add the two cut streams and a little framing, so the prompt stays under the cap.
     assert after - before < 2 * OUTPUT_BYTES + 1_000
-    assert after < meta_mod.MAX_PROMPT_BYTES
+    assert after < loop_tools.MAX_PROMPT_BYTES
 
 
 def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
@@ -989,8 +990,8 @@ def test_a_long_hebrew_output_leaves_room_for_the_next_model_call(
     result = model.calls[1][-1]
     assert result["role"] == "tool"
     assert json.loads(result["content"])["stdout"] == "א" * letters
-    assert len(json.dumps(model.calls[1], ensure_ascii=False).encode()) < meta_mod.MAX_PROMPT_BYTES
-    assert len(json.dumps(model.calls[1])) > meta_mod.MAX_PROMPT_BYTES
+    assert len(json.dumps(model.calls[1], ensure_ascii=False).encode()) < loop_tools.MAX_PROMPT_BYTES
+    assert len(json.dumps(model.calls[1])) > loop_tools.MAX_PROMPT_BYTES
 
 
 def test_a_failed_model_call_is_tried_again_and_replays_the_same_way(
@@ -1042,8 +1043,8 @@ def test_a_model_call_that_fails_on_every_attempt_ends_the_session_as_an_error(
 
     with pytest.raises(ProposerFailedError, match=re.escape(str(ModelCallFailedError("RuntimeError")))):
         _run(loop)
-    assert model.attempts == meta_mod.MODEL_ATTEMPTS
-    assert [kind for _, kind, _ in _steps(engine)] == ["model"] * meta_mod.MODEL_ATTEMPTS
+    assert model.attempts == loop_tools.MODEL_ATTEMPTS
+    assert [kind for _, kind, _ in _steps(engine)] == ["model"] * loop_tools.MODEL_ATTEMPTS
     assert boxes.opened == 0
 
 
@@ -1070,7 +1071,7 @@ def test_a_live_failure_waits_before_its_retry_and_a_replayed_one_does_not(
     )
     with pytest.raises(_WorkerDiedError):
         _run(first)
-    assert sleeps == [meta_mod.MODEL_RETRY_WAIT_SECONDS]
+    assert sleeps == [loop_tools.MODEL_RETRY_WAIT_SECONDS]
 
     sleeps.clear()
     _new_generation(engine)
@@ -1102,7 +1103,7 @@ def test_no_wait_follows_the_last_failed_attempt(
 
     with pytest.raises(ProposerFailedError):
         _run(loop)
-    assert sleeps == [meta_mod.MODEL_RETRY_WAIT_SECONDS] * (meta_mod.MODEL_ATTEMPTS - 1)
+    assert sleeps == [loop_tools.MODEL_RETRY_WAIT_SECONDS] * (loop_tools.MODEL_ATTEMPTS - 1)
 
 
 @pytest.mark.parametrize(
@@ -1136,7 +1137,7 @@ def test_a_session_at_its_cap_ends_out_of_budget_and_keeps_its_candidates(
     if cap == "max_tool_calls":
         options = _options(max_tool_calls=value)
     else:
-        monkeypatch.setattr(meta_mod, cap, value)
+        monkeypatch.setattr(loop_tools, cap, value)
     model = _Proposer(output_chars=output_chars)
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -1168,7 +1169,7 @@ def test_a_hebrew_transcript_past_the_byte_cap_ends_the_session_and_the_run_goes
         tmp_path: Pytest's temporary folder.
         monkeypatch: Pytest's monkeypatch.
     """
-    monkeypatch.setattr(meta_mod, "MAX_PROMPT_BYTES", 40_000)
+    monkeypatch.setattr(loop_tools, "MAX_PROMPT_BYTES", 40_000)
     model = _Proposer(output_chars=12_000, output_letter="\\u05d0")
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
@@ -1312,11 +1313,17 @@ def test_a_full_sweep_logs_its_start_as_the_native_runner_does(
 
 
 def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
 ) -> None:
     """A reply with more tool calls than the cap allows runs the first ones, then ends the session out of budget.
 
     Args:
+        monkeypatch: Pytest's monkeypatch.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -1328,7 +1335,7 @@ def test_a_reply_past_the_tool_call_cap_runs_only_the_calls_under_the_cap(
     worker._max_tool_calls = 2
     call = {"id": "c", "name": "bash", "arguments": {"command": "true"}}
     replies = iter([ModelReply("", Decimal(1), [call, call, call])])
-    worker._call_model = lambda messages, spent, remaining_cost: (next(replies), Decimal(0))
+    monkeypatch.setattr(loop_tools, "call_model", lambda *_: (next(replies), Decimal(0)))
 
     outcome = worker._propose(1, None)
 
@@ -1587,11 +1594,17 @@ def test_a_run_with_no_scorer_call_left_is_refused(
 
 
 def test_the_workspace_tree_holds_the_empty_layout_folders(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
 ) -> None:
     """A tree holds only files, so each empty layout folder gets a marker and the agent can write into it.
 
     Args:
+        monkeypatch: Pytest's monkeypatch.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -1611,23 +1624,29 @@ def test_the_workspace_tree_holds_the_empty_layout_folders(
     prompts: list[list[dict[str, Any]]] = []
 
     def call(
-        messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
+        ctx: EngineContext,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        spent: Decimal,
+        remaining_cost: float | None,
     ) -> tuple[ModelReply, Decimal]:
         """Keep the prompt and give the next scripted reply.
 
         Args:
+            ctx: Not used.
             messages: The session's messages.
+            tools: Not used.
             spent: Not used.
             remaining_cost: Not used.
 
         Returns:
             The reply and no failed cost.
         """
-        del spent, remaining_cost
+        del ctx, tools, spent, remaining_cost
         prompts.append(list(messages))
         return next(replies), Decimal(0)
 
-    worker._call_model = call
+    monkeypatch.setattr(loop_tools, "call_model", call)
 
     worker._propose(1, None)
 
@@ -2075,26 +2094,32 @@ def test_a_later_session_sees_the_tree_and_not_the_pulled_copies(
     outputs: list[str] = []
 
     def call(
-        messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
+        ctx: EngineContext,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        spent: Decimal,
+        remaining_cost: float | None,
     ) -> tuple[ModelReply, Decimal]:
         """Send the session's one command, then end the session after its result.
 
         Args:
+            ctx: Not used.
             messages: The session's messages.
+            tools: Not used.
             spent: Not used.
             remaining_cost: Not used.
 
         Returns:
             The reply and no failed cost.
         """
-        del spent, remaining_cost
+        del ctx, tools, spent, remaining_cost
         if messages[-1]["role"] == "tool":
             outputs.append(json.loads(messages[-1]["content"])["stdout"])
             return ModelReply("done", Decimal(0), []), Decimal(0)
         tool_call = {"id": "c", "name": "bash", "arguments": {"command": commands.pop(0)}}
         return ModelReply("", Decimal(0), [tool_call]), Decimal(0)
 
-    worker._call_model = call
+    monkeypatch.setattr(loop_tools, "call_model", call)
 
     for iteration in (1, 2, 3):
         worker._propose(iteration, None)
@@ -2152,13 +2177,13 @@ def test_a_billed_failure_at_the_proposer_cap_is_not_tried_again(
 @pytest.mark.parametrize(
     ("command", "runs"),
     [
-        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 2), True),
-        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 1), False),
+        (": " + "x" * (loop_tools.MAX_COMMAND_BYTES - 2), True),
+        (": " + "x" * (loop_tools.MAX_COMMAND_BYTES - 1), False),
         # One two-byte character: the command is at the bound in characters, and one byte over it as UTF-8.
-        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 4) + "é", True),
-        (": " + "x" * (meta_mod.MAX_COMMAND_BYTES - 3) + "é", False),
+        (": " + "x" * (loop_tools.MAX_COMMAND_BYTES - 4) + "é", True),
+        (": " + "x" * (loop_tools.MAX_COMMAND_BYTES - 3) + "é", False),
         # Hebrew letters are two bytes each, and JSON escapes them as six characters each, past MAX_ARGUMENT_CHARS.
-        (": " + "א" * ((meta_mod.MAX_COMMAND_BYTES - 2) // 2), True),
+        (": " + "א" * ((loop_tools.MAX_COMMAND_BYTES - 2) // 2), True),
     ],
     ids=["ascii-at-bound", "ascii-over", "utf8-at-bound", "utf8-over", "hebrew-at-bound"],
 )
@@ -2194,7 +2219,7 @@ def test_a_command_over_its_byte_bound_gets_an_error_result(
         sent = meta_mod._openai_call({"id": "c", "name": "bash", "arguments": {"command": command}})
         assert json.loads(sent["function"]["arguments"]) == {"command": command}
     else:
-        assert f"at most {meta_mod.MAX_COMMAND_BYTES} bytes" in json.loads(output)["error"]
+        assert f"at most {loop_tools.MAX_COMMAND_BYTES} bytes" in json.loads(output)["error"]
         assert after == tree
         assert boxes.opened == 0
 

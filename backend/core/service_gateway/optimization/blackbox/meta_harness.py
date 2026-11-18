@@ -26,7 +26,6 @@ import json
 import logging
 import math
 import posixpath
-import time
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import Any
@@ -38,7 +37,6 @@ from gepa.oa.task import Task as UpstreamTask
 from .... import run_log
 from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxProposer
-from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from . import loop_tools, native_engines, sandbox_log
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
@@ -54,7 +52,6 @@ from .protocol import (
     EngineContext,
     EvalServer,
     FileTooLargeError,
-    ModelReply,
     Result,
     Task,
     candidate_key,
@@ -81,36 +78,13 @@ BASH_TOOL = {
 _TMP_SCRATCH = "Draft the change in a scratch file under `/tmp/`"
 _WORKSPACE_SCRATCH = "Draft the change in a scratch file under `scratch/` in the workspace"
 
-# Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
-# prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as ``_propose``
-# measures it: a cut in characters lets one result of Hebrew or control characters fill ``MAX_PROMPT_BYTES``.
-OUTPUT_BYTES = 30_000
 # Model output is untrusted, and a committed reply replays on every resume, so a crash on its arguments could
 # never recover. These bounds make an over-long or deeply nested argument an error result: deep JSON makes the
 # parser, ``json.dumps`` and the next prompt hash raise RecursionError.
 MAX_ARGUMENT_CHARS = 200_000
 MAX_ARGUMENT_DEPTH = 32
-# Every box provider runs the command as one argv string, and Linux refuses an argv string over 128 KiB
-# (MAX_ARG_STRLEN) with E2BIG. A command under this bound gets to the box; a longer one gets an error result.
-MAX_COMMAND_BYTES = 100_000
 _REFUSED_ARGUMENTS = "{}"
-# A failed model step replays as the same failure, so the tool loop retries at fixed places: a resume makes
-# the same calls in the same order.
-MODEL_ATTEMPTS = 3
-# A rate limit (429) often clears in seconds, so a wait between attempts keeps a short burst from failing all of them.
-MODEL_RETRY_WAIT_SECONDS = 10.0
-# Every turn sends the whole transcript again, and each command can add up to two clipped outputs. This cap, and
-# the proposer's ``max_tool_calls``, keep the prompt inside the model's context: a session at a cap ends as out of
-# budget, so its iteration still reads ``pending_eval.json``, and the run does not stop. A byte-level token holds
-# at least one byte, so UTF-8 bytes bound the tokens of any output (Hebrew, base64 or binary-ish text can be about
-# one token a character). A 200k-token context, less 64k tokens of answer and 8k for the tool and message framing,
-# leaves 128k.
-MAX_PROMPT_BYTES = 128_000
-
 CANDIDATE_OUTSIDE_AGENTS = "candidate file must be a relative path under agents/"
-
-# Tests replace this, so a retry test does not wait.
-_sleep = time.sleep
 
 logger = logging.getLogger(__name__)
 
@@ -168,61 +142,6 @@ def _too_deep(value: Any) -> bool:
             return True
         stack.extend((child, depth + 1) for child in item)
     return False
-
-
-def _prompt_bytes(text: str) -> int:
-    """Measure a stream as ``_propose`` measures it in the prompt.
-
-    The tool result is the JSON of the output, and ``_propose`` measures the JSON of the messages, so the stream
-    is encoded twice: a control character takes 7 bytes, not 1.
-
-    Args:
-        text: The stream.
-
-    Returns:
-        The UTF-8 bytes of the stream, encoded twice as JSON, with its quotes.
-    """
-    return len(json.dumps(json.dumps(text, ensure_ascii=False), ensure_ascii=False).encode("utf-8", "surrogatepass"))
-
-
-def _fit(chars: Iterator[str], budget: int) -> int:
-    """Count the characters, in order, whose prompt bytes fit in ``budget``.
-
-    Args:
-        chars: The characters.
-        budget: The prompt bytes they may take, without quotes.
-
-    Returns:
-        How many of the first characters fit.
-    """
-    quotes = _prompt_bytes("")
-    count = 0
-    for char in chars:
-        # JSON escapes each code point alone, so the sizes add up, and a cut between code points always encodes.
-        budget -= _prompt_bytes(char) - quotes
-        if budget < 0:
-            break
-        count += 1
-    return count
-
-
-def _clip(text: str) -> str:
-    """Cut a command output to ``OUTPUT_BYTES`` in the prompt: keep its head and tail, with a note on what was cut.
-
-    Args:
-        text: The output.
-
-    Returns:
-        The output unchanged when it fits, else its head, a note and its tail.
-    """
-    # Each character takes at least one prompt byte, so the length check spares a huge output the full encode.
-    if len(text) <= OUTPUT_BYTES and _prompt_bytes(text) <= OUTPUT_BYTES:
-        return text
-    # The note for a cut of every character is the longest note, so the result always fits.
-    half = (OUTPUT_BYTES - _prompt_bytes(f"\n[... {len(text)} characters cut ...]\n")) // 2
-    head = _fit(iter(text), half)
-    tail = _fit(reversed(text), half)
-    return f"{text[:head]}\n[... {len(text) - head - tail} characters cut ...]\n{text[len(text) - tail :]}"
 
 
 class _UpstreamServer:
@@ -450,9 +369,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         """Run one proposer session as a tool loop: one step per model reply and per command.
 
         The proposer cap counts only committed costs, so a resume makes the same choices. The session also ends
-        as out of budget after the proposer's ``max_tool_calls`` commands, at a prompt over ``MAX_PROMPT_BYTES``, or
-        at a model call that fails after the session ran a command; all depend only on the committed replies,
-        results and failures, so a resume ends it at the same place.
+        as out of budget after the proposer's ``max_tool_calls`` commands, at a prompt over
+        ``loop_tools.MAX_PROMPT_BYTES``, or at a model call that fails after the session ran a command; all depend
+        only on the committed replies, results and failures, so a resume ends it at the same place.
 
         Args:
             iteration: One-based iteration number.
@@ -496,12 +415,12 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 exhausted = True
                 break
             # A reply with tool calls runs at least one command, so the command cap also bounds the turns.
-            # ``surrogatepass`` keeps the measure from raising on any text that a command printed.
-            size = len(json.dumps(messages, ensure_ascii=False).encode("utf-8", "surrogatepass"))
-            if commands >= self._max_tool_calls or size > MAX_PROMPT_BYTES:
+            # A session at a cap ends as out of budget, so its iteration still reads ``pending_eval.json``, and the
+            # run does not stop.
+            if commands >= self._max_tool_calls or loop_tools.messages_bytes(messages) > loop_tools.MAX_PROMPT_BYTES:
                 exhausted = True
                 break
-            reply, failed_cents = self._call_model(messages, spent, remaining_cost)
+            reply, failed_cents = loop_tools.call_model(ctx, messages, [BASH_TOOL], spent, remaining_cost)
             spent += failed_cents
             if reply is None:
                 exhausted = True
@@ -543,41 +462,6 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             killed=False,
         )
 
-    def _call_model(
-        self, messages: list[dict[str, Any]], spent: Decimal, remaining_cost: float | None
-    ) -> tuple[ModelReply | ModelCallFailedError | None, Decimal]:
-        """Call the model with the bash tool, and try a failed call again up to ``MODEL_ATTEMPTS`` times.
-
-        Each attempt is one ``model`` step, so a resume replays the same failures and the same retries. A live
-        failure waits ``MODEL_RETRY_WAIT_SECONDS`` before the next attempt; a replayed failure made no call, so it
-        does not wait. A failed attempt that the provider billed carries its committed cost, live and on a replay,
-        so the proposer cap counts it the same way both times, and no retry starts once the cap is reached.
-
-        Args:
-            messages: The session's messages.
-            spent: The session's committed spend before this call, in cents.
-            remaining_cost: Proposer spend still allowed, in dollars, or ``None``.
-
-        Returns:
-            The reply, the last :class:`ModelCallFailedError` when every attempt failed, or ``None`` when the
-            billed failures reached the proposer cap; and the summed cost of the failed attempts, in cents.
-        """
-        assert self._ctx.call_model is not None
-        failure = ModelCallFailedError("unknown")
-        failed_cents = Decimal(0)
-        for attempt in range(MODEL_ATTEMPTS):
-            try:
-                return self._ctx.call_model(messages, [BASH_TOOL]), failed_cents
-            except ModelCallFailedError as error:
-                failure = error
-                failed_cents += error.cost_cents
-            if remaining_cost is not None and float(spent + failed_cents) / 100 >= remaining_cost:
-                return None, failed_cents
-            # The loop raises a live failure from the model's own error, and a replayed failure with no cause.
-            if failure.__cause__ is not None and attempt < MODEL_ATTEMPTS - 1:
-                _sleep(MODEL_RETRY_WAIT_SECONDS)
-        return failure, failed_cents
-
     def _exec(self, tree: str, call: dict[str, Any]) -> tuple[str, str]:
         """Run one tool call as one command over the tree, modeled on the Sandbox SDK ``exec``.
 
@@ -609,22 +493,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             return json.dumps(
                 {"error": f"Call the {BASH_TOOL['name']} tool with a command string."}, ensure_ascii=False
             ), tree
-        if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
-            error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
-            return json.dumps({"error": error}, ensure_ascii=False), tree
-        try:
-            result, tree = self._ctx.run_command(tree, command, ())
-        except (TreeRejectedError, BoxFailureError) as error:
-            # The step committed the failure, so a resume raises it again and gets the same result here.
-            return json.dumps({"error": f"The command failed and changed nothing: {error}"}, ensure_ascii=False), tree
-        output = {
-            "exit_code": result.exit_code,
-            "stdout": _clip(result.stdout),
-            "stderr": _clip(result.stderr),
-            "timed_out": result.timed_out,
-        }
-        # ``_propose`` measures the prompt with no escapes, so an escape here makes a Hebrew letter take 7 bytes, not 2.
-        return json.dumps(output, ensure_ascii=False), tree
+        return loop_tools.run_command(self._ctx, tree, command)
 
     @staticmethod
     def _refuse_arguments(tree: str) -> tuple[str, str]:
