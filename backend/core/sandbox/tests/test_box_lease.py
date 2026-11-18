@@ -7,6 +7,7 @@ boxes, so no test calls a paid provider or the network.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import tempfile
 import threading
 import time
@@ -20,6 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetError
 from core.billing.signals import BudgetReached
 from core.sandbox.box_lease import BoxLease, StartBudget
 from core.sandbox.errors import SandboxInfraError
@@ -42,15 +44,18 @@ _REAPER = "box-lease-reaper"
 # Each lease and ticker of the running test, for the autouse teardown to close.
 _LEASES: list[BoxLease[Any]] = []
 _TICKERS: list[_Ticker] = []
+# Stands for the settlement's context scopes, such as settled_charges and the usage scope.
+_RUN_SCOPE: contextvars.ContextVar[str] = contextvars.ContextVar("run_scope")
 
 
 @pytest.fixture(autouse=True)
 def _close_every_lease(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Close every lease that the test built, and fail when a reaper thread outlives the test.
 
-    A healthy release starts a reaper thread that only close() stops, and
-    many tests never close their lease. Without this, each such test leaves a
-    reaper thread alive for the rest of the process.
+    A healthy release starts a reaper thread that runs while an idle box is
+    left, and many tests never close their lease or let the box sleep.
+    Without this, each such test leaves a reaper thread alive for up to the
+    idle time.
 
     Args:
         monkeypatch: Records each lease, also a RuntimeBoxLease or one built
@@ -796,6 +801,7 @@ class _Ticker:
     def __init__(self) -> None:
         """Start with no wait, no tick and blocking waits."""
         self.waits: list[float] = []
+        self.thread: threading.Thread | None = None
         self._ticks = 0
         self._free = False
         self._cond = threading.Condition()
@@ -813,6 +819,7 @@ class _Ticker:
                 self._cond.wait(0.001)
                 return
             self.waits.append(seconds)
+            self.thread = threading.current_thread()
             turn = len(self.waits)
             self._cond.notify_all()
             # No timeout: a timeout would let a stalled test get an extra reaper pass. free() always ends this
@@ -834,6 +841,18 @@ class _Ticker:
             self._ticks += 1
             self._cond.notify_all()
         self.passes(self._ticks + 1)
+
+    def tick_to_end(self) -> None:
+        """End the reaper's wait, and check that the reaper thread then ends with no new wait."""
+        with self._cond:
+            self._ticks += 1
+            waits = len(self.waits)
+            thread = self.thread
+            self._cond.notify_all()
+        assert thread is not None, "The reaper made no pass."
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "The reaper still runs with no idle box."
+        assert len(self.waits) == waits
 
     def free(self) -> None:
         """Make every wait end at once, so the reaper can see a close."""
@@ -882,12 +901,13 @@ def test_an_idle_box_sleeps_after_the_idle_time_with_no_other_call() -> None:
         assert ticker.waits[-1] == 1.0
 
         provider.clock.now = 600.0
-        ticker.tick()
+        ticker.tick_to_end()
 
         assert box.closed
         assert provider.closed == [box]
         assert "agent-1" not in lease._leases
-        assert ticker.waits[-1] == 600.0
+        # With no idle box left, the reaper thread ends, so a lease that is never closed holds no thread.
+        assert lease._reaper is None
     finally:
         _stop(lease, ticker)
 
@@ -907,7 +927,7 @@ def test_activity_restarts_the_idle_time() -> None:
         assert ticker.waits[-1] == 500.0
 
         provider.clock.now = 1100.0
-        ticker.tick()
+        ticker.tick_to_end()
         assert box.closed
     finally:
         _stop(lease, ticker)
@@ -920,17 +940,20 @@ def test_a_busy_box_never_sleeps() -> None:
     try:
         assert lease.acquire("agent-1", []) is box
         provider.clock.now = 10_000.0
-        ticker.tick()
+        # The held box is not idle, so the reaper has nothing to wait for and ends.
+        ticker.tick_to_end()
         assert not box.closed
-        assert ticker.waits[-1] == 600.0
+        assert lease._reaper is None
 
         lease.release(box, healthy=True)
+        ticker.passes(2)
+        assert ticker.waits[-1] == 600.0
         provider.clock.now = 10_599.0
         ticker.tick()
         assert not box.closed
 
         provider.clock.now = 10_600.0
-        ticker.tick()
+        ticker.tick_to_end()
         assert box.closed
     finally:
         _stop(lease, ticker)
@@ -942,7 +965,7 @@ def test_the_next_acquire_after_a_sleep_opens_a_new_box_and_counts_a_start() -> 
     lease, ticker, box = _sleepy(provider)
     try:
         provider.clock.now = 600.0
-        ticker.tick()
+        ticker.tick_to_end()
 
         fresh = lease.acquire("agent-1", [])
 
@@ -987,7 +1010,7 @@ def test_an_idle_box_close_error_is_logged_by_type_only(caplog: pytest.LogCaptur
         ticker.passes(1)
         try:
             provider.clock.now = 600.0
-            ticker.tick()
+            ticker.tick_to_end()
         finally:
             with pytest.raises(SandboxInfraError):
                 _stop(lease, ticker)
@@ -1025,7 +1048,7 @@ def _failing_lease(provider: _Provider, error: BaseException) -> tuple[BoxLease[
     lease.release(lease.acquire("agent-1", []), healthy=True)
     ticker.passes(1)
     provider.clock.now = 600.0
-    ticker.tick()
+    ticker.tick_to_end()
     return lease, ticker
 
 
@@ -1086,7 +1109,7 @@ def test_a_budget_stop_replaces_an_earlier_box_error_of_the_reaper() -> None:
     ticker.passes(1)
     try:
         provider.clock.now = 600.0
-        ticker.tick()
+        ticker.tick_to_end()
 
         with pytest.raises(BudgetReached) as raised:
             lease.acquire("agent-3", [])
@@ -1174,7 +1197,7 @@ def test_a_reaper_that_fails_outside_a_close_keeps_its_error_and_the_next_releas
         lease.release(box, healthy=True)
         ticker.passes(1)
         provider.clock.now = 600.0
-        ticker.tick()
+        ticker.tick_to_end()
         assert box.closed
     finally:
         _stop(lease, ticker)
@@ -1205,7 +1228,7 @@ def test_a_slow_idle_close_does_not_delay_the_next_deadline() -> None:
     lease.release(second, healthy=True)
     try:
         provider.clock.now = 600.0
-        ticker.tick()
+        ticker.tick_to_end()
 
         assert provider.closed == [first, second]
     finally:
@@ -1248,6 +1271,218 @@ def test_close_wakes_the_default_reaper_wait_at_once() -> None:
     assert not closer.is_alive(), "close() waited out the idle time."
     assert not reaper.is_alive()
     assert box.closed
+
+
+def test_a_failing_reaper_clears_itself_in_the_lock_that_keeps_its_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No release can come between the kept error and the cleared reaper, so a later release starts a new reaper."""
+    provider = _Provider()
+    ticker = _Ticker()
+    broken: list[float] = []
+
+    def wait_once_broken(seconds: float) -> None:
+        """Fail the first wait, then wait on the ticker.
+
+        Args:
+            seconds: The reaper's wait.
+
+        Raises:
+            RuntimeError: At the first wait.
+        """
+        if not broken:
+            broken.append(seconds)
+            raise RuntimeError("The wait broke.")
+        ticker(seconds)
+
+    lease = provider.lease(sleep_after_seconds=600, idle_wait=wait_once_broken)
+    first = lease.acquire("agent-1", [])
+    second = lease.acquire("agent-2", [])
+    keep = lease._keep_reap_error
+    released_in_gap: list[bool] = []
+    failed: list[threading.Thread] = []
+    kept = threading.Event()
+
+    def keep_then_release(error: BaseException) -> None:
+        """Keep the error, then try a healthy release from another thread before the reaper clears its field.
+
+        Args:
+            error: The reaper's error.
+        """
+        keep(error)
+        if failed:
+            return
+        failed.append(threading.current_thread())
+
+        def release_if_free() -> None:
+            """Release the second box only when the reaper does not hold the lease lock."""
+            if not lease._cond.acquire(blocking=False):
+                released_in_gap.append(False)
+                return
+            lease._cond.release()
+            released_in_gap.append(True)
+            lease.release(second, healthy=True)
+
+        # Joined here, so the release, if the lock lets it, runs before the reaper clears its field.
+        other = threading.Thread(target=release_if_free, daemon=True)
+        other.start()
+        other.join(timeout=5)
+        kept.set()
+
+    monkeypatch.setattr(lease, "_keep_reap_error", keep_then_release)
+    lease.release(first, healthy=True)
+    assert kept.wait(timeout=5), "The reaper did not fail."
+    failed[0].join(timeout=5)
+    try:
+        assert not failed[0].is_alive()
+        assert released_in_gap == [False], "A release ran between the kept error and the cleared reaper."
+        assert lease._reaper is None
+
+        lease.release(second, healthy=True)
+        ticker.passes(1)
+        assert lease._reaper is not None
+        assert lease._reaper.is_alive()
+        with pytest.raises(RuntimeError, match="The wait broke"):
+            lease.acquire("agent-3", [])
+    finally:
+        _stop(lease, ticker)
+
+
+def test_a_reaper_ends_with_no_idle_box_and_the_next_release_starts_a_new_one() -> None:
+    """A lease that is never closed keeps no reaper thread after its last idle box sleeps."""
+    provider = _Provider()
+    lease, ticker, _ = _sleepy(provider)
+    first = lease._reaper
+    assert first is not None
+    try:
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+        assert lease._reaper is None
+        assert not first.is_alive()
+
+        lease.release(lease.acquire("agent-1", []), healthy=True)
+        ticker.passes(2)
+        assert lease._reaper is not None
+        assert lease._reaper is not first
+    finally:
+        _stop(lease, ticker)
+
+
+def test_a_release_does_not_wake_the_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reaper waits on its own event, so a release, a drop or a failed open of another agent costs it no pass."""
+    provider = _Provider()
+    reaper_reads: list[float] = []
+    waiting = threading.Event()
+    wait = threading.Condition.wait
+
+    def clock() -> float:
+        """Return the fake time, and count each read of the reaper thread.
+
+        Returns:
+            The fake time.
+        """
+        if threading.current_thread().name == _REAPER:
+            reaper_reads.append(provider.clock.now)
+        return provider.clock.now
+
+    def wait_and_tell(self: threading.Condition, timeout: float | None = None) -> bool:
+        """Tell the test that the reaper starts its idle wait, then wait.
+
+        Args:
+            self: The condition.
+            timeout: The longest wait.
+
+        Returns:
+            The wait's own result.
+        """
+        if threading.current_thread().name == _REAPER:
+            waiting.set()
+        return wait(self, timeout)
+
+    # Every idle wait, on an event or on a condition, ends in Condition.wait.
+    monkeypatch.setattr(threading.Condition, "wait", wait_and_tell)
+    lease = provider.lease(clock=clock)
+    lease.release(lease.acquire("agent-0", []), healthy=True)
+    assert waiting.wait(timeout=5), "The reaper made no idle wait."
+    with lease._cond:
+        # Taken after the reaper's wait gives up its lock, so a wait on the lease condition shows here.
+        assert not lease._cond._waiters, "The reaper waits on the lease condition, so each release wakes it."
+    for number in range(1, 21):
+        box = lease.acquire(f"agent-{number}", [])
+        lease.release(box, healthy=True)
+        lease.release(lease.acquire(f"agent-{number}", []), healthy=False)
+    provider.fail_opens = 1
+    with pytest.raises(SandboxInfraError):
+        lease.acquire("agent-x", [])
+    lease.close()
+
+    assert reaper_reads == [0.0]
+
+
+def test_the_reaper_sleeps_idle_boxes_in_release_order() -> None:
+    """Each release goes to the end of the idle order, so the reaper looks only at the first idle box."""
+    provider = _Provider()
+    ticker = _Ticker()
+    lease = provider.lease(sleep_after_seconds=600, idle_wait=ticker)
+    boxes = {agent: lease.acquire(agent, []) for agent in ("a", "b", "c")}
+    lease.release(boxes["a"], healthy=True)
+    ticker.passes(1)
+    try:
+        provider.clock.now = 100.0
+        lease.release(boxes["b"], healthy=True)
+        provider.clock.now = 200.0
+        lease.release(boxes["c"], healthy=True)
+        provider.clock.now = 250.0
+        assert lease.acquire("a", []) is boxes["a"]
+        assert list(lease._idle) == ["b", "c"]
+        provider.clock.now = 300.0
+        lease.release(boxes["a"], healthy=True)
+        assert list(lease._idle) == ["b", "c", "a"]
+
+        provider.clock.now = 700.0
+        ticker.tick()
+
+        assert provider.closed == [boxes["b"]]
+        assert list(lease._idle) == ["c", "a"]
+        # The next deadline is c's, at 800.
+        assert ticker.waits[-1] == 100.0
+    finally:
+        _stop(lease, ticker)
+
+
+def test_the_reaper_closes_an_idle_box_in_the_context_of_its_last_release() -> None:
+    """The settlement of a reaper close sees the context vars of the box's last healthy release."""
+    provider = _Provider()
+    seen: list[str | None] = []
+
+    def close_in_scope(box: _Box) -> None:
+        """Record the run scope that the close sees, then close the box.
+
+        Args:
+            box: The box.
+        """
+        seen.append(_RUN_SCOPE.get(None))
+        provider.close(box)
+
+    ticker = _Ticker()
+    lease = BoxLease(
+        provider.open, close_in_scope, clock=provider.clock, sleep_after_seconds=600, idle_wait=ticker, **_LIMITS
+    )
+    box = lease.acquire("agent-1", [])
+    for scope in ("step-1", "step-2"):
+        token = _RUN_SCOPE.set(scope)
+        try:
+            lease.release(box, healthy=True)
+        finally:
+            _RUN_SCOPE.reset(token)
+        if scope == "step-1":
+            assert lease.acquire("agent-1", []) is box
+    ticker.passes(1)
+    try:
+        provider.clock.now = 600.0
+        ticker.tick_to_end()
+    finally:
+        _stop(lease, ticker)
+
+    assert seen == ["step-2"]
 
 
 @pytest.mark.parametrize("seconds", [0, -1, True, None, "600", float("inf"), float("nan"), 1e10])
@@ -1675,3 +1910,35 @@ def test_a_lease_needs_a_runtime_for_vercel_and_the_spill() -> None:
     assert lease.registry == {}
     lease.close()
     assert runtime.boxes == []
+
+
+def test_a_runtime_lease_keeps_its_first_budget_error_over_a_later_budget_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every budget error stops the run, so a later BudgetReached does not replace a kept BudgetError."""
+    runtime = _Runtime()
+    lease = RuntimeBoxLease(_on_both(runtime), _SPEC, **_LIMITS)
+    boxes = [lease.acquire(agent, []) for agent in ("agent-1", "agent-2")]
+    errors: list[BaseException] = [BudgetError("over budget"), BudgetReached("budget stopped")]
+    for box, error in zip(runtime.boxes, errors, strict=True):
+
+        def fail_close(close: Any = box.close, error: BaseException = error) -> None:
+            """Close the local box, then fail as a settlement does.
+
+            Args:
+                close: The box's own close.
+                error: The settlement's error.
+
+            Raises:
+                BaseException: ``error``, always.
+            """
+            close()
+            raise error
+
+        monkeypatch.setattr(box, "close", fail_close)
+    for box in boxes:
+        lease.release(box, healthy=True)
+
+    with pytest.raises(BudgetError) as raised:
+        lease.close()
+
+    assert raised.value is errors[0]
+    assert all(box.closed for box in runtime.boxes)

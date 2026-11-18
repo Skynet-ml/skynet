@@ -14,6 +14,10 @@ caller holds a box for ``sleep_after_seconds``, a reaper thread closes the box
 and drops it from the lease, also when no other call comes to the lease. The
 box state is lost by design: the next acquire for the agent opens a new box
 through placement and the start budget, as after an unhealthy release.
+The reaper closes a box in the context of the box's last release, so the
+settlement sees that caller's usage and log scopes. It looks only at the
+oldest idle box, wakes only for its deadline or a close, and ends when no
+idle box is left; the next healthy release starts a new one.
 :meth:`BoxLease.close` stops the reaper. The reaper keeps its first error,
 and a budget stop from settlement replaces an error of another type, so it
 stops the run. The next ``acquire`` or ``close`` raises the kept error once.
@@ -30,13 +34,14 @@ they do not see the boxes and starts of other leases or workers.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import math
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Generic, TypeVar, cast
 
 from ..billing.signals import BudgetReached
@@ -132,6 +137,8 @@ class _Lease(Generic[BoxT]):
     box: BoxT | None = None
     busy: bool = True
     released_at: float = 0.0
+    # The context of the last healthy release, for the reaper's close.
+    context: contextvars.Context = field(default_factory=contextvars.Context)
 
 
 class BoxLease(Generic[BoxT]):
@@ -171,7 +178,8 @@ class BoxLease(Generic[BoxT]):
                 lease, so :meth:`close` ends the wait at once.
             sleep_after_seconds: The idle time after which a warm box closes.
             idle_wait: The reaper's wait of up to a number of seconds; ``None``
-                waits on the lease, so :meth:`close` ends the wait at once. A
+                waits on an event that only :meth:`close` sets, so a release
+                does not wake the reaper and close ends the wait at once. A
                 custom wait must end soon after :meth:`close`, because close
                 waits for the reaper.
 
@@ -212,6 +220,8 @@ class BoxLease(Generic[BoxT]):
         self._vercel_cap = vercel_cap
         self._spill = spill
         self._leases: dict[str, _Lease[BoxT]] = {}
+        # The idle keys in release order. Each release sets the latest idle time, so the first key sleeps first.
+        self._idle: OrderedDict[str, None] = OrderedDict()
         # Box identity to its key: a box need not be hashable, and the lease holds it while the entry exists.
         self._holders: dict[int, str] = {}
         self._open: Counter[str] = Counter()
@@ -220,8 +230,10 @@ class BoxLease(Generic[BoxT]):
         self._budget = StartBudget(starts_per_minute, clock=clock, sleep=sleep or self._wait_on_lease)
         self._clock = clock
         self._sleep_after = float(sleep_after_seconds)
-        self._idle_wait = idle_wait or self._wait_on_lease
-        # Started at the first warm box, so a lease that keeps no box warm runs no thread.
+        # Its own event, not the lease condition, so a release or drop does not wake the reaper for a scan.
+        self._reaper_wake = threading.Event()
+        self._idle_wait = idle_wait or self._reaper_wake.wait
+        # Started at the first warm box and ended when no box is idle, so a lease with no idle box runs no thread.
         self._reaper: threading.Thread | None = None
         # The reaper's first close error, for the next acquire or close to raise.
         self._reap_error: BaseException | None = None
@@ -316,6 +328,8 @@ class BoxLease(Generic[BoxT]):
                 lease.busy = False
                 # Only an idle box sleeps, so the release starts its idle time; an acquire holds the box.
                 lease.released_at = self._clock()
+                lease.context = contextvars.copy_context()
+                self._idle[key] = None
                 if self._reaper is None:
                     self._reaper = threading.Thread(target=self._reap, name="box-lease-reaper", daemon=True)
                     self._reaper.start()
@@ -334,10 +348,10 @@ class BoxLease(Generic[BoxT]):
         """
         with self._cond:
             self._closed = True
-            # Wakes the acquires that wait for a start and the reaper, also when no idle box drops below.
+            # Wakes the acquires that wait for a start, also when no idle box drops below.
             self._cond.notify_all()
-            idle = [key for key, lease in self._leases.items() if not lease.busy]
-            boxes = [self._drop(key) for key in idle]
+            self._reaper_wake.set()
+            boxes = [self._drop(key) for key in list(self._idle)]
             reaper = self._reaper
         # Joined outside the lock, because the reaper takes the lock before it sees the close.
         if reaper is not None and reaper is not threading.current_thread():
@@ -360,40 +374,45 @@ class BoxLease(Generic[BoxT]):
         container to sleep after its ``sleepAfter`` time with no request.
         """
         try:
-            self._reap_until_closed()
+            self._reap_while_idle()
         except BaseException as exc:
             # A broken clock or idle wait would fail again at once, so the thread ends and a release starts it again.
             logger.warning("The box lease reaper stopped: %s", type(exc).__name__)
-            self._keep_reap_error(exc)
-        finally:
+            # One lock block for the error and the field: a release between them would see a live reaper,
+            # start none, and leave its idle box with no reaper.
             with self._cond:
+                self._keep_reap_error(exc)
                 self._reaper = None
 
-    def _reap_until_closed(self) -> None:
-        """Close each idle box whose idle time passed sleep_after, until the lease closes."""
+    def _reap_while_idle(self) -> None:
+        """Close each idle box whose idle time passed sleep_after, until the lease closes or no box is idle."""
         while True:
             with self._cond:
-                if self._closed:
+                if self._closed or not self._idle:
+                    # Cleared in the same lock block as the check, so the next healthy release starts a new reaper.
+                    self._reaper = None
                     return
                 now = self._clock()
-                expired = [
-                    key
-                    for key, lease in self._leases.items()
-                    if not lease.busy and now - lease.released_at >= self._sleep_after
-                ]
-                boxes = [self._drop(key) for key in expired]
-                wait = min(
-                    (lease.released_at + self._sleep_after - now for lease in self._leases.values() if not lease.busy),
-                    default=self._sleep_after,
-                )
-            for box, provider in boxes:
+                boxes: list[tuple[BoxT, str, contextvars.Context]] = []
+                # Release order is idle-time order, so the scan stops at the first box that is still in its time.
+                wait = 0.0
+                while self._idle:
+                    key = next(iter(self._idle))
+                    lease = self._leases[key]
+                    wait = lease.released_at + self._sleep_after - now
+                    if wait > 0:
+                        break
+                    boxes.append((*self._drop(key), lease.context))
+            for box, provider, context in boxes:
                 try:
-                    self._close_and_free(box, provider)
+                    # The release's context, so the settlement records its charges, usage and log in that scope.
+                    context.run(self._close_and_free, box, provider)
                 except BaseException as exc:
                     # The error text can hold a secret.
                     logger.warning("The idle box close failed: %s", type(exc).__name__)
                     self._keep_reap_error(exc)
             # A slow close moves the clock, so the next deadline comes from a new pass, not this wait.
+            # With no idle box left, the next pass ends the reaper.
             if boxes:
                 continue
             self._idle_wait(wait)
@@ -456,6 +475,7 @@ class BoxLease(Generic[BoxT]):
             lease = self._leases.get(key)
             if lease is not None and lease.grants == wanted:
                 lease.busy = True
+                self._idle.pop(key, None)
                 return lease, None
             stale = self._drop(key) if lease is not None else None
             placement = choose(grants, Quota(self._vercel_cap, self._open[VERCEL], self._spill))
@@ -475,6 +495,7 @@ class BoxLease(Generic[BoxT]):
             The box and its provider, for the caller to give to :meth:`_close_and_free`.
         """
         lease = self._leases.pop(key)
+        self._idle.pop(key, None)
         box = cast(BoxT, lease.box)
         del self._holders[id(box)]
         self._cond.notify_all()
