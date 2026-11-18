@@ -18,7 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.service_gateway.optimization.blackbox.sandbox_runtime import LocalSubprocessRuntime
-from core.storage.models import JobModel
+from core.storage.models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.worker.engine_loop import EngineLoop
@@ -1362,10 +1362,75 @@ def test_swarm_takes_a_throwaway_database(tmp_path: Path) -> None:
     swarm_10k._check_throwaway(engine)
 
 
+def _seed_rows_after_reset(monkeypatch: pytest.MonkeyPatch, engine: Engine) -> None:
+    """Make the reset also put in one swarm row in each step-log table, and one row of another worker.
+
+    The rows go in after the reset's own delete, as the shard processes' rows do, so only the cleanup removes them.
+
+    Args:
+        monkeypatch: Wraps ``_reset``.
+        engine: The database.
+    """
+    reset = swarm_10k._reset
+
+    def seeded(reset_engine: Engine, runs: list[str]) -> None:
+        """Reset the database, then put in the rows.
+
+        Args:
+            reset_engine: The database to reset.
+            runs: The job ids.
+        """
+        reset(reset_engine, runs)
+        pack = {"pack_key": "packs/swarm-w/0", "pack_offset": 0, "pack_length": 1}
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    AgentStepModel(
+                        step_id=f"{runs[0]}:agent-00000:1",
+                        run_id=runs[0],
+                        agent_id="agent-00000",
+                        seq=1,
+                        kind="command",
+                        execution_generation=1,
+                        grant_list_id="grants",
+                        **pack,
+                    ),
+                    TreeObjectModel(username=runs[0], object_id="tree", byte_size=1, **pack),
+                    StoragePackModel(pack_key="packs/swarm-w/0", worker_id="swarm-w", byte_size=1),
+                    TreeObjectModel(username="someone", object_id="tree", byte_size=1, **pack),
+                    StoragePackModel(pack_key="packs/other/0", worker_id="other", byte_size=1),
+                ]
+            )
+            session.commit()
+
+    monkeypatch.setattr(swarm_10k, "_reset", seeded)
+
+
+def _rows(engine: Engine) -> dict[str, list[str]]:
+    """Return the key of each row in the step-log tables.
+
+    Args:
+        engine: The database.
+
+    Returns:
+        The keys, by table.
+    """
+    with Session(engine) as session:
+        return {
+            "jobs": list(session.execute(select(JobModel.optimization_id)).scalars()),
+            "agent_steps": list(session.execute(select(AgentStepModel.step_id)).scalars()),
+            "tree_objects": list(session.execute(select(TreeObjectModel.username)).scalars()),
+            "storage_packs": list(session.execute(select(StoragePackModel.worker_id)).scalars()),
+        }
+
+
+_OTHER_ROWS = {"jobs": [], "agent_steps": [], "tree_objects": ["someone"], "storage_packs": ["other"]}
+
+
 def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Check that a shared-database pass keeps a live lease on its jobs and leaves no swarm row when it ends.
+    """Check that a shared-database pass keeps a live lease on its jobs and deletes only its own rows when it ends.
 
     A local worker's orphan sweep takes a running job with no lease, or a lapsed one.
 
@@ -1375,6 +1440,7 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
     """
     engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
     _postgres_pass(monkeypatch, engine)
+    _seed_rows_after_reset(monkeypatch, engine)
     leases: list[datetime | None] = []
 
     def digest(shards: list[swarm_10k.Shard]) -> tuple[str, int]:
@@ -1395,5 +1461,59 @@ def test_swarm_postgres_pass_leases_its_jobs_and_deletes_its_rows(
     swarm_10k.run_pass(config, 1, tmp_path / "pass")
     assert leases
     assert all(lease is not None and lease.replace(tzinfo=UTC) > datetime.now(UTC) for lease in leases)
-    with Session(engine) as session:
-        assert session.execute(select(JobModel.optimization_id)).scalars().all() == []
+    assert _rows(engine) == _OTHER_ROWS
+
+
+def _object_store_fails(folder: Path) -> tuple[Any, Any]:
+    """Fail as a bad object store setting does.
+
+    Args:
+        folder: Not used.
+
+    Raises:
+        RuntimeError: Always.
+    """
+    raise RuntimeError("object store failed")
+
+
+@pytest.mark.parametrize("failure", ["shard report", "object store"])
+def test_swarm_postgres_pass_that_fails_deletes_its_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    """Check that a failed shared-database pass deletes its own rows and keeps the rows of another worker.
+
+    The object store failure comes after the reset and before the first shard joins the pass.
+
+    Args:
+        monkeypatch: Replaces the engine, the shard processes, and the report or the object store.
+        tmp_path: The pass folder.
+        failure: The step that fails.
+    """
+    engine = _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm")
+    _postgres_pass(monkeypatch, engine)
+    _seed_rows_after_reset(monkeypatch, engine)
+    if failure == "shard report":
+        report = {"worker_id": "swarm-w", "error": "shard broke"}
+        monkeypatch.setattr(swarm_10k, "collect_reports", lambda *args: [report])
+    else:
+        monkeypatch.setattr(swarm_10k, "_object_store", _object_store_fails)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(RuntimeError, match=r"shard broke|object store failed"):
+        swarm_10k.run_pass(config, 2, tmp_path / "pass")
+    assert _rows(engine) == _OTHER_ROWS
+
+
+def test_swarm_refuses_a_remote_s3_endpoint_before_any_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Check that a bucket with an endpoint off the local host stops the pass before the database gets a row.
+
+    Args:
+        monkeypatch: Replaces the engine, sets the S3 settings, and makes a reset fail the test.
+        tmp_path: The pass folder.
+    """
+    _postgres_pass(monkeypatch, _named_sqlite(tmp_path / "db.sqlite", "loadtest_swarm"))
+    monkeypatch.setenv("LOAD_TEST_SWARM_S3_BUCKET", "swarm")
+    monkeypatch.setenv("LOAD_TEST_SWARM_S3_ENDPOINT", "https://s3.example.com")
+    monkeypatch.setattr(swarm_10k, "_reset", _no_start)
+    config = replace(_small_pass_config(), db_url="postgresql://user@localhost/loadtest_swarm")
+    with pytest.raises(RuntimeError, match="needs LOAD_TEST_SWARM_S3_ENDPOINT"):
+        swarm_10k.run_pass(config, 1, tmp_path / "pass")

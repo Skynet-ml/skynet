@@ -265,6 +265,29 @@ def run_id_for(index: int) -> str:
     return f"{RUN_PREFIX}{index:06d}"
 
 
+def _s3_settings() -> tuple[str, str] | None:
+    """Return the local S3 bucket and endpoint when a bucket is set.
+
+    Returns:
+        The bucket and endpoint, or ``None`` for a local folder.
+
+    Raises:
+        RuntimeError: When a bucket is set with no local endpoint, or boto3 is not installed.
+    """
+    bucket = os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip()
+    if not bucket:
+        return None
+    # With no endpoint, boto3 goes to real AWS S3; the swarm writes only to a local server.
+    endpoint = os.environ.get("LOAD_TEST_SWARM_S3_ENDPOINT", "").strip()
+    if urlsplit(endpoint).hostname not in LOCAL_S3_HOSTS:
+        raise RuntimeError(
+            f"LOAD_TEST_SWARM_S3_BUCKET needs LOAD_TEST_SWARM_S3_ENDPOINT on {sorted(LOCAL_S3_HOSTS)}, got {endpoint!r}"
+        )
+    if boto3 is None:
+        raise RuntimeError("boto3 is not installed")
+    return bucket, endpoint
+
+
 def _object_store(folder: Path) -> tuple[Any, Any]:
     """Return the object store: a bucket on a local S3 server when one is set, else a local folder.
 
@@ -277,17 +300,10 @@ def _object_store(folder: Path) -> tuple[Any, Any]:
     Raises:
         RuntimeError: When a bucket is set with no local endpoint, or boto3 is not installed.
     """
-    bucket = os.environ.get("LOAD_TEST_SWARM_S3_BUCKET", "").strip()
-    if not bucket:
+    settings = _s3_settings()
+    if settings is None:
         return LocalObjectStore(folder), None
-    # With no endpoint, boto3 goes to real AWS S3; the swarm writes only to a local server.
-    endpoint = os.environ.get("LOAD_TEST_SWARM_S3_ENDPOINT", "").strip()
-    if urlsplit(endpoint).hostname not in LOCAL_S3_HOSTS:
-        raise RuntimeError(
-            f"LOAD_TEST_SWARM_S3_BUCKET needs LOAD_TEST_SWARM_S3_ENDPOINT on {sorted(LOCAL_S3_HOSTS)}, got {endpoint!r}"
-        )
-    if boto3 is None:
-        raise RuntimeError("boto3 is not installed")
+    bucket, endpoint = settings
     client = boto3.client("s3", endpoint_url=endpoint)
     return S3ObjectStore(bucket, client), client
 
@@ -871,10 +887,14 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
         RuntimeError: When the database URL is not local, or a shard process fails or does not report.
     """
     _check_db_url(config.db_url)
+    # Check the S3 settings before any database write, so a bad setting leaves no row behind.
+    _s3_settings()
     runs = [run_id_for(index) for index in range(math.ceil(config.agents / AGENTS_PER_RUN))]
     agents = [(runs[index // AGENTS_PER_RUN], f"agent-{index:05d}") for index in range(config.agents)]
     stamp = f"{int(time.time() * 1000) % 10**9}"
     shards: list[Shard] = []
+    # The reset writes the swarm's job rows before the shard joins ``shards``; the cleanup follows the reset.
+    reset_engine: Engine | None = None
     reports: list[dict[str, Any]] = []
     # Spawn, not fork: a forked child would inherit the parent's engines and threads.
     context = multiprocessing.get_context("spawn")
@@ -893,6 +913,8 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
                 _check_throwaway(engine)
             if config.db_url is None or index == 0:
                 _reset(engine, runs)
+                if config.db_url is not None:
+                    reset_engine = engine
             shard_runs = [run for position, run in enumerate(runs) if position % shard_count == index]
             objects, s3 = _object_store(shard_folder / "objects")
             worker_id = f"{RUN_PREFIX}{stamp}-s{shard_count}-{index}"
@@ -939,11 +961,11 @@ def run_pass(config: SwarmConfig, shard_count: int, folder: Path) -> dict[str, A
                 process.join()
         # Each shard gets its cleanup, also after another shard's cleanup fails; the first error wins.
         cleanup_error: Exception | None = None
-        # A shard joins ``shards`` only after its database passed every check. The pass's rows point at packs
-        # that the cleanup deletes, and a later worker's orphan sweep must not take its running jobs.
-        if config.db_url is not None and shards:
+        # Only a database that passed every check gets a reset. The pass's rows point at packs that the cleanup
+        # deletes, and a later worker's orphan sweep must not take its running jobs.
+        if reset_engine is not None:
             try:
-                with Session(shards[0].engine) as session:
+                with Session(reset_engine) as session:
                     _delete_swarm_rows(session)
                     session.commit()
             except Exception as error:
