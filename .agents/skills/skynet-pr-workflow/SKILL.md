@@ -379,8 +379,8 @@ A manual hold on a change or on a promotion still stops it.
 - The orchestrator starts a batch when a PR is in **Ready to Merge** and no
   other batch is in progress. A batch is in progress while its batch PR is
   open, or while its `batch/` branch is not merged and not deleted.
-- When the orchestrator stops a batch without a merge, it closes the batch
-  PR and deletes the `batch/` branch.
+- When the orchestrator stops or rebuilds a batch, it first closes the
+  batch PR and deletes the `batch/` branch.
 - After an approval, the orchestrator does not merge the PR outside a
   batch. It moves the issue to **Ready to Merge**, adds the
   `ready-to-merge` label, a PR comment and the `agent-review/ready-to-merge`
