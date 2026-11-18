@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` enthält die Eingabespalten eines Falls. `case["expected"]` enthält die Ausgabespalte, mit ihrem Spaltennamen als Schlüssel. Das Repository hat eine Datei `serve.py` mit `def serve(input)`. Skynet stellt mit derselben Funktion nach dem Durchlauf die beste Version bereit.

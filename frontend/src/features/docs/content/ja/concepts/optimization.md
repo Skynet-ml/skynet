@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` は、セットアップコマンドの実行後の、リポジトリの 1 つのバージョンのフォルダーです。
 - `case` は dict です。`case["input"]` は 1 つのケースの入力フィールドを保持します。`case["expected"]` は期待値を保持します。期待値がないケースでは `None` です。
-- `score` はペアを返します。数値と、`"feedback"` 文字列を含む dict です。
+- `score` は 1 つのオブジェクトを返します。`"score"` の下の数値と、任意の `"feedback"` 文字列です。
 
 リポジトリのルートには、`def serve(input)` を持つ `serve.py` ファイルがあります。スコアラーはこの関数を呼び出せます。Skynet は実行の後、この関数を使って最も良いバージョンを提供します。
 

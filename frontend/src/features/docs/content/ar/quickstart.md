@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 يحتوي `case["input"]` على أعمدة الإدخال لحالة واحدة. ويحتوي `case["expected"]` على عمود الإخراج، ومفتاحه اسم العمود. في المستودع ملف `serve.py` فيه `def serve(input)`. يستخدم Skynet الدالة نفسها لتقديم أفضل نسخة بعد التشغيل.

@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` содержит столбцы с ролью «Вход» для одного примера. `case["expected"]` содержит столбец с ролью «Выход», ключ — имя этого столбца. В репозитории есть файл `serve.py` с `def serve(input)`. После запуска Skynet использует эту же функцию, чтобы обслуживать лучшую версию.

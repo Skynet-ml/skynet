@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path`는 설정 명령이 실행된 후의 리포지토리 한 버전의 폴더입니다.
 - `case`는 dict입니다. `case["input"]`는 케이스 하나의 입력 필드를 담습니다. `case["expected"]`는 기댓값을 담으며, 케이스에 기댓값이 없으면 `None`입니다.
-- `score`는 쌍을 반환합니다. 숫자 하나와 `"feedback"` 문자열이 있는 dict 하나입니다.
+- `score`는 객체 하나를 반환합니다. `"score"`에 숫자 하나와, 선택 사항인 `"feedback"` 문자열입니다.
 
 리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. 채점기는 이 함수를 호출할 수 있습니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
 

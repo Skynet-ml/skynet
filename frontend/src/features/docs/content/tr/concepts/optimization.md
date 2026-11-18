@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path`, kurulum komutu çalıştıktan sonra deponun bir sürümünün klasörüdür.
 - `case` bir dict'tir. `case["input"]` bir vakanın girdi alanlarını tutar. `case["expected"]` beklenen değeri tutar; vakanın beklenen değeri yoksa `None` olur.
-- `score` bir çift döndürür: bir sayı ve `"feedback"` dizesi içeren bir dict.
+- `score` tek bir nesne döndürür: `"score"` altında bir sayı ve isteğe bağlı bir `"feedback"` dizesi.
 
 Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. Puanlayıcı bu fonksiyonu çağırabilir. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
 

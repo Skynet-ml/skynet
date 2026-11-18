@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` is the folder of one version of the repository, after the setup command ran.
 - `case` is a dict. `case["input"]` holds the input fields of one case. `case["expected"]` holds the expected value, or `None` when the case has none.
-- `score` returns a pair: a number, and a dict with a `"feedback"` string.
+- `score` returns one object: a number under `"score"`, and an optional `"feedback"` string.
 
 The repository has a `serve.py` file at its root with `def serve(input)`. The scorer can call it, and Skynet uses it to serve the best version after the run.
 

@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | 引数        | 保持する内容                                                                     |
@@ -19,28 +19,35 @@ def score(repo_path, case):
 
 ## 戻り値
 
-`score` は、フィードバック付きのスコアを返す必要があります。次の形が有効です。
+`score` は 1 つのオブジェクトを返します。
 
-1. ペア: 数値と、フィードバックの文字列または `"feedback"` キーを持つ dict。
-2. `"score"` の下に数値、`"feedback"` の下に文字列を持つ dict。
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-フィードバックは空でない文字列である必要があります。
+- `"score"` は必須です。有限の数値です。バージョンの順位を決めるのはこのスコアだけです。
+- `"feedback"` は任意のテキストです。GEPA と Auto はこれから学ぶので、付けることをお勧めします。フィードバックがないと、エンジンはスコアだけを見ます。実行ログはそのことを 1 回だけ伝えます。
+- `"scores"` は任意です。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自の `"score"` と任意の `"feedback"` を持つオブジェクトです。すべてのエンジンは、各名前付きスコアをそれぞれ独自の目的として使います。
 
-付加情報には `"scores"` キーを含めることもできます。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自のスコアとフィードバックを持ちます。例: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
+ほかの形やキーはすべてエラーです。チェックは、誤った部分と有効な形を表示します。
 
-付加情報には、同じ形の `"cases"` キーを含めることもできます。各エントリは 1 つのケースの結果です。すべてのエンジンは、各ケースをそれぞれ独自の目的として使います。
-
-戻り値の形が異なる場合、チェックは失敗し、その理由を表示します。
-
-| 戻り値                                                                          | 有効か                                       |
-| ------------------------------------------------------------------------------- | -------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | はい                                         |
-| `(0.8, "Close. Missing the date.")`                                             | はい                                         |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | はい                              |
-| `0.8`                                                                           | いいえ。フィードバックがありません。         |
-| `(0.8, {})`                                                                     | いいえ。フィードバックの文字列がありません。 |
-| `("0.8", {"feedback": "OK"})`                                                   | いいえ。スコアが文字列です。                 |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | いいえ。名前付きスコアが数値ではありません。 |
+| 戻り値 | 有効か |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | はい |
+| `{"score": 0.8}` | はい。フィードバックはありません。 |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | はい |
+| `0.8` | いいえ。値がオブジェクトではありません。 |
+| `(0.8, "Close. Missing the date.")` | いいえ。値がオブジェクトではありません。 |
+| `{"score": "0.8"}` | いいえ。スコアが文字列です。 |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | いいえ。名前付きスコアはオブジェクトである必要があります。 |
+| `{"score": 0.8, "feedbak": "OK"}` | いいえ。キー `feedbak` は不明です。 |
 
 ## 役に立つフィードバックを書く
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### 審査員としてのモデル
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 スコアラーは、`OPENAI_BASE_URL`、`APP_API_KEY`、`APP_MODEL` の環境変数を使って、任意の OpenAI 互換クライアントを使うこともできます。ゲートウェイは、実行のスコアラーモデルだけを受け付けます。

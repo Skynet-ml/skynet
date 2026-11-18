@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` هو مجلد نسخة واحدة من المستودع، بعد تشغيل أمر الإعداد.
 - `case` قاموس (dict). يحتوي `case["input"]` على حقول الإدخال لحالة واحدة. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` إذا لم تكن للحالة قيمة متوقعة.
-- تُرجع `score` زوجًا: رقمًا، وقاموسًا فيه سلسلة نصية `"feedback"`.
+- تُرجع `score` كائنًا واحدًا: رقمًا تحت `"score"`، وسلسلة نصية `"feedback"` اختيارية.
 
 في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يمكن للمُقيِّم أن يستدعيه، ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
 

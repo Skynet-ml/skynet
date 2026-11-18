@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` — це папка однієї версії репозиторію після виконання команди налаштування.
 - `case` — це словник. `case["input"]` містить вхідні поля одного кейсу. `case["expected"]` містить очікуване значення або `None`, якщо кейс його не має.
-- `score` повертає пару: число й словник із рядком `"feedback"`.
+- `score` повертає один об'єкт: число під ключем `"score"` і необов'язковий рядок `"feedback"`.
 
 Репозиторій має в корені файл `serve.py` з `def serve(input)`. Оцінювач може його викликати, а Skynet використовує його, щоб обслуговувати найкращу версію після запуску.
 

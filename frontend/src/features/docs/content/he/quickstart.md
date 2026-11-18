@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 ‏`case["input"]` מכיל את עמודות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את עמודת הפלט, עם שם העמודה כמפתח. במאגר יש קובץ `serve.py` עם `def serve(input)`. ‏Skynet משתמש באותה פונקציה כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.

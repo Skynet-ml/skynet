@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` contient les colonnes d'entrée d'un cas. `case["expected"]` contient la colonne de sortie, indexée par le nom de la colonne. Le dépôt contient un fichier `serve.py` avec `def serve(input)`. Skynet utilise la même fonction pour servir la meilleure version après l'exécution.

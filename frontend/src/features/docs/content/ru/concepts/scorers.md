@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Аргумент    | Что содержит                                                                     |
@@ -19,28 +19,35 @@ def score(repo_path, case):
 
 ## Возвращаемое значение
 
-`score` должна вернуть оценку с обратной связью. Допустимы такие формы:
+`score` возвращает один объект:
 
-1. Пара: число и строка обратной связи или dict с ключом `"feedback"`.
-2. dict с числом в `"score"` и строкой в `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Обратная связь должна быть непустой строкой.
+- `"score"` обязателен. Это конечное число. Только эта оценка упорядочивает версии.
+- `"feedback"` — необязательный текст. Его рекомендуется давать, потому что GEPA и Auto учатся на нём. Без обратной связи движки видят только оценки, и журнал запуска сообщает об этом один раз.
+- `"scores"` необязателен. Он сопоставляет имена с именованными оценками. Каждая именованная оценка — это объект со своим `"score"` и необязательным `"feedback"`. Каждый движок использует каждую именованную оценку как отдельную цель.
 
-Дополнительные сведения также могут содержать ключ `"scores"`. Он сопоставляет имена с именованными оценками. У каждой именованной оценки есть своя оценка и своя обратная связь, например `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Любая другая форма или ключ — ошибка. Проверка показывает неверную часть и допустимую форму.
 
-Дополнительные сведения также могут содержать ключ `"cases"` той же формы. Каждая запись — результат одного примера. Каждый движок использует каждый пример как отдельную цель.
-
-Если возвращаемое значение имеет другую форму, проверка не проходит и показывает причину.
-
-| Возвращаемое значение                                                           | Допустимо                              |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Да                                     |
-| `(0.8, "Close. Missing the date.")`                                             | Да                                     |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Да                          |
-| `0.8`                                                                           | Нет. Нет обратной связи.               |
-| `(0.8, {})`                                                                     | Нет. Нет строки обратной связи.        |
-| `("0.8", {"feedback": "OK"})`                                                   | Нет. Оценка — это строка.              |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Нет. Именованная оценка — не число.   |
+| Возвращаемое значение | Допустимо |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Да |
+| `{"score": 0.8}` | Да. Обратной связи нет. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Да |
+| `0.8` | Нет. Значение — не объект. |
+| `(0.8, "Close. Missing the date.")` | Нет. Значение — не объект. |
+| `{"score": "0.8"}` | Нет. Оценка — это строка. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Нет. Именованная оценка должна быть объектом. |
+| `{"score": 0.8, "feedbak": "OK"}` | Нет. Ключ `feedbak` неизвестен. |
 
 ## Полезная обратная связь
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` — это dict, ключ которого — имя вашего столбца «Выход». Прочитайте [Наборы данных и разбиение](/docs/concepts/datasets).
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### Модель как судья
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 Оценщик также может использовать любой OpenAI-совместимый клиент с переменными окружения `OPENAI_BASE_URL`, `APP_API_KEY` и `APP_MODEL`. Шлюз принимает только модель оценщика этого запуска.

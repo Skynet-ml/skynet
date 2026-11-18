@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Аргумент    | Що містить                                                                       |
@@ -19,28 +19,35 @@ def score(repo_path, case):
 
 ## Значення, яке повертає функція
 
-`score` має повертати оцінку з відгуком. Коректні такі форми:
+`score` повертає один об'єкт:
 
-1. Пара: число й рядок відгуку або словник із ключем `"feedback"`.
-2. Словник із числом під ключем `"score"` і рядком під ключем `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Відгук має бути непорожнім рядком.
+- `"score"` обов'язковий. Це скінченне число. Лише ця оцінка впорядковує версії.
+- `"feedback"` — необов'язковий текст. Його радимо давати, бо GEPA та Auto вчаться на ньому. Без відгуку рушії бачать лише оцінки, і журнал запуску повідомляє про це один раз.
+- `"scores"` необов'язковий. Він зіставляє назви з іменованими оцінками. Кожна іменована оцінка — це об'єкт із власним `"score"` і необов'язковим `"feedback"`. Кожен рушій використовує кожну іменовану оцінку як окрему ціль.
 
-Додаткова інформація також може містити ключ `"scores"`. Він зіставляє назви з іменованими оцінками. Кожна іменована оцінка має власну оцінку й відгук, наприклад `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Будь-яка інша форма або ключ — це помилка. Перевірка показує хибну частину й коректну форму.
 
-Додаткова інформація також може містити ключ `"cases"` тієї самої форми. Кожен запис — це результат одного кейсу. Кожен рушій використовує кожен кейс як окрему ціль.
-
-Якщо значення має іншу форму, перевірка не проходить і показує причину.
-
-| Значення, яке повертає функція                                                  | Чи коректне                              |
-| ------------------------------------------------------------------------------- | ---------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Так                                      |
-| `(0.8, "Close. Missing the date.")`                                             | Так                                      |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Так                           |
-| `0.8`                                                                           | Ні. Немає відгуку.                       |
-| `(0.8, {})`                                                                     | Ні. Немає рядка з відгуком.              |
-| `("0.8", {"feedback": "OK"})`                                                   | Ні. Оцінка — це рядок.                   |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Ні. Іменована оцінка — не число.        |
+| Значення, яке повертає функція | Чи коректне |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Так |
+| `{"score": 0.8}` | Так. Відгуку немає. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Так |
+| `0.8` | Ні. Значення — не об'єкт. |
+| `(0.8, "Close. Missing the date.")` | Ні. Значення — не об'єкт. |
+| `{"score": "0.8"}` | Ні. Оцінка — це рядок. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Ні. Іменована оцінка має бути об'єктом. |
+| `{"score": 0.8, "feedbak": "OK"}` | Ні. Ключ `feedbak` невідомий. |
 
 ## Пишіть корисний відгук
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` — це словник, ключем у якому є назва вашого стовпця виводу. Прочитайте [Набори даних і розбиття](/docs/concepts/datasets).
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### Модель як суддя
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 Оцінювач також може використовувати будь-який клієнт, сумісний з OpenAI, зі змінними середовища `OPENAI_BASE_URL`, `APP_API_KEY` і `APP_MODEL`. Шлюз приймає лише модель оцінювача запуску.

@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` रिपॉज़िटरी के एक संस्करण का फ़ोल्डर है, सेटअप कमांड चलने के बाद।
 - `case` एक dict है। `case["input"]` में एक केस के इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` जब केस में कोई अपेक्षित मान नहीं है।
-- `score` एक जोड़ा लौटाता है: एक संख्या, और `"feedback"` स्ट्रिंग वाला एक dict।
+- `score` एक object लौटाता है: `"score"` के नीचे एक संख्या, और एक वैकल्पिक `"feedback"` स्ट्रिंग।
 
 रिपॉज़िटरी के रूट में `def serve(input)` वाली एक `serve.py` फ़ाइल है। स्कोरर इसे कॉल कर सकता है, और रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसका इस्तेमाल करता है।
 

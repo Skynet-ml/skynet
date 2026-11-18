@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` پوشهٔ یک نسخه از مخزن است، پس از اجرای دستور راه‌اندازی.
 - `case` یک dict است. `case["input"]` فیلدهای ورودی یک مورد را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا وقتی مورد مقداری ندارد `None` است.
-- `score` یک جفت برمی‌گرداند: یک عدد، و یک dict با یک رشتهٔ `"feedback"`.
+- `score` یک شیء برمی‌گرداند: یک عدد زیر `"score"`، و یک رشتهٔ `"feedback"` اختیاری.
 
 مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. امتیازدهنده می‌تواند آن را فراخوانی کند، و Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
 

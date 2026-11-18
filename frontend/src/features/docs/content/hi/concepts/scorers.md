@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | आर्गुमेंट    | इसमें क्या होता है                                                              |
@@ -19,28 +19,35 @@ def score(repo_path, case):
 
 ## रिटर्न मान
 
-`score` को फ़ीडबैक के साथ एक स्कोर लौटाना होगा। ये रूप मान्य हैं:
+`score` एक object लौटाता है:
 
-1. एक जोड़ा: एक संख्या, और एक feedback string या `"feedback"` key वाली एक dict।
-2. एक dict, जिसमें `"score"` के नीचे एक संख्या और `"feedback"` के नीचे एक string हो।
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-फ़ीडबैक एक ऐसी string होनी चाहिए जो खाली न हो।
+- `"score"` ज़रूरी है। यह एक सीमित संख्या है। सिर्फ़ यही स्कोर संस्करणों का क्रम तय करता है।
+- `"feedback"` वैकल्पिक टेक्स्ट है। इसे देने की सलाह दी जाती है, क्योंकि GEPA और Auto इससे सीखते हैं। फ़ीडबैक के बिना इंजन सिर्फ़ स्कोर देखते हैं, और रन लॉग यह बात एक बार बताता है।
+- `"scores"` वैकल्पिक है। यह नामों को नामित स्कोर से जोड़ती है। हर नामित स्कोर एक object है, जिसमें उसका अपना `"score"` और एक वैकल्पिक `"feedback"` होता है। हर इंजन हर नामित स्कोर को अपने अलग लक्ष्य के रूप में इस्तेमाल करता है।
 
-साइड इन्फ़ो में `"scores"` key भी हो सकती है। यह नामों को नामित स्कोर से जोड़ती है। हर नामित स्कोर का अपना स्कोर और फ़ीडबैक होता है, उदाहरण के लिए `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`।
+कोई भी दूसरा रूप या key एक त्रुटि है। जाँच गलत हिस्सा और मान्य रूप दिखाती है।
 
-साइड इन्फ़ो में इसी आकार की `"cases"` key भी हो सकती है। हर एंट्री एक केस का परिणाम है। हर इंजन हर केस को अपने अलग लक्ष्य के रूप में इस्तेमाल करता है।
-
-अगर रिटर्न मान का आकार अलग है, तो जाँच विफल होती है और कारण दिखाती है।
-
-| रिटर्न मान                                                                      | मान्य                                    |
-| ------------------------------------------------------------------------------- | ---------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | हाँ                                       |
-| `(0.8, "Close. Missing the date.")`                                             | हाँ                                       |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | हाँ                            |
-| `0.8`                                                                           | नहीं। कोई फ़ीडबैक नहीं है।                   |
-| `(0.8, {})`                                                                     | नहीं। कोई feedback string नहीं है।          |
-| `("0.8", {"feedback": "OK"})`                                                   | नहीं। स्कोर एक string है।                   |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | नहीं। एक नामित स्कोर संख्या नहीं है।         |
+| रिटर्न मान | मान्य |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | हाँ |
+| `{"score": 0.8}` | हाँ। कोई फ़ीडबैक नहीं है। |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | हाँ |
+| `0.8` | नहीं। मान एक object नहीं है। |
+| `(0.8, "Close. Missing the date.")` | नहीं। मान एक object नहीं है। |
+| `{"score": "0.8"}` | नहीं। स्कोर एक string है। |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | नहीं। नामित स्कोर एक object होना चाहिए। |
+| `{"score": 0.8, "feedbak": "OK"}` | नहीं। `feedbak` key अज्ञात है। |
 
 ## उपयोगी फ़ीडबैक लिखें
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` एक dict है, जिसकी key आपके आउटपुट कॉलम का नाम है। [डेटासेट और विभाजन](/docs/concepts/datasets) पढ़ें।
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### जज के रूप में मॉडल
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 स्कोरर `OPENAI_BASE_URL`, `APP_API_KEY` और `APP_MODEL` एनवायरनमेंट वेरिएबल के साथ कोई भी OpenAI-संगत क्लाइंट भी इस्तेमाल कर सकता है। गेटवे सिर्फ़ रन का स्कोरर मॉडल स्वीकार करता है।

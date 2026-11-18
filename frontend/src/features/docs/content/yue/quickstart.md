@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` 裝住一個案例嘅輸入欄。`case["expected"]` 裝住輸出欄，用欄名做 key。倉庫有一個 `serve.py` 檔案，入面有 `def serve(input)`。運行完之後，Skynet 會用同一個函數嚟提供最好嗰個版本。

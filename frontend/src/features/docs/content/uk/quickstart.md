@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` містить вхідні стовпці одного кейсу. `case["expected"]` містить вихідний стовпець, ключем якого є назва стовпця. Репозиторій має файл `serve.py` з `def serve(input)`. Після запуску Skynet використовує ту саму функцію, щоб обслуговувати найкращу версію.

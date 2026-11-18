@@ -5,7 +5,7 @@ El evaluador le dice a Skynet lo buena que es una versión de tu repositorio. Es
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argumento   | Qué contiene                                                                     |
@@ -19,28 +19,35 @@ El evaluador se ejecuta en el sandbox, en la carpeta de la versión. Puede impor
 
 ## El valor devuelto
 
-`score` debe devolver una puntuación con comentarios. Estas formas son válidas:
+`score` devuelve un objeto:
 
-1. Un par: un número, y una cadena de comentarios o un dict con una clave `"feedback"`.
-2. Un dict con un número en `"score"` y una cadena en `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Los comentarios deben ser una cadena que no esté vacía.
+- `"score"` es obligatorio. Es un número finito. Solo esta puntuación ordena las versiones.
+- `"feedback"` es un texto opcional. Se recomienda, porque GEPA y Auto aprenden de él. Sin comentarios, los motores solo ven las puntuaciones, y el registro de la ejecución lo indica una vez.
+- `"scores"` es opcional. Asocia nombres a puntuaciones con nombre. Cada puntuación con nombre es un objeto con su propio `"score"` y un `"feedback"` opcional. Todos los motores usan cada puntuación con nombre como un objetivo propio.
 
-La información adicional también puede tener una clave `"scores"`. Asocia nombres a puntuaciones con nombre. Cada puntuación con nombre tiene su propia puntuación y sus propios comentarios, por ejemplo `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Cualquier otra forma o clave es un error. La comprobación muestra la parte incorrecta y la forma válida.
 
-La información adicional también puede tener una clave `"cases"` con la misma forma. Cada entrada es el resultado de un caso. Todos los motores usan cada caso como un objetivo propio.
-
-Si el valor devuelto tiene otra forma, la comprobación falla y muestra el motivo.
-
-| Valor devuelto                                                                  | Válido                                         |
-| ------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Sí                                             |
-| `(0.8, "Close. Missing the date.")`                                             | Sí                                             |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Sí                                  |
-| `0.8`                                                                           | No. No hay comentarios.                        |
-| `(0.8, {})`                                                                     | No. No hay cadena de comentarios.              |
-| `("0.8", {"feedback": "OK"})`                                                   | No. La puntuación es una cadena.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | No. Una puntuación con nombre no es un número. |
+| Valor devuelto | Válido |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Sí |
+| `{"score": 0.8}` | Sí. No hay comentarios. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Sí |
+| `0.8` | No. El valor no es un objeto. |
+| `(0.8, "Close. Missing the date.")` | No. El valor no es un objeto. |
+| `{"score": "0.8"}` | No. La puntuación es una cadena. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | No. Una puntuación con nombre debe ser un objeto. |
+| `{"score": 0.8, "feedbak": "OK"}` | No. La clave `feedbak` es desconocida. |
 
 ## Escribe comentarios útiles
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` es un dict cuya clave es el nombre de tu columna de salida. Lee [Conjuntos de datos y divisiones](/docs/concepts/datasets).
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### Modelo como juez
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 El evaluador también puede usar cualquier cliente compatible con OpenAI con las variables de entorno `OPENAI_BASE_URL`, `APP_API_KEY` y `APP_MODEL`. La pasarela solo acepta el modelo evaluador de la ejecución.

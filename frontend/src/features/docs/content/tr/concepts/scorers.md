@@ -5,7 +5,7 @@ Puanlayıcı, Skynet'e deponuzun bir sürümünün ne kadar iyi olduğunu söyle
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argüman     | İçeriği                                                                      |
@@ -19,28 +19,35 @@ Puanlayıcı sandbox içinde, sürümün klasöründe çalışır. Depodan kod i
 
 ## Dönüş değeri
 
-`score`, geri bildirimli bir puan döndürmelidir. Şu biçimler geçerlidir:
+`score` tek bir nesne döndürür:
 
-1. Bir çift: bir sayı ve bir geri bildirim string'i ya da `"feedback"` anahtarı olan bir dict.
-2. `"score"` altında bir sayı ve `"feedback"` altında bir string olan bir dict.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Geri bildirim boş olmayan bir string olmalıdır.
+- `"score"` zorunludur. Sonlu bir sayıdır. Sürümleri yalnızca bu puan sıralar.
+- `"feedback"` isteğe bağlı bir metindir. Önerilir, çünkü GEPA ve Auto ondan öğrenir. Geri bildirim yoksa motorlar yalnızca puanları görür ve çalıştırma günlüğü bunu bir kez söyler.
+- `"scores"` isteğe bağlıdır. Adları adlandırılmış puanlara eşler. Her adlandırılmış puan, kendi `"score"` değeri ve isteğe bağlı bir `"feedback"` içeren bir nesnedir. Her motor her adlandırılmış puanı ayrı bir hedef olarak kullanır.
 
-Yan bilgide bir `"scores"` anahtarı da olabilir. Bu anahtar adları adlandırılmış puanlara eşler. Her adlandırılmış puanın kendi puanı ve geri bildirimi vardır, örneğin `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Başka her biçim veya anahtar bir hatadır. Kontrol yanlış kısmı ve geçerli biçimi gösterir.
 
-Yan bilgide aynı biçimde bir `"cases"` anahtarı da olabilir. Her girdi bir vakanın sonucudur. Her motor her vakayı ayrı bir hedef olarak kullanır.
-
-Dönüş değerinin biçimi farklıysa kontrol başarısız olur ve nedenini gösterir.
-
-| Dönüş değeri                                                                    | Geçerli mi                                |
-| ------------------------------------------------------------------------------- | ----------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Evet                                      |
-| `(0.8, "Close. Missing the date.")`                                             | Evet                                      |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Evet                           |
-| `0.8`                                                                           | Hayır. Geri bildirim yok.                 |
-| `(0.8, {})`                                                                     | Hayır. Geri bildirim string'i yok.        |
-| `("0.8", {"feedback": "OK"})`                                                   | Hayır. Puan bir string.                   |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Hayır. Adlandırılmış bir puan sayı değil. |
+| Dönüş değeri | Geçerli mi |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Evet |
+| `{"score": 0.8}` | Evet. Geri bildirim yok. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Evet |
+| `0.8` | Hayır. Değer bir nesne değil. |
+| `(0.8, "Close. Missing the date.")` | Hayır. Değer bir nesne değil. |
+| `{"score": "0.8"}` | Hayır. Puan bir string. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Hayır. Adlandırılmış bir puan bir nesne olmalıdır. |
+| `{"score": 0.8, "feedbak": "OK"}` | Hayır. `feedbak` anahtarı bilinmiyor. |
 
 ## Faydalı geri bildirim yazın
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]`, Çıktı sütununuzun adıyla anahtarlanmış bir dict'tir. [Veri kümeleri ve bölmeler](/docs/concepts/datasets) sayfasını okuyun.
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### Hakem olarak model
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.

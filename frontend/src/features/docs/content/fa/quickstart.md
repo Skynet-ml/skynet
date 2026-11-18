@@ -68,8 +68,8 @@ def score(repo_path, case):
     got = str(module.serve(case["input"])).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` ستون‌های ورودی یک مورد را نگه می‌دارد. `case["expected"]` ستون خروجی را نگه می‌دارد، با نام ستون به‌عنوان کلید. مخزن یک فایل `serve.py` با `def serve(input)` دارد. Skynet بعد از اجرا از همین تابع برای ارائهٔ بهترین نسخه استفاده می‌کند.

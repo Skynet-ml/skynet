@@ -14,12 +14,12 @@ def score(repo_path, case):
     spec.loader.exec_module(module)
     output = module.serve(case["input"])
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `repo_path` היא התיקייה של גרסה אחת של המאגר, אחרי שפקודת ההתקנה רצה.
 - `case` הוא dict. ‏`case["input"]` מכיל את שדות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את הערך הצפוי, או `None` כשאין למקרה ערך כזה.
-- `score` מחזיר זוג: מספר, ו-dict עם מחרוזת `"feedback"`.
+- הפונקציה `score` מחזירה אובייקט אחד: מספר תחת `"score"`, ומחרוזת `"feedback"` אופציונלית.
 
 בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. פונקציית הניקוד יכולה לקרוא לו, ו-Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
 

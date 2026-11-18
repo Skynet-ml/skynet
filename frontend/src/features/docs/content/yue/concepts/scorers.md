@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | 參數        | 裝住乜嘢                                                                         |
@@ -19,28 +19,35 @@ def score(repo_path, case):
 
 ## 回傳值
 
-`score` 一定要回傳一個分數同回饋。以下形狀係有效嘅：
+`score` 回傳一個物件：
 
-1. 一對值：一個數字，同一個回饋字串或者一個有 `"feedback"` 鍵嘅 dict。
-2. 一個 dict，`"score"` 下面係一個數字，`"feedback"` 下面係一個字串。
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-回饋一定要係一個唔係空嘅字串。
+- `"score"` 係必須嘅。佢係一個有限嘅數字。只有呢個分數會為版本排名。
+- `"feedback"` 係可選嘅文字。建議加上，因為 GEPA 同 Auto 會從佢度學習。冇回饋嘅話，引擎只會見到分數，執行記錄會講一次。
+- `"scores"` 係可選嘅。佢將名稱對應到具名分數。每個具名分數係一個物件，有自己嘅 `"score"` 同一個可選嘅 `"feedback"`。每個引擎都會將每個具名分數當做一個獨立目標。
 
-附加資訊亦可以有 `"scores"` 鍵。佢將名稱對應到具名分數。每個具名分數都有自己嘅分數同回饋，例如 `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
-
-附加資訊亦可以有一個形狀一樣嘅 `"cases"` 鍵。每一項係一個案例嘅結果。每個引擎都會將每個案例當做一個獨立目標。
-
-如果回傳值嘅形狀唔啱，檢查會失敗，並顯示原因。
+其他任何形狀或者鍵都係錯誤。檢查會顯示錯咗嘅部分同有效嘅形狀。
 
 | 回傳值 | 有冇效 |
 | --- | --- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | 係 |
-| `(0.8, "Close. Missing the date.")`                                             | 係 |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | 係 |
-| `0.8`                                                                           | 唔係。冇回饋。 |
-| `(0.8, {})`                                                                     | 唔係。冇回饋字串。 |
-| `("0.8", {"feedback": "OK"})`                                                   | 唔係。分數係字串。 |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | 唔係。有個具名分數唔係數字。 |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | 係 |
+| `{"score": 0.8}` | 係。冇回饋。 |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | 係 |
+| `0.8` | 唔係。個值唔係物件。 |
+| `(0.8, "Close. Missing the date.")` | 唔係。個值唔係物件。 |
+| `{"score": "0.8"}` | 唔係。分數係字串。 |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | 唔係。具名分數一定要係物件。 |
+| `{"score": 0.8, "feedbak": "OK"}` | 唔係。`feedbak` 呢個鍵唔存在。 |
 
 ## 寫有用嘅回饋
 
@@ -69,8 +76,8 @@ def score(repo_path, case):
     got = module.serve(case["input"])
     want = case["expected"]["label"]
     if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
 `case["expected"]` 係一個 dict，用你嘅輸出欄位名稱做鍵。睇 [數據集同分割](/docs/concepts/datasets)。
@@ -84,8 +91,8 @@ import subprocess
 def score(repo_path):
     result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
     if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": result.stdout[-2000:]}
 ```
 
 ### 用模型做評判
@@ -110,7 +117,7 @@ def score(repo_path, case):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 評分器亦可以用任何兼容 OpenAI 嘅客戶端，配合 `OPENAI_BASE_URL`、`APP_API_KEY` 同 `APP_MODEL` 環境變數。閘道只接受今次運行嘅評分器模型。
