@@ -169,6 +169,11 @@ def warn_once_without_feedback(scorer: ScorerFn) -> ScorerFn:
     this line is how its author learns the proposer gets no text. A named
     score with no feedback gives no line.
 
+    The warning comes once for each run attempt, that is, once in each
+    process that runs the job. The state is in memory only, so a run that
+    resumes in a new process can warn again. This is by design: no flag is
+    persisted.
+
     Args:
         scorer: The run's scorer.
 

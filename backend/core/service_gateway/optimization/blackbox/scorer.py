@@ -117,6 +117,7 @@ class RemoteScorer:
         timeout_seconds: float,
         protected_route: dict[str, str] | None = None,
         label: str = "remote scorer",
+        trusted_reply: bool = False,
     ) -> None:
         """Create a remote scorer.
 
@@ -126,8 +127,12 @@ class RemoteScorer:
             timeout_seconds: Per-request timeout.
             protected_route: Parent-issued capability for a protected evaluator endpoint.
             label: Names the scorer in failure messages.
+            trusted_reply: Whether the relay reply comes from Skynet's own
+                repository scorer, which may add Skynet's keys, such as
+                ``status``. A user's endpoint is never trusted.
         """
         self._url = url
+        self._trusted_reply = trusted_reply
         self._secret = secret
         self._timeout_seconds = timeout_seconds
         self._relay = (
@@ -151,7 +156,7 @@ class RemoteScorer:
                 a non-JSON body, or a body without a usable score.
         """
         if self._relay is not None:
-            return normalize_score(self._relay(candidate, case))
+            return normalize_score(self._relay(candidate, case), own_keys=self._trusted_reply)
         headers = {"Authorization": f"Bearer {self._secret}"} if self._secret else {}
         try:
             response = httpx.post(

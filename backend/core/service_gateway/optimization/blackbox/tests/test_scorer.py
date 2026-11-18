@@ -88,20 +88,26 @@ def test_normalize_score_keeps_a_failed_run_without_feedback(feedback: str | Non
 
 
 @pytest.mark.parametrize(
-    "scores",
-    [{"acc": {"score": "bad", "feedback": "x"}}, {"acc": 0.5}, {"acc": (1, "ok")}, "not a mapping"],
+    ("scores", "match"),
+    [
+        ({"acc": {"score": "bad", "feedback": "x"}}, "of the named score 'acc' must be a finite number"),
+        ({"acc": 0.5}, "the named score 'acc' is a bare number"),
+        ({"acc": (1, "ok")}, "the named score 'acc' is a pair"),
+        ("not a mapping", '"scores" must be an object that maps each name to a score object'),
+    ],
 )
-def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_one(scores: Any) -> None:
+def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_one(scores: Any, match: str) -> None:
     """A failed ``[run]`` entry validates its named scores like a scored result does (SKY-751).
 
     Args:
         scores: A malformed ``scores`` value.
+        match: A part of the expected named-score message.
     """
     failed = {"score": None, "status": "run_failed", "feedback": "x", "scores": scores}
     scored = {"score": 0.5, "feedback": "x", "scores": scores}
 
     for raw in (failed, scored):
-        with pytest.raises(ServiceError, match="score"):
+        with pytest.raises(ServiceError, match=match):
             normalize_score(raw)
 
 
@@ -255,6 +261,55 @@ def test_remote_scorer_wraps_transport_errors(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(ServiceError, match="connection refused"):
         RemoteScorer("https://scorer.example", secret=None, timeout_seconds=1)("x")
+
+
+def _relay_scorer(reply: dict[str, Any], *, trusted_reply: bool) -> RemoteScorer:
+    """Build a protected remote scorer whose relay returns ``reply``.
+
+    Args:
+        reply: What the parent relay returns.
+        trusted_reply: Whether the scorer is Skynet's own repository scorer.
+
+    Returns:
+        The scorer, with its relay replaced by a fake.
+    """
+    scorer = RemoteScorer(
+        "https://scorer.example",
+        secret=None,
+        timeout_seconds=1,
+        protected_route={"url": "http://127.0.0.1:9/v1", "token": "t"},
+        trusted_reply=trusted_reply,
+    )
+    scorer._relay = lambda candidate, case: reply  # type: ignore[assignment]
+    return scorer
+
+
+@pytest.mark.parametrize(
+    ("reply", "message"),
+    [
+        ({"score": 0.5, "predicted": 41}, "unknown key `predicted`"),
+        ({"score": None, "feedback": "x", "status": "run_failed"}, "unknown key `status`"),
+    ],
+)
+def test_protected_relay_checks_a_user_endpoint_reply_like_a_metric_answer(reply: dict[str, Any], message: str) -> None:
+    """A relayed reply from a user's endpoint is a metric answer: Skynet's keys are unknown keys (SKY-769).
+
+    Args:
+        reply: The endpoint's reply that the relay returns.
+        message: Expected fragment of the error.
+    """
+    with pytest.raises(ServiceError, match=message):
+        _relay_scorer(reply, trusted_reply=False)("x")
+
+
+def test_trusted_relay_keeps_skynet_keys_of_the_repository_scorer() -> None:
+    """Skynet's own repository scorer may reply with a failed ``[run]`` entry and its ``status`` (SKY-751)."""
+    reply = {"score": None, "feedback": "Run failed: boom", "status": "run_failed"}
+
+    assert _relay_scorer(reply, trusted_reply=True)("x") == (
+        None,
+        {"feedback": "Run failed: boom", "status": "run_failed"},
+    )
 
 
 def test_build_scorer_dispatches_on_kind() -> None:

@@ -1104,6 +1104,7 @@ def run_blackbox_optimization(
             timeout_seconds=payload.scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
             protected_route=evaluator_route,
             label="repository scorer",
+            trusted_reply=True,
         )
     else:
         base_scorer = build_scorer(payload.scorer, job_id=artifact_id, protected_route=evaluator_route)
