@@ -38,6 +38,8 @@ and S3 does not fail on a key that is already gone.
 A run that is deleted before its account goes the same way:
 :func:`mark_run_packs` runs in the job delete's transaction, before the
 cascade deletes the run's steps, and marks every pack that they point at.
+A run delete and an account delete both call :func:`delete_run_rows` first,
+so both take their row and budget locks in one order before the job lock.
 
 The purge is one function so that a later change can add the step log
 shards (SKY-731) in one place.
@@ -48,11 +50,28 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import ColumnElement, delete, select, update
 from sqlalchemy.orm import Session
 
-from .models import AgentStepModel, JobModel, StoragePackModel, TreeObjectModel, WorkspaceModel
+from ..billing.budgets import BudgetService
+from .models import (
+    AgentStepModel,
+    BlackboxAgentRunModel,
+    GepaCheckpointModel,
+    JobEmbeddingModel,
+    JobModel,
+    LogEntryModel,
+    ProgressEventModel,
+    RunCallModel,
+    RunCandidateModel,
+    RunFolderItemModel,
+    SandboxTrialModel,
+    StoragePackModel,
+    TreeObjectModel,
+    WorkspaceModel,
+)
 from .tree_compactor import GRACE_SECONDS, REFERENCED, tree_bucket_client
 
 # Keys in one IN query, far below the SQLite bind limit.
@@ -226,6 +245,57 @@ def bucket_deleter() -> Callable[[list[str]], None] | None:
                 raise TreePurgeError(f"could not delete {_describe(failed)}")
 
     return delete_objects
+
+
+def delete_run_rows(session: Session, run_ids: list[str], embeddings: ColumnElement[bool] | None) -> int:
+    """Delete the rows of runs about to be deleted and close their budgets, before any job lock.
+
+    A run delete and an account delete both call this before they lock the jobs. The order is
+    fixed: log, progress, embedding, checkpoint, trial, agent run, call, candidate and folder rows,
+    then the wallet and budget locks. If the two deletes took these locks in another order, or one
+    took the job lock first, each could wait for the other and PostgreSQL would abort one (SKY-733).
+
+    Args:
+        session: The open delete session; the caller commits.
+        run_ids: The job ids to be deleted. Duplicates and missing ids are allowed.
+        embeddings: Which embedding rows to delete, or ``None`` to delete none.
+
+    Returns:
+        The count of deleted rows.
+    """
+    deleted = 0
+    if run_ids:
+        for model in (LogEntryModel, ProgressEventModel):
+            deleted += _delete_rows(session, delete(model).where(model.optimization_id.in_(run_ids)))
+    if embeddings is not None:
+        deleted += _delete_rows(session, delete(JobEmbeddingModel).where(embeddings))
+    if not run_ids:
+        return deleted
+    for model in (
+        GepaCheckpointModel,
+        SandboxTrialModel,
+        BlackboxAgentRunModel,
+        RunCallModel,
+        RunCandidateModel,
+        RunFolderItemModel,
+    ):
+        deleted += _delete_rows(session, delete(model).where(model.optimization_id.in_(run_ids)))
+    # The budgets close but stay: with their ledger rows they are the money record, with no key to the jobs.
+    BudgetService(engine=session.get_bind()).close_for_deleted_jobs(run_ids, session=session)
+    return deleted
+
+
+def _delete_rows(session: Session, statement: Any) -> int:
+    """Run one bulk delete.
+
+    Args:
+        session: The open delete session.
+        statement: The delete statement.
+
+    Returns:
+        The count of deleted rows.
+    """
+    return session.execute(statement, execution_options={"synchronize_session": False}).rowcount or 0
 
 
 def purge_user(

@@ -18,7 +18,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import Engine, case, create_engine, func, or_, text
+from sqlalchemy import ColumnElement, Engine, case, create_engine, func, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
@@ -62,7 +62,6 @@ from .models import (
     ProgressEventModel,
     RunCallModel,
     RunCandidateModel,
-    RunFolderItemModel,
     SandboxTrialModel,
     UserModel,
     UserQuotaAuditModel,
@@ -71,7 +70,7 @@ from .models import (
 )
 from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
-from .tree_purge import mark_run_packs
+from .tree_purge import delete_run_rows, mark_run_packs
 from .usage import (
     StorageItem,
     StorageUsage,
@@ -1381,19 +1380,7 @@ class RemoteDBJobStore:
         """
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id == optimization_id).delete()
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id == optimization_id).delete()
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id == optimization_id
-            ).delete()
-            session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
-            self._close_deleted_job_budgets(session, [optimization_id])
+            delete_run_rows(session, [optimization_id], self._job_embeddings([optimization_id]))
             # The job lock comes where the job delete took it before; the cascade then drops the steps, so
             # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
             mark_run_packs(session, [optimization_id])
@@ -1403,18 +1390,18 @@ class RemoteDBJobStore:
             session.close()
         self._evict_job_counters([optimization_id])
 
-    def _close_deleted_job_budgets(self, session: Session, optimization_ids: list[str]) -> None:
-        """Close the execution budgets of jobs about to be deleted.
-
-        Budgets and ledger rows are financial history with no foreign key to
-        ``jobs``, so they are kept; this releases unstarted holds and drops the
-        link that would otherwise point at a deleted job.
+    def _job_embeddings(self, optimization_ids: list[str]) -> ColumnElement[bool] | None:
+        """Select the embedding rows that a job delete removes.
 
         Args:
-            session: The open delete session the caller commits.
             optimization_ids: Job ids being deleted.
+
+        Returns:
+            The rows of these jobs, or ``None`` when embeddings are off.
         """
-        BudgetService(engine=self._engine).close_for_deleted_jobs(list(optimization_ids), session=session)
+        if not settings.embeddings_enabled:
+            return None
+        return JobEmbeddingModel.optimization_id.in_(optimization_ids)
 
     def _evict_job_counters(self, optimization_ids: list[str]) -> None:
         """Drop the per-job in-memory bookkeeping for deleted jobs.
@@ -1483,35 +1470,7 @@ class RemoteDBJobStore:
             return 0
         session = self._get_session()
         try:
-            session.query(LogEntryModel).filter(LogEntryModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(ProgressEventModel).filter(ProgressEventModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            if settings.embeddings_enabled:
-                session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id.in_(optimization_ids)).delete(
-                    synchronize_session=False
-                )
-            session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(BlackboxAgentRunModel).filter(
-                BlackboxAgentRunModel.optimization_id.in_(optimization_ids)
-            ).delete(synchronize_session=False)
-            session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
-            self._close_deleted_job_budgets(session, optimization_ids)
+            delete_run_rows(session, optimization_ids, self._job_embeddings(optimization_ids))
             # The job lock comes where the job delete took it before; the cascade then drops the steps, so
             # their packs are marked first, or their bytes in shared packs stay forever (SKY-733).
             mark_run_packs(session, optimization_ids)

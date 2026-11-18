@@ -62,10 +62,8 @@ from ..storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
-    GepaCheckpointModel,
     JobEmbeddingModel,
     JobModel,
-    LogEntryModel,
     McpAuthCodeModel,
     McpGrantModel,
     McpTokenModel,
@@ -75,7 +73,6 @@ from ..storage.models import (
     OptimizationShareGrantModel,
     OptimizationShareLinkModel,
     PackageRegistryPreferenceModel,
-    ProgressEventModel,
     PushSubscriptionModel,
     SetupDraftModel,
     SlackConnectionModel,
@@ -557,14 +554,11 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         anonymized += result.rowcount or 0
 
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
+    # The run rows and budgets, then the job lock, in the same order as a run delete; another order
+    # deadlocks with a concurrent delete of one of these runs (SKY-733). The budgets close here, so
+    # the wallet and budget locks come before the job lock, as in a run delete.
+    deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
     if job_ids:
-        # Log, progress, embedding and checkpoint rows, then the job lock, as in a run delete; another
-        # order deadlocks with a concurrent delete of one of these runs (SKY-733).
-        _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
-    _run_delete(delete(JobEmbeddingModel).where(JobEmbeddingModel.user_id == username))
-    if job_ids:
-        _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
     # Before the jobs go: their cascade would delete the steps without their pack keys.
