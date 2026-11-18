@@ -48,7 +48,7 @@ class JobScorer(Protocol):
         ...
 
 
-def normalize_score(raw: Any, *, own_keys: bool = True) -> tuple[float | None, SideInfo]:
+def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float | None, SideInfo]:
     """Read a scorer's reply into ``(score, side_info)``.
 
     A relay reply is a document that Skynet built from a checked metric
@@ -59,8 +59,9 @@ def normalize_score(raw: Any, *, own_keys: bool = True) -> tuple[float | None, S
 
     Args:
         raw: The scorer's reply.
-        own_keys: Whether the reply comes from Skynet. ``False`` for a
-            metric answer itself, which gets the full check.
+        own_keys: Whether the reply comes from Skynet. Set it only for a
+            document Skynet built; by default the reply is a metric answer
+            and gets the full check.
 
     Returns:
         The float score, or ``None`` for a failed ``[run]`` entry, and side

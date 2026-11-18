@@ -2433,7 +2433,9 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
 
     def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
         """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
-        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
+        return scorer_mod.normalize_score(
+            json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body), own_keys=True
+        )
 
     try:
         scorer.prepare()

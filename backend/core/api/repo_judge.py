@@ -566,7 +566,7 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
         reply = scorer.dispatch({"candidate": candidate, "case": case})
         if reply.status != 200:
             raise ServiceError(reply.body.decode(errors="replace"))
-        return normalize_score(json.loads(reply.body))
+        return normalize_score(json.loads(reply.body), own_keys=True)
 
     try:
         # A repository target scores one case at a time, as in a run.

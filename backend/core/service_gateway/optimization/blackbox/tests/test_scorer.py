@@ -33,7 +33,7 @@ def test_normalize_score_reads_a_relay_reply_with_skynet_keys(raw: Any, expected
         raw: The relay reply.
         expected: The normalized pair.
     """
-    assert normalize_score(raw) == expected
+    assert normalize_score(raw, own_keys=True) == expected
 
 
 @pytest.mark.parametrize(
@@ -59,18 +59,20 @@ def test_normalize_score_rejects_a_reply_that_is_not_an_answer_object(raw: Any, 
 
 
 def test_normalize_score_checks_every_key_of_a_metric_answer() -> None:
-    """With ``own_keys=False`` the reply is the metric answer itself, so Skynet's keys are unknown keys too."""
+    """By default the reply is the metric answer itself, so Skynet's keys are unknown keys too."""
     with pytest.raises(ServiceError, match="unknown key `status`"):
-        normalize_score({"score": None, "feedback": "x", "status": "run_failed"}, own_keys=False)
+        normalize_score({"score": None, "feedback": "x", "status": "run_failed"})
+    with pytest.raises(ServiceError, match="unknown key `illegal_approach`"):
+        normalize_score({"score": 0.5, "illegal_approach": True})
     with pytest.raises(ServiceError, match="Did you mean `feedback`"):
-        normalize_score({"score": 0.5, "feedbak": "x"}, own_keys=False)
+        normalize_score({"score": 0.5, "feedbak": "x"})
 
 
 def test_normalize_score_keeps_no_score_for_a_failed_run_with_feedback() -> None:
     """The run-failed answer that Skynet builds passes the second read with its ``status`` (SKY-751, SKY-769)."""
     raw = {"score": None, "feedback": "Run failed: boom", "status": "run_failed"}
 
-    assert normalize_score(raw) == (None, {"feedback": "Run failed: boom", "status": "run_failed"})
+    assert normalize_score(raw, own_keys=True) == (None, {"feedback": "Run failed: boom", "status": "run_failed"})
 
 
 @pytest.mark.parametrize("feedback", [None, "", "   "])
@@ -84,7 +86,7 @@ def test_normalize_score_keeps_a_failed_run_without_feedback(feedback: str | Non
     if feedback is not None:
         raw["feedback"] = feedback
 
-    assert normalize_score(raw) == (None, {"status": "run_failed", "feedback": ""})
+    assert normalize_score(raw, own_keys=True) == (None, {"status": "run_failed", "feedback": ""})
 
 
 @pytest.mark.parametrize(
@@ -108,14 +110,14 @@ def test_normalize_score_rejects_bad_named_scores_on_a_failed_run_like_a_scored_
 
     for raw in (failed, scored):
         with pytest.raises(ServiceError, match=match):
-            normalize_score(raw)
+            normalize_score(raw, own_keys=True)
 
 
 def test_normalize_score_keeps_valid_named_scores_on_a_failed_run() -> None:
     """A failed ``[run]`` entry keeps its valid named scores in the normalized form (SKY-751)."""
     raw = {"score": None, "status": "run_failed", "feedback": "x", "scores": {"acc": {"score": 1, "feedback": "ok"}}}
 
-    assert normalize_score(raw) == (
+    assert normalize_score(raw, own_keys=True) == (
         None,
         {"status": "run_failed", "feedback": "x", "scores": {"acc": {"score": 1.0, "feedback": "ok"}}},
     )
