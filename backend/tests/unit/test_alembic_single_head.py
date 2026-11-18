@@ -11,7 +11,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 
 
 def test_the_migration_tree_has_one_head() -> None:
-    """Fail when two revisions share a parent, because ``alembic upgrade head`` then stops."""
+    """Fail when the tree has more than one head, because ``alembic upgrade head`` then stops."""
     config = Config(str(_BACKEND / "alembic.ini"))
     config.set_main_option("script_location", str(_BACKEND / "alembic"))
 
