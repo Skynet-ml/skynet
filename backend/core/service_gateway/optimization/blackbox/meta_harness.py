@@ -55,6 +55,7 @@ from .protocol import (
     Candidate,
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     Result,
     Task,
@@ -618,14 +619,17 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         assert self._ctx.read_file is not None
         logs = self.logs_dir.relative_to(self.work_dir).as_posix()
         pending = self.logs_dir / "pending_eval.json"
-        data = self._ctx.read_file(tree, f"{logs}/pending_eval.json")
         self._oversize = set()
+        # The engine runs in the worker process, and parsing a large file costs many times its size in memory.
+        # An empty file is a malformed one: the iteration gets no candidate.
+        try:
+            data = self._ctx.read_file(tree, f"{logs}/pending_eval.json", native_engines.MAX_PENDING_BYTES)
+        except FileTooLargeError:
+            data = b""
         if data is None:
             pending.unlink(missing_ok=True)
             return
-        # The engine runs in the worker process, and parsing a large file costs many times its size in memory.
-        # An empty file is a malformed one: the iteration gets no candidate.
-        pending.write_bytes(b"" if len(data) > native_engines.MAX_PENDING_BYTES else data)
+        pending.write_bytes(data)
         for spec in self._read_pending(pending):
             file = spec.get("file")
             if not isinstance(file, str):
@@ -636,14 +640,17 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             if not path.startswith("agents/") or "\0" in path:
                 continue
             local = self.work_dir / path
-            content = self._ctx.read_file(tree, path)
+            # A tree file may hold up to ``MAX_TREE_BYTES``, so the cap refuses a larger file before it loads.
+            try:
+                content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+            except FileTooLargeError:
+                content = None
+                self._oversize.add(path)
             # An entry that names a local folder, or a path under a local file, cannot be a candidate
             # file; ``_validate`` refuses it.
             with contextlib.suppress(OSError):
-                if content is None or len(content) > native_engines.MAX_CANDIDATE_BYTES:
+                if content is None:
                     local.unlink(missing_ok=True)
-                    if content is not None:
-                        self._oversize.add(path)
                 else:
                     local.parent.mkdir(parents=True, exist_ok=True)
                     local.write_bytes(content)
