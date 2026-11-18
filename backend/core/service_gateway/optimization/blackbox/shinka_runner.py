@@ -1546,6 +1546,11 @@ class ProgramScorer:
                 "metrics": {"combined_score": 0.0, "text_feedback": feedback},
             }
         metrics = summarize_scores(results)
+        if unscored:
+            # The filled mean still guides parent selection, but a version with
+            # a metric error cannot become best, show a score or stop the run,
+            # as in Best-of-N and AutoSaddler (SKY-751).
+            return {"correct": True, "error": None, "metrics": metrics}
         with self._lock:
             self.scored[generation] = {
                 "candidate": value,

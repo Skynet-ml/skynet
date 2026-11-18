@@ -268,7 +268,7 @@ def test_runner_climbs_with_upstream_engine_and_reports_usage(tmp_path: Path) ->
 def test_upstream_run_finishes_when_a_train_case_crashes(
     tmp_path: Path, seed_crashes: bool, crashed_cases: set[str]
 ) -> None:
-    """A crashed case gets upstream's floor: the run finishes, keeps the scored seed and never shows the floor (SKY-751).
+    """A crashed case gets upstream's floor: the run finishes, keeps the scored seed, never shows the floor (SKY-751).
 
     Args:
         tmp_path: Working folder of the run.
@@ -1196,7 +1196,7 @@ def test_a_version_with_a_metric_error_is_still_offered_as_a_parent(monkeypatch:
 
 
 def test_mailbox_reads_a_null_parent_score_as_no_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The parent sends null for a case with no score; the mailbox reads it as negative infinity, not an error (SKY-751).
+    """The parent sends null for a case with no score; the mailbox reads it as negative infinity, no error (SKY-751).
 
     Args:
         tmp_path: Working folder with the response file.

@@ -2510,7 +2510,7 @@ def test_a_sweep_with_a_failed_run_case_has_no_score(tmp_path: Path) -> None:
 
 
 def test_native_fill_unscored_gives_a_failed_run_version_no_score() -> None:
-    """A version with a failed [run] case is negative infinity on every case; a scorer's own status is kept (SKY-751)."""
+    """A version with a failed [run] case is negative infinity on every case; a scorer's own status stays (SKY-751)."""
     inf = float("-inf")
     failed = {"status": native_engines.RUN_FAILED_STATUS}
 
@@ -2540,14 +2540,25 @@ def test_meta_harness_never_rewards_a_version_with_a_failed_run_case(tmp_path: P
     assert record["scores"] == {"a": 1.0, "b": None}
 
 
+@pytest.mark.parametrize(
+    ("seed", "proposed", "expected"),
+    [("axyz", "aeio", (None, None, "no score")), ("aeio", "axyz", (0.25, None, "0.2500"))],
+)
 def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: str,
+    proposed: str,
+    expected: tuple[float | None, float | None, str],
 ) -> None:
-    """The agent's evolution summary shows a failed [run] version as "no score", never -Infinity (SKY-751).
+    """The evolution summary shows "no score" for a failed [run] version and no delta from a failed seed (SKY-751).
 
     Args:
         tmp_path: Upstream evaluation artifacts and the engine's work and log folders.
         monkeypatch: Replaces the proposer CLI.
+        seed: The seed's text; ``aeio`` fails its [run] entry on case ``b``.
+        proposed: The proposed version's text.
+        expected: The row's ``avg_val``, ``delta`` and ``outcome``.
     """
     server = _child_server(_run_fails_on({"aeio": {"b"}}), tmp_path)
     engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
@@ -2562,12 +2573,12 @@ def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
     engine.candidates_per_iter = 2
     engine.logs_dir.mkdir()
     (engine.work_dir / "agents").mkdir(parents=True)
-    engine._benchmark(server, "seed", "axyz")
+    engine._benchmark(server, "seed", seed)
     monkeypatch.setattr(engine, "_task_prompt", lambda iteration: "")
     monkeypatch.setattr(engine, "skill", lambda: "")
 
     def propose(*args: Any, **kwargs: Any) -> native_engines.ProposerOutcome:
-        """Write one candidate whose [run] entry fails, as the agent would.
+        """Write one proposed candidate, as the agent would.
 
         Args:
             *args: The prompt.
@@ -2576,8 +2587,8 @@ def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
         Returns:
             A clean session outcome.
         """
-        (engine.work_dir / "agents" / "crashed.txt").write_text("aeio", encoding="utf-8")
-        pending = {"candidates": [{"name": "crashed", "file": "agents/crashed.txt"}]}
+        (engine.work_dir / "agents" / "proposed.txt").write_text(proposed, encoding="utf-8")
+        pending = {"candidates": [{"name": "proposed", "file": "agents/proposed.txt"}]}
         (engine.logs_dir / "pending_eval.json").write_text(json.dumps(pending), encoding="utf-8")
         return native_engines.ProposerOutcome("s", 0.0, False, "", False, False)
 
@@ -2587,8 +2598,8 @@ def test_meta_harness_iteration_row_shows_no_score_for_a_failed_run(
 
     lines = (engine.logs_dir / "evolution_summary.jsonl").read_text(encoding="utf-8").splitlines()
     row = json.loads(lines[-1])
-    assert (row["avg_val"], row["delta"], row["outcome"]) == (None, None, "no score")
-    assert "Infinity" not in lines[-1]
+    assert (row["avg_val"], row["delta"], row["outcome"]) == expected
+    assert "inf" not in lines[-1].lower()
     assert engine._leader() == ("axyz", 0.25)
 
 

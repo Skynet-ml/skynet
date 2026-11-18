@@ -472,13 +472,16 @@ def test_a_case_with_no_score_fails_the_program_with_its_run_failure(tmp_path: P
     assert scorer.scored == {}
 
 
-def _two_case_answer(tmp_path: Path, monkeypatch: Any, second: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+def _two_case_answer(
+    tmp_path: Path, monkeypatch: Any, second: dict[str, Any], stop_at_score: float | None = None
+) -> tuple[Any, dict[str, Any]]:
     """Score one program on two cases: the first scores 0.5, the second gets ``second`` from the parent.
 
     Args:
         tmp_path: Working folder with the parent's response files.
         monkeypatch: Working folder and fixed request ids.
         second: The parent's response for the second case.
+        stop_at_score: Score that stops the run, if any.
 
     Returns:
         The program scorer and its answer for the program.
@@ -495,7 +498,7 @@ def _two_case_answer(tmp_path: Path, monkeypatch: Any, second: dict[str, Any]) -
         examples=[{"id": "a"}, {"id": "b"}],
         part_names=None,
         max_concurrency=1,
-        stop_at_score=None,
+        stop_at_score=stop_at_score,
     )
     program = tmp_path / "results" / "gen_2" / "main.md"
     program.parent.mkdir(parents=True)
@@ -516,9 +519,25 @@ def test_a_metric_error_case_keeps_the_programs_mean_over_its_scored_cases(tmp_p
     assert answer["metrics"]["combined_score"] == 0.5
     assert answer["metrics"]["private"] == {"case_0": 0.5}
     assert "Case 1 has no score: the metric failed:\nKeyError: 'x'" in answer["metrics"]["text_feedback"]
-    assert scorer.best is not None
-    assert scorer.best["best_score"] == 0.5
-    assert scorer.scored[2]["per_example"] == [("0", 0.5)]
+    assert scorer.best is None
+    assert scorer.scored == {}
+
+
+def test_a_metric_error_version_cannot_reach_stop_at_score(tmp_path: Path, monkeypatch: Any) -> None:
+    """A version with a metric error keeps its mean for selection, but it cannot stop the run or become best (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    second = {"score": None, "info": {"error": "KeyError: 'x'"}}
+    scorer, answer = _two_case_answer(tmp_path, monkeypatch, second, stop_at_score=0.4)
+
+    assert answer["correct"] is True
+    assert answer["metrics"]["combined_score"] == 0.5
+    assert not scorer.target_reached.is_set()
+    assert scorer.best is None
+    assert scorer.scored == {}
 
 
 def test_a_program_the_metric_fails_on_every_case_has_no_score(tmp_path: Path, monkeypatch: Any) -> None:
