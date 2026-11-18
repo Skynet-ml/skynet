@@ -40,6 +40,7 @@ import core.storage.remote as remote_mod
 from alembic import command
 from core.billing.budgets import BudgetService
 from core.config import app_env
+from core.constants import PROGRESS_BASELINE
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
 from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
 from core.sandbox.tests.fake_provider import InMemorySandbox
@@ -340,6 +341,24 @@ def test_progress_event_key_index_exists_after_migration(store: RemoteDBJobStore
     assert indexdef is not None
     assert indexdef.startswith("CREATE UNIQUE INDEX")
     assert "jsonb_typeof" in indexdef
+
+
+def test_progress_trim_keeps_structural_events_while_keyed_events_cover_the_excess(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept keyed non-structural rows cover the excess, so the trim does not delete the baseline (SKY-808)."""
+    monkeypatch.setattr(store, "_max_progress_events", 3)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    optimization_id = f"progress-trim-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    try:
+        store.record_progress(optimization_id, PROGRESS_BASELINE, {"score": 0.1})
+        for i in range(3):
+            store.record_progress(optimization_id, "step", {PROGRESS_EVENT_KEY: f"step:{i}"})
+        events = store.get_progress_events(optimization_id)
+        assert [e["event"] for e in events] == [PROGRESS_BASELINE, "step", "step", "step"]
+    finally:
+        store.delete_jobs([optimization_id])
 
 
 def test_claim_orders_by_user_in_flight_then_age(store: RemoteDBJobStore) -> None:

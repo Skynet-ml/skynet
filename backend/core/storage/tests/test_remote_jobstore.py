@@ -33,7 +33,13 @@ from sqlalchemy.pool import StaticPool
 import core.api.observability as observability_mod
 import core.storage.remote as remote_mod
 from core.billing.budgets import BudgetService
-from core.constants import OPTIMIZATION_TYPE_TAGGING, WORKER_RESTART_CAUSE
+from core.constants import (
+    OPTIMIZATION_TYPE_TAGGING,
+    PROGRESS_BASELINE,
+    PROGRESS_LANE_STARTED,
+    PROGRESS_OPTIMIZED,
+    WORKER_RESTART_CAUSE,
+)
 from core.storage.base import JobStore
 from core.storage.models import (
     MAX_PROGRESS_EVENT_KEY_LENGTH,
@@ -1992,6 +1998,36 @@ def test_progress_trim_keeps_keyed_events(store: SQLiteJobStore, monkeypatch: py
 
     events = store.get_progress_events("evict-keyed")
     assert [e["event"] for e in events] == ["keyed-step", "step-2"]
+
+
+def test_progress_trim_keeps_structural_events_while_keyed_events_cover_the_excess(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept keyed non-structural rows cover the excess, so the trim does not delete the baseline (SKY-808)."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 3)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-baseline")
+    store.record_progress("evict-baseline", PROGRESS_BASELINE, {"score": 0.1})
+    for i in range(3):
+        store.record_progress("evict-baseline", "step", {PROGRESS_EVENT_KEY: f"step:{i}"})
+
+    events = store.get_progress_events("evict-baseline")
+    assert [e["event"] for e in events] == [PROGRESS_BASELINE, "step", "step", "step"]
+
+
+def test_progress_trim_deletes_structural_events_only_for_the_uncovered_excess(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structural row goes only when the non-structural rows, keyed ones included, cannot cover the excess."""
+    monkeypatch.setattr(remote_mod, "MAX_PROGRESS_EVENTS", 2)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    store.create_job("evict-structural")
+    for name in (PROGRESS_BASELINE, PROGRESS_OPTIMIZED, PROGRESS_LANE_STARTED):
+        store.record_progress("evict-structural", name, {})
+    store.record_progress("evict-structural", "step", {PROGRESS_EVENT_KEY: "step:0"})
+
+    events = store.get_progress_events("evict-structural")
+    assert [e["event"] for e in events] == [PROGRESS_OPTIMIZED, PROGRESS_LANE_STARTED, "step"]
 
 
 def test_progress_trim_hard_cap_deletes_oldest_keyed_events(

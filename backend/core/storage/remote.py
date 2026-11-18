@@ -18,7 +18,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import ColumnElement, Engine, TextClause, case, create_engine, func, or_, text, true
+from sqlalchemy import ColumnElement, Engine, TextClause, and_, case, create_engine, func, or_, text, true
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, make_url
@@ -3218,9 +3218,10 @@ class RemoteDBJobStore:
         """Delete the oldest excess progress events for a job in one batch.
 
         The trim deletes only unkeyed rows down to the cap: a replay of a
-        deleted key would add it again (SKY-808). Past the hard cap of
-        ``PROGRESS_EVENTS_HARD_CAP_FACTOR`` times the cap, it also deletes the
-        oldest keyed rows.
+        deleted key would add it again (SKY-808). It deletes a structural row
+        only for the excess that all non-structural rows, keyed ones included,
+        cannot cover. Past the hard cap of ``PROGRESS_EVENTS_HARD_CAP_FACTOR``
+        times the cap, it also deletes the oldest keyed rows.
 
         Args:
             optimization_id: ID of the job whose retained progress rows should
@@ -3236,9 +3237,27 @@ class RemoteDBJobStore:
                 return
 
             _, keyed_sql = PROGRESS_EVENT_KEY_SQL[session.get_bind().dialect.name]
-            event_count -= self._delete_oldest_progress_events(
-                session, optimization_id, event_count - cap, text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 0")
+            keyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 1")
+            unkeyed = text(f"CASE WHEN {keyed_sql} THEN 1 ELSE 0 END = 0")
+            non_structural = or_(
+                ProgressEventModel.event.is_(None), ProgressEventModel.event.not_in(STRUCTURAL_PROGRESS_EVENTS)
             )
+            event_count -= self._delete_oldest_progress_events(
+                session, optimization_id, event_count - cap, and_(unkeyed, non_structural)
+            )
+            if event_count > cap:
+                # Kept keyed non-structural rows still count against the excess, so a
+                # structural row goes only when non-structural rows cannot cover it.
+                keyed_non_structural = (
+                    session.query(ProgressEventModel)
+                    .filter(ProgressEventModel.optimization_id == optimization_id, keyed, non_structural)
+                    .count()
+                )
+                structural_excess = event_count - cap - keyed_non_structural
+                if structural_excess > 0:
+                    event_count -= self._delete_oldest_progress_events(
+                        session, optimization_id, structural_excess, unkeyed
+                    )
             hard_excess = event_count - cap * PROGRESS_EVENTS_HARD_CAP_FACTOR
             if hard_excess > 0:
                 self._delete_oldest_progress_events(session, optimization_id, hard_excess, true())
