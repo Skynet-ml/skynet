@@ -191,7 +191,8 @@ SHAPES: tuple[Shape, ...] = (
     Shape(
         "circle_packing",
         work_script=(
-            'awk -v n="$1" \'BEGIN { r = 1 / (2 * sqrt(n)); printf "%d %.6f\\n", n, n * 3.14159265 * r * r * (1 - n / 40) }\''
+            'awk -v n="$1" \'BEGIN { r = 1 / (2 * sqrt(n)); '
+            'printf "%d %.6f\\n", n, n * 3.14159265 * r * r * (1 - n / 40) }\''
             " > answer.txt\n"
         ),
         metric_script='{ printf "%.6f\\n", $2 }\n',
@@ -252,7 +253,7 @@ KILL_KINDS = tuple(_KILL_POINTS)
 
 
 class ChaosSwitch:
-    """One run's chaos fuse: the chaos job arms a kill, and the run's next model call, box command or commit fires it."""
+    """One run's chaos fuse: a chaos job arms a kill, and the run's next model call, box command or commit fires it."""
 
     def __init__(self) -> None:
         """Start unarmed and not live."""
