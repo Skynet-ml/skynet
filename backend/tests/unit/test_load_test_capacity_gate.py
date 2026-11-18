@@ -751,16 +751,17 @@ class _BrokenBarrier:
         self.aborted += 1
 
 
-@pytest.mark.parametrize("broken", [True, False])
+@pytest.mark.parametrize(("broken", "close_fails"), [(True, False), (False, False), (False, True)])
 def test_swarm_shard_closes_its_step_log_and_engine(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: bool, close_fails: bool
 ) -> None:
-    """Check that a shard closes its step log and disposes its engine once, after a broken barrier or a good pass.
+    """Check that a shard closes its step log and disposes its engine once, also when the barrier or the close fails.
 
     Args:
         monkeypatch: Records each step log close and each engine dispose.
         tmp_path: The folder for the shard's database and objects.
         broken: Whether the start barrier raises ``BrokenBarrierError``.
+        close_fails: Whether the step log close raises, as it does when its last flush fails.
     """
     monkeypatch.delenv("LOAD_TEST_SWARM_S3_BUCKET", raising=False)
     closed: list[str] = []
@@ -773,9 +774,14 @@ def test_swarm_shard_closes_its_step_log_and_engine(
 
         Args:
             self: The step log.
+
+        Raises:
+            RuntimeError: When ``close_fails`` is set, after the real close.
         """
         closed.append(self._worker_id)
         real_close(self)
+        if close_fails:
+            raise RuntimeError("last flush failed")
 
     def create(url: str, **kwargs: Any) -> Engine:
         """Create the shard's engine and record each dispose of it.
@@ -826,6 +832,8 @@ def test_swarm_shard_closes_its_step_log_and_engine(
     if broken:
         assert "BrokenBarrierError" in report["error"]
         assert barrier.aborted == 1
+    elif close_fails:
+        assert "last flush failed" in report["error"]
     else:
         assert "error" not in report, report.get("error")
         assert len(report["times"]) == 2

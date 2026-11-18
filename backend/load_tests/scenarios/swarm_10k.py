@@ -11,10 +11,9 @@ step with the tree id. About 100 agents share one run (one ``jobs`` row).
 Each step-log shard runs in its own OS process, with its own database on
 SQLite (one shared Postgres database otherwise) and its own step log worker,
 as one Cloudflare Durable Object owns its own storage. Run ``i`` goes to
-shard ``i % shards``. The shard processes start
-their agents together at a barrier. In each shard process, at most
-``MAX_DRIVERS_PER_SHARD`` driver threads serve the agents, whatever the
-agent count. Each agent is due to commit one step every ``step_interval``
+shard ``i % shards``. The shard processes start their agents together at
+a barrier. In each shard process, at most ``MAX_DRIVERS_PER_SHARD`` driver
+threads serve the agents, whatever the agent count. Each agent is due to commit one step every ``step_interval``
 seconds, so the agents ask for ``TARGET_COMMITS_PER_SECOND`` times
 ``OFFERED_LOAD_MARGIN`` steps per second. But each agent keeps only one
 step in flight, so the swarm offers at most the agent count divided by the
@@ -55,11 +54,12 @@ monotonic clock:
   gated (``box_caps_gated`` is ``False``): box caps are out of scope here,
   and SKY-732 owns them.
 
-The swarm runs three times: on 1 shard process, on 2, then on ``shards``
-shard processes (twice when ``shards`` is 2). Every pass must give the same
-step log. The 2-shard pass checks only the step log: at 10,000 agents, 2
-shards cannot keep the step wait under its limit. With fewer than 2 shards,
-or fewer runs than shards, the passes are not compared and the gate fails.
+The swarm runs on 1 shard process, on 2, then on ``shards`` shard processes.
+Each shard count runs once, so with ``shards`` of 2 the 2-shard pass is the
+gated pass. Every pass must give the same step log. The 2-shard pass checks
+only the step log: at 10,000 agents, 2 shards cannot keep the step wait
+under its limit. With fewer than 2 shards, or fewer runs than shards, the
+passes are not compared and the gate fails.
 
 The gate passes when the sharded pass commits at least
 ``TARGET_COMMITS_PER_SECOND`` steps per second in the steady part, the
@@ -903,9 +903,11 @@ def _shard_process(
                     stop.set()
                     raise
         finally:
-            if store is not None:
-                store.close()
-            engine.dispose()
+            try:
+                if store is not None:
+                    store.close()
+            finally:
+                engine.dispose()
         results.put(
             {
                 "worker_id": shard["worker_id"],
