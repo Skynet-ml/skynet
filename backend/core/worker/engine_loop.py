@@ -61,7 +61,8 @@ definitions and gives a :class:`ModelReply` with the text, the tool calls and
 the cost; the tools are part of the prompt hash that a replay matches.
 :meth:`EngineLoop.model` is the same call with no tools, and gives only the
 text. :meth:`EngineLoop.put_files`, :meth:`EngineLoop.read_file` and
-:meth:`EngineLoop.list_files` write, read and list trees with no box. A tree
+:meth:`EngineLoop.list_files` write, read and list trees with no box. A read
+with ``max_bytes`` refuses a larger file before it loads (SKY-818). A tree
 write is no step: a tree id is the hash of its content, so a resume that
 writes the same files gets the same tree. The loop gets the run's hidden-path
 hashes once, when it is built, and ``read_file``, ``list_files`` and every
@@ -137,6 +138,7 @@ from ..service_gateway.optimization.blackbox.protocol import (
     Candidate,
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     ScorerAbortError,
     SideInfo,
@@ -617,17 +619,25 @@ class EngineLoop:
                 self._run_outputs.add(tree_id)
             return tree_id
 
-    def read_file(self, tree_id: str, path: str) -> bytes | None:
+    def read_file(self, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
         """Read one file of a tree with no box, unless the loop hides it.
+
+        A file's bytes are model output, and a tree may hold a file of up to ``MAX_TREE_BYTES``. With
+        ``max_bytes``, the loop reads the file's size from the step log's record first, and a file above the cap
+        never loads. Like a read with no cap, this is no step: the blob id is the hash of the file's bytes, so the
+        same tree and path give the same size and the same answer on a resume, before and after the flush.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated path of the file.
+            max_bytes: The most bytes to load; ``None`` loads the file at any size.
 
         Returns:
             The file bytes, or ``None`` when the path is hidden or is not a file or executable in the tree.
 
         Raises:
+            FileTooLargeError: When the file has more than ``max_bytes`` bytes. A hidden path gives ``None``
+                first, so the error never tells the size of a hidden file.
             LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
                 :meth:`_check_links` tells; the loop keeps it.
             LookupError: When the run cannot see the tree or one of its folders.
@@ -641,6 +651,10 @@ class EngineLoop:
             entry = None if folder is None else self._entries(folder).get(name)
             if entry is None or entry.mode not in {"file", "exec"}:
                 return None
+            if max_bytes is not None:
+                size = self._trees.blob_size(self._run.run_id, entry.object_id)
+                if size is not None and size > max_bytes:
+                    raise FileTooLargeError(path, size, max_bytes)
             return self._trees.get_blob(self._run.run_id, entry.object_id)
 
     def list_files(self, tree_id: str, path: str = "") -> list[str] | None:

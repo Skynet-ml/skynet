@@ -155,6 +155,27 @@ def test_a_repeated_object_is_stored_once_per_account(step_log, engine) -> None:
     assert owners == ["ada", "bob"]
 
 
+def test_a_blob_size_reads_no_object_before_or_after_the_flush(step_log, monkeypatch) -> None:
+    """The size comes from the buffer or the pack row, with the read rules of ``get_blob``, and loads no bytes."""
+    trees = TreeStore(step_log)
+    blob = trees.put_blob("job-ada", b"\0" * 1000)
+    empty = trees.put_blob("job-ada", b"")
+    reads: list[str] = []
+    monkeypatch.setattr(step_log, "get_object", lambda run_id, object_id: reads.append(object_id))
+    monkeypatch.setattr(LocalObjectStore, "get", lambda *args: reads.append("pack"))
+
+    assert trees.blob_size("job-ada", blob) == 1000
+    assert trees.blob_size("job-ada", empty) == 0
+    assert trees.blob_size("job-bob", blob) is None
+    step_log.flush()
+
+    assert trees.blob_size("job-ada-2", blob) == 1000
+    assert trees.blob_size("job-ada", empty) == 0
+    assert trees.blob_size("job-bob", blob) is None
+    assert trees.blob_size("job-ada", "f" * 64) is None
+    assert reads == []
+
+
 def test_a_blob_read_as_a_tree_or_a_changed_object_is_refused(step_log) -> None:
     """A read checks the hash and the object type."""
     trees = TreeStore(step_log)

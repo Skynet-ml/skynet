@@ -527,16 +527,47 @@ class StepLogStore:
             buffered = self._tree_objects.get((run_id, object_id))
         if buffered is not None:
             return buffered
+        location = self._object_location(run_id, object_id)
+        return None if location is None else self._objects.get(*location)
+
+    def object_size(self, run_id: str, object_id: str) -> int | None:
+        """Return the length of one tree object's stored bytes for a run, and read none of the bytes.
+
+        The run sees the same objects as in :meth:`get_object`. Before the flush, the length is the buffered
+        bytes' length; after it, the length that the flush recorded for the object in its pack.
+
+        Args:
+            run_id: The job that asks; its owner must own the object.
+            object_id: The object's content hash.
+
+        Returns:
+            The stored length in bytes, or ``None`` when the run is unknown or its owner does not have the object.
+        """
+        with self._cond:
+            buffered = self._tree_objects.get((run_id, object_id))
+        if buffered is not None:
+            return len(buffered)
+        location = self._object_location(run_id, object_id)
+        return None if location is None else location[2]
+
+    def _object_location(self, run_id: str, object_id: str) -> tuple[str, int, int] | None:
+        """Return where a flushed tree object of the run's owner lies in its pack.
+
+        Args:
+            run_id: The job that reads the object.
+            object_id: The object's content hash.
+
+        Returns:
+            The pack key, offset and length, or ``None`` when the run is unknown or its owner does not have
+            the object.
+        """
         # The same ``or ""`` as the flush, so a job without a username reads what the flush stored for it.
         owner = select(func.coalesce(JobModel.username, "")).where(JobModel.optimization_id == run_id).scalar_subquery()
         with Session(self._engine) as session:
             row = session.scalars(
                 select(TreeObjectModel).where(TreeObjectModel.object_id == object_id, TreeObjectModel.username == owner)
             ).first()
-            if row is None:
-                return None
-            location = (row.pack_key, row.pack_offset, row.pack_length)
-        return self._objects.get(*location)
+            return None if row is None else (row.pack_key, row.pack_offset, row.pack_length)
 
     def flush(self) -> None:
         """Write the pending batch now: one pack PUT, then one Postgres transaction.

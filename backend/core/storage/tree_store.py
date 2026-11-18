@@ -174,6 +174,22 @@ class TreeStore:
             raise ValueError(f"object {object_id} is not a blob")
         return stored[len(_BLOB_HEADER) :]
 
+    def blob_size(self, run_id: str, object_id: str) -> int | None:
+        """Return the length of a blob's file bytes for a run, and read none of the bytes.
+
+        The length comes from the step log's record of the object, so a caller can refuse a large blob before it
+        loads. It checks neither the hash nor the blob header: :meth:`get_blob` checks both when it reads.
+
+        Args:
+            run_id: The job that asks.
+            object_id: The blob's object id.
+
+        Returns:
+            The file length in bytes, or ``None`` when the run cannot see such an object.
+        """
+        stored = self._step_log.object_size(run_id, object_id)
+        return None if stored is None else stored - len(_BLOB_HEADER)
+
     def get_tree(self, run_id: str, object_id: str) -> list[TreeEntry] | None:
         """Return a tree's entries for a run, from the buffer before its flush.
 

@@ -139,6 +139,22 @@ class ScorerAbortError(RuntimeError):
     """
 
 
+class FileTooLargeError(Exception):
+    """Raised by a capped ``read_file`` of the engine context when a tree file is larger than the cap."""
+
+    def __init__(self, path: str, size: int, max_bytes: int) -> None:
+        """Keep the file's size and the cap.
+
+        Args:
+            path: The ``/``-separated path that the caller asked for.
+            size: The file's length in bytes.
+            max_bytes: The cap of the read.
+        """
+        super().__init__(f"file {path} has {size} bytes, more than the cap of {max_bytes}")
+        self.size = size
+        self.max_bytes = max_bytes
+
+
 def candidate_key(candidate: Candidate) -> str:
     """Return a stable identity string for a candidate.
 
@@ -389,6 +405,27 @@ class PutFiles(Protocol):
         ...
 
 
+class ReadFile(Protocol):
+    """Read one file of a tree with no box, with an optional byte cap."""
+
+    def __call__(self, tree_id: str, path: str, max_bytes: int | None = None) -> bytes | None:
+        """Read a file.
+
+        Args:
+            tree_id: The tree.
+            path: The ``/``-separated path of the file.
+            max_bytes: The most bytes to load; ``None`` loads the file at any size. A file above the cap
+                does not load.
+
+        Returns:
+            The file bytes, or ``None`` when the file is missing or hidden.
+
+        Raises:
+            FileTooLargeError: When the file has more than ``max_bytes`` bytes.
+        """
+        ...
+
+
 class ListFiles(Protocol):
     """List the files under one folder of a tree with no box."""
 
@@ -433,7 +470,7 @@ class EngineContext:
     call_model: CallModel | None = None
     run_command: RunCommand | None = None
     put_files: PutFiles | None = None
-    read_file: Callable[[str, str], bytes | None] | None = None
+    read_file: ReadFile | None = None
     list_files: ListFiles | None = None
     repo_seed: RepoSeed | None = None
 
