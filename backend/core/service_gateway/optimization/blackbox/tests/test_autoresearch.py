@@ -2515,7 +2515,9 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
     """
     at_bound = "[" * loop_tools.MAX_ARGUMENT_DEPTH + "]" * loop_tools.MAX_ARGUMENT_DEPTH
     in_string = json.dumps({"command": "echo " + '[{\\"' * 1000})
-    texts = ["[" * 990, "[" * 900 + "]" * 900, "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1), at_bound, in_string]
+    # Many shallow lists side by side: the depth goes down at each close, so the text stays inside the bound.
+    wide = "[" + "[]," * 40 + "[]]"
+    texts = ["[" * 990, "[" * 900 + "]" * 900, "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1), at_bound, in_string, wide]
 
     def results() -> list[tuple[Any, bool]]:
         """Give each text's transcript arguments and whether the tool loop refuses it.
@@ -2544,7 +2546,7 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
         return results() if levels == 0 else deep(levels - 1)
 
     top = results()
-    assert top == [("{}", True), ("{}", True), ("{}", True), (at_bound, False), (in_string, False)]
+    assert top == [("{}", True), ("{}", True), ("{}", True), (at_bound, False), (in_string, False), (wide, False)]
     assert deep(sys.getrecursionlimit() - 200) == top
 
 

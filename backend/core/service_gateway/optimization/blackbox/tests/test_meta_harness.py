@@ -1794,8 +1794,19 @@ def _nested(depth: int) -> dict[str, Any]:
         (_nested(900), "nested at most"),
         # Short JSON text nested past the depth bound: the transcript holds an empty object, as in AutoResearch.
         (json.dumps(_nested(loop_tools.MAX_ARGUMENT_DEPTH)), "nested at most"),
+        # Short text that is not JSON breaks no bound, so the transcript keeps it and the error asks for a command.
+        ("not json", "command string"),
     ],
-    ids=["deep-text", "long-text", "padded-text", "long-command", "long-object", "deep-object", "short-deep-text"],
+    ids=[
+        "deep-text",
+        "long-text",
+        "padded-text",
+        "long-command",
+        "long-object",
+        "deep-object",
+        "short-deep-text",
+        "not-json",
+    ],
 )
 def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
     arguments: Any,
@@ -1806,7 +1817,9 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A model reply with arguments past the bounds gets an error result and opens no box; a resume replays it.
+    """A model reply with arguments past the bounds, or not JSON, gets an error result and opens no box.
+
+    A resume replays it.
 
     Args:
         arguments: The tool call's arguments.

@@ -90,8 +90,7 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
             return None, True
         try:
             value = json.loads(value)
-        # JSON nested past the parser's recursion limit raises RecursionError.
-        except (ValueError, RecursionError):
+        except ValueError:
             value = None
     if _too_deep(value):
         return None, True
