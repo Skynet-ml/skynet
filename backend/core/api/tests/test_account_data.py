@@ -208,7 +208,11 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def test_export_returns_owned_data_without_secrets(harness: SimpleNamespace) -> None:
-    """Export carries the account's own rows but never any secret material."""
+    """Export carries the account's own rows but never any secret material.
+
+    Args:
+        harness: The test client and its engine.
+    """
     resp = harness.client.get("/account/export")
     assert resp.status_code == 200
     assert "attachment" in resp.headers["content-disposition"]
@@ -237,7 +241,11 @@ def test_export_returns_owned_data_without_secrets(harness: SimpleNamespace) -> 
 
 
 def test_export_carries_the_saved_setup_draft_until_it_is_deleted(harness: SimpleNamespace) -> None:
-    """Export returns the account's saved setup and chat, and nothing once the draft is deleted."""
+    """Export returns the account's saved setup and chat, and nothing once the draft is deleted.
+
+    Args:
+        harness: The test client and its engine.
+    """
     assert harness.client.get("/account/export").json()["setup_draft"] is None
 
     with Session(harness.engine) as session:
@@ -287,7 +295,11 @@ def _seed_feedback_report(engine: Engine, username: str) -> None:
 
 
 def test_export_carries_each_chat_feedback_reports(harness: SimpleNamespace) -> None:
-    """Each exported chat lists the agent's feedback reports about it, without internal keys."""
+    """Each exported chat lists the agent's feedback reports about it, without internal keys.
+
+    Args:
+        harness: The test client and its engine.
+    """
     _seed_feedback_report(harness.engine, _EMAIL)
     _seed_feedback_report(harness.engine, _OTHER)
 
@@ -303,7 +315,11 @@ def test_export_carries_each_chat_feedback_reports(harness: SimpleNamespace) -> 
 
 
 def test_delete_removes_and_counts_the_feedback_reports(harness: SimpleNamespace) -> None:
-    """Deletion removes the account's feedback reports, counts them, and keeps another account's."""
+    """Deletion removes the account's feedback reports, counts them, and keeps another account's.
+
+    Args:
+        harness: The test client and its engine.
+    """
     _seed_feedback_report(harness.engine, _OTHER)
     with Session(harness.engine) as session:
         baseline = delete_account(session, _EMAIL)
@@ -326,7 +342,14 @@ def test_delete_removes_and_counts_the_feedback_reports(harness: SimpleNamespace
 def test_export_lists_and_delete_removes_the_chat_media(
     harness: SimpleNamespace, filename: str, kind: str, mime: str
 ) -> None:
-    """Export lists only the account's chat media, documents too, without bytes; deletion removes only that media."""
+    """Export lists only the account's chat media, documents too, without bytes; deletion removes only that media.
+
+    Args:
+        harness: The test client and its engine.
+        filename: The file name of the seeded media.
+        kind: The media kind that the export lists.
+        mime: The MIME type of the seeded media.
+    """
     with Session(harness.engine) as session:
         for owner in (_EMAIL, _OTHER):
             session.add(
@@ -357,7 +380,12 @@ def test_export_lists_and_delete_removes_the_chat_media(
 def test_delete_stops_only_the_account_chat_sandboxes(
     harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Deleting an account stops each of its chats' file sandboxes and leaves other accounts' sandboxes."""
+    """Deleting an account stops each of its chats' file sandboxes and leaves other accounts' sandboxes.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     stopped: list[str] = []
     monkeypatch.setattr(account_data_mod, "stop_chat_runner", stopped.append)
     with Session(harness.engine) as session:
@@ -376,7 +404,11 @@ def test_delete_stops_only_the_account_chat_sandboxes(
 
 
 def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespace) -> None:
-    """A local account keeps all its data when the confirm password is wrong."""
+    """A local account keeps all its data when the confirm password is wrong.
+
+    Args:
+        harness: The test client and its engine.
+    """
     resp = harness.client.post("/account/delete", json={"password": "not my password"})
     assert resp.status_code == 401
     assert resp.json()["code"] == "accounts.invalid_credentials"
@@ -402,7 +434,11 @@ def test_delete_answers_503_and_keeps_the_account_when_the_tree_purge_fails(harn
 
 
 def test_delete_purges_owned_data_and_anonymizes_records(harness: SimpleNamespace) -> None:
-    """Deletion removes owned rows, anonymizes financial/telemetry rows, spares others."""
+    """Deletion removes owned rows, anonymizes financial/telemetry rows, spares others.
+
+    Args:
+        harness: The test client and its engine.
+    """
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
     assert resp.status_code == 200
     assert resp.json()["deleted_rows"] > 0
@@ -431,7 +467,11 @@ def test_delete_purges_owned_data_and_anonymizes_records(harness: SimpleNamespac
 
 
 def test_delete_oauth_account_needs_no_password(harness: SimpleNamespace) -> None:
-    """An OAuth account (no users row, no password) deletes on bearer auth alone."""
+    """An OAuth account (no users row, no password) deletes on bearer auth alone.
+
+    Args:
+        harness: The test client and its engine.
+    """
     oauth_email = "sso@example.com"
     _seed_user_data(harness.engine, oauth_email, "cus_sso")
     harness.app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(
@@ -447,7 +487,11 @@ def test_delete_oauth_account_needs_no_password(harness: SimpleNamespace) -> Non
 
 
 def test_delete_provisioned_oauth_account_needs_no_password(harness: SimpleNamespace) -> None:
-    """An OAuth identity mirrored into ``users`` still deletes on bearer auth alone."""
+    """An OAuth identity mirrored into ``users`` still deletes on bearer auth alone.
+
+    Args:
+        harness: The test client and its engine.
+    """
     oauth_email = "mirrored@example.com"
     provisioned = harness.client.post(
         "/auth/oauth/provision",
@@ -469,7 +513,11 @@ def test_delete_provisioned_oauth_account_needs_no_password(harness: SimpleNames
 
 
 def test_export_includes_channels_and_connectors_without_secrets(harness: SimpleNamespace) -> None:
-    """Inbox, Chrome alerts, Slack and connectors are exported, their tokens are not."""
+    """Inbox, Chrome alerts, Slack and connectors are exported, their tokens are not.
+
+    Args:
+        harness: The test client and its engine.
+    """
     body = harness.client.get("/account/export").json()
     raw = json.dumps(body)
 
@@ -484,7 +532,12 @@ def test_export_includes_channels_and_connectors_without_secrets(harness: Simple
 
 @pytest.mark.parametrize("export_format", EXPORT_FORMATS)
 def test_export_renders_every_format(harness: SimpleNamespace, export_format: str) -> None:
-    """Each format downloads as a readable file holding the account's runs."""
+    """Each format downloads as a readable file holding the account's runs.
+
+    Args:
+        harness: The test client and its engine.
+        export_format: The export format to download.
+    """
     resp = harness.client.get("/account/export", params={"format": export_format})
     assert resp.status_code == 200
     disposition = resp.headers["content-disposition"]
@@ -517,12 +570,20 @@ def test_export_renders_every_format(harness: SimpleNamespace, export_format: st
 
 
 def test_export_rejects_unknown_format(harness: SimpleNamespace) -> None:
-    """An unsupported format is a validation error, not a silent JSON fallback."""
+    """An unsupported format is a validation error, not a silent JSON fallback.
+
+    Args:
+        harness: The test client and its engine.
+    """
     assert harness.client.get("/account/export", params={"format": "docx"}).status_code == 422
 
 
 def test_delete_removes_channels_and_connectors(harness: SimpleNamespace) -> None:
-    """Deletion clears the inbox, Chrome alerts, Slack link and connectors, sparing others."""
+    """Deletion clears the inbox, Chrome alerts, Slack link and connectors, sparing others.
+
+    Args:
+        harness: The test client and its engine.
+    """
     assert harness.client.post("/account/delete", json={"password": _PASSWORD}).status_code == 200
     with Session(harness.engine) as session:
         for model in (NotificationModel, PushSubscriptionModel, SlackConnectionModel, UserConnectorModel):
@@ -561,7 +622,11 @@ def _open_wallets(engine: Any) -> None:
 
 
 def test_delete_closes_the_wallet_and_records_the_forfeited_balance(harness: SimpleNamespace) -> None:
-    """Deletion leaves no open wallet: balance and grant go to zero, and a closure row explains it."""
+    """Deletion leaves no open wallet: balance and grant go to zero, and a closure row explains it.
+
+    Args:
+        harness: The test client and its engine.
+    """
     _open_wallets(harness.engine)
     assert harness.client.post("/account/delete", json={"password": _PASSWORD}).status_code == 200
 
@@ -583,7 +648,11 @@ def test_delete_closes_the_wallet_and_records_the_forfeited_balance(harness: Sim
 
 
 def test_migration_closes_wallets_deleted_before_the_fix(harness: SimpleNamespace) -> None:
-    """The one-time migration closes old tombstone wallets and spares live ones."""
+    """The one-time migration closes old tombstone wallets and spares live ones.
+
+    Args:
+        harness: The test client and its engine.
+    """
     _open_wallets(harness.engine)
     tombstone = _anonymized_username(_EMAIL)
     with Session(harness.engine) as session:
@@ -687,7 +756,11 @@ def _delete(engine: Engine) -> None:
 
 
 def test_repeat_deletion_of_one_email_keeps_each_closed_wallet(full_schema_engine: Engine) -> None:
-    """Delete, sign up again and delete again: each deletion keeps its own closed wallet (SKY-602)."""
+    """Delete, sign up again and delete again: each deletion keeps its own closed wallet (SKY-602).
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
     _sign_up_with_local_wallet(full_schema_engine, 200)
     _delete(full_schema_engine)
     _sign_up_with_local_wallet(full_schema_engine, 70)
@@ -712,7 +785,11 @@ def test_repeat_deletion_of_one_email_keeps_each_closed_wallet(full_schema_engin
 
 
 def test_migration_frees_the_local_ids_of_wallets_closed_before_the_fix(full_schema_engine: Engine) -> None:
-    """A wallet closed before SKY-602 gives up the email's local id, so the account can sign up again."""
+    """A wallet closed before SKY-602 gives up the email's local id, so the account can sign up again.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
     old_tombstone = _anonymized_username(_EMAIL)
     with Session(full_schema_engine) as session:
         session.add_all(
@@ -739,7 +816,11 @@ def test_migration_frees_the_local_ids_of_wallets_closed_before_the_fix(full_sch
 
 
 def test_deletion_keeps_a_real_stripe_customer_id(full_schema_engine: Engine) -> None:
-    """A closed wallet keeps its real Stripe customer id, so a later webhook still finds it."""
+    """A closed wallet keeps its real Stripe customer id, so a later webhook still finds it.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
     with Session(full_schema_engine) as session:
         session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus_real"))
         session.commit()
@@ -832,7 +913,11 @@ def _swept(engine: Engine) -> set[str]:
 
 
 def test_deletion_releases_the_open_holds_so_the_sweep_skips_them(full_schema_engine: Engine) -> None:
-    """A deleted account leaves no hold for the reconciliation sweep, and a live account keeps its holds."""
+    """A deleted account leaves no hold for the reconciliation sweep, and a live account keeps its holds.
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
     _seed_budget_with_holds(full_schema_engine, _EMAIL)
     _seed_budget_with_holds(full_schema_engine, _OTHER)
     assert _swept(full_schema_engine) == {
@@ -868,7 +953,11 @@ def test_deletion_releases_the_open_holds_so_the_sweep_skips_them(full_schema_en
 
 
 def test_refund_that_resolved_the_email_before_deletion_reverses_the_closure(full_schema_engine: Engine) -> None:
-    """A refund webhook that resolved the email before the deletion finds the closed wallet (SKY-601)."""
+    """A refund webhook that resolved the email before the deletion finds the closed wallet (SKY-601).
+
+    Args:
+        full_schema_engine: Engine holding the full schema.
+    """
     with Session(full_schema_engine) as session:
         session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus_real", balance_cents=300))
         session.add(

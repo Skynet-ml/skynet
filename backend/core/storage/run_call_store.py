@@ -71,7 +71,14 @@ def event_candidate_key(metrics: dict[str, Any]) -> str | None:
 
 
 def _iso(value: datetime | None) -> str | None:
-    """Return a stored timestamp as an aware ISO string; SQLite hands back naive UTC."""
+    """Return a stored timestamp as an aware ISO string; SQLite hands back naive UTC.
+
+    Args:
+        value: The stored timestamp, or ``None``.
+
+    Returns:
+        The aware ISO string, or ``None`` when no timestamp is stored.
+    """
     if value is None:
         return None
     if value.tzinfo is None:
@@ -80,7 +87,14 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _parse_timestamp(value: Any) -> datetime:
-    """Return a call's start time as an aware datetime; now when absent or unreadable."""
+    """Return a call's start time as an aware datetime; now when absent or unreadable.
+
+    Args:
+        value: The start time as a datetime, an ISO string or another value.
+
+    Returns:
+        The aware start time.
+    """
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     if isinstance(value, str):
@@ -388,7 +402,14 @@ class PostgresRunCallStore:
 
     @staticmethod
     def _call_record(row: RunCallModel) -> dict[str, Any]:
-        """Project an ORM row onto the record shape the read routes serve."""
+        """Project an ORM row onto the record shape the read routes serve.
+
+        Args:
+            row: The run call row.
+
+        Returns:
+            The call record.
+        """
         return {
             "id": int(row.id),
             "seq": int(row.seq),

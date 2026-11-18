@@ -301,6 +301,12 @@ def _json_int(value: Any) -> int | None:
     Extraction returns text on PostgreSQL (``->>``) and native affinity values
     on SQLite, so both forms must coerce; junk degrades to ``None``, mirroring
     the ``isinstance`` guards the analytics aggregations always applied.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The integer, or ``None`` when the value is not one.
     """
     try:
         return int(value)
@@ -309,7 +315,14 @@ def _json_int(value: Any) -> int | None:
 
 
 def _json_float(value: Any) -> float | None:
-    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one."""
+    """Coerce one extracted JSON scalar to ``float``, or ``None`` when it isn't one.
+
+    Args:
+        value: The extracted JSON scalar.
+
+    Returns:
+        The float, or ``None`` when the value is not one.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -754,6 +767,9 @@ class RemoteDBJobStore:
         Safe to call repeatedly. If the database role lacks the privilege
         to install the extension, the log line below is the operator's
         hint to run ``CREATE EXTENSION vector`` once out-of-band.
+
+        Returns:
+            True when the extension exists, False when its install failed.
         """
         try:
             with self._engine.connect() as conn:
@@ -775,6 +791,9 @@ class RemoteDBJobStore:
         SQLAlchemy's create_all can't express HNSW, and we don't want to
         pay for a reindex on every restart — the IF NOT EXISTS guard
         makes the call free on warm databases.
+
+        Returns:
+            True when the indexes exist, False when their creation failed.
         """
         statements = [
             (
@@ -2723,7 +2742,15 @@ class RemoteDBJobStore:
         return self._claim_next_job_fallback(worker_id, lease_seconds)
 
     def _claim_next_job_postgres(self, worker_id: str, lease_seconds: float) -> JobRecord | None:
-        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``."""
+        """PostgreSQL fast path using ``FOR UPDATE SKIP LOCKED``.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
+        """
         sql = text(
             """
             UPDATE jobs
@@ -2776,6 +2803,13 @@ class RemoteDBJobStore:
         Holds an exclusive transaction so concurrent claims are serialized at
         the engine level. Not race-safe across processes but adequate for
         single-process test runs.
+
+        Args:
+            worker_id: The id of the worker that claims the job.
+            lease_seconds: The lease length of the claim.
+
+        Returns:
+            The claimed job, or ``None`` when no job is ready.
         """
         session = self._get_session()
         try:
