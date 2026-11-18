@@ -2,7 +2,7 @@ Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。引�
 
 ## 共用合約
 
-每次運行都有一個倉庫、一個有 `[run]` 入口嘅 `optimize.toml` 檔案，同一個評分器。`[run]` 入口會用一個案例運行倉庫嘅一個版本。評分器係一個 Python 函數，佢會收到入口嘅輸出同個案例。
+每次運行都有一個倉庫、一個有 `[run]` 入口或者 `[target.<name>]` 階段嘅 `optimize.toml` 檔案，同一個評分器。`[run]` 入口會用一個案例運行倉庫嘅一個版本。評分器係一個 Python 函數，佢會收到入口嘅輸出同個案例。
 
 ```toml tab="optimize.toml"
 version = 1

@@ -2,7 +2,7 @@ Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Un mote
 
 ## Le contrat commun
 
-Chaque exécution comporte un dépôt, un fichier `optimize.toml` avec une entrée `[run]`, et un évaluateur. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur est une fonction Python qui reçoit la sortie de l'entrée et le cas.
+Chaque exécution comporte un dépôt, un fichier `optimize.toml` avec une entrée `[run]` ou une étape `[target.<name>]`, et un évaluateur. L'entrée `[run]` exécute une version du dépôt sur un cas. L'évaluateur est une fonction Python qui reçoit la sortie de l'entrée et le cas.
 
 ```toml tab="optimize.toml"
 version = 1

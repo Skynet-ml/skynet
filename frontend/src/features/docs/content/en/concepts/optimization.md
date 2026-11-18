@@ -2,7 +2,7 @@ Skynet is Optimize Anything: every run optimizes a repository. An engine propose
 
 ## The shared contract
 
-Every run has a repository, an `optimize.toml` file with a `[run]` entry, and a scorer. The `[run]` entry runs one version of the repository on one case. The scorer is a Python function that gets the output of the entry and the case.
+Every run has a repository, an `optimize.toml` file with a `[run]` entry or a `[target.<name>]` stage, and a scorer. The `[run]` entry runs one version of the repository on one case. The scorer is a Python function that gets the output of the entry and the case.
 
 ```toml tab="optimize.toml"
 version = 1

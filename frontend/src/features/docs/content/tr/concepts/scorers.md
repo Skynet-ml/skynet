@@ -12,7 +12,7 @@ def score(repo_path, case, output=None):
 | ----------- | ---------------------------------------------------------------------------- |
 | `repo_path` | Yalnızca metrik dosyalarınızı tutan bir klasör. Başka bir depo dosyası veya sürüm kodu tutmaz |
 | `case`      | Bir dict. `case["input"]` girdi alanlarını tutar. `case["expected"]` beklenen değeri veya `None` tutar |
-| `output`    | `[run]` giriş noktasının vaka için döndürdüğü değer |
+| `output`    | `[run]` giriş noktasının vaka için döndürdüğü değer veya dosyada `[run]` yoksa `None` |
 
 Deponun `optimize.toml` dosyasında bir `[run]` bölümü veya bir `[target.<name>]` aşaması olmalıdır. `[run]` giriş noktası (`entry`), bir sürümü bir vaka üzerinde kendi sandbox'ında çalıştırır. Skynet ikisi de olmayan bir dosyayı reddeder, çünkü her sürüm aynı puanı alırdı.
 

@@ -2,7 +2,7 @@ Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Un motore 
 
 ## Il contratto comune
 
-Ogni esecuzione ha un repository, un file `optimize.toml` con una voce `[run]` e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
+Ogni esecuzione ha un repository, un file `optimize.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
 
 ```toml tab="optimize.toml"
 version = 1

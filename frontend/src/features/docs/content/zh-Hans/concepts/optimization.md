@@ -2,7 +2,7 @@ Skynet 就是 Optimize Anything：每次运行都优化一个仓库。引擎提�
 
 ## 共享契约
 
-每次运行都有一个仓库、一个带有 `[run]` 入口的 `optimize.toml` 文件，以及一个评分器。`[run]` 入口对一个用例运行仓库的一个版本。评分器是一个 Python 函数，它接收入口的输出和该用例。
+每次运行都有一个仓库、一个带有 `[run]` 入口或 `[target.<name>]` 阶段的 `optimize.toml` 文件，以及一个评分器。`[run]` 入口对一个用例运行仓库的一个版本。评分器是一个 Python 函数，它接收入口的输出和该用例。
 
 ```toml tab="optimize.toml"
 version = 1

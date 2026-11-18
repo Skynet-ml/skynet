@@ -2,7 +2,7 @@ Skynet ist Optimize Anything: Jeder Durchlauf optimiert ein Repository. Eine Eng
 
 ## Der gemeinsame Vertrag
 
-Jeder Durchlauf hat ein Repository, eine Datei `optimize.toml` mit einem `[run]`-Eintrag und einen Scorer. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer ist eine Python-Funktion, die die Ausgabe des Eintrags und den Fall erhält.
+Jeder Durchlauf hat ein Repository, eine Datei `optimize.toml` mit einem `[run]`-Eintrag oder einer Stufe `[target.<name>]` und einen Scorer. Der `[run]`-Eintrag führt eine Version des Repositorys auf einem Fall aus. Der Scorer ist eine Python-Funktion, die die Ausgabe des Eintrags und den Fall erhält.
 
 ```toml tab="optimize.toml"
 version = 1

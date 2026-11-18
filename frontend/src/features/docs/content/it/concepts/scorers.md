@@ -12,7 +12,7 @@ def score(repo_path, case, output=None):
 | ----------- | -------------------------------------------------------------------------------- |
 | `repo_path` | Una cartella che contiene solo i tuoi file della metrica. Non contiene altri file del repository né codice della versione |
 | `case`      | Un dict. `case["input"]` contiene i campi di input. `case["expected"]` contiene il valore atteso, oppure `None` |
-| `output`    | Ciò che la voce `[run]` ha restituito per il caso |
+| `output`    | Ciò che la voce `[run]` ha restituito per il caso, oppure `None` se il file non ha `[run]` |
 
 Il file `optimize.toml` del repository deve avere una sezione `[run]` o una fase `[target.<name>]`. L'`entry` di `[run]` esegue una versione su un caso, nel proprio box della sandbox. Skynet rifiuta un file senza nessuna delle due, perché ogni versione otterrebbe lo stesso punteggio.
 

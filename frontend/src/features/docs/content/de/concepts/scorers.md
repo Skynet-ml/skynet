@@ -12,7 +12,7 @@ def score(repo_path, case, output=None):
 | ----------- | -------------------------------------------------------------------------------- |
 | `repo_path` | Ein Ordner, der nur Ihre Metrikdateien enthält. Er enthält keine andere Datei des Repositorys und keinen Code der Version |
 | `case`      | Ein Dict. `case["input"]` enthält die Eingabefelder. `case["expected"]` enthält den erwarteten Wert oder `None` |
-| `output`    | Was der `[run]`-Eintrag für den Fall zurückgegeben hat |
+| `output`    | Was der `[run]`-Eintrag für den Fall zurückgegeben hat, oder `None`, wenn die Datei kein `[run]` hat |
 
 Die Datei `optimize.toml` des Repositorys muss einen Abschnitt `[run]` oder eine Stufe `[target.<name>]` haben. Der `entry` von `[run]` führt eine Version auf einem Fall aus, in einer eigenen Sandbox-Box. Skynet lehnt eine Datei ohne beides ab, weil sonst jede Version dieselbe Bewertung erhält.
 

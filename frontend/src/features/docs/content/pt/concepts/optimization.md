@@ -2,7 +2,7 @@ O Skynet é o Optimize Anything: toda execução otimiza um repositório. Um mot
 
 ## O contrato comum
 
-Toda execução tem um repositório, um arquivo `optimize.toml` com uma entrada `[run]` e um avaliador. A entrada `[run]` executa uma versão do repositório em um caso. O avaliador é uma função Python que recebe a saída da entrada e o caso.
+Toda execução tem um repositório, um arquivo `optimize.toml` com uma entrada `[run]` ou uma etapa `[target.<name>]`, e um avaliador. A entrada `[run]` executa uma versão do repositório em um caso. O avaliador é uma função Python que recebe a saída da entrada e o caso.
 
 ```toml tab="optimize.toml"
 version = 1

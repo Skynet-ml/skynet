@@ -2,7 +2,7 @@ Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Bir 
 
 ## Ortak sözleşme
 
-Her çalıştırmanın bir deposu, `[run]` giriş noktası içeren bir `optimize.toml` dosyası ve bir puanlayıcısı vardır. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı bir Python fonksiyonudur. Giriş noktasının çıktısını ve vakayı alır.
+Her çalıştırmanın bir deposu, `[run]` giriş noktası veya `[target.<name>]` aşaması içeren bir `optimize.toml` dosyası ve bir puanlayıcısı vardır. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı bir Python fonksiyonudur. Giriş noktasının çıktısını ve vakayı alır.
 
 ```toml tab="optimize.toml"
 version = 1
