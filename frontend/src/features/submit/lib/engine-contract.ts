@@ -31,6 +31,15 @@ export const DEFAULT_PROPOSER: BlackboxProposer & { harness: BlackboxHarness } =
   max_tool_calls: 100,
 };
 
+/**
+ * The proposer picker's value. It stays empty until the user picks a harness,
+ * so the picker shows a placeholder. Radix fires no change for the current
+ * value, so a picker that showed Codex could never send a pick of Codex.
+ */
+export function harnessPickerValue(proposer: BlackboxProposer): BlackboxHarness | "" {
+  return proposer.harness ?? "";
+}
+
 /** The inclusive range the backend accepts for `max_tool_calls`. */
 export const MAX_TOOL_CALLS_LIMITS = { min: 1, max: 1_000 } as const;
 

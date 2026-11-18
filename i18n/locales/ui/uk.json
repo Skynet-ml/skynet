@@ -150,6 +150,7 @@
   "submit.v2.optimizer.picker.title.guided": "Як покращувати",
   "submit.v2.optimizer.proposer.candidates": "Кандидатів за ітерацію",
   "submit.v2.optimizer.proposer.harness": "Агент-програміст",
+  "submit.v2.optimizer.proposer.harness_default": "Типове значення сервера",
   "submit.v2.optimizer.sandbox.label": "Пісочниця",
   "submit.v2.optimizer.sandbox.hint": "Де виконується код запуску.",
   "submit.v2.optimizer.sandbox.load_failed": "Не вдалося завантажити пісочниці. Запуск використовує типове значення сервера.",

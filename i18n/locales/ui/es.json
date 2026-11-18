@@ -150,6 +150,7 @@
   "submit.v2.optimizer.picker.title.guided": "Cómo mejorarlo",
   "submit.v2.optimizer.proposer.candidates": "Candidatos por iteración",
   "submit.v2.optimizer.proposer.harness": "Agente de código",
+  "submit.v2.optimizer.proposer.harness_default": "Predeterminado del servidor",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
   "submit.v2.optimizer.sandbox.hint": "Dónde se ejecuta el código de la ejecución.",
   "submit.v2.optimizer.sandbox.load_failed": "No se pudieron cargar los sandboxes. La ejecución usa el valor predeterminado del servidor.",

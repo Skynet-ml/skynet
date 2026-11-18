@@ -23,6 +23,7 @@ const { contractMetricEntry, contractMissing, finishedHardeningJobId, repoBaseTe
   "./repo-run.ts"
 );
 const { prepareModelConfig } = await import("./model-config.ts");
+const { harnessPickerValue } = await import("./engine-contract.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
 
@@ -103,6 +104,16 @@ test("a repository run sends no harness until the user picks one (SKY-753)", () 
   const state = repoState();
   state.optimizer.proposer = { ...state.optimizer.proposer, harness: "pi" };
   assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
+});
+
+test("the harness picker starts empty, so picking Codex sends Codex (SKY-753)", () => {
+  const state = repoState();
+  // Radix fires onValueChange only for a new value, so the unset picker must not hold "codex".
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "");
+
+  state.optimizer.proposer = { ...state.optimizer.proposer, harness: "codex" };
+  assert.equal(harnessPickerValue(state.optimizer.proposer), "codex");
+  assert.equal(repoRunRequest(state, options)?.proposer?.harness, "codex");
 });
 
 test("a repository Skynet created is flagged in the run request", () => {

@@ -150,6 +150,7 @@
   "submit.v2.optimizer.picker.title.guided": "Как улучшать",
   "submit.v2.optimizer.proposer.candidates": "Кандидатов за итерацию",
   "submit.v2.optimizer.proposer.harness": "Агент-программист",
+  "submit.v2.optimizer.proposer.harness_default": "Значение сервера по умолчанию",
   "submit.v2.optimizer.sandbox.label": "Песочница",
   "submit.v2.optimizer.sandbox.hint": "Где выполняется код запуска.",
   "submit.v2.optimizer.sandbox.load_failed": "Не удалось загрузить песочницы. Запуск использует значение сервера по умолчанию.",

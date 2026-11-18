@@ -47,7 +47,12 @@ import { msg } from "@/shared/lib/messages";
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
-import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
+import {
+  DEFAULT_PROPOSER,
+  harnessPickerValue,
+  proposerKnobs,
+  usesNativeProposer,
+} from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
 import {
   DEFAULT_SHINKA_SETTINGS,
@@ -295,13 +300,13 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
               tip="submit.blackbox.proposer"
             >
               <Select
-                value={harness}
+                value={harnessPickerValue(proposer)}
                 onValueChange={(value) => {
                   patchOptimizer({ proposer: { ...proposer, harness: value as BlackboxHarness } });
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
-                  <SelectValue />
+                  <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")} />
                 </SelectTrigger>
                 <SelectContent>
                   {BLACKBOX_HARNESSES.map((h) => (
