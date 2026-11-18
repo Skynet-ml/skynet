@@ -38,6 +38,7 @@ from core.sandbox.box_lease import BoxLease
 from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
+from core.sandbox.services import ComposeService, stop_command
 
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
@@ -2021,7 +2022,7 @@ def test_a_warm_box_that_fails_its_reset_is_replaced_by_a_new_box_with_the_candi
         box.close()
         (old,) = _candidates(runtime)  # type: ignore[arg-type]
         replaced = _open(space, version)
-        assert any(f"rm -rf {WORK_DIR}" in command for command, _ in old.commands)
+        assert any(command.startswith("find .app-repo ") for command in old.root_commands)
         assert old.closed
         new = _candidates(runtime)[-1]  # type: ignore[arg-type]
         assert replaced.session is new
@@ -2115,8 +2116,11 @@ def test_closing_the_workspace_closes_a_held_candidate_box_at_its_release(tmp_pa
     assert not box.closed
     held.close()
     assert box.closed
+    opened = len(runtime.boxes)
     with pytest.raises(RuntimeError, match="lease is closed"):
         space.open_candidate("")
+    # A late candidate fails before setup, so it opens no paid setup box.
+    assert len(runtime.boxes) == opened
 
 
 def test_the_candidate_lease_takes_its_cap_and_start_budget_from_the_settings(
@@ -2162,5 +2166,142 @@ def test_each_score_still_gets_a_new_metric_box_next_to_a_warm_candidate_box(tmp
         assert metrics[0] is not metrics[1]
         assert all(box.closed for box in metrics)
         assert not set(map(id, metrics)) & set(map(id, _candidates(runtime)))
+    finally:
+        space.close()
+
+
+def test_a_reset_removes_every_earlier_call_folder_and_keeps_the_prepared_tree(tmp_path: Path) -> None:
+    """The next version on a warm box sees no input, output or runner of an earlier call (SKY-805)."""
+    runtime = _Runtime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        first = _open(space, "")
+        first.session.write_files(
+            {".app-repo/calls/000001/candidate/input.json": "{}", ".app-repo/app_runner.py": "runner\n"}
+        )
+        first.close()
+        second = _open(space, "")
+        assert second.session is first.session
+        assert second.session.read_file(".app-repo/calls/000001/candidate/input.json") is None
+        assert second.session.read_file(".app-repo/app_runner.py") is None
+        assert second.session.read_file(f"{PREPARED_DIR}/src/app.py") == "x = 1\n"
+        assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        second.close()
+    finally:
+        space.close()
+
+
+_API = ComposeService(name="api", command="python -m api")
+
+
+class _ServiceBox(_Box):
+    """Record each start of the compose services."""
+
+    def __init__(self, inner: Any, spec: SandboxSpec) -> None:
+        """Wrap a local session with no service started.
+
+        Args:
+            inner: The real local session.
+            spec: The spec the box opened with.
+        """
+        super().__init__(inner, spec)
+        self.starts: list[str] = []
+
+    def start_services(self, base_dir: str) -> None:
+        """Record the folder the services start in.
+
+        Args:
+            base_dir: The absolute folder the services run in.
+        """
+        self.starts.append(base_dir)
+
+
+class _ServiceRuntime(_Runtime):
+    """Open boxes that can start compose services."""
+
+    def open(self, spec: SandboxSpec) -> _Box:
+        """Open one recording box that can start services."""
+        box = _ServiceBox(self._local.open(spec), spec)
+        self.boxes.append(box)
+        return box
+
+
+def _service_space(tmp_path: Path) -> tuple[RepoWorkspace, _ServiceRuntime]:
+    """Build a workspace whose candidate boxes run one compose service.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The workspace and its runtime.
+    """
+    runtime = _ServiceRuntime()
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, services=(_API,)),
+        archive=_archive(tmp_path, {"src/app.py": "x = 1\n"}),
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+    )
+    return space, runtime
+
+
+def test_a_reset_stops_the_compose_services_and_starts_them_again(tmp_path: Path) -> None:
+    """A warm box's reset stops the service of the last version, then starts it on a new copy (SKY-805)."""
+    space, runtime = _service_space(tmp_path)
+    try:
+        for _ in range(3):
+            _open(space, "").close()
+        (box,) = _candidates(runtime)  # type: ignore[arg-type]
+        assert isinstance(box, _ServiceBox)
+        assert len(box.starts) == 3
+        resets = [command for command in box.root_commands if command.startswith(stop_command(_API))]
+        assert len(resets) == 2
+    finally:
+        space.close()
+
+
+def test_after_the_reaper_closes_an_idle_slot_box_the_next_candidate_gets_a_new_checked_box(tmp_path: Path) -> None:
+    """The idle close drops the slot's box; the next version opens a new box, checks its digest and starts services."""
+    space, runtime = _service_space(tmp_path)
+    space._candidates._sleep_after = 0.05
+    try:
+        _open(space, "").close()
+        (old,) = _candidates(runtime)  # type: ignore[arg-type]
+        deadline = time.monotonic() + 10
+        while not old.closed and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert old.closed
+        box = _open(space, "")
+        new = _candidates(runtime)[-1]  # type: ignore[arg-type]
+        assert box.session is new
+        assert new is not old
+        assert isinstance(new, _ServiceBox)
+        assert len(new.starts) == 1
+        assert any(command.startswith(f"cd {PREPARED_DIR} && ") for command, _ in new.commands)
+        assert not any(command.startswith("find .app-repo ") for command in new.root_commands)
+        box.close()
+    finally:
+        space.close()
+
+
+def test_a_kept_reaper_error_reaches_the_candidate_and_keeps_the_snapshots(tmp_path: Path) -> None:
+    """A lease error before a new box opens is no lost snapshot: setup does not run again (SKY-805)."""
+    runtime = _SnapshotRuntime()
+    space = _space(_archive(tmp_path, {"src/app.py": "x = 1\n"}), runtime, setup=None)
+    try:
+        _open(space, "").close()
+        opened = len(runtime.boxes)
+        space._candidates._keep_reap_error(RuntimeError("the idle box close failed"))
+        with pytest.raises(RuntimeError, match="idle box close failed"):
+            space.open_candidate("")
+        assert len(runtime.boxes) == opened
+        assert not space._snapshots_off
+        box = _open(space, "")
+        assert box.session is _candidates(runtime)[0]  # type: ignore[arg-type]
+        assert len(runtime.boxes) == opened
+        box.close()
     finally:
         space.close()

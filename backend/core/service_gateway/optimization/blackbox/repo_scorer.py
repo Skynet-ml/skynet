@@ -630,8 +630,10 @@ class RepoScorer:
     ) -> dict[str, Any]:
         """Run the ``[run]`` entry on the case's input in the candidate box.
 
-        The box holds no metric file and no earlier call; the caller ends it
-        after this returns, and with it every process the entry left.
+        The box holds no metric file and no earlier call folder. After this
+        returns, the caller gives the box back to the run's lease, which resets
+        it for the next version. A process that the entry left in the
+        background can survive the reset; SKY-809 stops those processes.
 
         Args:
             candidate: The evaluation's open candidate box.

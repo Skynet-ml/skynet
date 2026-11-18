@@ -922,6 +922,7 @@ class RepoWorkspace:
             image_digest=spec.image or "", setup_command="", install_command="", lock_files={"metric": unique}
         )
         self._snapshots_off = False
+        self._closed = False
         self._opened = 0
         self._lock = threading.Lock()
         cap = settings.repo_candidate_vercel_cap if candidate_cap is None else candidate_cap
@@ -930,7 +931,7 @@ class RepoWorkspace:
         self._candidates: BoxLease[SandboxSession] = BoxLease(
             self._open_leased,
             _close_session,
-            # One slot for each warm box, so the lease never reaches the cap and never spills.
+            # One slot for each warm box; the opener ignores the placement, so a box never spills.
             vercel_cap=cap,
             starts_per_minute=(
                 settings.repo_candidate_starts_per_minute
@@ -1210,7 +1211,7 @@ class RepoWorkspace:
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
-            _SnapshotLostError: When the box cannot open from its snapshot.
+            _SnapshotLostError: When a new box cannot open from its snapshot.
         """
         if state is not None and state.snapshot_id is not None:
             spec = replace(spec, snapshot_id=state.snapshot_id)
@@ -1268,7 +1269,9 @@ class RepoWorkspace:
             raise
         except Exception as error:
             # A saved state is a snapshot or a tar file, never both, so an error here with a snapshot is the open's.
-            if spec.snapshot_id is None:
+            # A slot's error is the open's only when the lease opened a new box in this call; a kept reaper
+            # error, a closed lease or a warm box's error leaves the snapshots in place.
+            if spec.snapshot_id is None or (slot is not None and not self._pending.fresh):
                 raise
             # Only the type: the provider's text can name the snapshot.
             logger.warning("A box did not open from its snapshot (%s)", type(error).__name__)
@@ -1348,8 +1351,13 @@ class RepoWorkspace:
         Raises:
             RepoSetupError: When the workspace is not prepared or the box does
                 not hold the prepared tree.
+            RuntimeError: When the workspace is closed.
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
+        with self._lock:
+            # Before prepare: the close forgets the saved states, so a late call would pay for setup again.
+            if self._closed:
+                raise RuntimeError("The box lease is closed.")
         self.prepare()
         # Each candidate takes its own key, also when it reuses a warm box.
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
@@ -1439,6 +1447,9 @@ class RepoWorkspace:
     def _reset(self, session: SandboxSession) -> bool:
         """Clear the last candidate from a warm box, restart its services and check the prepared tree.
 
+        The reset keeps only the prepared tree of the repository folder, so a
+        version never reads or changes an earlier call's folder.
+
         Args:
             session: The warm box.
 
@@ -1449,7 +1460,13 @@ class RepoWorkspace:
             RepoSetupError: When the services cannot start again.
         """
         stops = "".join(f"{stop_command(service)}; " for service in self._spec.services)
-        cleared = session.run(f"{stops}rm -rf {WORK_DIR} {PATCH_FILE}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+        keep = posixpath.basename(PREPARED_DIR)
+        cleared = session.run(
+            f"{stops}find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name {keep} -exec rm -rf {{}} +",
+            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+            # The supervisor runs as root, so a call folder holds root's files.
+            sudo=True,
+        )
         if not cleared.ok:
             return False
         self._start_services(session)
@@ -1459,7 +1476,9 @@ class RepoWorkspace:
         """Open a new candidate box for the lease with the spec of the candidate that asked for it.
 
         Args:
-            placement: Not used: the slots stay within the cap, so the lease always places on Vercel.
+            placement: Not used: the box always opens on Vercel. A box that the
+                reaper dropped counts until its close ends, so the lease can then
+                name the spill provider, and Vercel briefly holds more than the cap.
             grants: Not used: the box gets the ``[run]`` hosts as given.
 
         Returns:
@@ -1639,6 +1658,7 @@ class RepoWorkspace:
             Exception: The first close error of a warm box, raw, after every warm box had its close.
         """
         with self._lock:
+            self._closed = True
             if self._folder is not None:
                 shutil.rmtree(self._folder, ignore_errors=True)
                 self._folder = None
