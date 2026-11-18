@@ -215,10 +215,16 @@ def test_a_proposer_command_that_is_not_a_list_of_strings_fails(key: str, value:
         r'"agent.js\n"',
         r'"\u001fagent.js"',
         r'"agent\u007f.js"',
+        r'"agent\u0080.js"',
         r'"agent\u0085.js"',
+        r'"agent\u009f.js"',
+        r'"agent\u061c.js"',
+        r'"agent\u200e.js"',
+        r'"agent\u200f.js"',
+        r'"agent\u202a.js"',
         r'"agent\u202e.js"',
         r'"agent\u2066.js"',
-        r'"agent\u200f.js"',
+        r'"agent\u2069.js"',
     ],
 )
 def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) -> None:
@@ -236,6 +242,18 @@ def test_a_proposer_command_with_a_control_character_fails(key: str, part: str) 
     with pytest.raises(ConstraintsError, match=rf"\[proposer\] {key} must be a command list") as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize("name", ["\u05e9\u05dc\u05d5\u05dd\u200c.js", "\U0001f468\u200d\U0001f4bb.js"])
+def test_a_proposer_entry_with_a_zwnj_or_zwj_is_kept_exactly(name: str) -> None:
+    """A ZWNJ or ZWJ is part of real file names, so the setup check keeps it (SKY-753).
+
+    Args:
+        name: A Hebrew file name with a ZWNJ, or an emoji file name with a ZWJ.
+    """
+    raw = f'version = 1\n[proposer]\nentry = ["node", "{name}"]\n'.encode()
+
+    assert parse_constraints(raw).proposer_entry == ("node", name)
 
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
