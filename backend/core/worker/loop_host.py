@@ -59,9 +59,8 @@ from ..service_gateway.optimization.blackbox.protocol import (
 )
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import (
-    BASE_REF,
     REPO_SNAPSHOT_KEY,
-    _git,
+    forget_file_stats,
     unpack_tree,
     version_patch,
 )
@@ -330,10 +329,8 @@ def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: st
                 entry.unlink()
         with tarfile.open(fileobj=BytesIO(tree_to_tar(trees, run_id, candidate_tree))) as archive:
             archive.extractall(checkout, filter="data")
-        # Both tars carry the same mtime, and Linux reuses the freed inode, so a
-        # same-size edit keeps the stat that git cached and ``git add`` skips it
-        # (SKY-843). An index read from the tree has no stat, so git hashes each file.
-        _git(["read-tree", BASE_REF], checkout)
+        # Both tars carry the same mtime, so git's cached stats can hide edits (SKY-843).
+        forget_file_stats(checkout)
         return version_patch(checkout)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
