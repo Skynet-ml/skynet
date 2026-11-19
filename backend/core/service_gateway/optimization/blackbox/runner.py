@@ -728,7 +728,7 @@ def missing_llm(prompt: Any = None, input: Any = None, **kwargs: Any) -> str:
 
 
 def side_info_json_default(value: Any) -> str:
-    """JSON fallback for side info: images become data URLs, anything else ``str()``.
+    """JSON fallback for scorer payloads and log fields: an image becomes a data URL, anything else ``str()``.
 
     Args:
         value: A side-info value ``json.dumps`` cannot encode.
