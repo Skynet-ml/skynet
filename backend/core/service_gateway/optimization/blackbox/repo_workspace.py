@@ -15,7 +15,10 @@ versions. Each box holds only the code it needs (SKY-398):
   repository code. Its network is open only for that install.
 - A candidate box C opens for each evaluation from the prepared state,
   checks the digest and lays out the version. The parent ends it after the
-  ``[run]`` entry; closing the box is the only cleanup.
+  ``[run]`` entry; closing the box is the only cleanup. No candidate box
+  serves a second version (SKY-805): a reset of a used box would have to
+  clear every state a version can leave, so each version gets a new box
+  from the saved state, and the setup does not run again.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
 

@@ -24,7 +24,7 @@ from core.sandbox.providers.vercel import box_name
 from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
-from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError, RepoScorer
 from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, CandidateBox, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
@@ -428,6 +428,173 @@ def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states
     assert [_setups(box) for box in runtime.boxes] == [1, 0, 1, 0, 0]
     assert len(runtime.saved) == 1
     assert space._snapshots_off
+
+
+_RUN = (
+    "import time\n"
+    "def run(value):\n"
+    "    if value == 'slow':\n"
+    "        time.sleep(30)\n"
+    "    if value == 'boom':\n"
+    "        raise RuntimeError('broke')\n"
+    "    return value\n"
+)
+
+
+class _VersionRuntime(_SnapshotRuntime):
+    """Record what each candidate box sees: which earlier candidate boxes closed, and its own ``src`` work tree."""
+
+    def __init__(self, root: Path, **options: Any) -> None:
+        """Start with no candidate box.
+
+        Args:
+            root: Where the saved snapshots go.
+            **options: The ``_SnapshotRuntime`` options.
+        """
+        super().__init__(root, **options)
+        self.closed_before: list[list[bool]] = []
+        self.trees: list[dict[str, str]] = []
+
+    def open(self, spec: SandboxSpec) -> _Box:
+        """Open a box; for a candidate box, record the earlier ones' close state and wrap its close.
+
+        Args:
+            spec: The requested box.
+
+        Returns:
+            The box.
+        """
+        box = super().open(spec)
+        if ":candidate-" not in str(spec.operation_key):
+            return box
+        self.closed_before.append([earlier.closed for earlier in _boxes(self, "candidate")[:-1]])
+        close = box.close
+
+        def recording_close() -> None:
+            """Record the box's ``src`` work tree, then close the box."""
+            if not box.closed:
+                work = box.path / WORK_DIR / "src"
+                self.trees.append({path.name: path.read_text() for path in sorted(work.glob("*.py"))})
+            close()
+
+        box.close = recording_close  # type: ignore[method-assign]
+        return box
+
+
+def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[list[float | None], list[bool]]:
+    """Score two different versions with a repository scorer that runs ``src/run.py`` in its candidate boxes.
+
+    The first version adds ``src/one.py``, the second adds ``src/two.py``.
+
+    Args:
+        tmp_path: Scratch folder.
+        runtime: The box runtime.
+        first: The first version's input; the second version's input is ``ok``.
+
+    Returns:
+        The two scores (``None`` for a failed run), and the close state of every box before the scorer closes.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.py": _RUN})
+    versions = [
+        _patch(tmp_path / "one", archive, {"src/one.py": "one = 1\n"}),
+        _patch(tmp_path / "two", archive, {"src/two.py": "two = 2\n"}),
+    ]
+    scorer = RepoScorer(
+        _space(archive, runtime),
+        "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n",
+        timeout_seconds=60,
+        run_entry="src/run.py:run",
+        run_timeout=5.0,
+    )
+    try:
+        scores = [
+            scorer.score(version, {"input": value})["score"]
+            for version, value in zip(versions, (first, "ok"), strict=True)
+        ]
+        return scores, [box.closed for box in runtime.boxes]
+    finally:
+        scorer.close()
+
+
+def _boxes(runtime: _SnapshotRuntime, kind: str) -> list[_Box]:
+    """Return the boxes of one kind, in open order.
+
+    Args:
+        runtime: The box runtime.
+        kind: ``setup``, ``candidate`` or ``metric``.
+
+    Returns:
+        The boxes whose operation key names that kind.
+    """
+    return [box for box in runtime.boxes if f":{kind}-" in str(box.spec.operation_key)]
+
+
+def _assert_own_box_per_version(runtime: _VersionRuntime, closed: list[bool]) -> None:
+    """Check that each version ran alone in a new candidate box that closed before the next one opened.
+
+    Args:
+        runtime: The box runtime after two scores.
+        closed: The close state of every box before the scorer closed.
+    """
+    assert all(closed)
+    assert runtime.closed_before == [[], [True]]
+    base = {"app.py": "x = 1\n", "run.py": _RUN}
+    assert runtime.trees == [{**base, "one.py": "one = 1\n"}, {**base, "two.py": "two = 2\n"}]
+    assert len(_boxes(runtime, "metric")) == 2
+    keys = [box.spec.operation_key for box in runtime.boxes]
+    assert len(set(keys)) == len(keys)
+
+
+@pytest.mark.parametrize("first", ["ok", "boom", "slow"])
+def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_path: Path, first: str) -> None:
+    """Give each version its own new candidate box from the snapshot, and close it after its run (SKY-805).
+
+    A box is never reused, so the second version's tree lacks the first
+    version's change, and the setup runs only once. The first box closes
+    before the second opens, also after a failed run. Each score also gets
+    its own new metric box.
+
+    Args:
+        tmp_path: Scratch folder.
+        first: The first version's input: it succeeds, raises or runs out of time.
+    """
+    runtime = _VersionRuntime(tmp_path / "snaps")
+
+    scores, closed = _score_two(tmp_path, runtime, first)
+
+    assert scores == [None if first != "ok" else 1.0, 1.0]
+    _assert_own_box_per_version(runtime, closed)
+    assert [box.spec.snapshot_id for box in _boxes(runtime, "candidate")] == ["snap-0", "snap-0"]
+    assert len(_boxes(runtime, "setup")) == 1
+    assert [_setups(box) for box in runtime.boxes] == [1] + [0] * (len(runtime.boxes) - 1)
+
+
+@pytest.mark.parametrize("fault", ["snapshot", "open"])
+def test_each_scored_version_gets_a_new_box_from_the_tar_state_when_the_snapshot_fails(
+    tmp_path: Path, fault: str
+) -> None:
+    """Open a new candidate box from the tar state for each version when the snapshot fails (SKY-805).
+
+    Args:
+        tmp_path: Scratch folder.
+        fault: Which step the provider refuses: the save or the open from the snapshot.
+    """
+    error = ServiceError("provider refused")
+    runtime = _VersionRuntime(
+        tmp_path / "snaps",
+        snapshot_error=error if fault == "snapshot" else None,
+        open_error=error if fault == "open" else None,
+    )
+
+    scores, closed = _score_two(tmp_path, runtime, "boom")
+
+    assert scores == [None, 1.0]
+    _assert_own_box_per_version(runtime, closed)
+    candidates = _boxes(runtime, "candidate")
+    assert all(box.spec.snapshot_id is None and box.spec.snapshot_archive for box in candidates)
+    assert all(_setups(box) == 0 for box in candidates)
+    # The open fault is found only at the first candidate open, so setup runs once more to make the tar state.
+    assert len(_boxes(runtime, "setup")) == (1 if fault == "snapshot" else 2)
 
 
 @pytest.mark.parametrize("fault", ["snapshot", "open"])
