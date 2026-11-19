@@ -56,6 +56,18 @@ void describe("formatScore", () => {
     assert.match(renderToStaticMarkup(<>{formatScore(job)}</>), /title="0 → 1"/);
   });
 
+  void it("SKY-750: colors a lower minimize score green and shows the raw change", () => {
+    const job = {
+      optimization_type: "blackbox",
+      baseline_test_metric: 0.9,
+      optimized_test_metric: 0.75,
+      metric_improvement: 0.15,
+    } as OptimizationSummaryResponse;
+    const html = renderToStaticMarkup(<>{formatScore(job)}</>);
+    assert.match(html, /--success/);
+    assert.match(html, /-0\.15/);
+  });
+
   void it("shows a dash when the run has no score", () => {
     assert.equal(scoreText("blackbox", null, null), "-");
   });

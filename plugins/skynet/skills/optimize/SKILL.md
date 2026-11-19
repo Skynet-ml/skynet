@@ -64,7 +64,8 @@ change their plan. Then call `next_tool`.
    The scorer runs in its own box that holds only the metric files and no
    version code, so it never imports the repository's code. With no cases, the entry runs once with no
    input. Return one object: `{"score": <number>, "feedback": "<short text>"}`.
-   Higher is better. Only `score` is required. Give the feedback: the
+   Higher is better, unless `optimize.toml` sets `direction = "minimize"`
+   under `[metric]`. Only `score` is required. Give the feedback: the
    engines learn from it. Named scores go under
    `"scores": {"<name>": {"score": <number>}}`. Skynet refuses a bare
    number, a pair and any other key. Call `repo_draft_set_scorer` with the code as `metric_code`.

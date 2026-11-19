@@ -16,13 +16,15 @@ export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
   const fmtScore = formatBlackboxScore;
 
   if (baseline != null && optimized != null && improvement != null) {
+    // metric_improvement is positive when the run got better, also when a lower
+    // score is better (SKY-750). It sets the color; the text shows the raw change.
     const color =
       improvement > 0
         ? "text-[var(--success)]"
         : improvement < 0
           ? "text-[var(--danger)]"
           : "text-muted-foreground";
-    const delta = formatBlackboxDelta(improvement);
+    const delta = formatBlackboxDelta(optimized - baseline);
     return (
       <span
         className="inline-flex items-center gap-1 text-xs whitespace-nowrap"

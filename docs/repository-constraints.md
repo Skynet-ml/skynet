@@ -54,6 +54,11 @@ entry = ["bash", "eval/metric.sh"]
 # no cases.
 cases = "data/cases.jsonl"
 
+[metric]
+# Optional. "maximize" (the default) or "minimize". With "minimize", a lower
+# score is better.
+direction = "maximize"
+
 [outcome]
 # Optional. The score that is good enough. The search stops when it reaches it.
 target = 0.9
@@ -225,6 +230,23 @@ U+2066 to U+2069), because they can hide what a command does.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
   check, and the run's tool-call limit does not apply to your command.
 
+## Direction: `[metric] direction`
+
+`direction` says which way the score improves. It is `"maximize"` (the
+default: a higher score is better) or `"minimize"` (a lower score is
+better, for example a latency or an error count). Another value fails the
+setup check, and the message names both values. The key is protected like
+the rest of `optimize.toml`.
+
+With `"minimize"`, the engines get the negated score, so each engine still
+climbs. Every score that a person or an API client sees stays raw: the run
+result, the versions, the progress events, the record and the pull request.
+The best version is the one with the lowest score, and the improvement is
+positive when the score went down. The run result has a `direction` field.
+
+`[outcome.require]` does not follow `direction`. Each value there is
+always a minimum.
+
 ## Outcome: `[outcome]`
 
 `[outcome]` says which score is good enough. It has two optional keys:
@@ -248,7 +270,7 @@ cases there is no held-out part, so the run uses its validation cases, or
 its train cases when there are none. A
 run with no cases has no split, so the verdict uses the one `score()` of
 the version. "Target reached" is true when that score is equal to or above
-`target`. "Minimums passed" is true when each named score is equal to or
+`target`, or equal to or below it with `direction = "minimize"`. "Minimums passed" is true when each named score is equal to or
 above its minimum. A named score is its mean over the same cases. The
 metric must return the name on each of those cases, or the minimum fails.
 The reason gives the count, or names the score when no case returns it.
@@ -262,8 +284,8 @@ Skynet does not merge it by itself. A repository that Skynet created gets
 no pull request: its top versions go to branches, and `skynet/best` holds
 the best one.
 
-The search stops when its score reaches `target`. A file without `target`
-has no stop score.
+The search stops when its score reaches `target` (at or below it with
+`direction = "minimize"`). A file without `target` has no stop score.
 
 ## Run record: `details.record`
 
