@@ -334,7 +334,8 @@ def text_nests_deeper(text: str, levels: int) -> bool:
             if depth > levels:
                 return True
         elif char in "]}":
-            depth -= 1
+            # A stray closer must not hide later openers: a reader that repairs or skips text still nests them.
+            depth = max(depth - 1, 0)
     return False
 
 

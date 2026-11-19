@@ -693,11 +693,22 @@ def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
         ("[[1]]", False),
         ("[[[1]]]", True),
         ("[[1], [2]]", False),
+        ("]]][[[", True),
+        ('{"a":1}}}}[[[', True),
     ],
-    ids=["brackets-in-string", "escaped-backslash", "escaped-quote", "at-bound", "past-bound", "siblings"],
+    ids=[
+        "brackets-in-string",
+        "escaped-backslash",
+        "escaped-quote",
+        "at-bound",
+        "past-bound",
+        "siblings",
+        "stray-closers-first",
+        "stray-closers-after-a-value",
+    ],
 )
 def test_text_nests_deeper_counts_only_brackets_outside_strings(text: str, deeper: bool) -> None:
-    """Brackets inside JSON strings, and quotes that a backslash escapes, do not change the depth.
+    """Brackets inside JSON strings, quotes that a backslash escapes, and stray closers do not lower the bound.
 
     Args:
         text: The JSON text.
