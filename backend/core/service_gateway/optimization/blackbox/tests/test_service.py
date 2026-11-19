@@ -3447,11 +3447,11 @@ def test_only_engine_score_keys_outside_scorer_owned_keys_turn_raw() -> None:
     server = EvalServer(lambda c, e: (1.0, {}), max_evals=1, direction="minimize")
     engine_keys = sorted(service_mod._ENGINE_SCORE_KEYS)
     owned = {key: {"score": 0.7, "best_score": 0.7} for key in service_mod._SCORER_OWNED_KEYS}
-    payload = {"nested": {key: -0.5 for key in engine_keys}, "other": -0.5, **owned}
+    payload = {"nested": dict.fromkeys(engine_keys, -0.5), "other": -0.5, **owned}
 
     raw = service_mod._raw_engine_scores(payload, server)
 
-    assert raw["nested"] == {key: 0.5 for key in engine_keys}
+    assert raw["nested"] == dict.fromkeys(engine_keys, 0.5)
     assert raw["other"] == -0.5
     for key in service_mod._SCORER_OWNED_KEYS:
         assert raw[key] == {"score": 0.7, "best_score": 0.7}

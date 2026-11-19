@@ -666,9 +666,7 @@ def _draft_fix(
         reference_after = runner.reference_score(fix_diff=diff, reference=reference)
         # The check name says "not lower" for the default direction; for a minimize metric it means "not worse".
         not_worse = reference_after <= reference_before if minimize else reference_after >= reference_before
-        checks.reference_not_lower = _result(
-            not_worse or math.isclose(reference_after, reference_before, abs_tol=1e-9)
-        )
+        checks.reference_not_lower = _result(not_worse or math.isclose(reference_after, reference_before, abs_tol=1e-9))
     current.fix = HardeningFix(diff=diff, checks=checks)
     current.status = "waiting_fix"
     job.status = "waiting_fix"
