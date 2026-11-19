@@ -132,12 +132,12 @@ RUN python -m venv /opt/prime-agent/kernel-venv \
 
 # ShinkaEvolve pins its own closure (openai, anthropic, numpy, pandas, ...) that
 # conflicts with the backend's, so it gets its own venv instead of /app/.venv.
-# Protected sandboxes have no network to build it at run time; the native
-# runtime uses this interpreter when present (native_runtime.SHINKA_IMAGE_PYTHON)
-# and the readiness probe reports shinka_ready from it.
-# Off by default: the layer is ~700 MB and carries a GPL package (Levenshtein),
-# so only the sandbox image build opts in with
-# --build-arg INCLUDE_SHINKA_EVOLVE=1; API/worker images stay without it.
+# The engine runs it as a child process of the worker with this interpreter
+# (native_runtime.SHINKA_IMAGE_PYTHON, SKY-728), and the Continue check reports
+# shinka_ready from it. Off by default: the layer is ~700 MB and carries a GPL
+# package (Levenshtein). The sandbox image and the deployed backend image, which
+# the API and the worker share (infra/terraform/scripts/build-push.sh), opt in
+# with --build-arg INCLUDE_SHINKA_EVOLVE=1.
 ARG INCLUDE_SHINKA_EVOLVE=false
 COPY core/service_gateway/optimization/blackbox/shinka_requirements.txt /opt/shinka/requirements.txt
 RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true" ]; then \
@@ -183,10 +183,10 @@ RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]
     fi
 
 # AutoSaddler v2 needs Python 3.12+ and pins its own closure (pydantic, starlette,
-# mcp, ...) apart from the backend's, so it also gets its own venv. Protected
-# sandboxes have no network to build it at run time; the native runtime uses
-# this interpreter when present (native_runtime.AUTOSADDLER_IMAGE_PYTHON) and the
-# readiness probe reports autosaddler_ready from it (SKY-645).
+# mcp, ...) apart from the backend's, so it also gets its own venv. The engine
+# runs it as a child process of the worker with this interpreter
+# (native_runtime.AUTOSADDLER_IMAGE_PYTHON, SKY-728), and the Continue check
+# reports autosaddler_ready from it (SKY-645).
 COPY core/service_gateway/optimization/blackbox/autosaddler_requirements.txt /opt/autosaddler/requirements.txt
 RUN python -m venv /opt/autosaddler/venv \
     && /opt/autosaddler/venv/bin/python -m pip install --no-cache-dir --no-deps \
