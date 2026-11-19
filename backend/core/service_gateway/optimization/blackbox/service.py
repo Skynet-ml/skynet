@@ -1384,7 +1384,8 @@ def _run_job(
     if job.max_cost_cents is not None and job.reflection_model_settings.token_source != "byok":
         token_budget = job.max_cost_cents * CENT_USD_VALUE / usage_markup()
     native_options = None
-    if uses_native_runtime(job):
+    # The engine loop's tool loop reads the same options: the contract file's command and the settings it refuses.
+    if uses_native_runtime(job) or has_loop_route(job):
         budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
         gateway = (
             GatewayConfig(url=budget_route["url"], api_key=budget_route["token"])
@@ -1409,7 +1410,8 @@ def _run_job(
             reasoning_effort=effort if isinstance(effort, str) and effort else None,
             repo=(
                 {
-                    "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot["chunks"]],
+                    # The engine loop reads the worker's archive, so its snapshot has no chunks.
+                    "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot.get("chunks") or ()],
                     "editable_paths": list(target.repo.editable_paths),
                     "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
                     "constrained": bool(repo_snapshot.get("constrained")),

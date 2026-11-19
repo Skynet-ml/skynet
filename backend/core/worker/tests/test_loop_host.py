@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from core.billing import mcp_broker
 from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetBoundExceededError, BudgetError, BudgetService
+from core.billing.model_gateway import ROUTE_KEY
 from core.billing.openrouter_quotes import price_text_request
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.runtime import UsagePendingError
@@ -1367,6 +1368,12 @@ def _host_payload(owner: tuple[User, str, int], tmp_path: Path, monkeypatch: pyt
     archive.write_bytes(_archive({"src/app.py": "x = 1\n"}))
     return {
         **_repo_request(execution_budget_id=owner[1]),
+        # The worker's budget gateway gives every protected run a model route and a spending ceiling.
+        "reflection_model_config": {
+            "name": "gpt-4o",
+            "extra": {ROUTE_KEY: {"url": "http://127.0.0.1:9/model", "token": "model-route", "model": "gpt-4o"}},
+        },
+        "max_cost_cents": 100,
         "_skynet_evaluator_route": {"url": "http://127.0.0.1:9/evaluate", "token": "route"},
         "_repo_snapshot": {"archive": str(archive), "hidden_hashes": {}, "readonly_paths": []},
         # The parent's box route: the job sees a sandbox runtime, so the engine passes its availability check.
@@ -1577,6 +1584,30 @@ def test_the_host_checks_that_the_run_replayed_every_step(
 
     assert [event["type"] for event in events][-1] == "result"
     assert len(finishes) == 1
+
+
+@pytest.mark.parametrize("engine_name", ["autoresearch", "meta_harness"])
+def test_a_loop_routed_run_with_an_entry_runs_the_contract_files_command(
+    engine_name: str, owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real engine on the loop runs the ``[proposer] entry`` command, not its built-in tool loop (SKY-816)."""
+    # The real engine, not the fake strategy of the other host tests.
+    real_strategy = service.run_strategy
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "run_strategy", real_strategy)
+    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset({(engine_name, "repo")}))
+    payload["strategy"] = {"mode": "single", "engine": engine_name}
+    # Repository staging sets these from the contract file's ``[proposer] entry``.
+    payload["proposer"] = {"harness": "custom", "run_command": "printf x >> src/app.py"}
+    payload["_repo_snapshot"] = {**payload["_repo_snapshot"], "file_proposer": True}
+    model = _Model()
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=model)
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert model.prompts == []
+    # The entry appends to the seed's ``x = 1\n``, so the scored patch adds an ``x`` line.
+    assert any("\n+x\n" in patch for patch in _FakeRepoScorer.calls)
 
 
 def test_a_scorer_outage_in_the_final_run_requeues_the_run(
