@@ -27,11 +27,12 @@ from urllib.parse import urlsplit
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
 from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
-from ....sandbox.grants import Grant, GrantError
+from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from .native_runtime import NativeOptions
 from .protocol import EngineContext, EvalServer, FileTooLargeError, ModelReply
+from .sandbox_contract import CommandResult
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
@@ -612,7 +613,8 @@ class FileProposer:
             the session leaves no version.
 
         Raises:
-            GrantError: When the grants cannot resolve; every command would fail the same way, so the run stops.
+            GrantDeniedError: When the grants do not resolve. Every command would fail the same way, so the run
+                stops; a resume replays the committed failure and raises it again.
         """
         assert self._ctx.run_command is not None
         task = f"{self._lab}/{TASK_FILE}"
@@ -621,9 +623,7 @@ class FileProposer:
         )
         try:
             result, tree = self._ctx.run_command(start, script, self._grants)
-        except GrantError:
-            raise
-        except (ValueError, TreeRejectedError, BoxFailureError) as error:
+        except (TreeRejectedError, BoxFailureError) as error:
             # The step committed the failure, so a resume gets the same failed version.
             return start, f"The [proposer] entry command left no usable version: {error}"
         if result.timed_out or result.exit_code != 0:
@@ -653,13 +653,16 @@ class FileProposer:
         """Run ``[proposer] setup`` once over the seed tree, and list the top paths that it added.
 
         One box runs the setup and lists the new paths, so the list also holds links and empty folders, which no
-        tree read sees. Two more boxes check that only those paths changed.
+        tree read sees. Three more boxes check that only those paths changed: one removes the lab folder, one removes
+        the added paths, and one gives the seed's own tree to compare with.
 
         Returns:
             The added paths that hold no seed path, relative to the repository root; empty with no setup.
 
         Raises:
-            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; or
+                when a box of the setup or of its check fails.
+            GrantDeniedError: When the grants do not resolve.
         """
         assert self._ctx.repo_seed is not None
         assert self._ctx.run_command is not None
@@ -684,7 +687,12 @@ class FileProposer:
                 f"> {lab}/{_SETUP_ROOTS}",
             ]
         )
-        result, tree = self._ctx.run_command(seed, script, self._grants)
+        try:
+            result, tree = self._ctx.run_command(seed, script, self._grants)
+        except BoxFailureError as error:
+            raise ServiceError(f"The {name} could not run in a box. Start a new run. {error}") from error
+        except TreeRejectedError as error:
+            raise ServiceError(f"The {name} left files that the run refuses. {error}") from error
         if result.timed_out or result.exit_code != 0:
             raise ServiceError(_command_failure(name, result))
         try:
@@ -697,8 +705,10 @@ class FileProposer:
         full = drop_lab(self._ctx, seed, tree, seed, self._lab)
         stripped = full if full is None or not roots else _remove(self._ctx, full, roots)
         # The same box round trip on the seed gives the tree to compare with, without the hidden paths.
-        same, untouched = self._ctx.run_command(seed, "true", ())
-        if full is None or stripped is None or same.exit_code != 0 or stripped != untouched:
+        untouched = None if stripped is None else _round_trip(self._ctx, seed)
+        if untouched is None:
+            raise ServiceError(f"The check of the {name} could not run in a box. Start a new run.")
+        if stripped != untouched:
             raise ServiceError(
                 f"The {name} changed or removed files of the repository. Those changes would enter every version. "
                 "Make the setup write only new files."
@@ -726,7 +736,25 @@ def _remove(ctx: EngineContext, tree: str, paths: list[str]) -> str | None:
     return after if result.exit_code == 0 and not result.timed_out else None
 
 
-def _command_failure(name: str, result: Any) -> str:
+def _round_trip(ctx: EngineContext, tree: str) -> str | None:
+    """Pass a tree through a box with no change, so it compares with a tree that a box command left.
+
+    Args:
+        ctx: The engine context, with its command call.
+        tree: The tree.
+
+    Returns:
+        The tree after the box, or ``None`` when the box failed.
+    """
+    assert ctx.run_command is not None
+    try:
+        result, after = ctx.run_command(tree, "true", ())
+    except (TreeRejectedError, BoxFailureError):
+        return None
+    return after if result.exit_code == 0 and not result.timed_out else None
+
+
+def _command_failure(name: str, result: CommandResult) -> str:
     """Describe a failed box command for the run's log or error.
 
     Args:

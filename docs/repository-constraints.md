@@ -146,8 +146,9 @@ U+2066 to U+2069), because they can hide what a command does.
   or `.meta-harness/ascent-task.md`. The file holds the goal, the past
   versions, their scores and the lab notes. The tree that the command leaves,
   without the lab folder and without the files that `setup` added, is the new
-  version, and the engine scores it. `setup` runs once, over the first
-  version, before the first command. If `setup` changes or removes a file of
+  version, and the engine scores it. `setup` runs once for each engine,
+  over the first version, before the first command. In an Auto run, each
+  lane runs `setup` once. If `setup` changes or removes a file of
   the repository, the run stops. A command that fails gives no version: it is
   a failed attempt, not a failed run. AutoResearch then ends the run, because
   a round with no version ends it. Meta-Harness goes on to its next

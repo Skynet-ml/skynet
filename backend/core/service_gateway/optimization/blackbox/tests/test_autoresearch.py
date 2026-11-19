@@ -1132,7 +1132,8 @@ def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
 
 
 _ENTRY = (
-    'grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
+    '[ "$APP_PROMPT_FILE" = "$ASCENT_TASK" ] && [ "$APP_MODEL" = m ] '
+    '&& grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
     '&& [ "$(cat deps/lib.txt)" = lib ] && printf x >> a.py && printf n >> .autoresearch/notebook.md'
 )
 
@@ -1247,6 +1248,90 @@ def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(
             repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
             native_options=_command_options(setup=["sh", "-c", "printf b >> a.py"]),
         )
+
+
+def test_a_files_proposer_setup_that_fails_stops_the_run_with_its_command_and_exit_code(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A setup that exits 3 stops the run before any entry command, and the error names the setup and the code.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    with pytest.raises(ServiceError, match=r"\[proposer\] setup command .*sh -c 'exit 3'.* failed with exit code 3"):
+        _run(
+            loop,
+            score=_score_a_py,
+            repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+            native_options=_command_options(setup=["sh", "-c", "exit 3"]),
+        )
+
+
+def test_a_files_proposer_version_past_the_evaluation_budget_ends_the_run_without_an_error(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed sweep takes two of three scorer calls, so round one's version cannot get its full sweep.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(
+        loop,
+        max_evals=3,
+        stop_at_score=None,
+        score=_score_a_py,
+        repo_seed=RepoSeed(tree_id=seed),
+        native_options=_command_options(),
+    )
+
+    # The sweep refuses the version whole, so the third scorer call stays unused.
+    assert result.best_candidate == seed
+    assert result.metadata["rounds"] == 1
+    assert result.total_evals == 2
+
+
+def test_a_files_proposer_run_replays_on_a_resume_with_no_box(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup and each entry command are committed steps, so a new generation replays the run with no box.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    seed = _tree(trees, "a.py", "a")
+    first, first_boxes = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    live = _run(
+        first, stop_at_score=4.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=_command_options()
+    )
+    assert first_boxes.opened > 0
+
+    _new_generation(engine)
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=2)
+    replayed = _run(
+        loop, stop_at_score=4.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=_command_options()
+    )
+    loop.finish()
+
+    assert (replayed.best_candidate, replayed.best_score) == (live.best_candidate, live.best_score)
+    assert loop.read_file(replayed.best_candidate, "a.py") == b"axxx"
+    assert boxes.opened == 0
 
 
 @pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])

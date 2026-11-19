@@ -713,6 +713,47 @@ def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_call
     assert result.best_candidate == versions[2]
 
 
+def test_a_failed_files_proposer_command_leaves_the_seed_best_and_the_run_goes_on(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A command that exits 1 is a failed mutation: each iteration runs it, and the seed stays the best version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command="printf x >> a.py; exit 1")
+    options.gateway = SimpleNamespace(url="")
+    options.repo = {"file_proposer": True, "proposer_setup": [], "proposer_hosts": []}
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score a version by the length of its ``a.py``, so a kept failed tree would beat the seed.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: Not used.
+
+        Returns:
+            The length and no side information.
+        """
+        del case
+        return float(len(loop.read_file(candidate, "a.py") or b"")), {}
+
+    result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert model.calls == []
+    assert result.best_candidate == seed
+    assert result.metadata["iterations"] == 2
+    assert result.metadata["session_ids"] == ["iter1", "iter2"]
+
+
 def test_a_repository_session_tree_has_no_agents_folder(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
