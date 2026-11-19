@@ -266,6 +266,8 @@ def test_timeout_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert result.status == 502
     assert _body(result)["error"]["message"] == "claude timed out"
     assert attempts == ["claude"]
+    # A slow start can only lower this count, so it guards a second CLI launch inside the runner.
+    assert len(calls(tmp_path, "claude")) <= 1
 
 
 def test_messages_request_answers_in_the_anthropic_shape(tmp_path: Path) -> None:
