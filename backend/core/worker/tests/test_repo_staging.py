@@ -4512,3 +4512,73 @@ def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monk
     with pytest.raises(subprocess.CalledProcessError) as refused:
         repo_staging._git(bare, "rev-parse", "--git-dir")
     assert "safe.bareRepository" in refused.value.stderr
+
+
+_ENTRY_WITH_SERVICES = {
+    "optimize.toml": (
+        'version = 1\n[services.judge]\nurl = "https://judge.example.com/v1"\n'
+        '[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\nservices = ["judge"]\n'
+    )
+}
+_EFFORT = {"reflection_model_settings": {"name": "m", "extra": {"reasoning_effort": "high"}}}
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        {"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH},
+        {"mode": "single", "engine": BLACKBOX_ENGINE_META_HARNESS},
+        {"mode": "auto"},
+    ],
+)
+@pytest.mark.parametrize(
+    ("files", "extra", "setting", "key"),
+    [
+        (_ENTRY_WITH_SERVICES, {}, "[proposer] services", "services"),
+        (_ENTRY_ONLY, _EFFORT, "the reasoning_effort setting", "entry"),
+    ],
+)
+def test_a_setting_the_engine_loop_cannot_give_the_files_proposer_fails_the_setup_check(
+    strategy: dict[str, str],
+    files: dict[str, str],
+    extra: dict[str, Any],
+    setting: str,
+    key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AutoResearch and Meta-Harness would fail at start, so staging refuses the setting first (SKY-816).
+
+    An Auto run has both lanes, and a failed lane would lose its budget share.
+
+    Args:
+        strategy: A run that reaches AutoResearch or Meta-Harness.
+        files: The repository files.
+        extra: The request fields that set the setting.
+        setting: The setting's name in the message.
+        key: The constraints key that the error names.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), **extra, "strategy": strategy}
+
+    with pytest.raises(ConstraintsError, match=re.escape(f"cannot give {setting} to the [proposer] entry")) as caught:
+        _stage_with(files, monkeypatch, payload=payload)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize(("files", "extra"), [(_ENTRY_WITH_SERVICES, {}), (_ENTRY_ONLY, _EFFORT)])
+def test_a_single_run_of_another_engine_keeps_the_files_proposer_settings(
+    files: dict[str, str], extra: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GEPA runs the file's command with the services and the effort, so staging keeps them (SKY-816).
+
+    Args:
+        files: The repository files.
+        extra: The request fields that set the setting.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), **extra, "strategy": {"mode": "single", "engine": "gepa"}}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True

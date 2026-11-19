@@ -62,6 +62,8 @@ from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
 from ..models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
     FILE_PROPOSER_REFUSED_ENGINES,
@@ -436,6 +438,7 @@ def stage_repository(
         if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
             raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
         if environment.proposer_entry is not None:
+            _refuse_engine_loop_settings(environment, result)
             environment = _without_refused_engines(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
@@ -588,10 +591,47 @@ def stage_repository(
     )
 
 
+# The engines that run [proposer] entry in the worker engine loop (SKY-816).
+_ENGINE_LOOP_ENGINES = frozenset({BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS})
 # The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
 _FILE_PROPOSER_REFUSALS = {
     BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
 }
+
+
+def _refuse_engine_loop_settings(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:
+    """Refuse the settings that the engine loop cannot give ``[proposer] entry``, before any lane starts.
+
+    AutoResearch and Meta-Harness run the file's command in the engine loop (SKY-816). That loop gives it no
+    relay for ``[proposer] services`` and no reasoning effort, so the engine would fail at start. An Auto run has
+    both lanes, and a failed lane loses its budget share. The other engines run the command with both.
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        payload: The stored run request.
+
+    Raises:
+        ConstraintsError: When a single AutoResearch or Meta-Harness run, or an Auto run, has one of the settings.
+    """
+    strategy = payload.get("strategy") or {}
+    if strategy.get("mode", "auto") == "single" and strategy.get("engine") not in _ENGINE_LOOP_ENGINES:
+        return
+    fix = "Remove it, or choose a single run of another engine."
+    if environment.constraints is not None and environment.constraints.proposer.services:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give [proposer] services to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="services",
+        )
+    effort = ((payload.get("reflection_model_settings") or {}).get("extra") or {}).get("reasoning_effort")
+    if effort:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give the reasoning_effort setting to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="entry",
+        )
 
 
 def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:

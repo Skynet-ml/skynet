@@ -168,7 +168,11 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
   command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
   key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
-  A run that is not protected gets no model relay and no key.
+  A run that is not protected gets no model relay and no key. These two
+  engines do not give the command `[proposer] services` or a reasoning
+  effort. So a single AutoResearch or Meta-Harness run, or an Auto run, with
+  `entry` and one of these settings fails the setup check. The message
+  names the setting.
 - ShinkaEvolve cannot use the command, because it writes versions with its
   own editor. A single ShinkaEvolve run with `entry` fails the setup check,
   and the message names `[proposer] entry` and the engine. Auto leaves out
@@ -701,8 +705,9 @@ mcp = "eval/.mcp.json"
   call against the proposer's own list, fills the secrets in the parent,
   and returns redirects without following them.
   The `[proposer] entry` command of AutoResearch and Meta-Harness does not
-  get this relay yet. A run with `entry` and `[proposer] services` fails
-  with an error that names `services`.
+  get this relay yet. A single run of these engines, or an Auto run, with
+  `entry` and `[proposer] services` fails the setup check, and the message
+  names `services`.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
