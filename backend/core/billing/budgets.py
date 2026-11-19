@@ -1449,7 +1449,7 @@ class BudgetService:
     def fence_generation(
         self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
     ) -> BudgetSnapshot:
-        """Revoke old admission and release only its provably undispatched reservations.
+        """Revoke old admission, release undispatched reservations and end the old lease slices.
 
         Args:
             budget_id: Envelope whose old worker is being fenced.
@@ -1458,7 +1458,8 @@ class BudgetService:
             session: Optional recovery transaction, retaining account-before-budget locking.
 
         Returns:
-            New epoch, retaining all old dispatched coverage until reconciliation.
+            New epoch. Each old dispatched agent lease slice without a refused settle is settled at its last
+            settle; all other old dispatched coverage stays until reconciliation.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
@@ -1477,8 +1478,10 @@ class BudgetService:
             # A dead worker's lease slice has no provider record to reconcile, so recovery would wait for it
             # forever. Its last settle holds all the work that the worker can still prove; the fence ends the
             # slice there, and the old worker can settle it no more. A slice with a refused settle stays for review.
-            refused = select(ExecutionUsageEvidenceModel.operation_id).where(
-                ExecutionUsageEvidenceModel.issue.is_not(None)
+            refused = (
+                select(ExecutionUsageEvidenceModel.operation_id)
+                .join(ExecutionOperationModel, ExecutionOperationModel.id == ExecutionUsageEvidenceModel.operation_id)
+                .where(ExecutionOperationModel.budget_id == budget_id, ExecutionUsageEvidenceModel.issue.is_not(None))
             )
             for operation in session.scalars(
                 select(ExecutionOperationModel).where(
@@ -1885,14 +1888,25 @@ class BudgetService:
                 )
                 if operation.state not in _DISPATCHED_STATES and not fenced:
                     raise BudgetConflictError("Usage may only settle a dispatched attempt.")
-                if scope < operation.actual_units or charge < operation.actual_wallet_units:
+                floor_units, floor_wallet = operation.actual_units, operation.actual_wallet_units
+                if fenced:
+                    # A late settle never moves the operation's totals, so the last late settle is the floor.
+                    late_units, late_wallet = session.execute(
+                        select(
+                            func.max(ExecutionUsageEvidenceModel.actual_units),
+                            func.max(ExecutionUsageEvidenceModel.actual_wallet_units),
+                        ).where(ExecutionUsageEvidenceModel.operation_id == operation_id)
+                    ).one()
+                    floor_units = max(floor_units, late_units or 0)
+                    floor_wallet = max(floor_wallet, late_wallet or 0)
+                if scope < floor_units or charge < floor_wallet:
                     raise BudgetConflictError("Cumulative usage cannot decrease.")
                 scope_delta = scope - operation.actual_units
                 wallet_delta = charge - operation.actual_wallet_units
                 billed = 0 if fenced else ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
                 if scope > operation.max_units or charge > operation.max_wallet_units:
                     issue = "bound_exceeded"
-                elif billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
+                elif not fenced and billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
                     issue = "funding_lost"
                 event_id = str(uuid4())
                 session.add(
@@ -1910,11 +1924,10 @@ class BudgetService:
                         created_at=datetime.now(UTC),
                     )
                 )
-                if issue:
+                if issue and not fenced:
                     budget.state = "blocked"
                     budget.blocked_reason = issue
-                    if not fenced:
-                        operation.state = "pending"
+                    operation.state = "pending"
                 elif not fenced:
                     budget.settled_units += scope_delta
                     budget.wallet_settled_units += wallet_delta

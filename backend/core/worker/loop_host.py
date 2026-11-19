@@ -132,6 +132,7 @@ class LeaseModelClient:
         self._source = source
         self._key = key
         self._data_policy = data_policy
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=MODEL_TIMEOUT_SECONDS)
         model = str(extra.get("model") or config.get("name") or "")
         self._api_base = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
@@ -153,6 +154,8 @@ class LeaseModelClient:
         if upstream.slug == "custom":
             # The user names this host, so each call goes to the one public address that the check accepted.
             address = _pinned_address(upstream.base_url, False, label="custom provider endpoint")
+            self.close()
+            self._owns_client = True
             self._client = httpx.Client(
                 transport=_PinnedTransport(upstream.base_url, address),
                 timeout=MODEL_TIMEOUT_SECONDS,
@@ -161,6 +164,11 @@ class LeaseModelClient:
             )
             self._custom_url = f"{upstream.base_url}/chat/completions"
             self._model = model.removeprefix("openai/")
+
+    def close(self) -> None:
+        """Close the HTTP client that this model client opened; a client that the caller gave stays open."""
+        if self._owns_client:
+            self._client.close()
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
         """Call the model once.
@@ -491,6 +499,8 @@ def host_loop_job(
         safe_queue_put(event_queue, failure_event(error, traceback_text=traceback.format_exc()))
         return
     loop: EngineLoop | None = None
+    own_dir = run_dir is None
+    folder = run_dir or Path(tempfile.mkdtemp(prefix=f"engine-loop-{run_id[:8]}-"))
     try:
         try:
             user = User(str(host["username"]), engine=engine, budgets=BudgetService(engine=engine))
@@ -527,7 +537,7 @@ def host_loop_job(
                 metrics=RuntimeBoxSource(runtime, spec),
                 model=model,
                 model_max_cents=MODEL_MAX_CENTS,
-                run_dir=run_dir or Path(tempfile.mkdtemp(prefix=f"engine-loop-{run_id[:8]}-")),
+                run_dir=folder,
                 hidden_hashes=hidden,
             )
             binding = _LoopBinding(loop, trees, run_id, seed)
@@ -538,6 +548,8 @@ def host_loop_job(
     finally:
         _close(loop.close if loop is not None else None, "engine loop")
         _close(step_log.close, "step log")
+        if own_dir:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def _close(close: Callable[[], None] | None, label: str) -> None:
@@ -566,28 +578,32 @@ def run_loop_job(payload: dict[str, Any], artifact_id: str, event_queue: Any, _s
     """
     payload = dict(payload)
     host = payload.pop(LOOP_HOST_KEY)
+    model: LeaseModelClient | None = None
     try:
-        descriptor = payload["_budget_gateway_descriptor"]
-        runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
-        managed_key = settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
-        model = LeaseModelClient(
-            host["reflection_model"],
-            payload_token_source=host.get("token_source"),
-            managed_key=managed_key,
-            data_policy=host.get("data_policy", DEFAULT_DATA_POLICY),
+        try:
+            descriptor = payload["_budget_gateway_descriptor"]
+            runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+            managed_key = settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
+            model = LeaseModelClient(
+                host["reflection_model"],
+                payload_token_source=host.get("token_source"),
+                managed_key=managed_key,
+                data_policy=host.get("data_policy", DEFAULT_DATA_POLICY),
+            )
+            engine = get_job_store().engine
+            objects = S3ObjectStore()
+        except BaseException as error:
+            safe_queue_put(event_queue, failure_event(error, traceback_text=traceback.format_exc()))
+            return
+        host_loop_job(
+            payload,
+            artifact_id,
+            event_queue,
+            host=host,
+            engine=engine,
+            objects=objects,
+            runtime=runtime,
+            model=model,
         )
-        engine = get_job_store().engine
-        objects = S3ObjectStore()
-    except BaseException as error:
-        safe_queue_put(event_queue, failure_event(error, traceback_text=traceback.format_exc()))
-        return
-    host_loop_job(
-        payload,
-        artifact_id,
-        event_queue,
-        host=host,
-        engine=engine,
-        objects=objects,
-        runtime=runtime,
-        model=model,
-    )
+    finally:
+        _close(model.close if model is not None else None, "model client")

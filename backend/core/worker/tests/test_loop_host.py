@@ -1049,6 +1049,94 @@ def test_a_custom_byok_call_goes_to_the_checked_address(monkeypatch: pytest.Monk
     }
 
 
+def test_close_closes_every_http_client_that_the_model_client_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A custom BYOK client opens a default client and then its pinned client; close must close both."""
+    opened: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def record(*args: Any, **kwargs: Any) -> httpx.Client:
+        """Open a real client and remember it.
+
+        Args:
+            *args: The client's arguments.
+            **kwargs: The client's keyword arguments.
+
+        Returns:
+            The client.
+        """
+        opened.append(real_client(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(
+        mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("93.184.216.34", 443))]
+    )
+    monkeypatch.setattr(loop_host.httpx, "Client", record)
+
+    _custom_byok().close()
+
+    assert len(opened) == 2
+    assert all(client.is_closed for client in opened)
+
+
+def test_close_keeps_a_given_http_client_open() -> None:
+    """The caller owns a client that it gives, so the model client does not close it."""
+    given = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    LeaseModelClient(
+        {"name": "openai/gpt-4o", "token_source": "byok", "extra": {"api_key": "user-key"}},
+        payload_token_source=None,
+        managed_key="",
+        client=given,
+    ).close()
+
+    assert not given.is_closed
+    given.close()
+
+
+def test_the_host_removes_the_run_folder_that_it_made(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host with no run folder makes a temporary one, and removes it also when the job fails to start."""
+    made = tmp_path / "made"
+
+    def mkdtemp(prefix: str) -> str:
+        """Make the run folder in the test's folder.
+
+        Args:
+            prefix: The folder's name prefix.
+
+        Returns:
+            The folder.
+        """
+        made.mkdir()
+        (made / "file").write_text("x")
+        return str(made)
+
+    monkeypatch.setattr(loop_host.tempfile, "mkdtemp", mkdtemp)
+    _, budget_id, budget_generation = owner
+    events: queue.Queue = queue.Queue()
+
+    host_loop_job(
+        {},
+        f"{RUN_ID}-g1",
+        events,
+        host={
+            "run_id": RUN_ID,
+            "username": "alice",
+            "budget_id": budget_id,
+            "budget_generation": budget_generation,
+            "execution_generation": 1,
+            "worker_id": "worker-1",
+        },
+        engine=engine,
+        objects=LocalObjectStore(tmp_path / "objects"),
+        runtime=LocalSubprocessRuntime(),
+        model=_Model(),
+    )
+
+    assert events.get_nowait()["type"] == "error"
+    assert not made.exists()
+
+
 def _fake_strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
     """Act as a loop-routed engine: ask the model, write its reply, score it, then ask the model again.
 
