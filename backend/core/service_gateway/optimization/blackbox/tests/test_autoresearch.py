@@ -1105,7 +1105,7 @@ def test_a_repository_budget_that_cannot_score_a_version_stops_before_the_sessio
     assert (result.best_candidate, result.total_evals) == (seed, 2)
 
 
-def test_a_repository_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_budget(
+def test_a_repository_budget_that_cannot_score_the_seed_fails_the_run_before_any_session(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """One evaluation is left for two cases, so the seed gets no sweep: the run ends with no session (SKY-825).

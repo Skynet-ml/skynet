@@ -706,7 +706,7 @@ def test_a_repository_session_that_changes_nothing_gives_no_candidate(
 
 
 @pytest.mark.parametrize("repository", [True, False])
-def test_a_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_budget(
+def test_a_budget_that_cannot_score_the_seed_fails_the_run_before_any_session(
     repository: bool,
     owner: tuple[User, int],
     engine: Engine,
