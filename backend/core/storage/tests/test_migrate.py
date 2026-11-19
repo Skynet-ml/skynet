@@ -26,7 +26,7 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pydantic import SecretStr
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, inspect, make_url, text
 from sqlalchemy.orm import Session
 
 from alembic import command
@@ -154,6 +154,12 @@ def fresh_pg(migrate_db_url: str) -> Iterator[Engine]:
         yield engine
     finally:
         engine.dispose()
+
+
+@_needs_pg
+def test_fresh_pg_wipes_the_module_database_not_the_shared_test_database(fresh_pg: Engine) -> None:
+    """The wiped database is the module's own database, never the shared ``APP_TEST_DB_URL`` (SKY-831)."""
+    assert fresh_pg.url.database != make_url(TEST_DB_URL or "").database
 
 
 @_needs_pg

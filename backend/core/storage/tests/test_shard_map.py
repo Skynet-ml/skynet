@@ -72,7 +72,7 @@ SHARD_TABLES = [AgentStepModel.__table__, TreeObjectModel.__table__, StoragePack
 TREE = "b" * 64
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="module")
 def _own_postgres_databases() -> Iterator[None]:
     """Point the PostgreSQL tests of this module at new databases that only this module uses.
 
@@ -618,6 +618,7 @@ def test_the_jobs_lookup_of_a_map_with_no_shard_has_a_partial_index(main: Engine
 
 
 @needs_postgres
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_the_check_of_a_map_with_no_shard_reads_the_partial_index_on_postgres() -> None:
     """On PostgreSQL the check query reads the partial index, not every ``jobs`` row, when most runs record ``main``."""
     engine = create_engine(MAIN_DB_URL or "", poolclass=NullPool)
@@ -1093,6 +1094,7 @@ def _wipe(engine: Engine) -> None:
 
 
 @needs_two_postgres
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_alembic_migrates_the_main_database_and_the_step_log_tables_on_a_shard(
     objects: LocalObjectStore, monkeypatch
 ) -> None:
@@ -1150,6 +1152,7 @@ def test_alembic_migrates_the_main_database_and_the_step_log_tables_on_a_shard(
 
 
 @needs_postgres
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migrations(monkeypatch) -> None:
     """A down shard fails the boot with a named error; main stays at head and its bootstrap lock is free."""
     main = create_engine(MAIN_DB_URL or "")
@@ -1188,6 +1191,7 @@ def test_a_shard_that_cannot_connect_fails_the_boot_after_main_commits_its_migra
     not (SHARD_DB_URL or "").startswith("postgresql"),
     reason="Set APP_TEST_SHARD_DB_URL to a disposable PostgreSQL database.",
 )
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_pods_that_migrate_a_new_shard_at_the_same_time_all_succeed(monkeypatch) -> None:
     """Pods that boot together wait on the shard's migration lock, so each migration succeeds and the tables exist."""
     monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(SHARD_DB_URL or "")})
@@ -1226,6 +1230,7 @@ def test_pods_that_migrate_a_new_shard_at_the_same_time_all_succeed(monkeypatch)
     not (SHARD_DB_URL or "").startswith("postgresql"),
     reason="Set APP_TEST_SHARD_DB_URL to a disposable PostgreSQL database.",
 )
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_a_shard_migration_runs_with_the_migration_statement_and_lock_timeouts(monkeypatch) -> None:
     """The migration replaces the 30-second runtime statement limit and adds a lock wait limit."""
     monkeypatch.setattr(settings, "step_log_shards", {"s2": SecretStr(SHARD_DB_URL or "")})
@@ -1506,6 +1511,7 @@ def test_the_sweep_keeps_a_pack_that_another_shard_records_and_claims_an_orphan_
 
 
 @needs_two_postgres
+@pytest.mark.usefixtures("_own_postgres_databases")
 def test_the_run_delete_merge_and_account_purge_work_on_two_postgres_databases(
     objects: LocalObjectStore, tmp_path: Path, monkeypatch
 ) -> None:
