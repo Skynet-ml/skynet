@@ -141,6 +141,58 @@ def migrate_test_db(db_url: str) -> None:
         _upgrade_to_head(db_url)
 
 
+@contextlib.contextmanager
+def own_database(db_url: str, label: str) -> Iterator[str]:
+    """Create a new, empty database next to ``db_url`` for one test module, and drop it at the end.
+
+    A test that wipes ``public`` or changes the migrated tables uses this database. So it never
+    deletes the tables that other xdist workers use at the same time in ``APP_TEST_DB_URL`` (SKY-831).
+    It skips the test on a server that is not local, so a stray URL never creates or wipes a database
+    on a managed Postgres.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target. The new database is on its server.
+        label: A short name part that tells which module made the database.
+
+    Yields:
+        The SQLAlchemy URL of the new database.
+    """
+    url = make_url(db_url)
+    if url.host not in ("localhost", "127.0.0.1"):
+        pytest.skip(f"refusing to create a test database on a non-local server (host={url.host!r})")
+    # Postgres cuts names at 63 bytes, so the unique part comes first and a long base name is cut instead.
+    name = f"{uuid.uuid4().hex[:8]}_{label}_{url.database}".encode()[:63].decode(errors="ignore")
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+        try:
+            yield url.set(database=name).render_as_string(hide_password=False)
+        finally:
+            with admin.connect() as conn:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    finally:
+        admin.dispose()
+
+
+def _open_store(db_url: str) -> RemoteDBJobStore:
+    """Open a store on ``db_url`` with no step log shards.
+
+    The store constructor runs Alembic on an adopted database, and that upgrade also migrates every
+    ``STEP_LOG_SHARDS`` database. The store also keeps the shard map of the settings. So the shard
+    map is empty while the store opens (SKY-831).
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+
+    Returns:
+        The store. The caller disposes its engine.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(settings, "step_log_shards", {})
+        return RemoteDBJobStore(db_url)
+
+
 @pytest.fixture(scope="module")
 def store() -> Iterator[RemoteDBJobStore]:
     """Yield a single store backed by the real Postgres for the whole module.
@@ -151,7 +203,7 @@ def store() -> Iterator[RemoteDBJobStore]:
     """
     migrate_test_db(TEST_DB_URL or "")
 
-    s = RemoteDBJobStore(TEST_DB_URL)
+    s = _open_store(TEST_DB_URL or "")
     try:
         yield s
     finally:
@@ -213,6 +265,28 @@ def test_alembic_setup_skips_the_step_log_shards_from_the_settings(
     # The shard database does not exist, so a shard upgrade would raise.
     _upgrade_to_head(TEST_DB_URL or "")
 
+    assert settings.step_log_shards is shards
+
+
+def test_the_store_opens_without_the_step_log_shards_from_the_settings(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open a store that neither migrates nor keeps a ``STEP_LOG_SHARDS`` database (SKY-831).
+
+    Args:
+        store: Used only so that its fixture migrates the test database first.
+        monkeypatch: Sets ``settings.step_log_shards`` for this test.
+    """
+    shard_url = make_url(TEST_DB_URL or "").set(database=f"sky831_missing_shard_{uuid.uuid4().hex[:8]}")
+    shards = {"proof": SecretStr(shard_url.render_as_string(hide_password=False))}
+    monkeypatch.setattr(settings, "step_log_shards", shards)
+
+    # The database is adopted, so the store runs an upgrade; a shard upgrade would raise.
+    opened = _open_store(TEST_DB_URL or "")
+    try:
+        assert opened.step_log_shards.names() == ("main",)
+    finally:
+        opened.engine.dispose()
     assert settings.step_log_shards is shards
 
 
@@ -307,11 +381,19 @@ def test_claim_records_owner_and_lease(store: RemoteDBJobStore, seeded_jobs: lis
     assert lease_expires_at > claimed_at
 
 
-def test_parallel_progress_writers_finish_quickly(store: RemoteDBJobStore) -> None:
-    """Parallel progress writers for distinct jobs avoid parent-row lock serialization."""
+def test_a_progress_writer_never_waits_for_the_open_write_of_another_job(store: RemoteDBJobStore) -> None:
+    """Progress writers for distinct jobs avoid parent-row lock serialization.
+
+    A real ``record_progress`` of one job stops before each of its two commits: the event row
+    and the latest metrics. While each one is open, a batch of writes of another job must finish.
+    A shared lock (a parent row, a table or an advisory lock) makes them wait for the open write.
+    The test had a 2-second limit on two parallel writers before; under xdist load that limit
+    measured the machine, not the locks (SKY-831). A blocked writer waits until the open write
+    ends, so the 60-second limit only stops the test, and a slow but free writer still passes.
+    """
     prefix = f"progress-test-{uuid.uuid4().hex[:8]}"
-    ids = [f"{prefix}-a", f"{prefix}-b"]
-    for oid in ids:
+    held, free = f"{prefix}-a", f"{prefix}-b"
+    for oid in (held, free):
         store.create_job(oid)
 
     def write_events(optimization_id: str) -> None:
@@ -319,17 +401,45 @@ def test_parallel_progress_writers_finish_quickly(store: RemoteDBJobStore) -> No
         for i in range(100):
             store.record_progress(optimization_id, "optimizer_progress", {"i": i})
 
-    try:
-        started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(write_events, ids))
-        elapsed = time.perf_counter() - started
+    # One (reached, go) pair for each commit of the held record_progress: the event row, then the metrics.
+    open_writes = [(threading.Event(), threading.Event()) for _ in range(2)]
+    pending = list(open_writes)
+    holder = threading.Thread(target=store.record_progress, args=(held, "optimizer_progress", {"i": -1}))
 
-        assert elapsed < 2.0
-        assert store.get_progress_count(ids[0]) == 100
-        assert store.get_progress_count(ids[1]) == 100
+    def hold_open(session: Session) -> None:
+        """Keep the held job's transaction open, with its writes sent, until the test lets it commit.
+
+        Args:
+            session: The session that commits.
+        """
+        if threading.current_thread() is not holder or not pending:
+            return
+        reached, go = pending.pop(0)
+        # before_commit runs before the commit flush, so the flush sends the event row now.
+        session.flush()
+        reached.set()
+        go.wait(60)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    event.listen(store._session_factory, "before_commit", hold_open)
+    try:
+        holder.start()
+        for reached, go in open_writes:
+            assert reached.wait(60), "the held record_progress did not reach its commit"
+            pool.submit(write_events, free).result(timeout=60)
+            go.set()
+        holder.join(60)
+
+        assert store.get_progress_count(free) == 200
+        assert store.get_progress_count(held) == 1
     finally:
-        store.delete_jobs(ids)
+        for _, go in open_writes:
+            go.set()
+        if holder.ident is not None:
+            holder.join(60)
+        event.remove(store._session_factory, "before_commit", hold_open)
+        pool.shutdown(wait=True)
+        store.delete_jobs([held, free])
 
 
 def test_replayed_keyed_progress_events_add_one_row_each(

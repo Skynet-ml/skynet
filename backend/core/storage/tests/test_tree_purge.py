@@ -25,6 +25,8 @@ from core.storage import tree_compactor, tree_purge
 from core.storage.models import (
     AgentStepModel,
     Base,
+    ConversationEmbeddingModel,
+    JobEmbeddingModel,
     JobModel,
     StoragePackModel,
     TreeObjectModel,
@@ -32,6 +34,7 @@ from core.storage.models import (
 )
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
+from core.storage.tests.test_remote_jobstore_postgres import migrate_test_db
 from core.storage.tree_compactor import TreeCompactor
 from core.storage.tree_purge import TreePurgeError, TreePurgeSummary, delete_unused_packs, purge_user, purge_user_shards
 from core.storage.tree_store import TreeEntry, TreeStore
@@ -69,12 +72,20 @@ def engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Engine]:
     if request.param == "sqlite":
         eng = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
     else:
+        # The migration makes the ``public`` tables that the guard test must not find (SKY-831).
+        migrate_test_db(TEST_DB_URL)
         admin = create_engine(TEST_DB_URL)
         with admin.begin() as connection:
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
         eng = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema},public"})
     try:
-        Base.metadata.create_all(eng)
+        # The search path names ``public`` too, so a check-first create found the migrated tables of
+        # APP_TEST_DB_URL there, and parallel workers wrote the same rows into them (SKY-831).
+        # The embedding tables need the ``vector`` type, which a plain test database lacks, and a purge
+        # with embeddings off never reads them.
+        embedding = {JobEmbeddingModel.__table__, ConversationEmbeddingModel.__table__}
+        tables = [table for table in Base.metadata.sorted_tables if table not in embedding]
+        Base.metadata.create_all(eng, tables=tables, checkfirst=False)
         with Session(eng) as session:
             for run_id in ADA_RUNS:
                 session.add(JobModel(optimization_id=run_id, username="ada", execution_generation=1))
@@ -89,6 +100,21 @@ def engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Engine]:
             with admin.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
             admin.dispose()
+
+
+def test_the_postgres_tables_are_in_the_schema_of_the_test(engine: Engine) -> None:
+    """Keep the tables of a PostgreSQL test in its own schema, never in ``public`` (SKY-831).
+
+    Args:
+        engine: The test database.
+    """
+    if engine.dialect.name != "postgresql":
+        pytest.skip("only PostgreSQL has schemas")
+    with engine.connect() as connection:
+        home = connection.scalar(
+            text("SELECT relnamespace::regnamespace::text FROM pg_class WHERE oid = 'jobs'::regclass")
+        )
+        assert home == connection.scalar(text("SELECT current_schema()"))
 
 
 @pytest.fixture
