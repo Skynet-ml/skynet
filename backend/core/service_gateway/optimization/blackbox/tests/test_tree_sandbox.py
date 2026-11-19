@@ -321,6 +321,20 @@ def test_a_failing_command_is_output_not_an_error(trees: TreeStore, step_log: St
     assert _files(trees, new_tree) == {"out.txt": b"x\n"}
 
 
+def test_a_command_time_limit_replaces_the_layer_limit_for_that_command(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A call's limit reaches the box; a call with no limit keeps the layer's limit (SKY-816)."""
+    sandbox, _, _ = _sandbox(trees, step_log, _Runtime(), timeout_seconds=0.5)
+    start = _tree(trees, {})
+
+    kept, _ = sandbox.run(_step(1), start, "sleep 5", [])
+    longer, _ = sandbox.run(_step(2), start, "sleep 1", [], timeout_seconds=30)
+    shorter, _ = sandbox.run(_step(3), start, "sleep 5", [], timeout_seconds=0.5)
+
+    assert (kept.timed_out, longer.timed_out, shorter.timed_out) == (True, False, True)
+
+
 def test_each_run_gets_a_fresh_box(trees: TreeStore, step_log: StepLogStore) -> None:
     """Nothing one call writes outside the tree reaches the next call."""
     runtime = _Runtime()

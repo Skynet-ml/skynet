@@ -72,8 +72,14 @@ for path in sorted(set(sys.stdin.buffer.read().split(b"\0")) - seen):
     if path and (path.rpartition(b"/")[0] == b"." or path.rpartition(b"/")[0] in seen):
         sys.stdout.buffer.write(path + b"\0")
 """
+# The limit of each ``[proposer] setup`` and ``[proposer] entry`` command, as docs/repository-constraints.md says.
+_COMMAND_TIMEOUT_SECONDS = 30 * 60
 # The error of a setup that changed the seed names at most this many files.
 _NAMED_FILES = 20
+# The error compares at most this many common files, each read up to this many bytes, so a large repository
+# cannot fill the worker's memory on that error path.
+_COMPARED_FILES = 200
+_COMPARED_BYTES = 1_000_000
 # A failed command's message keeps the end of its output, where the error usually is.
 _COMMAND_ERROR_CHARS = 2000
 
@@ -640,7 +646,7 @@ class FileProposer:
             [*self._exports, f'export ASCENT_TASK="$PWD/{task}" APP_PROMPT_FILE="$PWD/{task}"', self._entry]
         )
         try:
-            result, tree = self._ctx.run_command(start, script, self._grants)
+            result, tree = self._ctx.run_command(start, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS)
         except (TreeRejectedError, BoxFailureError) as error:
             # The step committed the failure, so a resume gets the same failed version.
             return start, f"The [proposer] entry command left no usable version: {error}"
@@ -706,7 +712,7 @@ class FileProposer:
             ]
         )
         try:
-            result, tree = self._ctx.run_command(seed, script, self._grants)
+            result, tree = self._ctx.run_command(seed, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS)
         except BoxFailureError as error:
             raise ServiceError(f"The {name} could not run in a box. Start a new run. {error}") from error
         except TreeRejectedError as error:
@@ -774,7 +780,8 @@ def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
 
     Returns:
         The added, removed and changed files and the files whose executable mode changed, sorted, at most
-        ``_NAMED_FILES``; empty when only a link or an empty folder differs.
+        ``_NAMED_FILES``. It compares the content of at most ``_COMPARED_FILES`` common files and counts a file
+        above ``_COMPARED_BYTES`` as changed. Empty when only a link or an empty folder differs.
     """
     assert ctx.list_files is not None
     assert ctx.read_file is not None
@@ -782,10 +789,14 @@ def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
     after = set(ctx.list_files(tree) or ())
     modes = set(ctx.list_files(seed, executable=True) or ()) ^ set(ctx.list_files(tree, executable=True) or ())
     changed = (before ^ after) | modes
-    for path in sorted((before & after) - changed):
+    for path in sorted((before & after) - changed)[:_COMPARED_FILES]:
         if len(changed) >= _NAMED_FILES:
             break
-        if ctx.read_file(seed, path) != ctx.read_file(tree, path):
+        try:
+            differs = ctx.read_file(seed, path, _COMPARED_BYTES) != ctx.read_file(tree, path, _COMPARED_BYTES)
+        except FileTooLargeError:
+            differs = True
+        if differs:
             changed.add(path)
     return sorted(changed)[:_NAMED_FILES]
 

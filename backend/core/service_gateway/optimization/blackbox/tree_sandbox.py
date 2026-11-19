@@ -343,6 +343,7 @@ class TreeSandbox:
         grants: Sequence[Grant],
         *,
         refuse: Callable[[str], bool] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
 
@@ -352,6 +353,7 @@ class TreeSandbox:
             command: The shell command; it runs in the tree's folder.
             grants: The box's network grants.
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
+            timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -370,6 +372,7 @@ class TreeSandbox:
         """
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
+        timeout = self._timeout if timeout_seconds is None else timeout_seconds
 
         def work(box: SandboxSession) -> tuple[CommandResult, str]:
             """Unpack the tree, run the command and store the new tree.
@@ -381,7 +384,7 @@ class TreeSandbox:
                 The command's result and the new tree id.
             """
             self._unpack(box, archive, TREE_DIR)
-            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=self._timeout)
+            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout)
             return result, self._pack(box, step.run_id, TREE_DIR)
 
         result, new_tree_id = self._in_box(self._candidates, step, grants, work)

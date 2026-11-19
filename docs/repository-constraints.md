@@ -109,9 +109,9 @@ U+2066 to U+2069), because they can hide what a command does.
   checkout (for example a Python virtual environment) can fail in an
   AutoSaddler worktree, because each worktree has a different path. The copy
   uses disk space in the box, and each later session spends time to copy it.
-  The files it adds never join a version. It has 30 minutes, but never more
-  than the time that the proposer session has left: the setup time counts
-  inside the session's time limit. If it fails or runs out of time, the run
+  The files it adds never join a version. In GEPA, Best-of-N and AutoSaddler,
+  it has 30 minutes, but never more than the time that the proposer session
+  has left: the setup time counts inside the session's time limit. If it fails or runs out of time, the run
   stops, and the message names the command and its output. When `setup`
   ends, the run stops every process that it left running. When the run stops
   a proposer session, it also stops a `setup` that runs.
@@ -153,7 +153,9 @@ U+2066 to U+2069), because they can hide what a command does.
   lane runs `setup` once. If `setup` changes or removes a file of
   the repository, the run stops, and the message names the command and the
   changed files. If the run cannot remove the files that `setup` added (for
-  example, a read-only folder), the run stops too. A command that fails
+  example, a read-only folder), the run stops too. `setup` and each `entry`
+  command have 30 minutes each. A `setup` that runs out of time stops the
+  run. An `entry` command that runs out of time gives no version. A command that fails
   gives no version: it is a failed attempt, not a failed run. AutoResearch then ends the run, because
   a round with no version ends it. Meta-Harness goes on to its next
   iteration. In these two engines, the command gets `ASCENT_TASK`,

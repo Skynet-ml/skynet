@@ -15,7 +15,7 @@ from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxProposer
 from core.sandbox.grants import Grant
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import loop_tools
-from core.service_gateway.optimization.blackbox.protocol import RepoSeed
+from core.service_gateway.optimization.blackbox.protocol import FileTooLargeError, RepoSeed
 from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult
 
 _LAB = ".autoresearch"
@@ -23,7 +23,7 @@ _SETUP = ["sh", "-c", "mkdir deps"]
 
 
 class _Commands:
-    """Record each box command and its grants, and give one result or failure for a command."""
+    """Record each box command, its grants and its time limit, and give one result or failure for a command."""
 
     def __init__(self, outcomes: dict[str, CommandResult | Exception] | None = None) -> None:
         """Set the outcome of the commands that start with a key; every other command exits 0.
@@ -33,14 +33,18 @@ class _Commands:
         """
         self.outcomes = outcomes or {}
         self.calls: list[tuple[str, tuple[Grant, ...]]] = []
+        self.timeouts: list[tuple[str, float | None]] = []
 
-    def __call__(self, tree: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+    def __call__(
+        self, tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+    ) -> tuple[CommandResult, str]:
         """Run one fake box command.
 
         Args:
             tree: The tree the command starts from.
             command: The shell command.
             grants: The box's grants.
+            timeout_seconds: The command's time limit; ``None`` keeps the box's limit.
 
         Returns:
             The result and one fixed tree id, so each box round trip gives the same tree.
@@ -50,6 +54,7 @@ class _Commands:
         """
         del tree
         self.calls.append((command, grants))
+        self.timeouts.append((command, timeout_seconds))
         for start, outcome in self.outcomes.items():
             if command.startswith(start):
                 if isinstance(outcome, Exception):
@@ -168,18 +173,21 @@ def test_a_setup_whose_check_tree_differs_from_the_seed_changed_a_seed_file() ->
     proposer = _proposer(commands, setup=_SETUP)
     original = commands.__call__
 
-    def differ(tree: str, command: str, grants: tuple[Grant, ...] = ()) -> tuple[CommandResult, str]:
+    def differ(
+        tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+    ) -> tuple[CommandResult, str]:
         """Give the seed's round trip another tree than the setup's.
 
         Args:
             tree: The tree the command starts from.
             command: The shell command.
             grants: The box's grants.
+            timeout_seconds: The command's time limit.
 
         Returns:
             The result and the tree.
         """
-        result, after = original(tree, command, grants)
+        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds)
         return result, "seed-again" if command == "true" else after
 
     proposer._ctx.run_command = differ  # type: ignore[attr-defined]
@@ -190,6 +198,72 @@ def test_a_setup_whose_check_tree_differs_from_the_seed_changed_a_seed_file() ->
         proposer.base("seed")
 
     assert "b.py" not in str(error.value)
+
+
+def test_the_setup_and_the_entry_get_thirty_minutes_and_the_other_boxes_keep_their_limit() -> None:
+    """The docs give each proposer command 30 minutes; the lab removal and the check boxes keep the box limit."""
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+
+    proposer.base("seed")
+    proposer.run("start")
+
+    proposer_limits = [
+        limit for command, limit in commands.timeouts if "mkdir deps" in command or "my-agent" in command
+    ]
+    other_limits = {
+        limit for command, limit in commands.timeouts if "mkdir deps" not in command and "my-agent" not in command
+    }
+    assert proposer_limits == [1800, 1800]
+    assert other_limits == {None}
+
+
+def test_a_seed_file_too_large_to_compare_counts_as_changed() -> None:
+    """The error reads each file with a byte cap, and a file above the cap is named, not loaded."""
+    ctx = SimpleNamespace(list_files=lambda tree, path="", executable=False: [] if executable else ["a.bin", "b.py"])
+    limits: list[int | None] = []
+
+    def read_file(tree: str, path: str, limit: int | None = None) -> bytes:
+        """Refuse the large file, and give the same bytes for every other file.
+
+        Args:
+            tree: The tree.
+            path: The file.
+            limit: The byte cap.
+
+        Returns:
+            The file bytes.
+
+        Raises:
+            FileTooLargeError: For the large file.
+        """
+        limits.append(limit)
+        if path == "a.bin":
+            raise FileTooLargeError(path, 2 * loop_tools._COMPARED_BYTES, loop_tools._COMPARED_BYTES)
+        return b"same"
+
+    ctx.read_file = read_file
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == ["a.bin"]  # type: ignore[arg-type]
+    assert limits
+    assert set(limits) == {loop_tools._COMPARED_BYTES}
+
+
+def test_the_seed_change_error_compares_at_most_the_capped_number_of_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A large repository reads only the first files, so the error path cannot read every file of it.
+
+    Args:
+        monkeypatch: Sets a small file cap.
+    """
+    monkeypatch.setattr(loop_tools, "_COMPARED_FILES", 3)
+    reads: list[str] = []
+    ctx = SimpleNamespace(
+        list_files=lambda tree, path="", executable=False: [] if executable else [f"f{i}" for i in range(10)],
+        read_file=lambda tree, path, limit=None: reads.append(path) or b"",
+    )
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == []  # type: ignore[arg-type]
+    assert sorted(set(reads)) == ["f0", "f1", "f2"]
 
 
 def test_a_setup_name_with_a_new_line_is_one_path_of_the_listing() -> None:
