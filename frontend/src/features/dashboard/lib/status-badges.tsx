@@ -3,6 +3,7 @@
 import type React from "react";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
 import { formatBlackboxDelta, formatBlackboxScore } from "@/shared/lib";
+import { msg } from "@/shared/lib/messages";
 
 export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
   const baseline = job.baseline_test_metric;
@@ -17,18 +18,21 @@ export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
 
   if (baseline != null && optimized != null && improvement != null) {
     // metric_improvement is positive when the run got better, also when a lower
-    // score is better (SKY-750). It sets the color; the text shows the raw change.
+    // score is better (SKY-750). The badge shows it as the run page does. The
+    // summary has no direction, so a gain against the raw change marks a minimize run.
+    const lowerIsBetter = improvement !== 0 && Math.sign(improvement) === -Math.sign(optimized - baseline);
     const color =
       improvement > 0
         ? "text-[var(--success)]"
         : improvement < 0
           ? "text-[var(--danger)]"
           : "text-muted-foreground";
-    const delta = formatBlackboxDelta(optimized - baseline);
+    const delta = formatBlackboxDelta(improvement);
+    const title = `${fmtScore(baseline)} → ${fmtScore(optimized)}`;
     return (
       <span
         className="inline-flex items-center gap-1 text-xs whitespace-nowrap"
-        title={`${fmtScore(baseline)} → ${fmtScore(optimized)}`}
+        title={lowerIsBetter ? `${title} · ${msg("optimization.overview.lower_is_better")}` : title}
       >
         <span className="font-medium">{fmtScore(optimized)}</span>
         <span className={`${color} font-medium`}>({delta})</span>

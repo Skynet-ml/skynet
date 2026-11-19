@@ -65,7 +65,7 @@ import type {
 } from "@/shared/types/api";
 import type { SharedOptimizationData } from "@/shared/lib/api";
 import { extractBlackboxScorePoints } from "../lib/blackbox";
-import { ReplayViewer, extractCandidates, scopeToLatestLane } from "@/features/trajectory";
+import { ReplayViewer, extractCandidates, minimizesRun, scopeToLatestLane } from "@/features/trajectory";
 import {
   rememberRunKind,
   measureOverview,
@@ -760,9 +760,16 @@ export function OptimizationDetailView({
     () => (jobIsBlackbox ? extractCandidates(scopeToLatestLane(jobProgressEvents ?? [])) : []),
     [jobIsBlackbox, jobProgressEvents],
   );
+  const jobBlackboxResult = job?.blackbox_result;
   const scorePoints = useMemo(
-    () => (jobIsBlackbox ? extractBlackboxScorePoints(blackboxCandidates) : []),
-    [jobIsBlackbox, blackboxCandidates],
+    () =>
+      jobIsBlackbox
+        ? extractBlackboxScorePoints(
+            blackboxCandidates,
+            minimizesRun({ blackbox_result: jobBlackboxResult ?? null, progress_events: jobProgressEvents ?? [] }),
+          )
+        : [],
+    [jobIsBlackbox, blackboxCandidates, jobBlackboxResult, jobProgressEvents],
   );
 
   // A schedule set up in the submit wizard stays on its run when the run fails,
