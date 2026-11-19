@@ -64,6 +64,16 @@ MAX_PROMPT_BYTES = 128_000
 TASK_FILE = "ascent-task.md"
 # The file in the lab folder where the setup box lists the paths that ``[proposer] setup`` added.
 _SETUP_ROOTS = "setup-roots"
+# The setup box's check: stdin and the file in argv[1] are NUL-separated listings after and before the setup, so a
+# name with a new line stays one path. It prints each new path whose folder existed before: a top path of the output.
+_NEW_ROOTS = r"""import sys
+seen = set(open(sys.argv[1], "rb").read().split(b"\0"))
+for path in sorted(set(sys.stdin.buffer.read().split(b"\0")) - seen):
+    if path and (path.rpartition(b"/")[0] == b"." or path.rpartition(b"/")[0] in seen):
+        sys.stdout.buffer.write(path + b"\0")
+"""
+# The error of a setup that changed the seed names at most this many files.
+_NAMED_FILES = 20
 # A failed command's message keeps the end of its output, where the error usually is.
 _COMMAND_ERROR_CHARS = 2000
 
@@ -458,9 +468,14 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     if options.reasoning_effort:
         refused.append("reasoning_effort")
     if refused:
+        runs = (
+            "runs the [proposer] entry command of the contract file"
+            if file_proposer
+            else "in the worker engine loop runs only its built-in proposer"
+        )
         raise ServiceError(
-            f"{engine} in the worker engine loop runs only its built-in proposer, so it cannot apply these "
-            f"settings: {', '.join(refused)}. Remove them, or choose another engine."
+            f"{engine} {runs}, so it cannot apply these settings: {', '.join(refused)}. "
+            "Remove them, or choose another engine."
         )
 
 
@@ -643,6 +658,9 @@ class FileProposer:
 
         Returns:
             The version's tree id, or ``None`` when a box could not remove the paths.
+
+        Raises:
+            ServiceError: When the ``rm`` of the setup's output fails.
         """
         if tree == start:
             return parent
@@ -663,8 +681,8 @@ class FileProposer:
             The added paths that hold no seed path, relative to the repository root; empty with no setup.
 
         Raises:
-            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; or
-                when a box of the setup or of its check fails.
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; when
+                a box of the setup or of its check fails; or when the ``rm`` of its output fails.
             GrantDeniedError: When the grants do not resolve.
         """
         assert self._ctx.repo_seed is not None
@@ -675,9 +693,8 @@ class FileProposer:
         if not self._setup_argv:
             return []
         name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
-        listing = "find . -mindepth 1 -print | LC_ALL=C sort"
+        listing = "find . -mindepth 1 -print0"
         lab = shlex.quote(self._lab)
-        # A new path whose folder existed before the setup is a top path of its output.
         script = "\n".join(
             [
                 *self._exports,
@@ -685,9 +702,7 @@ class FileProposer:
                 f'{listing} > "$paths"',
                 f"{shlex.join(self._setup_argv)} || exit $?",
                 f"mkdir -p {lab}",
-                f"{listing} | awk 'NR == FNR {{ seen[$0]; next }} !($0 in seen) {{ dir = $0; "
-                f'sub("/[^/]*$", "", dir); if (dir == "." || (dir in seen)) print }}\' "$paths" - '
-                f"> {lab}/{_SETUP_ROOTS}",
+                f'{listing} | python3 -I -c {shlex.quote(_NEW_ROOTS)} "$paths" > {lab}/{_SETUP_ROOTS}',
             ]
         )
         try:
@@ -702,9 +717,9 @@ class FileProposer:
             data = self._ctx.read_file(tree, f"{self._lab}/{_SETUP_ROOTS}", MAX_COMMAND_BYTES // 2)
         except FileTooLargeError:
             raise ServiceError(f"The {name} added too many top-level paths. Put its output in fewer folders.") from None
-        lines = (data or b"").decode("utf-8", "replace").splitlines()
+        names = (data or b"").decode("utf-8", "replace").split("\0")
         # The lab folder that the listing's own ``mkdir`` made is no setup output.
-        roots = [path for path in (line.removeprefix("./") for line in lines if line) if path != self._lab]
+        roots = [path for path in (name.removeprefix("./") for name in names if name) if path != self._lab]
         full = drop_lab(self._ctx, seed, tree, seed, self._lab)
         stripped = full if full is None or not roots else _remove(self._ctx, full, roots)
         # The same box round trip on the seed gives the tree to compare with, without the hidden paths.
@@ -712,9 +727,11 @@ class FileProposer:
         if untouched is None:
             raise ServiceError(f"The check of the {name} could not run in a box. Start a new run.")
         if stripped != untouched:
+            changed = _changed_files(self._ctx, untouched, stripped)
             raise ServiceError(
-                f"The {name} changed or removed files of the repository. Those changes would enter every version. "
-                "Make the setup write only new files."
+                f"The {name} changed or removed files of the repository"
+                + (f": {', '.join(changed)}" if changed else "")
+                + ". Those changes would enter every version. Make the setup write only new files."
             )
         self._full[seed] = full
         return roots
@@ -730,13 +747,47 @@ def _remove(ctx: EngineContext, tree: str, paths: list[str]) -> str | None:
 
     Returns:
         The tree without the paths, or ``None`` when the box failed.
+
+    Raises:
+        ServiceError: When ``rm`` fails or runs out of time, for example on a read-only folder of the setup.
     """
     assert ctx.run_command is not None
     try:
         result, after = ctx.run_command(tree, f"rm -rf -- {shlex.join(paths)}", ())
     except (TreeRejectedError, BoxFailureError):
         return None
-    return after if result.exit_code == 0 and not result.timed_out else None
+    if result.timed_out or result.exit_code != 0:
+        raise ServiceError(
+            _command_failure("removal of the files that [proposer] setup added", result)
+            + " Make the setup write only files that it can remove."
+        )
+    return after
+
+
+def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
+    """Name the files that differ between the seed and a tree, for the error of a setup that changed the seed.
+
+    Args:
+        ctx: The engine context, with its file calls.
+        seed: The seed's tree.
+        tree: The setup's tree without the lab folder and the setup's output.
+
+    Returns:
+        The added, removed and changed files and the files whose executable mode changed, sorted, at most
+        ``_NAMED_FILES``; empty when only a link or an empty folder differs.
+    """
+    assert ctx.list_files is not None
+    assert ctx.read_file is not None
+    before = set(ctx.list_files(seed) or ())
+    after = set(ctx.list_files(tree) or ())
+    modes = set(ctx.list_files(seed, executable=True) or ()) ^ set(ctx.list_files(tree, executable=True) or ())
+    changed = (before ^ after) | modes
+    for path in sorted((before & after) - changed):
+        if len(changed) >= _NAMED_FILES:
+            break
+        if ctx.read_file(seed, path) != ctx.read_file(tree, path):
+            changed.add(path)
+    return sorted(changed)[:_NAMED_FILES]
 
 
 def _round_trip(ctx: EngineContext, tree: str) -> str | None:

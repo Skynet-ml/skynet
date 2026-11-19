@@ -122,10 +122,12 @@ U+2066 to U+2069), because they can hide what a command does.
   The same applies to the new files of the version that git does not track
   yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
   If `setup` makes a commit or checks out another commit, the run stops too.
-- A file or folder name that `setup` adds must be UTF-8. It cannot hold a
-  control character (such as a new line) or end in a space. The run cannot
-  keep such a name out of the versions, so the run stops, and the message
-  names the file.
+- In GEPA, Best-of-N and AutoSaddler, a file or folder name that `setup`
+  adds must be UTF-8. It cannot hold a control character (such as a new
+  line) or end in a space. The run cannot keep such a name out of the
+  versions, so the run stops, and the message names the file. AutoResearch
+  and Meta-Harness keep any UTF-8 name out of the versions. A name that is
+  not UTF-8 stops the run there, because the run cannot store it.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
@@ -149,8 +151,10 @@ U+2066 to U+2069), because they can hide what a command does.
   version, and the engine scores it. `setup` runs once for each engine,
   over the first version, before the first command. In an Auto run, each
   lane runs `setup` once. If `setup` changes or removes a file of
-  the repository, the run stops. A command that fails gives no version: it is
-  a failed attempt, not a failed run. AutoResearch then ends the run, because
+  the repository, the run stops, and the message names the command and the
+  changed files. If the run cannot remove the files that `setup` added (for
+  example, a read-only folder), the run stops too. A command that fails
+  gives no version: it is a failed attempt, not a failed run. AutoResearch then ends the run, because
   a round with no version ends it. Meta-Harness goes on to its next
   iteration. In these two engines, the command gets `ASCENT_TASK`,
   `APP_PROMPT_FILE` and `APP_MODEL`, but no model relay.

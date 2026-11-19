@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BlackboxProposer
+from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxProposer
 from core.sandbox.grants import Grant
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
 from core.service_gateway.optimization.blackbox import loop_tools
@@ -86,7 +86,8 @@ def _proposer(
     ctx = SimpleNamespace(
         repo_seed=RepoSeed(tree_id="seed"),
         run_command=commands,
-        read_file=lambda tree, path, limit: b"",
+        read_file=lambda tree, path, limit=None: b"",
+        list_files=lambda tree, path="", executable=False: [],
     )
     options = SimpleNamespace(
         model="m",
@@ -136,7 +137,6 @@ def test_an_entry_that_runs_out_of_time_gives_no_version() -> None:
             r"setup command .* left files that the run refuses",
         ),
         ({f"rm -rf {_LAB}": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),
-        ({"rm -rf -- deps": CommandResult(1)}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": TreeRejectedError("s", "refused")}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": CommandResult(1)}, r"check of the \[proposer\] setup .* could not run"),
@@ -154,7 +154,7 @@ def test_a_box_failure_in_the_setup_or_its_check_gives_its_own_error(
     commands = _Commands(outcomes)
     proposer = _proposer(commands, setup=_SETUP)
     # The setup listing names one added path, so the check also runs the ``rm`` of the added paths.
-    proposer._ctx.read_file = lambda tree, path, limit: b"./deps\n"  # type: ignore[attr-defined]
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
 
     with pytest.raises(ServiceError, match=message) as error:
         proposer.base("seed")
@@ -183,6 +183,71 @@ def test_a_setup_whose_check_tree_differs_from_the_seed_changed_a_seed_file() ->
         return result, "seed-again" if command == "true" else after
 
     proposer._ctx.run_command = differ  # type: ignore[attr-defined]
+    proposer._ctx.list_files = lambda tree, path="", executable=False: [] if executable else ["a.py", "b.py"]  # type: ignore[attr-defined]
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"new" if (tree, path) == ("after", "a.py") else b""  # type: ignore[attr-defined]
 
-    with pytest.raises(ServiceError, match="changed or removed files of the repository"):
+    with pytest.raises(ServiceError, match=r"changed or removed files of the repository: a\.py\. ") as error:
         proposer.base("seed")
+
+    assert "b.py" not in str(error.value)
+
+
+def test_a_setup_name_with_a_new_line_is_one_path_of_the_listing() -> None:
+    """The setup box lists NUL-separated names, so a name with a new line is removed whole, not as two paths."""
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0./a\nb\0./.autoresearch\0"  # type: ignore[attr-defined]
+
+    proposer.base("seed")
+
+    assert "find . -mindepth 1 -print0" in commands.calls[0][0]
+    assert [command for command, _ in commands.calls if command.startswith("rm -rf --")] == ["rm -rf -- deps 'a\nb'"]
+
+
+def test_a_setup_output_that_rm_cannot_remove_gives_its_own_error() -> None:
+    """A failed ``rm`` is no box failure and no seed change, so the error names the removal and its output."""
+    commands = _Commands({"rm -rf -- deps": CommandResult(1, stderr="rm: deps/x: Permission denied")})
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+
+    with pytest.raises(ServiceError) as error:
+        proposer.base("seed")
+
+    message = str(error.value)
+    assert "removal of the files that [proposer] setup added failed with exit code 1" in message
+    assert "Permission denied" in message
+    assert "Start a new run" not in message
+    assert "changed or removed files" not in message
+
+
+@pytest.mark.parametrize(
+    ("file_proposer", "harness", "says", "never"),
+    [
+        (True, BLACKBOX_HARNESS_CUSTOM, "runs the [proposer] entry command of the contract file", "built-in"),
+        (False, "codex", "in the worker engine loop runs only its built-in proposer", "[proposer] entry"),
+    ],
+)
+def test_the_proposer_refusal_says_which_proposer_the_engine_runs(
+    file_proposer: bool, harness: str, says: str, never: str
+) -> None:
+    """With the file's command, the engine runs that command, so the refusal does not say "built-in proposer".
+
+    Args:
+        file_proposer: Whether the file's command runs.
+        harness: The proposer harness that the engine accepts in that case.
+        says: The text that the message holds.
+        never: The text that the message does not hold.
+    """
+    options = SimpleNamespace(
+        proposer=BlackboxProposer(
+            harness=harness, run_command="my-agent" if file_proposer else None, install_command="npm ci"
+        ),
+        budget_route=None,
+        reasoning_effort=None,
+    )
+
+    with pytest.raises(ServiceError) as error:
+        loop_tools.refuse_unsupported_proposer(options, "AutoResearch", file_proposer=file_proposer)  # type: ignore[arg-type]
+
+    assert f"AutoResearch {says}, so it cannot apply these settings: install_command." in str(error.value)
+    assert never not in str(error.value)

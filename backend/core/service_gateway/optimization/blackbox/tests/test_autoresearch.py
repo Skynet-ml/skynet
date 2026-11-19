@@ -1334,13 +1334,102 @@ def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
 
-    with pytest.raises(ServiceError, match="changed or removed files of the repository"):
+    with pytest.raises(ServiceError, match=r"changed or removed files of the repository: a\.py\. "):
         _run(
             loop,
             score=_score_a_py,
             repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
             native_options=_command_options(setup=["sh", "-c", "printf b >> a.py"]),
         )
+
+
+def test_a_files_proposer_setup_name_with_a_new_line_stays_out_of_every_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup listing is NUL-separated, so a folder name with a new line is one path, and no version holds it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    setup = ["sh", "-c", 'mkdir deps "$(printf "x\\ny")" && printf lib > deps/lib.txt && touch "$(printf "x\\ny")/f"']
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=2.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+        native_options=_command_options(setup=setup),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert len(versions) == 2
+    for version in versions:
+        assert loop.list_files(version, ".") == ["a.py"]
+
+
+def test_a_files_proposer_notebook_line_reaches_the_next_round(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one's command writes a notebook line, and round two's task file and lab notebook hold it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    entry = (
+        'if grep -q carried "$ASCENT_TASK" && grep -q carried .autoresearch/notebook.md; then printf y >> a.py; '
+        "else printf x >> a.py && printf 'carried\\n' >> .autoresearch/notebook.md; fi"
+    )
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=3.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+        native_options=_command_options(entry, setup=[]),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert [loop.read_file(version, "a.py") for version in versions] == [b"a", b"ax", b"axy"]
 
 
 def test_a_files_proposer_setup_that_fails_stops_the_run_with_its_command_and_exit_code(
