@@ -22,19 +22,14 @@ and ``backend/THIRD_PARTY_NOTICES.md``.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
 import math
-import os
 import re
 import shutil
-import subprocess
-import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,10 +41,7 @@ from gepa.oa.engine import Result
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task, seed_as_text
 
-try:
-    from . import repo_tree
-except ImportError:  # In the sandbox the runner loads ``repo_tree`` as a top-level sibling first.
-    import repo_tree
+from . import repo_tree
 
 META_HARNESS_REVISION = "0cbc31e97c9e6d24232d1dc754827c02e1ec415c"
 AUTORESEARCH_VERSION = "1"
@@ -96,67 +88,11 @@ def log_event(
     )
 
 
-def log_refusals(refusals: Any, **fields: Any) -> None:
-    """Log each hidden-path refusal of a proposer session to the run log.
-
-    Only the tool and the path kind are logged, never the path or its content.
-
-    Args:
-        refusals: The ``refusals`` list of the session's result document.
-        **fields: Extra event fields, such as the session name.
-    """
-    for refusal in refusals or []:
-        tool, kind = str(refusal.get("tool") or ""), str(refusal.get("kind") or "")
-        log_event(
-            "proposer.refusal",
-            f"Refused a {tool} call on a hidden {kind} path; the session continues",
-            level=logging.WARNING,
-            source="proposer",
-            tool=tool,
-            kind=kind,
-            **fields,
-        )
-
-
-def blocked_patch(repo: dict[str, Any], patch: str) -> str | None:
-    """Refuse a version that breaks the path rules of a run with a constraints file.
-
-    The agent reads only the fixed illegal-action message; the run log keeps the
-    reason. A run without a constraints file is not checked here: its guest
-    gates keep naming the refused paths to the agent.
-
-    Args:
-        repo: Repository settings holding ``editable_paths``, ``readonly_paths``
-            and ``constrained``.
-        patch: The version's diff against the starting commit.
-
-    Returns:
-        The illegal-action message for a refused version, else ``None``.
-    """
-    if not repo.get("constrained"):
-        return None
-    problems = repo_tree.patch_violations(patch, repo["editable_paths"], repo["readonly_paths"])
-    if not problems:
-        return None
-    reason = " ".join(problems)
-    log_event(
-        repo_tree.RULE_BLOCK_EVENT,
-        f"Illegal action blocked: {repo_tree.PATH_RULE}. {reason}",
-        level=logging.WARNING,
-        rule=repo_tree.PATH_RULE,
-        reason=reason,
-    )
-    return repo_tree.ILLEGAL_ACTION_MESSAGE
-
-
 ASSET_CHECKSUMS = {
     "meta_harness/SKILL.md": "fce9a51d2e95d8a2d59c60b91106adc0309232a8d6b2fe0fa0785395dcb78d1c",
 }
 BUDGET_EXHAUSTED_MARKER = "BUDGET_EXHAUSTED"
-# Upstream meta_harness.py: PROPOSER_ALLOWED_TOOLS.
-META_HARNESS_TOOLS = "Read,Glob,Grep,Agent,Write,Edit,Bash"
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}$")
-_SESSION_POLL_SECONDS = 0.2
 # The CLI stderr tail carried into a failed run's error and its run log.
 _FAILURE_TAIL_CHARS = 2000
 
@@ -172,161 +108,12 @@ _STOP_AFTER = 4
 _PLANNED_ROUNDS = 6
 # A named score's Pareto column is keyed apart from example ids.
 NAMED_PREFIX = "score:"
-# Once a round spends its allowance the agent still gets time to write up the notebook.
-_WRITE_UP_GRACE_SECONDS = 90
 # The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
 # is refused before it is read. A pending list of a few candidates is far smaller than its cap.
 MAX_PENDING_BYTES = 1024 * 1024
 MAX_CANDIDATE_BYTES = repo_tree.MAX_PATCH_BYTES
 CANDIDATE_MISSING = "candidate file must exist under agents/"
 CANDIDATE_TOO_LARGE = "candidate file is larger than a version may be"
-
-# With no example ids the call is a full evaluation over the whole visible pool,
-# which is what the server logs as progress; with ids it is a probe. HTTP 429
-# surfaces the BUDGET_EXHAUSTED marker the brief tells the agent to obey. The
-# JSON body is built with the runtime's own interpreter because the sandbox
-# image is not guaranteed to ship jq.
-EVAL_SCRIPT = """\
-#!/usr/bin/env bash
-# Usage: ./eval.sh <candidate_file> [example_id ...]
-set -euo pipefail
-CANDIDATE_FILE="$1"
-shift
-SERVER_URL="{server_url}"
-PYTHON="{python}"
-BODY=$(CANDIDATE_FILE="$CANDIDATE_FILE" "$PYTHON" -c 'import json, os, sys
-body = {{"candidate": open(os.environ["CANDIDATE_FILE"], encoding="utf-8").read()}}
-if sys.argv[1:]:
-    body["example_ids"] = sys.argv[1:]
-print(json.dumps(body))' "$@")
-RESPONSE=$(curl -s -w "\\n%{{http_code}}" -X POST "$SERVER_URL/{route}" \\
-    -H "Content-Type: application/json" -d "$BODY")
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | sed '$d')
-echo "$BODY"
-if [ "$HTTP_CODE" = "429" ]; then echo "{marker}" >&2; exit 1; fi
-if [ "$HTTP_CODE" != "200" ]; then echo "evaluator returned HTTP $HTTP_CODE" >&2; exit 1; fi
-"""
-
-# Repository mode: the candidate is the diff between the lab's ``repo/`` checkout
-# and the commit it started from. The rules file and the shared ``repo_tree``
-# module reject a diff the trusted scorer would refuse anyway, without spending
-# budget; the scorer still enforces the same rules on its own. Under a
-# constraints file the engine's evaluator wrapper refuses it instead, so the
-# block reaches the run log. Example ids are probes, as in text mode.
-REPO_EVAL_SCRIPT = """\
-#!/usr/bin/env bash
-# Usage: ./eval.sh [example_id ...]
-set -euo pipefail
-cd "$(dirname "$0")"
-PATCH_FILE=$(mktemp)
-trap 'rm -f "$PATCH_FILE"' EXIT
-git -C repo add --all
-git -C repo diff --cached --binary --no-color --no-ext-diff {base} > "$PATCH_FILE"
-SERVER_URL="{server_url}"
-PYTHON="{python}"
-BODY=$(PATCH_FILE="$PATCH_FILE" PYTHONPATH="{tools}" "$PYTHON" -c 'import json, os, sys
-import repo_tree
-try:
-    patch = open(os.environ["PATCH_FILE"], encoding="utf-8").read()
-except UnicodeDecodeError:
-    sys.exit("Not evaluated: a changed text file is not UTF-8.")
-rules = json.load(open(".repo-rules.json", encoding="utf-8"))
-problems = [] if rules["constrained"] else repo_tree.patch_violations(
-    patch, rules["editable_paths"], rules["readonly_paths"]
-)
-if problems:
-    sys.exit("Not evaluated:\\n" + "\\n".join(problems))
-body = {{"candidate": patch}}
-if sys.argv[1:]:
-    body["example_ids"] = sys.argv[1:]
-print(json.dumps(body))' "$@")
-RESPONSE=$(curl -s -w "\\n%{{http_code}}" -X POST "$SERVER_URL/{route}" \\
-    -H "Content-Type: application/json" --data-binary @- <<< "$BODY")
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | sed '$d')
-echo "$BODY"
-if [ "$HTTP_CODE" = "429" ]; then echo "{marker}" >&2; exit 1; fi
-if [ "$HTTP_CODE" != "200" ]; then echo "evaluator returned HTTP $HTTP_CODE" >&2; exit 1; fi
-"""
-
-CHECKOUT_SCRIPT = """\
-#!/usr/bin/env bash
-# Usage: ./checkout.sh <id>   (an archive id such as c003, or "base" for the starting commit)
-set -euo pipefail
-cd "$(dirname "$0")"
-VERSION="${{1:?usage: ./checkout.sh <id|base>}}"
-case "$VERSION" in *[!A-Za-z0-9]*) echo "unknown version: $VERSION" >&2; exit 2;; esac
-if [ "$VERSION" != "base" ] && [ ! -f "archive/$VERSION.patch" ]; then
-    echo "unknown version: $VERSION" >&2; exit 2
-fi
-git -C repo reset --quiet --hard {base}
-git -C repo clean --quiet -fd
-if [ "$VERSION" != "base" ] && [ -s "archive/$VERSION.patch" ]; then
-    git -C repo apply --binary --whitespace=nowarn "$PWD/archive/$VERSION.patch"
-fi
-echo "repo/ is now $VERSION"
-"""
-
-# Meta-Harness repository mode: a candidate is ``agents/<name>.patch``, the diff
-# of ``repo/`` against the starting commit when the proposer saved it. The same
-# rules check as ``eval.sh`` refuses a diff the trusted scorer would refuse, so
-# a bad candidate fails here instead of costing a benchmark. Under a
-# constraints file a refused diff moves to the blocks folder, which the engine
-# reads after each proposer turn to log the block.
-MH_SAVE_SCRIPT = """\
-#!/usr/bin/env bash
-# Usage: ./save.sh <name>   (writes repo/'s changes against the starting commit to agents/<name>.patch)
-set -euo pipefail
-cd "$(dirname "$0")"
-NAME="${{1:?usage: ./save.sh <name>}}"
-case "$NAME" in .*|*[!A-Za-z0-9_.-]*) echo "invalid candidate name: $NAME" >&2; exit 2;; esac
-PATCH_FILE="agents/$NAME.patch"
-git -C repo add --all
-git -C repo diff --cached --binary --no-color --no-ext-diff {base} > "$PATCH_FILE"
-PATCH_FILE="$PATCH_FILE" PYTHONPATH="{tools}" "{python}" -c 'import json, os, sys, time
-import repo_tree
-path = os.environ["PATCH_FILE"]
-try:
-    patch = open(path, encoding="utf-8").read()
-except UnicodeDecodeError:
-    os.remove(path)
-    sys.exit("Not saved: a changed text file is not UTF-8.")
-rules = json.load(open(".repo-rules.json", encoding="utf-8"))
-problems = repo_tree.patch_violations(patch, rules["editable_paths"], rules["readonly_paths"])
-if problems and rules["constrained"]:
-    os.makedirs("{blocks}", exist_ok=True)
-    os.replace(path, os.path.join("{blocks}", f"{{time.time_ns()}}.patch"))
-    sys.exit(repo_tree.ILLEGAL_ACTION_MESSAGE)
-if not patch.strip():
-    problems.append("repo/ has no changes against the starting commit.")
-if len(patch.encode("utf-8")) > repo_tree.MAX_PATCH_BYTES:
-    problems.append("The change is larger than a version may be.")
-if problems:
-    os.remove(path)
-    sys.exit("Not saved:\\n" + "\\n".join(problems))'
-echo "saved $PATCH_FILE"
-"""
-
-MH_RULE_BLOCKS_DIR = ".rule-blocks"
-
-MH_CHECKOUT_SCRIPT = """\
-#!/usr/bin/env bash
-# Usage: ./checkout.sh <name>   (a saved candidate such as seed, or "base" for the starting commit)
-set -euo pipefail
-cd "$(dirname "$0")"
-NAME="${{1:?usage: ./checkout.sh <name|base>}}"
-case "$NAME" in .*|*[!A-Za-z0-9_.-]*) echo "unknown candidate: $NAME" >&2; exit 2;; esac
-if [ "$NAME" != "base" ] && [ ! -f "agents/$NAME.patch" ]; then
-    echo "unknown candidate: $NAME" >&2; exit 2
-fi
-git -C repo reset --quiet --hard {base}
-git -C repo clean --quiet -fd
-if [ "$NAME" != "base" ] && [ -s "agents/$NAME.patch" ]; then
-    git -C repo apply --binary --whitespace=nowarn "$PWD/agents/$NAME.patch"
-fi
-echo "repo/ is now $NAME"
-"""
 
 
 def load_asset(relative: str) -> str:
@@ -575,176 +362,6 @@ class ProposerOutcome:
         raise ProposerFailedError(
             f"The proposer CLI session {name} failed (exit {self.returncode}): {detail[-_FAILURE_TAIL_CHARS:]}"
         )
-
-
-# Variables a proposer never inherits. The raw provider key and nested-session
-# flag follow upstream; the scorer/metric names keep any path or key the
-# parent's scorer uses out of the agent's reach.
-_PROPOSER_ENV_DROP = frozenset({"CLAUDECODE", "ANTHROPIC_API_KEY"})
-# The legacy spellings stay listed: an older control plane may still set them.
-_PROPOSER_ENV_DROP_PREFIXES = ("APP_SCORER", "APP_METRIC", "SKYNET_SCORER", "SKYNET_METRIC")
-
-
-def proposer_environment(environ: dict[str, str]) -> dict[str, str]:
-    """Copy the box environment for a proposer, without what it must not see.
-
-    Args:
-        environ: The runner's environment.
-
-    Returns:
-        The environment the proposer CLI runs with.
-    """
-    return {
-        name: value
-        for name, value in environ.items()
-        if name not in _PROPOSER_ENV_DROP and not name.startswith(_PROPOSER_ENV_DROP_PREFIXES)
-    }
-
-
-def run_proposer(
-    prompt: str,
-    *,
-    work_dir: Path,
-    log_dir: Path,
-    name: str,
-    model: str,
-    session_id: str,
-    resume: bool = False,
-    max_budget_usd: float | None = None,
-    tools: str | None = None,
-    append_system_prompt: str | None = None,
-    should_kill: Callable[[], bool] | None = None,
-) -> ProposerOutcome:
-    """Run the proposer through the ``claude`` command, exactly as the upstream drivers do.
-
-    The harness bridge answers to ``claude`` for the configured harness, so this
-    is the single invocation shape every proposer must answer.
-
-    Args:
-        prompt: Task prompt for this session.
-        work_dir: Workspace the agent edits.
-        log_dir: Where the CLI stdout, stderr and metadata land.
-        name: Log file stem, such as ``iter3`` or ``session2``.
-        model: Model identifier passed to the CLI.
-        session_id: Session to create or, with ``resume``, to continue.
-        resume: Whether to continue ``session_id`` instead of starting it.
-        max_budget_usd: Remaining proposer spend passed as ``--max-budget-usd``.
-        tools: Comma-separated tool whitelist, or ``None`` for the CLI default.
-        append_system_prompt: Extra system prompt (the Meta-Harness skill).
-        should_kill: Polled while the CLI runs; returning ``True`` terminates it.
-
-    Returns:
-        The parsed outcome; a CLI failure is reported, not raised.
-    """
-    cmd = ["claude", "--print", "--output-format", "json", "--model", model, "--dangerously-skip-permissions"]
-    cmd.extend(["--resume", session_id] if resume else ["--session-id", session_id])
-    if tools:
-        cmd.extend(["--tools", tools, "--allowedTools", tools])
-    if append_system_prompt:
-        cmd.extend(["--append-system-prompt", append_system_prompt])
-    if max_budget_usd is not None:
-        cmd.extend(["--max-budget-usd", f"{max(0.0, max_budget_usd):.6f}"])
-    cmd.append(prompt)
-    env = proposer_environment(dict(os.environ))
-    log_dir.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    killed = False
-    log_event(
-        "proposer.start",
-        f"Proposer session {name} started" + (" (resumed)" if resume else ""),
-        source="proposer",
-        session=name,
-        model=model,
-        resume=resume,
-        max_budget_usd=max_budget_usd,
-    )
-    with (
-        (log_dir / f"{name}_stdout.json").open("w", encoding="utf-8") as stdout_file,
-        (log_dir / f"{name}_stderr.txt").open("w", encoding="utf-8") as stderr_file,
-    ):
-        process = subprocess.Popen(
-            cmd, cwd=str(work_dir), env=env, stdout=stdout_file, stderr=stderr_file, text=True, start_new_session=True
-        )
-        while process.poll() is None:
-            if should_kill is not None and should_kill():
-                killed = True
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                break
-            time.sleep(_SESSION_POLL_SECONDS)
-    stdout = (log_dir / f"{name}_stdout.json").read_text(encoding="utf-8")
-    stderr = (log_dir / f"{name}_stderr.txt").read_text(encoding="utf-8")
-    document = _result_document(stdout)
-    outcome = ProposerOutcome(
-        session_id=str(document.get("session_id") or session_id),
-        cost_usd=float(document.get("total_cost_usd") or 0.0),
-        is_error=killed or process.returncode != 0 or bool(document.get("is_error")),
-        text=str(document.get("result") or ""),
-        budget_exhausted=BUDGET_EXHAUSTED_MARKER in stdout or BUDGET_EXHAUSTED_MARKER in stderr,
-        killed=killed,
-        returncode=process.returncode,
-        stderr_tail=stderr[-_FAILURE_TAIL_CHARS:],
-    )
-    duration = round(time.monotonic() - started, 1)
-    log_event(
-        "proposer.done",
-        f"Proposer session {name} {'failed' if outcome.is_error else 'finished'} in {duration}s, "
-        f"spent {outcome.cost_usd:.4f} dollars",
-        level=logging.WARNING if outcome.is_error and not killed else logging.INFO,
-        source="proposer",
-        session=name,
-        duration_s=duration,
-        cost_usd=outcome.cost_usd,
-        returncode=process.returncode,
-        killed=killed,
-        budget_exhausted=outcome.budget_exhausted,
-    )
-    log_refusals(document.get("refusals"), session=name)
-    if outcome.is_error:
-        # The runner's stderr reaches the job's run log; the CLI's own files die with the sandbox.
-        print(
-            f"[{name}] proposer CLI exited {process.returncode}"
-            f"{' after being stopped' if killed else ''}: {(stderr.strip() or outcome.text.strip())[-_FAILURE_TAIL_CHARS:]}",
-            file=sys.stderr,
-            flush=True,
-        )
-    (log_dir / f"{name}_meta.json").write_text(
-        json.dumps(
-            {
-                "session_id": outcome.session_id,
-                "returncode": process.returncode,
-                "cost_usd": outcome.cost_usd,
-                "is_error": outcome.is_error,
-                "killed": killed,
-                "duration_s": round(time.monotonic() - started, 1),
-            }
-        ),
-        encoding="utf-8",
-    )
-    return outcome
-
-
-def _result_document(stdout: str) -> dict[str, Any]:
-    """Find the ``claude --output-format json`` result object in captured stdout.
-
-    Args:
-        stdout: Captured CLI output.
-
-    Returns:
-        The result object, or an empty mapping when none parses.
-    """
-    for raw in (stdout.strip(), *reversed(stdout.strip().splitlines())):
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            continue
-        if isinstance(payload, dict) and ("result" in payload or "session_id" in payload):
-            return payload
-    return {}
 
 
 def _remaining_cost(max_token_cost: float | None, spent: float) -> float | None:
@@ -1045,11 +662,7 @@ class AutoResearchEngine:
         self.multi_round = bool(engine_config.pop("ralph", True))
         no_eval = engine_config.pop("max_no_eval_seconds", None)
         self.max_no_eval_seconds = None if no_eval is None else float(no_eval)
-        # ``checkout``, ``base``, ``editable_paths``, ``readonly_paths``,
-        # ``constrained`` (a constraints file governs the run) and ``tools``
-        # (the folder holding ``repo_tree.py``) for a repository run.
-        self.repo: dict[str, Any] | None = engine_config.pop("repo", None)
-        self.suffix = ".patch" if self.repo else ".txt"
+        self.suffix = ".txt"
         self.max_token_cost = config.max_token_cost
         self.stop_at_score = config.stop_at_score
         self.run_dir = Path(config.run_dir or "autoresearch-run").resolve()
@@ -1062,9 +675,6 @@ class AutoResearchEngine:
         self.example_ids: list[str] = []
         self._ids: dict[str, str] = {}
         self._lock = threading.Lock()
-        # Set by ``_layout`` when a repository run starts from a non-empty
-        # starting patch rather than from the fetched commit itself.
-        self.repo_seed = False
         self.seed = ""
 
     def run(self, task: Task, server: EvalServer) -> Result:
@@ -1149,20 +759,6 @@ class AutoResearchEngine:
         if notebook.is_file():
             shutil.copyfile(notebook, target / "notebook.md")
 
-    def _refuse_blocked(self, candidate: str) -> None:
-        """Stop a version the constraints file refuses before it uses any budget.
-
-        Args:
-            candidate: The version's diff.
-
-        Raises:
-            RuntimeError: With the illegal-action message, which the evaluation
-                server returns to ``eval.sh``.
-        """
-        refusal = blocked_patch(self.repo, candidate) if self.repo else None
-        if refusal:
-            raise RuntimeError(refusal)
-
     def _record(self, server: EvalServer) -> Callable[[], None]:
         """Capture every evaluator answer the agent receives, per example.
 
@@ -1191,7 +787,6 @@ class AutoResearchEngine:
                 Returns:
                     The server's score and side information.
                 """
-                self._refuse_blocked(candidate)
                 score, info = original(candidate, example_ids=example_ids, split=split)
                 scores = {str(k): float(v) for k, v in (info.get("scores") or {}).items()}
                 feedback = {str(k): _feedback_text(v) for k, v in (info.get("infos") or {}).items()}
@@ -1222,7 +817,6 @@ class AutoResearchEngine:
             Returns:
                 The server's score and side information.
             """
-            self._refuse_blocked(candidate)
             score, info = original_single(candidate, example, **kwargs)
             # Upstream checkpoints only dataset sweeps; without one the run
             # view would never see a version, so each answer is its checkpoint.
@@ -1355,137 +949,20 @@ class AutoResearchEngine:
 
         Args:
             task: Task providing the seed and description.
-            server: Evaluation server whose URL ``eval.sh`` targets.
+            server: Evaluation server of the run; the lab layout does not use it.
         """
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir)
-        for sub in ("archive", "frontier") if self.repo else ("archive", "frontier", "work"):
+        for sub in ("archive", "frontier", "work"):
             (self.work_dir / sub).mkdir(parents=True)
-        route = "evaluate_examples" if self.example_ids else "evaluate"
-        brief = task_brief(task, self.example_ids)
-        if self.repo:
-            brief += repo_rules(self.repo)
-            (self.work_dir / "repo").symlink_to(Path(self.repo["checkout"]), target_is_directory=True)
-            rules = {
-                "editable_paths": self.repo["editable_paths"],
-                "readonly_paths": self.repo["readonly_paths"],
-                "constrained": bool(self.repo.get("constrained")),
-            }
-            (self.work_dir / ".repo-rules.json").write_text(json.dumps(rules), encoding="utf-8")
-            script = REPO_EVAL_SCRIPT.format(
-                server_url=server.url,
-                route=route,
-                marker=BUDGET_EXHAUSTED_MARKER,
-                python=sys.executable,
-                tools=self.repo["tools"],
-                base=self.repo["base"],
-            )
-            checkout_script = self.work_dir / "checkout.sh"
-            checkout_script.write_text(CHECKOUT_SCRIPT.format(base=self.repo["base"]), encoding="utf-8")
-            checkout_script.chmod(0o755)
-            seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
-            self.repo_seed = bool(seed.strip())
-            if self.repo_seed:
-                # The seed stays a patch against the fetched commit, so every
-                # version the agent saves still diffs against that commit.
-                (self.work_dir / "archive" / f"seed{self.suffix}").write_text(seed, encoding="utf-8")
-                subprocess.run(["./checkout.sh", "seed"], cwd=self.work_dir, check=True, capture_output=True)
-        else:
-            (self.work_dir / "work" / "seed.txt").write_text(seed_as_text(task.seed_candidate), encoding="utf-8")
-            script = EVAL_SCRIPT.format(
-                server_url=server.url, route=route, marker=BUDGET_EXHAUSTED_MARKER, python=sys.executable
-            )
-        (self.work_dir / "TASK.md").write_text(brief, encoding="utf-8")
-        eval_script = self.work_dir / "eval.sh"
-        eval_script.write_text(script, encoding="utf-8")
-        eval_script.chmod(0o755)
-        (self.work_dir / "BRIEF.md").write_text(self._repo_brief() if self.repo else self._brief(), encoding="utf-8")
+        (self.work_dir / "work" / "seed.txt").write_text(seed_as_text(task.seed_candidate), encoding="utf-8")
+        (self.work_dir / "TASK.md").write_text(task_brief(task, self.example_ids), encoding="utf-8")
+        (self.work_dir / "BRIEF.md").write_text(self._brief(), encoding="utf-8")
         (self.work_dir / "notebook.md").write_text(
             "# Research notebook\n\nOne section per round: hypotheses, experiments, outcomes, conclusions.\n",
             encoding="utf-8",
         )
         (self.work_dir / "archive" / "index.tsv").write_text("id\tscore\tround\n", encoding="utf-8")
-
-    def _repo_brief(self) -> str:
-        """Write the standing research method for a repository run.
-
-        Returns:
-            The ``BRIEF.md`` text.
-        """
-        probe = (
-            "- `./eval.sh <example_id> [<example_id> ...]` is a **probe**: it scores `repo/` on just those examples "
-            "and costs one unit per example. Probes check whether a change moves the examples it targets; they "
-            "never enter the leaderboard.\n"
-            if self.example_ids
-            else ""
-        )
-        full = (
-            "one unit per visible example (see `TASK.md`)"
-            if self.example_ids
-            else "one unit, since the evaluator scores the repository as a whole"
-        )
-        seed = (
-            "- The run starts from a starting version, `archive/seed.patch`, not from the bare starting commit. "
-            "`repo/` holds it when the run begins, and `./checkout.sh seed` restores it.\n"
-            if self.repo_seed
-            else ""
-        )
-        return (
-            "# Research brief\n\n"
-            "You are running one round of a multi-round research effort to improve a code repository against a "
-            "fixed evaluator. `TASK.md` says what the change is for, how it is judged and which paths you may "
-            "edit. Higher scores are better.\n\n"
-            "## Files\n\n"
-            "- `repo/` is a git checkout of the repository. Edit it in place: its files are the version you are "
-            "working on. Only the editable paths in `TASK.md` may change.\n"
-            "- `TASK.md`, `BRIEF.md`, `STATE.md`, `eval.sh`, `checkout.sh`, `frontier/` and `archive/` are "
-            "maintained by the engine. Read them; never edit them.\n"
-            "- `STATE.md` is rewritten before every round: the leaderboard, the Pareto frontier of versions that "
-            "win on different examples, the failure dossier, this round's **directive** and your evaluation "
-            "allowance.\n"
-            "- Versions are patches against the starting commit. `frontier/<id>.patch` holds the current frontier; "
-            "`archive/<id>.patch` holds every version that ever received a full evaluation, with scores in "
-            "`archive/index.tsv`.\n"
-            "- `./checkout.sh <id>` resets `repo/` to that version, and `./checkout.sh base` to the starting "
-            "commit. It throws away unsaved work in `repo/`.\n"
-            f"{seed}"
-            "- `notebook.md` is yours and is the only memory that survives between rounds. Later rounds, "
-            "possibly a different session of you, depend on it.\n\n"
-            "## Evaluating\n\n"
-            f"- `./eval.sh` is a **full evaluation** of `repo/` as it stands: it costs {full} and is the only way "
-            "a version enters the leaderboard.\n"
-            f"{probe}"
-            "- The evaluator scores the difference between `repo/` and the starting commit. Files the repository "
-            "ignores are left out, and commits you make do not matter, only the files. It applies that difference "
-            "to a fresh checkout, runs the repository's setup and then the scorer, which you cannot run here. "
-            "This sandbox is offline, so local builds and tests may lack dependencies.\n"
-            "- A change outside the editable paths is refused before it is scored and costs nothing.\n"
-            f"- If `eval.sh` prints `{BUDGET_EXHAUSTED_MARKER}`, the budget is spent: write up the notebook and end "
-            "the session.\n"
-            "- Never score the same state twice; every call spends budget.\n\n"
-            "## Method for a round\n\n"
-            "1. **Orient.** Read `STATE.md`, then `notebook.md`. Do not rerun a hypothesis the notebook already "
-            "refuted unless you have a new reason, and say what the reason is.\n"
-            "2. **Diagnose.** Study the failure dossier and the evaluator feedback, and read the code it points "
-            "to. Name concrete failure modes, each tied to the examples that show it.\n"
-            "3. **Hypothesize.** Under a `## Round N` heading in `notebook.md`, write two to four falsifiable "
-            "hypotheses. For each: the change, why it should help, and which examples it should move.\n"
-            "4. **Experiment.** Test one hypothesis per version: `./checkout.sh` a frontier version, make one "
-            "focused change in `repo/`, and evaluate it. Write the hypothesis down before you evaluate, and the "
-            "result right after.\n"
-            "5. **Conclude.** Mark each hypothesis confirmed, refuted or inconclusive, with the evidence. Record "
-            "what you learned about the code, not just the number.\n"
-            "6. **Consolidate.** Stack the confirmed changes into one version of `repo/` and give it a full "
-            "evaluation before the round's allowance runs out.\n\n"
-            "## Standards\n\n"
-            "- Follow the round's directive in `STATE.md`; it is chosen from the evidence of earlier rounds.\n"
-            "- Keep the repository working. The final result is measured afresh, so a change that only helps "
-            "because it special-cases an example, or weakens the checks that judge it, is not an improvement.\n"
-            "- Between two versions with the same score, the smaller diff is better. A change that deletes code "
-            "and keeps the score is a win.\n"
-            "- There is no human to ask. End the session once the allowance is spent or the directive is done; "
-            "the engine starts the next round with fresh evidence.\n"
-        )
 
     def _brief(self) -> str:
         """Write the standing research method every round follows.
@@ -1609,19 +1086,7 @@ class AutoResearchEngine:
         Returns:
             Markdown for the directive section.
         """
-        leader = self._ids[front[0]] if front else ("the starting commit" if self.repo else "the seed")
-        if directive == "survey" and self.repo_seed:
-            return (
-                "**Survey.** First give the starting version a full evaluation (`./checkout.sh seed`, then "
-                "`./eval.sh`) to anchor the baseline. Then map the failure modes across examples and test your most "
-                "promising hypotheses."
-            )
-        if directive == "survey" and self.repo:
-            return (
-                "**Survey.** First give the untouched checkout a full evaluation (`./checkout.sh base`, then "
-                "`./eval.sh`) to anchor the baseline. Then map the failure modes across examples and test your most "
-                "promising hypotheses."
-            )
+        leader = self._ids[front[0]] if front else "the seed"
         if directive == "survey":
             return (
                 "**Survey.** First give `work/seed.txt` a full evaluation as-is to anchor the baseline. Then map the "
@@ -1641,9 +1106,7 @@ class AutoResearchEngine:
                     "of it cause those wins and graft them into the leader without losing the leader's own wins."
                 )
         if directive == "pivot":
-            angle = (
-                "take a different approach in the code" if self.repo else "rewrite the candidate from a different angle"
-            )
+            angle = "rewrite the candidate from a different angle"
             return (
                 f"**Pivot.** {_PIVOT_AFTER} rounds in a row did not beat `{leader}`: small edits have stalled. Make a "
                 f"structural change: {angle}, or start from a frontier member other than the leader. Keep what the "
@@ -1706,51 +1169,6 @@ class AutoResearchEngine:
             "directory, and carry out the round as the brief describes. Record everything in `notebook.md`."
         )
 
-    def _session(self, server: EvalServer, directive: str, *, max_budget_usd: float | None) -> ProposerOutcome:
-        """Run one round's agent session under the stall and allowance watchdogs.
-
-        Args:
-            server: Evaluation server whose usage counter proves progress.
-            directive: This round's directive.
-            max_budget_usd: Remaining proposer spend.
-
-        Returns:
-            The session outcome.
-        """
-        start_used = server.budget.used
-        quota = self._round_quota(server)
-        last_used = start_used
-        last_progress = time.monotonic()
-        spent_at: float | None = None
-
-        def should_kill() -> bool:
-            """End a session that stalled or overran its allowance by more than the write-up grace.
-
-            Returns:
-                ``True`` when the session must end.
-            """
-            nonlocal last_used, last_progress, spent_at
-            now = time.monotonic()
-            if server.budget.used != last_used:
-                last_used = server.budget.used
-                last_progress = now
-            if quota is not None and server.budget.used - start_used >= quota:
-                spent_at = spent_at if spent_at is not None else now
-                if now - spent_at >= _WRITE_UP_GRACE_SECONDS:
-                    return True
-            return self.max_no_eval_seconds is not None and now - last_progress >= self.max_no_eval_seconds
-
-        return run_proposer(
-            self._round_prompt(directive),
-            work_dir=self.work_dir,
-            log_dir=self.run_dir / "sessions",
-            name=f"round{self.round}",
-            model=self.model,
-            session_id=str(uuid.uuid4()),
-            max_budget_usd=max_budget_usd,
-            should_kill=should_kill,
-        )
-
     def _done(self, server: EvalServer, outcome: ProposerOutcome, evals_before: int, stale: int) -> bool:
         """Decide whether another round is worth starting.
 
@@ -1807,7 +1225,6 @@ class AutoResearchEngine:
                 "frontier": [{"id": self._ids[c], "score": round(ranking[c], 6)} for c in pareto_front(table, ranking)],
                 "work_dir": str(self.work_dir),
                 "seed_len": len(seed_as_text(task.seed_candidate)),
-                **({"repository": True} if self.repo else {}),
             },
         )
 
@@ -1839,11 +1256,7 @@ class MetaHarnessEngine:
         self.candidates_per_iter = max(1, int(engine_config.pop("max_candidates_per_iter", 3)))
         self.max_token_cost = config.max_token_cost
         self.stop_at_score = config.stop_at_score
-        # ``checkout``, ``base``, ``editable_paths``, ``readonly_paths``,
-        # ``constrained`` (a constraints file governs the run) and ``tools``
-        # (the folder holding ``repo_tree.py``) for a repository run.
-        self.repo: dict[str, Any] | None = engine_config.pop("repo", None)
-        self.suffix = ".patch" if self.repo else ".txt"
+        self.suffix = ".txt"
         self.run_dir = Path(config.run_dir or "meta-harness-run").resolve()
         self.work_dir = self.run_dir / "meta_harness"
         self.logs_dir = self.work_dir / "logs" / "run"
@@ -1924,25 +1337,6 @@ class MetaHarnessEngine:
         seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
         (self.work_dir / "agents" / f"seed{self.suffix}").write_text(seed, encoding="utf-8")
         brief = task_brief(task, self.example_ids)
-        if self.repo:
-            brief += repo_rules(self.repo)
-            (self.work_dir / "repo").symlink_to(Path(self.repo["checkout"]), target_is_directory=True)
-            rules = {
-                "editable_paths": self.repo["editable_paths"],
-                "readonly_paths": self.repo["readonly_paths"],
-                "constrained": bool(self.repo.get("constrained")),
-            }
-            (self.work_dir / ".repo-rules.json").write_text(json.dumps(rules), encoding="utf-8")
-            scripts = {
-                "save.sh": MH_SAVE_SCRIPT.format(
-                    base=self.repo["base"], tools=self.repo["tools"], python=sys.executable, blocks=MH_RULE_BLOCKS_DIR
-                ),
-                "checkout.sh": MH_CHECKOUT_SCRIPT.format(base=self.repo["base"]),
-            }
-            for name, text in scripts.items():
-                (self.work_dir / name).write_text(text, encoding="utf-8")
-                (self.work_dir / name).chmod(0o755)
-            subprocess.run(["./checkout.sh", "seed"], cwd=self.work_dir, check=True, capture_output=True)
         (self.work_dir / "task.md").write_text(brief, encoding="utf-8")
         skill_dir = self.work_dir / ".claude" / "skills" / "meta-harness"
         skill_dir.mkdir(parents=True)
@@ -2045,10 +1439,7 @@ class MetaHarnessEngine:
             (
                 "1. Copy a top-performing base system to `agents/<name>.py`, then make targeted modifications. This "
                 "copy-then-edit approach ensures correct imports and proven patterns.",
-                "1. Run `./checkout.sh <base>` to reset `repo/` to a top-performing candidate, then make targeted "
-                "changes to the code in `repo/`. This checkout-then-edit approach keeps proven patterns."
-                if self.repo
-                else "1. Copy a top-performing base candidate to `agents/<name>.txt`, then make targeted modifications. "
+                "1. Copy a top-performing base candidate to `agents/<name>.txt`, then make targeted modifications. "
                 "This copy-then-edit approach keeps proven patterns.",
             ),
             (
@@ -2059,18 +1450,7 @@ class MetaHarnessEngine:
                 "4. Validate: `uv run python -c \"from text_classification.agents.<name> import *; print('OK')\"`\n\n"
                 "Do not edit `config.yaml` just to register candidates. The benchmark auto-discovers files in "
                 "`agents/`.",
-                (
-                    "After implementing, re-read your diff and check: does this candidate introduce a genuinely NEW "
-                    "mechanism, or is it just a parameter variant? If the code is identical to the base except for "
-                    "constants, REWRITE with a truly novel mechanism.\n"
-                    "4. Save: `./save.sh <name>` writes `repo/`'s whole change against the starting commit to "
-                    "`agents/<name>.patch` and checks it only touches files you may change; it must print `saved`. "
-                    "Then move on to the next candidate with `./checkout.sh`.\n\n"
-                    "Do not edit `task.md` or write patch files by hand. The benchmark applies exactly the patches "
-                    "listed in `pending_eval.json` to a fresh checkout of the starting commit."
-                )
-                if self.repo
-                else "After writing, re-read the file and check: does this candidate introduce a genuinely NEW "
+                "After writing, re-read the file and check: does this candidate introduce a genuinely NEW "
                 "mechanism, or is it just a cosmetic variant? If it is identical to the base except for a few "
                 "words or numbers, REWRITE with a truly novel mechanism.\n"
                 "4. Validate: `test -s agents/<name>.txt && echo OK` — the file must exist and be non-empty; its "
@@ -2083,24 +1463,12 @@ class MetaHarnessEngine:
                 "## MemorySystem Interface",
                 "- Test results: `results/<dataset>/<memory>/<model>/test.json` (separate dir, never exposed during "
                 "evolution)",
-                (
-                    "## Candidate Format\n\n"
-                    "- `repo/` is a git checkout of the repository under optimization; edit its code in place.\n"
-                    "- Each candidate is a patch `agents/<name>.patch` made by `./save.sh <name>`: `repo/`'s change "
-                    "against the starting commit. The evaluator applies it to a fresh checkout, runs the "
-                    "repository's setup and scorer, which you cannot run here.\n"
-                    "- `./checkout.sh <name>` resets `repo/` to a saved candidate, and `./checkout.sh base` to the "
-                    "starting commit. It throws away unsaved work in `repo/`.\n"
-                    "- `task.md` says what the repository is for, how it is judged and which paths you may change.\n"
-                    "- `agents/seed.patch` is the starting candidate the run began from.\n\n"
-                    if self.repo
-                    else "## Candidate Format\n\n"
-                    "- Each candidate is a plain text file under `agents/`; its whole content is submitted to the "
-                    "evaluator.\n"
-                    "- `task.md` says what the candidate is for and how it is judged.\n"
-                    "- `agents/seed.txt` is the starting candidate the run began from.\n\n"
-                )
-                + "## Directory Structure\n\n"
+                "## Candidate Format\n\n"
+                "- Each candidate is a plain text file under `agents/`; its whole content is submitted to the "
+                "evaluator.\n"
+                "- `task.md` says what the candidate is for and how it is judged.\n"
+                "- `agents/seed.txt` is the starting candidate the run began from.\n\n"
+                "## Directory Structure\n\n"
                 "- Val results: `results/<candidate>/val.json` (`avg_val` plus per-example `scores` and evaluator "
                 "`infos`)\n"
                 "- Frontier: `frontier_val.json` (`_pareto` ranks candidates by average score; every other key "
@@ -2145,13 +1513,7 @@ class MetaHarnessEngine:
             f"- `{logs / 'reports'}/` — post-eval reports\n"
             f"- `{logs / 'results'}/<candidate>/val.json` — per-example scores and evaluator feedback\n"
             f"- Write pending_eval.json to: `{logs / 'pending_eval.json'}`\n\n"
-            + (
-                "Each candidate is a change to the repository checked out in `repo/`: edit it in place and save "
-                "each candidate with `./save.sh <name>`.\n\n"
-                if self.repo
-                else ""
-            )
-            + "Follow the meta-harness skill in `.claude/skills/meta-harness/SKILL.md`."
+            "Follow the meta-harness skill in `.claude/skills/meta-harness/SKILL.md`."
         )
 
     def _iteration(self, server: EvalServer, iteration: int, remaining_cost: float | None) -> None:
@@ -2180,7 +1542,6 @@ class MetaHarnessEngine:
         propose_seconds = time.monotonic() - started
         self.cost_usd += outcome.cost_usd
         self.session_ids.append(outcome.session_id)
-        self._log_save_blocks()
         outcome.raise_if_failed(f"iter{iteration}")
         candidates = self._read_pending(pending)
         if not candidates:
@@ -2245,46 +1606,6 @@ class MetaHarnessEngine:
             best=new_best[1] if new_best else None,
         )
 
-    def _propose(self, iteration: int, remaining_cost: float | None) -> ProposerOutcome:
-        """Run one proposer session over the work folder, which leaves ``pending_eval.json`` behind.
-
-        The worker host (SKY-722) replaces this session with its own tool loop;
-        the rest of the iteration stays the same.
-
-        Args:
-            iteration: One-based iteration number.
-            remaining_cost: Proposer spend still allowed, or ``None``.
-
-        Returns:
-            The session's outcome.
-        """
-        (self.logs_dir / "pending_eval.json").unlink(missing_ok=True)
-        return run_proposer(
-            self._task_prompt(iteration),
-            work_dir=self.work_dir,
-            log_dir=self.logs_dir / "claude_sessions",
-            name=f"iter{iteration}",
-            model=self.model,
-            session_id=str(uuid.uuid4()),
-            max_budget_usd=remaining_cost,
-            tools=META_HARNESS_TOOLS,
-            append_system_prompt=self.skill(),
-        )
-
-    def _log_save_blocks(self) -> None:
-        """Log each diff ``save.sh`` refused under the constraints file, then drop it.
-
-        The diffs are checked again here, so a file the agent wrote into the
-        folder becomes an event only when it truly breaks the path rules.
-        """
-        blocks = self.work_dir / MH_RULE_BLOCKS_DIR
-        if not self.repo or not blocks.is_dir():
-            return
-        for path in sorted(blocks.glob("*.patch")):
-            with contextlib.suppress(OSError, UnicodeDecodeError):
-                blocked_patch(self.repo, path.read_text(encoding="utf-8"))
-            path.unlink(missing_ok=True)
-
     def _read_pending(self, pending: Path) -> list[dict[str, Any]]:
         """Read the proposer's ``pending_eval.json`` candidate list.
 
@@ -2337,21 +1658,12 @@ class MetaHarnessEngine:
                 return CANDIDATE_TOO_LARGE
         except (OSError, RuntimeError):
             return CANDIDATE_MISSING
-        if self.repo and path.suffix != self.suffix:
-            return "candidate file must be a patch saved by save.sh"
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return "candidate file is not UTF-8 text"
         if not text.strip():
             return "candidate file is empty"
-        if self.repo:
-            refusal = blocked_patch(self.repo, text)
-            if refusal:
-                return refusal
-            problems = repo_tree.patch_violations(text, self.repo["editable_paths"], self.repo["readonly_paths"])
-            if problems:
-                return "; ".join(problems)
         return None
 
     def _benchmark(self, server: EvalServer, name: str, candidate: str) -> float:

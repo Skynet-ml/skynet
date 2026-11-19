@@ -11,9 +11,8 @@ from pathlib import Path
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
 
-from ..harness import GatewayConfig, build_launch, pinned_harness_check
+from ..harness import GatewayConfig
 from ..harness_bridge import parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.base import _version_check
@@ -27,7 +26,6 @@ from ..harnesses.openhands_sdk import (
 )
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
-_RELAY = "http://127.0.0.1:3210/v1"
 _DIRECT_KEYS = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -382,61 +380,6 @@ def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 
 
-def test_protected_launch_checks_the_pin_offline_and_rewrites_the_runner_to_the_relay(tmp_path: Path) -> None:
-    """Protected mode uses the version probe, offline uv env, and points the runner at the local relay."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True)
-
-    assert launch.install_command is not None
-    assert launch.install_command == pinned_harness_check(HARNESS_ID)
-    assert "pip install" not in launch.install_command
-    assert launch.env["UV_OFFLINE"] == "1"
-    assert launch.env["DO_NOT_TRACK"] == "1"
-    assert launch.env["OPENHANDS_SUPPRESS_BANNER"] == "1"
-    for name in _DIRECT_KEYS:
-        assert launch.env[name] == ""
-    for name, content in launch.files.items():
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    subprocess.run(
-        launch.run_command,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
-        timeout=10,
-        check=True,
-    )
-    runner = (tmp_path / RUNNER_FILE).read_text()
-    assert _GATEWAY.url not in runner
-    assert f"GATEWAY_URL = {_RELAY!r}" in runner
-
-
-@pytest.mark.parametrize(("reported", "ok"), [("1.61.0", True), ("1.61.1", False), ("11.61.0", False)])
-def test_pinned_check_accepts_only_the_exact_sdk_version(tmp_path: Path, reported: str, ok: bool) -> None:
-    """The offline probe passes only when the warmed script reports the pinned SDK release."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text(f"#!/bin/sh\necho {reported}\n")
-    fake_uv.chmod(0o755)
-    check = pinned_harness_check(HARNESS_ID)
-    assert check is not None
-
-    result = subprocess.run(
-        check,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
-        timeout=10,
-        check=False,
-    )
-
-    assert (result.returncode == 0) is ok
-
-
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
     """Against a fake SDK, the runner points the LLM at the gateway, drops direct keys and prints parseable output."""
     launch = SPEC.launch("claude-sonnet-4-5", _GATEWAY, reasoning_effort="high")
@@ -490,50 +433,6 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     assert list((workspace / ".app/openhands_sdk").iterdir()) == [workspace / RUNNER_FILE]
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
     assert result.stdout.strip().count("\n") == 0
-
-
-def test_protected_runner_gives_the_agent_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
-    """Give each [proposer] server one streamable HTTP entry at the relay in ``Agent.mcp_config`` (SKY-621)."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True, mcp_servers=("search", "my tools"))
-    ws = tmp_path / "ws"
-    for name, content in launch.files.items():
-        path = ws / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    rewrite = launch.run_command.split(" && ", 1)[0]
-    subprocess.run(rewrite, shell=True, cwd=ws, env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY}, check=True)
-    runner = (ws / RUNNER_FILE).read_text()
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("Fix the bug.\n")
-    record = tmp_path / "record.json"
-
-    result = _run_runner(
-        tmp_path,
-        {RUNNER_FILE: runner},
-        **{**launch.env, "APP_API_KEY": "k", "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(record.read_text())["mcp_config"] == {
-        "search": {"url": f"{_RELAY}/mcp/search", "transport": "http"},
-        "my tools": {"url": f"{_RELAY}/mcp/my%20tools", "transport": "http"},
-    }
-    assert _GATEWAY.url not in runner
-    assert _GATEWAY.api_key not in runner
-
-
-def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
-    """Keep the runner as before when the proposer's file lists no server."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True)
-
-    assert "mcp_config" not in launch.files[RUNNER_FILE]
-    assert "agent = Agent(llm=llm, tools=tools, agent_context=" in launch.files[RUNNER_FILE]
 
 
 def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:

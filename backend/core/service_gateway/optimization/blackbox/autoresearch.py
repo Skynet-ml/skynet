@@ -448,7 +448,6 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             server: The upstream server adapter.
         """
         super()._layout(task, server)
-        (self.work_dir / "eval.sh").unlink()
         if self._repo is not None:
             rules = native_engines.repo_rules(
                 {"editable_paths": self._repo.editable_paths or (".",), "readonly_paths": self._repo.readonly_paths}

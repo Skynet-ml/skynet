@@ -29,7 +29,7 @@ from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 
-from .. import native_engines, native_runtime, runner
+from .. import native_runtime, runner
 from ..native_runtime import NATIVE_TASK_FIELDS, assert_metric_absent, native_task_payload
 from ..protocol import Task
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
@@ -136,22 +136,6 @@ def test_the_metric_tree_reaches_only_the_metric_box(tree_layer: tuple[TreeStore
     assert _files(trees, outputs)["answer.txt"] == _files(trees, again)["answer.txt"] == b"clean\n"
     assert metrics.files == [["./metric/score.py", "./outputs/answer.txt", "./outputs/solver.py"]]
     assert all(not name.startswith("./metric") for listing in candidates.files for name in listing)
-
-
-def test_proposer_environment_drops_scorer_variables() -> None:
-    """Keep the harness key and paths a proposer needs, drop scorer and nested-session variables."""
-    env = native_engines.proposer_environment(
-        {
-            "PATH": "/bin",
-            "APP_API_KEY": "route",
-            "SKYNET_SCORER_DIR": "/private/scorer",
-            "SKYNET_METRIC_PATH": "/private/metric.py",
-            "CLAUDECODE": "1",
-            "ANTHROPIC_API_KEY": "raw",
-        }
-    )
-
-    assert env == {"PATH": "/bin", "APP_API_KEY": "route"}
 
 
 # --- The candidate box C and the metric box M of a repository evaluation (SKY-398) ---

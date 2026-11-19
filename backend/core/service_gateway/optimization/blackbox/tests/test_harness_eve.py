@@ -2,26 +2,20 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import io
 import json
 import os
 import shutil
 import signal
 import subprocess
-import tarfile
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_HARNESS_EVE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.models.blackbox import BLACKBOX_HARNESS_EVE, BLACKBOX_HARNESSES
 
-from .. import repo_tree
-from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import (
     GUARD_REFUSAL,
     _Monitor,
@@ -30,17 +24,12 @@ from ..harness_bridge import (
     parse_output,
     parse_pi_output,
     tool_call_ids,
-    workspace_files,
 )
 from ..harnesses import REGISTRY
-from ..harnesses.base import _temp_root
 from ..harnesses.eve import (
     _NODE_CHECK,
     AI_SDK_VERSION,
     EVE_CHANNEL,
-    EVE_DISABLE_AGENT_TOOL,
-    EVE_IMAGE_DEPS,
-    EVE_INSTRUCTIONS_FILE,
     EVE_REASONING_LEVELS,
     EVE_RUNNER,
     EVE_SANDBOX,
@@ -52,7 +41,6 @@ from ..harnesses.eve import (
 _SANDBOX_RUNTIME = Path(__file__).resolve().parents[5] / "sandbox-runtime"
 _NODE = shutil.which("node")
 
-_GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _PROVIDER_KEYS = (
     "AI_GATEWAY_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -84,18 +72,6 @@ _RUNNER_SAMPLE = "\n".join(
 )
 
 
-def _target(**overrides: str) -> BlackboxTarget:
-    """Build an eve agent target.
-
-    Args:
-        overrides: Extra target fields.
-
-    Returns:
-        The target.
-    """
-    return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, model="openrouter/acme/agent-1", harness="eve", **overrides)
-
-
 def test_eve_is_registered_after_prime_and_before_cline() -> None:
     """List eve in the registry and the model ids after prime and before cline, at a unique position."""
     spec = REGISTRY[BLACKBOX_HARNESS_EVE]
@@ -103,165 +79,6 @@ def test_eve_is_registered_after_prime_and_before_cline() -> None:
     assert [other.id for other in REGISTRY.values() if other.position == spec.position] == ["eve"]
     for names in (list(BLACKBOX_HARNESSES), list(REGISTRY)):
         assert names.index("prime") < names.index("eve") < names.index("cline")
-
-
-# Fake ``npm`` and ``node`` for the run command: npm leaves node_modules and a
-# lockfile in its cwd, ``eve build`` leaves build output, and the runner copies
-# the project it got to $RECORD_DIR, then edits main.py as the agent would.
-# ``node -e`` is the Node version check, which passes unless $FAKE_NODE_OLD is set.
-# With $FAKE_KILL_SHELL set, the check SIGKILLs the run's shell, as the bridge
-# does at a timeout, so the EXIT trap does not run. The check is not the
-# shell's last command, so its parent is that shell.
-_FAKE_NPM = """#!/bin/sh
-if [ -n "$FAKE_NPM_FAILS" ]; then exit 1; fi
-mkdir -p node_modules/.bin node_modules/eve
-echo '{}' > package-lock.json
-echo 'module.exports = {}' > node_modules/eve/index.js
-printf '#!/bin/sh\\nmkdir -p .eve && echo built > .eve/server.mjs\\n' > node_modules/.bin/eve
-chmod +x node_modules/.bin/eve
-"""
-_FAKE_NODE = """#!/bin/sh
-if [ "$1" = "-e" ]; then
-  if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
-  if [ -n "$FAKE_NODE_OLD" ]; then echo "eve needs Node 24 or newer; found v22.0.0" >&2; exit 1; fi
-  exit 0
-fi
-cp -R "$EVE_PROJECT_DIR/." "$RECORD_DIR/"
-echo "$EVE_PROJECT_DIR" > "$RECORD_DIR/.project_dir"
-echo "$EVE_WORKSPACE" > "$RECORD_DIR/.workspace"
-if [ -f main.py ]; then echo 'print(2)' > main.py; fi
-"""
-
-
-def _run_with_fakes(
-    run_command: str, workspace: Path, tmp_path: Path, *, check: bool = True, temp: Path | None = None, **env: str
-) -> Path:
-    """Run the real eve run command with fake ``npm`` and ``node`` on PATH.
-
-    Args:
-        run_command: The launch run command.
-        workspace: The run workspace, which holds the launch files.
-        tmp_path: Test folder for the fakes, TMPDIR and the record.
-        check: Fail the test when the run command exits non-zero.
-        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
-        **env: Extra environment variables.
-
-    Returns:
-        The folder that holds a copy of the eve project the runner received.
-    """
-    fakes = tmp_path / "fakes"
-    fakes.mkdir()
-    for name, body in (("npm", _FAKE_NPM), ("node", _FAKE_NODE)):
-        (fakes / name).write_text(body)
-        (fakes / name).chmod(0o755)
-    record = tmp_path / "record"
-    record.mkdir()
-    temp = temp or tmp_path / "tmp"
-    temp.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["/bin/sh", "-c", run_command],
-        cwd=workspace,
-        env={
-            "PATH": f"{fakes}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
-            "HOME": str(tmp_path),
-            "TMPDIR": str(temp),
-            "RECORD_DIR": str(record),
-            **env,
-        },
-        timeout=30,
-        check=check,
-    )
-    return record
-
-
-def _write_launch_files(launch_files: dict[str, str], instructions_file: str, root: Path) -> None:
-    """Write the launch files and the instructions the way the bridge does.
-
-    Args:
-        launch_files: Workspace-relative path to content.
-        instructions_file: Workspace-relative instructions path.
-        root: The workspace.
-    """
-    for name, content in launch_files.items():
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    (root / instructions_file).write_text("instructions\n")
-
-
-def test_launch_generates_a_pinned_eve_project(tmp_path: Path) -> None:
-    """Write package.json with exact pins, an agent on the gateway, and the runner."""
-    launch = build_launch(_target(), _GATEWAY)
-    assert launch.instructions_file == EVE_INSTRUCTIONS_FILE == ".app/eve/agent/instructions.md"
-    assert set(launch.files) == {".app/eve/agent/agent.ts"}
-    agent = launch.files[".app/eve/agent/agent.ts"]
-    assert 'baseURL: "https://gw.example/v1"' in agent
-    assert "apiKey: process.env.APP_API_KEY" in agent
-    assert 'gateway("acme/agent-1")' in agent
-    assert "secret-key" not in agent
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    _write_launch_files(launch.files, launch.instructions_file, workspace)
-    record = _run_with_fakes(launch.run_command, workspace, tmp_path)
-    package = json.loads((record / "package.json").read_text())
-    assert package["dependencies"] == {
-        "@ai-sdk/openai-compatible": OPENAI_COMPATIBLE_VERSION,
-        "ai": AI_SDK_VERSION,
-        "eve": EVE_VERSION,
-        "zod": ZOD_VERSION,
-    }
-    assert all(version[0].isdigit() for version in package["dependencies"].values())
-    assert (record / "runner.mjs").read_text() == EVE_RUNNER
-    assert (record / "agent/agent.ts").read_text() == agent
-    assert (record / "agent/instructions.md").read_text() == "instructions\n"
-    assert (record / "agent/sandbox.ts").read_text() == EVE_SANDBOX
-    assert (record / "agent/channels/eve.ts").read_text() == EVE_CHANNEL
-    assert (record / "agent/tools/agent.ts").read_text() == EVE_DISABLE_AGENT_TOOL
-    assert (record / ".eve/server.mjs").is_file()
-    project_dir = Path((record / ".project_dir").read_text().strip())
-    assert project_dir.is_absolute()
-    assert workspace.resolve() not in project_dir.resolve().parents
-    assert Path((record / ".workspace").read_text().strip()).resolve() == workspace.resolve()
-    assert not project_dir.exists()
-    assert list((tmp_path / "tmp").iterdir()) == []
-    assert sorted(str(path.relative_to(workspace)) for path in workspace.rglob("*") if path.is_file()) == [
-        ".app/eve/agent/agent.ts",
-        ".app/eve/agent/instructions.md",
-    ]
-
-
-def test_launch_installs_the_pinned_cli_and_runs_the_runner() -> None:
-    """Install eve at the pin, build a temp project after the box files land, then run the runner."""
-    launch = build_launch(_target(), _GATEWAY)
-    assert launch.install_command == (
-        "eve --version 2>/dev/null | grep -Eq '(^| )1[.]0[.]0-rc[.]6( |$)' || npm install -g eve@1.0.0-rc.6"
-    )
-    assert launch.run_command.startswith(f'export EVE_WORKSPACE="$PWD" && {_temp_root("EVE_DIR", "eve")} && ')
-    assert f'if [ -d "{EVE_IMAGE_DEPS}/eve" ]; then ' in launch.run_command
-    assert "else npm install " in launch.run_command
-    assert "node_modules/.bin/eve build) >&2 && " in launch.run_command
-    assert launch.run_command.endswith('EVE_PROJECT_DIR="$EVE_DIR" node "$EVE_DIR/runner.mjs"')
-    assert launch_payload(launch)["output_format"] == "pi"
-
-
-def test_launch_links_the_preinstalled_image_packages_instead_of_installing(tmp_path: Path) -> None:
-    """Link each preinstalled package into the project's own node_modules and never call npm."""
-    deps = tmp_path / "image-deps"
-    (deps / "eve").mkdir(parents=True)
-    (deps / "@ai-sdk/openai-compatible").mkdir(parents=True)
-    (deps / ".bin").mkdir()
-    (deps / ".bin/eve").write_text("#!/bin/sh\nmkdir -p .eve && echo built > .eve/server.mjs\n")
-    (deps / ".bin/eve").chmod(0o755)
-    launch = build_launch(_target(), _GATEWAY)
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    _write_launch_files(launch.files, launch.instructions_file, workspace)
-    run_command = launch.run_command.replace(EVE_IMAGE_DEPS, str(deps))
-    record = _run_with_fakes(run_command, workspace, tmp_path, FAKE_NPM_FAILS="1")
-    modules = record / "node_modules"
-    assert sorted(path.name for path in modules.iterdir()) == [".bin", "@ai-sdk", "eve"]
-    assert (record / ".eve/server.mjs").is_file()
-    assert not (deps / ".eve").exists()
 
 
 def test_image_lock_pins_the_same_eve_packages_as_the_harness() -> None:
@@ -286,24 +103,6 @@ def test_reasoning_levels_match_eve() -> None:
     assert REGISTRY[BLACKBOX_HARNESS_EVE].supported_efforts == EVE_REASONING_LEVELS
 
 
-@pytest.mark.parametrize("effort", [None, *EVE_REASONING_LEVELS])
-def test_reasoning_effort_reaches_the_agent_config_unchanged(effort: str | None) -> None:
-    """Pass each eve level unchanged as ``reasoning``, or leave the model's default."""
-    agent = build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[".app/eve/agent/agent.ts"]
-    assert "modelContextWindowTokens: 200_000" in agent
-    if effort is None:
-        assert "reasoning:" not in agent
-    else:
-        assert f'reasoning: "{effort}"' in agent
-
-
-@pytest.mark.parametrize("effort", ["max", "turbo", "provider-default", "HIGH"])
-def test_reasoning_effort_that_eve_lacks_is_refused(effort: str) -> None:
-    """Refuse a level eve does not have, with its name, instead of a silent remap or drop."""
-    with pytest.raises(ServiceError, match=f"does not support the effort '{effort}'"):
-        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-
-
 def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> None:
     """Give eve's tools a host sandbox rooted at the run workspace that hides the key and runner token."""
     assert 'defineSandboxProvider({ name: "skynet-workspace"' in EVE_SANDBOX
@@ -320,17 +119,6 @@ def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> No
     assert "auth: { bearer: runnerToken }" in EVE_RUNNER
 
 
-def test_env_carries_only_the_gateway_and_turns_telemetry_off() -> None:
-    """Give eve the gateway URL and key, no provider key, and telemetry off."""
-    env = build_launch(_target(), _GATEWAY).env
-    assert env["APP_GATEWAY_URL"] == "https://gw.example/v1"
-    assert env["APP_API_KEY"] == "secret-key"
-    assert env["APP_MODEL"] == "acme/agent-1"
-    assert env["EVE_TELEMETRY_DISABLED"] == "1"
-    assert env["NPM_CONFIG_UPDATE_NOTIFIER"] == "false"
-    assert not set(_PROVIDER_KEYS) & set(env)
-
-
 def test_runner_drops_direct_provider_keys_from_the_eve_server() -> None:
     """Delete every direct provider credential before the runner starts ``eve start``."""
     for key in _PROVIDER_KEYS:
@@ -338,59 +126,6 @@ def test_runner_drops_direct_provider_keys_from_the_eve_server() -> None:
     assert "for (const key of PROVIDER_ENV_KEYS) delete env[key];" in EVE_RUNNER
     assert '"start", "--host", host, "--port"' in EVE_RUNNER
     assert 'stdio: ["ignore", "pipe", "inherit"]' in EVE_RUNNER
-
-
-def test_protected_launch_checks_the_pin_relays_the_gateway_and_blocks_updates(tmp_path: Path) -> None:
-    """Probe the pinned CLI, rewrite the agent's gateway URL to the relay, and add the protected env."""
-    launch = build_launch(_target(), _GATEWAY, protected=True)
-    assert launch.install_command == pinned_harness_check("eve")
-    assert "npm install -g" not in launch.install_command
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    _write_launch_files(launch.files, launch.instructions_file, workspace)
-    record = _run_with_fakes(launch.run_command, workspace, tmp_path, APP_BUDGET_RELAY_URL="http://127.0.0.1:3210/v1")
-    assert 'baseURL: "http://127.0.0.1:3210/v1"' in (workspace / ".app/eve/agent/agent.ts").read_text()
-    assert 'baseURL: "http://127.0.0.1:3210/v1"' in (record / "agent/agent.ts").read_text()
-    assert launch.env["NPM_CONFIG_OFFLINE"] == "true"
-    assert launch.env["EVE_TELEMETRY_DISABLED"] == "1"
-    # A protected run blanks the direct provider credentials, like goose.
-    credentials = [key for key in _PROVIDER_KEYS if key != "OPENAI_BASE_URL"]
-    assert {key: launch.env.get(key) for key in credentials} == dict.fromkeys(credentials, "")
-    assert "OPENAI_BASE_URL" not in launch.env
-
-
-def test_protected_launch_gives_eve_only_the_proposer_mcp_connections_at_the_relay(tmp_path: Path) -> None:
-    """Each proposer MCP server becomes one eve connection at the relay; other files in the folder stay out."""
-    relay = "http://127.0.0.1:3210/v1"
-    launch = build_launch(_target(), _GATEWAY, protected=True, mcp_servers=("search", "code-tools"))
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    _write_launch_files(launch.files, launch.instructions_file, workspace)
-    (workspace / ".app/eve/agent/connections/stray.ts").write_text("export default {};\n")
-    record = _run_with_fakes(launch.run_command, workspace, tmp_path, APP_BUDGET_RELAY_URL=relay)
-
-    assert sorted(path.name for path in (record / "agent/connections").iterdir()) == ["code-tools.ts", "search.ts"]
-    for name in ("search", "code-tools"):
-        connection = (record / f"agent/connections/{name}.ts").read_text()
-        assert 'import { defineMcpClientConnection } from "eve/connections";' in connection
-        assert f'url: "{relay}/mcp/{name}"' in connection
-        assert _GATEWAY.url not in connection
-        assert _GATEWAY.api_key not in connection
-
-
-def test_launch_without_proposer_mcp_servers_adds_no_connection() -> None:
-    """No proposer MCP servers means no connection file and no copy step."""
-    launch = build_launch(_target(), _GATEWAY, protected=True)
-
-    assert set(launch.files) == {".app/eve/agent/agent.ts"}
-    assert "connections" not in launch.run_command
-
-
-@pytest.mark.parametrize("name", ["My-Tools", "my_tools", "1tools"])
-def test_mcp_server_name_that_eve_cannot_load_is_refused(name: str) -> None:
-    """A name eve rejects as a connection name stops the launch instead of a run without that server."""
-    with pytest.raises(ServiceError, match="eve harness cannot load the MCP server"):
-        build_launch(_target(), _GATEWAY, protected=True, mcp_servers=(name,))
 
 
 def test_pi_parser_reads_the_recorded_runner_sample() -> None:
@@ -409,41 +144,6 @@ def test_tool_counter_counts_each_requested_eve_action() -> None:
         for call_id in tool_call_ids("pi", json.loads(line))
     ]
     assert ids == ["act_1", "act_2"]
-
-
-def _shipped_tree(tmp_path: Path) -> Path:
-    """Unpack a one-file shipped tree the way a repo-mode run does.
-
-    Args:
-        tmp_path: Test folder.
-
-    Returns:
-        The checkout.
-    """
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tree:
-        data = b"print(1)\n"
-        info = tarfile.TarInfo("main.py")
-        info.size = len(data)
-        tree.addfile(info, io.BytesIO(data))
-    chunk = tmp_path / "chunk0"
-    chunk.write_text(base64.b64encode(buffer.getvalue()).decode("ascii"))
-    return repo_tree.unpack_tree([chunk], tmp_path / "repo")
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
-def test_version_patch_holds_only_the_code_change(tmp_path: Path) -> None:
-    """Keep the eve project, its node_modules, lockfile and build output out of a repo-mode version patch."""
-    checkout = _shipped_tree(tmp_path)
-    payload = launch_payload(build_launch(_target(), _GATEWAY))
-    repo_tree.exclude_paths(checkout, workspace_files(payload))
-    _write_launch_files(payload["files"], payload["instructions_file"], checkout)
-
-    _run_with_fakes(payload["run_command"], checkout, tmp_path)
-
-    patch = repo_tree.version_patch(checkout)
-    assert [line for line in patch.splitlines() if line.startswith("diff --git")] == ["diff --git a/main.py b/main.py"]
-    assert "+print(2)" in patch
 
 
 # A fake ``eve`` package for the real runner: ``eve start`` answers the
@@ -645,46 +345,6 @@ def test_node_check_needs_node_24_or_newer() -> None:
     else:
         assert completed.returncode == 1
         assert "eve needs Node 24 or newer" in completed.stderr
-
-
-def test_launch_stops_on_old_node_before_the_eve_build(tmp_path: Path) -> None:
-    """Stop the run command before the install, the build and the runner when the Node check fails."""
-    launch = build_launch(_target(), _GATEWAY)
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    _write_launch_files(launch.files, launch.instructions_file, workspace)
-    record = _run_with_fakes(launch.run_command, workspace, tmp_path, check=False, FAKE_NODE_OLD="1")
-    assert not any(record.iterdir())
-    assert list((tmp_path / "tmp").iterdir()) == []
-
-
-def test_next_run_removes_the_project_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
-    """Remove the temp project that a SIGKILL left behind when the next run starts (SKY-613).
-
-    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
-    run and the project stays until the next run sweeps it.
-    """
-    launch = build_launch(_target(), _GATEWAY)
-    temp = tmp_path / "tmp"
-    for tag in ("killed", "after"):
-        (tmp_path / tag / "work").mkdir(parents=True)
-        _write_launch_files(launch.files, launch.instructions_file, tmp_path / tag / "work")
-    _run_with_fakes(
-        launch.run_command,
-        tmp_path / "killed" / "work",
-        tmp_path / "killed",
-        check=False,
-        temp=temp,
-        FAKE_KILL_SHELL="1",
-    )
-    (killed_dir,) = temp.iterdir()
-    assert killed_dir.name.startswith("app-eve-")
-
-    record = _run_with_fakes(launch.run_command, tmp_path / "after" / "work", tmp_path / "after", temp=temp)
-
-    assert not killed_dir.exists()
-    assert Path((record / ".project_dir").read_text().strip()).parent == temp
-    assert list(temp.iterdir()) == []
 
 
 # Stubs of the two eve entry points that the sandbox module imports, so the

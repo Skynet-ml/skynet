@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -46,13 +45,10 @@ from core.models.blackbox import (
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
     BlackboxProposer,
-    BlackboxRunRequest,
-    BlackboxTarget,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import harness_bridge, runner
-from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
+from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -390,94 +386,6 @@ def test_staging_refuses_a_file_that_asks_for_more(
 
     assert workdirs
     assert not workdirs[0].exists()
-
-
-# The fake proposer writes the task file path, the task and its own arguments
-# where a version change would go; its setup appends one line each time it runs.
-_FAKE_AGENT = """
-import os, pathlib, sys
-pathlib.Path("src").mkdir(exist_ok=True)
-task = pathlib.Path(os.environ["ASCENT_TASK"])
-pathlib.Path("src/proposed.txt").write_text("\\n".join([str(task), task.read_text(), *sys.argv[1:]]))
-"""
-_FAKE_SETUP = 'import pathlib; open(pathlib.Path("setup-ran"), "a").write("ran\\n")'
-
-
-def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A request with no proposer runs the file's setup once in the checkout, then its entry (SKY-753).
-
-    The run is protected, as every hosted run is: its bootstrap installs
-    nothing, so the setup reaches the guest through the repository payload.
-
-    Args:
-        tmp_path: The checkout and the session folder.
-        monkeypatch: Pytest fixture for the fake fetch and the relay key.
-    """
-    files = {
-        "optimize.toml": (
-            'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
-            f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
-            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
-        ),
-        "agent/fake.py": _FAKE_AGENT,
-    }
-    payload = BlackboxRunRequest.model_validate(
-        {
-            **_payload("c" * 40),
-            "objective": "o",
-            "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
-            "cases": [{"input": "x"}],
-            "reflection_model_config": {"name": "openai/reflect"},
-            "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH},
-        }
-    ).model_dump(mode="json", by_alias=True)
-    assert "harness" not in payload["proposer"]
-
-    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
-    staged.cleanup()
-
-    proposer = BlackboxRunRequest.model_validate(staged_payload).proposer
-    snapshot = staged_payload[repo_staging.REPO_SNAPSHOT_KEY]
-    assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
-    assert proposer.install_command is None
-    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
-        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
-    ]
-    # The launch of the file's command for a protected run.
-    launch = build_launch(
-        BlackboxTarget(
-            kind="agent",
-            harness=proposer.harness,
-            model="openai/task",
-            install_command=proposer.install_command,
-            run_command=proposer.run_command,
-        ),
-        GatewayConfig(url="https://gw.example/v1", api_key=harness_bridge.KEY_TOKEN),
-        protected=True,
-        exact_commands=snapshot["file_proposer"],
-    )
-    checkout = tmp_path / "repo-checkout"
-    (checkout / "agent").mkdir(parents=True)
-    (checkout / "agent/fake.py").write_text(_FAKE_AGENT)
-    harness_bridge.run_setup(snapshot["proposer_setup"], checkout)
-    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
-    outcome = harness_bridge.run_session(
-        launch_payload(launch),
-        workspace=checkout,
-        prompt="Make it faster.",
-        model="openai/task",
-        session_dir=tmp_path / "session",
-    )
-
-    assert outcome.returncode == 0, outcome.stderr
-    assert (checkout / "setup-ran").read_text() == "ran\n"
-    task_file, task, *arguments = (checkout / "src/proposed.txt").read_text().split("\n")
-    assert Path(task_file).is_absolute()
-    assert Path(task_file).is_file()
-    assert task == "Make it faster."
-    assert arguments == ["{model}"]
 
 
 def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
