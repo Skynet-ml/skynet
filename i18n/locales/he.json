@@ -132,6 +132,7 @@
     "optimization.resume_wrong_status": "אפשר להמשיך רק {term.optimizationPlural} שנעצרו באמצע — זו במצב '{status}'.",
     "optimization.resume_not_resumable": "אין נקודת המשך שמורה ל{term.optimization} הזו — ניתן להריץ אותה מחדש במקום.",
     "optimization.resume_target_retired": "כל הרצה מבצעת עכשיו אופטימיזציה למאגר קוד. ההרצה הזו, של טקסט או סוכן, נשארת בהיסטוריה, אבל אי אפשר להמשיך אותה.",
+    "optimization.restart_target_retired": "כל הרצה מבצעת עכשיו אופטימיזציה למאגר קוד. ההרצה הזו, של טקסט או סוכן, נשארת בהיסטוריה, אבל אי אפשר להריץ אותה מחדש.",
     "optimization.resume_exhausted": "ה{term.optimization} מיצתה את מספר הניסיונות המרבי ({attempts}) — ניתן להריץ אותה מחדש במקום.",
     "optimization.resume_budget_projected": "האופטימיזציה צפויה לעלות כ-{projected}, מעל התקרה של {limit}. יש להעלות את תקרת ההוצאה מעל {projected} כדי להמשיך.",
     "optimization.pause_wrong_status": "אפשר להשהות רק {term.optimizationPlural} שרצות כרגע — זו במצב '{status}'.",

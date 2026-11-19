@@ -741,7 +741,7 @@ def register_lifecycle_routes(
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         # The requeue wipes the stored result and logs, and the worker refuses the target.
         if has_retired_target(job_data):
-            raise DomainError("optimization.resume_target_retired", status=409)
+            raise DomainError("optimization.restart_target_retired", status=409)
         _require_new_budget_configuration(job_data)
 
         status = status_to_job_status(job_data.get("status", "pending"))

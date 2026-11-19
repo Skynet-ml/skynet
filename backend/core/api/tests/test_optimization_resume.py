@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ...config import settings
-from ...constants import OPTIMIZATION_TYPE_BLACKBOX, WORKER_RESTART_CAUSE
+from ...constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_TAGGING, WORKER_RESTART_CAUSE
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint, _fund_without_checkpoint
 from ..auth import AuthenticatedUser
 from ..routers._helpers import is_pausable, is_resumable, pausable_id_flags, resumable_id_flags
@@ -491,3 +491,58 @@ def test_a_stored_run_with_no_target_reads_as_a_text_run_and_never_resumes(
     resp = client.post("/optimizations/old_targetless/resume")
     assert resp.status_code == 409
     assert "Every run now optimizes a repository" in resp.json()["detail"]
+
+
+def test_resume_skips_the_retired_target_rule_for_a_tagging_job(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A tagging job with no repository target stays resumable, and resume answers 404, never 409 (SKY-834).
+
+    The route hides every job that is not a black-box run, so the retired-target rule must skip such a job.
+
+    Args:
+        client: Test client over the optimizations router.
+        store: Fake job store.
+    """
+    store.seed_job(
+        "tag1",
+        status="failed",
+        username="alice",
+        payload={"rows": [{"text": "hello"}]},
+        payload_overview={"optimization_type": OPTIMIZATION_TYPE_TAGGING},
+    )
+    store.save_gepa_checkpoint("tag1", b"GEPA-STATE", iteration=7)
+    assert is_resumable(store, store.get_job("tag1"))
+    resp = client.post("/optimizations/tag1/resume")
+    assert resp.status_code == 404, resp.text
+
+
+class _ListRowsWithoutPayloadStore(_RepoJobStore):
+    """Return list rows without the payload, as the real store's list query does."""
+
+    def list_jobs(self, **kwargs: Any) -> list[dict]:
+        """Return the matching rows with ``payload`` set to ``None``.
+
+        Args:
+            **kwargs: The fake store's list filters.
+
+        Returns:
+            The rows, each without its payload.
+        """
+        return [{**row, "payload": None} for row in super().list_jobs(**kwargs)]
+
+
+def test_listings_never_offer_resume_for_a_stored_text_run() -> None:
+    """List rows load without the payload, yet a text run with a checkpoint still shows no Resume (SKY-834)."""
+    store = _ListRowsWithoutPayloadStore()
+    store.seed_job("old_text", status="failed", username="alice", payload={"target": {"kind": "text"}})
+    store.save_gepa_checkpoint("old_text", b"GEPA-STATE", iteration=7)
+    _seed_resumable(store, "repo_run")
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    for path in ("/optimizations", "/optimizations/sidebar"):
+        response = client.get(path)
+        assert response.status_code == 200
+        flags = {row["optimization_id"]: row["resumable"] for row in response.json()["items"]}
+        assert flags == {"old_text": False, "repo_run": True}

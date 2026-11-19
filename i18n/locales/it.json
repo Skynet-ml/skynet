@@ -275,6 +275,7 @@
     "optimization.resume_exhausted": "Questa ottimizzazione ha raggiunto il numero massimo di tentativi ({attempts}): eseguila di nuovo invece.",
     "optimization.resume_not_resumable": "Questa ottimizzazione non ha alcun punto di ripresa salvato: eseguila di nuovo invece.",
     "optimization.resume_target_retired": "Ora ogni esecuzione ottimizza un repository. Questa esecuzione di testo o agente resta nella cronologia, ma non può riprendere.",
+    "optimization.restart_target_retired": "Ora ogni esecuzione ottimizza un repository. Questa esecuzione di testo o agente resta nella cronologia, ma non può essere riavviata.",
     "optimization.resume_wrong_status": "Possono essere riprese solo le ottimizzazioni che si sono interrotte durante l'esecuzione: questa è nello stato '{status}'.",
     "sandbox.docker_unavailable": "Docker non è in esecuzione su questo computer. Avvia Docker Desktop o OrbStack e riprova.",
     "sandbox.docker_image_missing": "L’immagine della sandbox locale non è ancora stata creata. Riavvia l’app per crearla.",

@@ -275,6 +275,7 @@
     "optimization.resume_exhausted": "Bu optimizasyon maksimum deneme sayısına ({attempts}) ulaştı — bunun yerine yeniden çalıştırın.",
     "optimization.resume_not_resumable": "Bu optimizasyonun kayıtlı bir devam noktası yok — bunun yerine yeniden çalıştırın.",
     "optimization.resume_target_retired": "Artık her çalıştırma bir depoyu optimize eder. Bu metin veya ajan çalıştırması geçmişinizde kalır, ancak devam ettirilemez.",
+    "optimization.restart_target_retired": "Artık her çalıştırma bir depoyu optimize eder. Bu metin veya ajan çalıştırması geçmişinizde kalır, ancak yeniden başlatılamaz.",
     "optimization.resume_wrong_status": "Yalnızca çalışma ortasında duran optimizasyonlar devam ettirilebilir — bu optimizasyon '{status}' durumunda.",
     "sandbox.docker_unavailable": "Bu bilgisayarda Docker çalışmıyor. Docker Desktop veya OrbStack’i başlatıp tekrar deneyin.",
     "sandbox.docker_image_missing": "Yerel sanal alan imajı henüz oluşturulmadı. Oluşturmak için uygulamayı yeniden başlatın.",

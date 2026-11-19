@@ -332,11 +332,11 @@ def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
         payload: The submitted or stored job.
 
     Returns:
-        True for a repository run whose engine, or every Auto engine in auto mode, has a row in
+        True when the engine, or every Auto engine in auto mode, has a row in
         :data:`LOOP_ROUTES`.
     """
     engines = AUTO_ENGINES if payload.strategy.mode == "auto" else (str(payload.strategy.engine),)
-    return payload.target.kind == BLACKBOX_TARGET_REPO and all((name, "repo") in LOOP_ROUTES for name in engines)
+    return all((name, "repo") in LOOP_ROUTES for name in engines)
 
 
 def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
@@ -618,7 +618,6 @@ def _final_run(
     label: str,
     phase: str,
     case_offset: int = 0,
-    repo_scorer: bool = False,
 ) -> FinalRun:
     """Score ``candidate`` afresh on every case, or once without cases, outside the budget.
 
@@ -634,8 +633,6 @@ def _final_run(
         phase: Which pass this is: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
         case_offset: Added to each case's index in the usage records, so the
             held-out pass does not overwrite the selection pass's records.
-        repo_scorer: Whether ``scorer`` is the repository scorer, the only
-            scorer whose ``run_failed`` feedback holds the failure text.
 
     Returns:
         The mean score, the feedback and named scores, and each case's result.
@@ -700,7 +697,7 @@ def _final_run(
     errors = [
         # Pending rule-judge notes can come before the failure text.
         feedback.rpartition(RUN_FAILED)[2]
-        if repo_scorer and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
         else str(side_info.get("error") or METRIC_ERROR)
         for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
         if score is None
@@ -1109,7 +1106,6 @@ def run_blackbox_optimization(
             progress_callback=progress_callback,
             gepa_log_dir_path=gepa_log_dir_path,
             repo_snapshot=repo_snapshot,
-            repo_scorer=True,
             loop=loop,
         )
     except BudgetReached as exc:
@@ -1130,7 +1126,6 @@ def run_job(
     progress_callback: ProgressCallback | None,
     gepa_log_dir_path: str | None,
     repo_snapshot: dict[str, Any] | None = None,
-    repo_scorer: bool = False,
     loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run a job over an already-built scorer and close the scorer afterwards.
@@ -1144,8 +1139,6 @@ def run_job(
         progress_callback: The job's progress sink, if any.
         gepa_log_dir_path: Workspace for engine state; a temp dir when unset.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
-        repo_scorer: Whether ``base_scorer`` is the repository scorer, whose
-            ``run_failed`` status marks a case where the version's run crashed.
         loop: The worker's engine loop, if the run uses it.
 
     Returns:
@@ -1166,7 +1159,6 @@ def run_job(
             progress_callback=progress_callback,
             gepa_log_dir_path=gepa_log_dir_path,
             repo_snapshot=repo_snapshot,
-            repo_scorer=repo_scorer,
             loop=loop,
         )
     except BudgetReached as exc:
@@ -1223,7 +1215,6 @@ def _run_job(
     progress_callback: ProgressCallback | None,
     gepa_log_dir_path: str | None,
     repo_snapshot: dict[str, Any] | None = None,
-    repo_scorer: bool = False,
     loop: LoopBinding | None = None,
 ) -> BlackboxRunResponse:
     """Run the job over an already-built scorer; see :func:`run_job`.
@@ -1242,7 +1233,6 @@ def _run_job(
         progress_callback: The job's progress sink, if any.
         gepa_log_dir_path: Workspace for engine state; a temp dir when unset.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
-        repo_scorer: Whether ``base_scorer`` is the repository scorer; see :func:`run_job`.
         loop: The worker's engine loop, if the run uses it. Each scorer call, the final runs too, is then one
             loop step, so a resume replays the run's evaluations; the run's end checks the replay.
 
@@ -1339,7 +1329,7 @@ def _run_job(
         "max_iterations": job.budget.max_iterations,
         "progress_callback": engine_progress,
     }
-    # The loop gives its own model, run directory and concurrency of 1, so that each step has one place in its log.
+    # The loop gives its own model and run directory, so that each step has one place in its log.
     ctx = (
         loop.context(**fields)
         if loop is not None
@@ -1448,7 +1438,6 @@ def _run_job(
                     select_on,
                     label="starting point",
                     phase=PHASE_BASELINE,
-                    repo_scorer=repo_scorer,
                 )
             best_val = (
                 baseline_val
@@ -1459,7 +1448,6 @@ def _run_job(
                     select_on,
                     label="optimized version",
                     phase=PHASE_FINAL,
-                    repo_scorer=repo_scorer,
                 )
             )
             if baseline_val is not None and best_val.score is None:
@@ -1490,7 +1478,6 @@ def _run_job(
                         label="starting point on held-out cases",
                         phase=PHASE_BASELINE,
                         case_offset=len(select_on),
-                        repo_scorer=repo_scorer,
                     )
                 best_run = (
                     baseline_run
@@ -1502,7 +1489,6 @@ def _run_job(
                         label="optimized version on held-out cases",
                         phase=PHASE_FINAL,
                         case_offset=len(select_on),
-                        repo_scorer=repo_scorer,
                     )
                 )
         except BudgetReached as exc:

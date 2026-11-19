@@ -307,6 +307,7 @@ class I18nKey(StrEnum):
     OPTIMIZATION_PAYLOAD_UNAVAILABLE = 'optimization.payload_unavailable'
     OPTIMIZATION_REPO_ARCHIVE_FAILED = 'optimization.repo_archive_failed'
     OPTIMIZATION_REPO_VERSION_UNKNOWN = 'optimization.repo_version_unknown'
+    OPTIMIZATION_RESTART_TARGET_RETIRED = 'optimization.restart_target_retired'
     OPTIMIZATION_RESUME_BUDGET_PROJECTED = 'optimization.resume_budget_projected'
     OPTIMIZATION_RESUME_EXHAUSTED = 'optimization.resume_exhausted'
     OPTIMIZATION_RESUME_NOT_RESUMABLE = 'optimization.resume_not_resumable'

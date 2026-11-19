@@ -15,7 +15,6 @@ same population.
 
 from __future__ import annotations
 
-import functools
 import logging
 import math
 import re
@@ -32,7 +31,6 @@ from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, Track
 from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
-from ....sandbox.timeouts import Phase
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
@@ -51,12 +49,10 @@ from .protocol import (
     Result,
     Task,
     engine_score,
-    fill_unscored,
     score_batch,
 )
 from .repo_tree import EXPLOITS_DIR, inside
 from .upstream import GEPA_SOURCE
-from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
 # One proposal's model replies; the proposal gives GEPA no new version when they run out.
@@ -183,8 +179,7 @@ class GepaEngine:
                 # On the loop, GEPA reads the proposer's ``total_cost``: the committed cost of its model steps.
                 max_reflection_cost=ctx.proposer_token_budget_usd,
                 # ``batch_evaluator`` is GEPA's only scoring path here, and it
-                # fans a batch out itself up to ``ctx.concurrency``. GEPA's own
-                # pool would only nest a second pool over it.
+                # scores a batch itself. GEPA's own pool would only nest a second pool over it.
                 parallel=False,
                 display_progress_bar=False,
             ),
@@ -266,16 +261,7 @@ class GepaEngine:
             Returns:
                 One ``(score, side_info)`` per pair, in order.
             """
-            # A concurrency of 1 keeps the serial loop. A wider one runs the batch
-            # ``ctx.concurrency`` wide on the sandbox pool, one sandbox per case.
-            if ctx.concurrency <= 1:
-                return score_batch(score_one, pairs, 1)
-            calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
-            results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
-            filled = fill_unscored(
-                [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
-            )
-            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
+            return score_batch(score_one, pairs, 1)
 
         kwargs: dict[str, Any] = {
             "seed_candidate": start,

@@ -2089,7 +2089,6 @@ def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id:
         started=time.perf_counter(),
         progress_callback=None,
         gepa_log_dir_path=str(tmp_path),
-        repo_scorer=True,
     )
 
 
@@ -2253,7 +2252,6 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
         started=time.perf_counter(),
         progress_callback=None,
         gepa_log_dir_path=str(tmp_path),
-        repo_scorer=True,
     )
 
     repo_meta = response.optimization_metadata["target"]["repo"]
@@ -2451,7 +2449,6 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
             [{"input": 1}, {"input": 2}],
             label="starting point",
             phase=PHASE_BASELINE,
-            repo_scorer=True,
         )
     finally:
         scorer.close()
@@ -3025,7 +3022,6 @@ def test_a_loop_route_moves_only_its_single_repo_engine_off_the_native_runtime(m
 def test_an_auto_repo_run_uses_the_loop_only_when_every_auto_engine_has_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """Auto composes all its engines, so its repository runs move to the loop only with all their rows (SKY-832)."""
     auto = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
-    text_auto = _payload(strategy={"mode": "auto"})
     rows = {(name, "repo") for name in AUTO_ENGINES}
     monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset(rows - {("shinka_evolve", "repo")}))
 
@@ -3036,8 +3032,6 @@ def test_an_auto_repo_run_uses_the_loop_only_when_every_auto_engine_has_a_row(mo
 
     assert service_mod.has_loop_route(auto)
     assert not service_mod.uses_native_runtime(auto)
-    # The loop builds a run only from a repository snapshot, so a text Auto run keeps its route.
-    assert not service_mod.has_loop_route(text_auto)
 
 
 @pytest.mark.parametrize(

@@ -275,6 +275,7 @@
     "optimization.resume_exhausted": "Diese Optimierung hat ihre maximale Anzahl von Versuchen ({attempts}) erreicht — führen Sie sie stattdessen erneut aus.",
     "optimization.resume_not_resumable": "Diese Optimierung hat keinen gespeicherten Fortsetzungspunkt — führen Sie sie stattdessen erneut aus.",
     "optimization.resume_target_retired": "Jeder Lauf optimiert jetzt ein Repository. Dieser Text- oder Agent-Lauf bleibt in Ihrem Verlauf, kann aber nicht fortgesetzt werden.",
+    "optimization.restart_target_retired": "Jeder Lauf optimiert jetzt ein Repository. Dieser Text- oder Agent-Lauf bleibt in Ihrem Verlauf, kann aber nicht neu gestartet werden.",
     "optimization.resume_wrong_status": "Nur Optimierungen, die mitten im Durchlauf gestoppt wurden, können fortgesetzt werden — diese befindet sich im Zustand '{status}'.",
     "sandbox.docker_unavailable": "Docker läuft auf diesem Computer nicht. Starte Docker Desktop oder OrbStack und versuche es erneut.",
     "sandbox.docker_image_missing": "Das lokale Sandbox-Image ist noch nicht gebaut. Starte die App neu, um es zu bauen.",

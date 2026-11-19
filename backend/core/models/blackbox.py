@@ -489,27 +489,19 @@ class BlackboxTarget(BaseModel):
     repo: BlackboxRepoSource | None = None
 
     @model_validator(mode="after")
-    def _ensure_agent_fields(self, info: ValidationInfo) -> BlackboxTarget:
+    def _ensure_agent_fields(self) -> BlackboxTarget:
         """Require what an agent or repository target needs to launch.
-
-        Args:
-            info: Validation info; its context marks a stored run's payload.
 
         Returns:
             The validated target instance.
 
         Raises:
             ValueError: When an agent target names no model or an unknown or
-                retired harness, a custom harness has no run command, the
-                repository and target kind disagree, or a new repository
-                target names a model.
+                retired harness, a custom harness has no run command, or the
+                repository and target kind disagree.
         """
         if (self.kind == BLACKBOX_TARGET_REPO) != (self.repo is not None):
             raise ValueError("A repository target needs a repo, and only a repository target takes one.")
-        # Only an agent target routed ``model`` (SKY-834); a stored row keeps whatever it saved.
-        stored = (info.context or {}).get(STORED_PAYLOAD_KEY)
-        if self.kind == BLACKBOX_TARGET_REPO and self.model is not None and not stored:
-            raise ValueError("A repository target takes no model. The proposer names the model it runs.")
         if self.kind != BLACKBOX_TARGET_AGENT:
             return self
         if not (self.model or "").strip():

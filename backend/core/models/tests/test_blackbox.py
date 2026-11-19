@@ -293,19 +293,6 @@ def test_repo_field_only_on_repository_targets() -> None:
         BlackboxTarget(kind="text", repo={"repository": "octo/hello", "editable_paths": ["src"]})
 
 
-def test_a_new_repository_target_refuses_a_model_and_a_stored_one_still_loads() -> None:
-    """Only an agent target used ``target.model`` (SKY-834), so a new repository target refuses it."""
-    target = {
-        "kind": "repo",
-        "model": "openrouter/acme/agent-1",
-        "repo": {"repository": "octo/hello", "editable_paths": ["src"]},
-    }
-    with pytest.raises(ValidationError, match="A repository target takes no model"):
-        BlackboxTarget.model_validate(target)
-    stored = BlackboxTarget.model_validate(target, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
-    assert stored.model == "openrouter/acme/agent-1"
-
-
 @pytest.mark.parametrize("repository", ["octo", "octo/hello/extra", "octo/hel lo", "https://github.com/octo/hello"])
 def test_repository_must_be_owner_slash_name(repository: str) -> None:
     """Only the ``owner/name`` form is accepted."""

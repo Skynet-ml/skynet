@@ -17,7 +17,6 @@ import pytest
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_OPENHANDS, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
-from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
@@ -147,7 +146,8 @@ def _run_with_fake_openhands(
         _target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers
     )
     workspace = tmp_path / "work"
-    files = {**launch.files, **(candidate_files(candidate, launch.instructions_file) if candidate is not None else {})}
+    version_files = {launch.instructions_file: candidate} if isinstance(candidate, str) else candidate or {}
+    files = {**launch.files, **version_files}
     for name, content in files.items():
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)

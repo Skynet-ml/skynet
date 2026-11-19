@@ -530,7 +530,6 @@ class EngineLoop:
             return EngineContext(
                 reflection_lm=self.model,
                 run_dir=str(self.run_dir),
-                concurrency=1,
                 remaining_cost_usd=self.remaining_cost_usd,
                 call_model=self.call_model,
                 run_command=self.run,

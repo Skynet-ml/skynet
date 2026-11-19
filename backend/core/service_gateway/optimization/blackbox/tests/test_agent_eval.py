@@ -1,4 +1,4 @@
-"""Tests for the shared sandbox helpers: path safety, version files and gateway resolution."""
+"""Tests for the shared sandbox helpers: gateway resolution."""
 
 from __future__ import annotations
 
@@ -7,37 +7,14 @@ from typing import Any
 import pytest
 
 from core.config import Settings
-from core.exceptions import ServiceError
 
 from .. import agent_eval as agent_eval_mod
 from ..agent_eval import (
     _GATEWAY_MISSING,
     agent_target_unavailable_reason,
-    candidate_files,
     gateway_from_settings,
-    safe_relative_path,
 )
 from ..harness import GatewayConfig
-
-
-def test_safe_relative_path_normalizes_and_rejects_escapes() -> None:
-    """Relative paths are normalized; anything that could escape the workspace is refused."""
-    assert safe_relative_path("./a/b") == "a/b"
-    assert safe_relative_path("a/./b/") == "a/b"
-    assert safe_relative_path("a/c/../d") == "a/d"
-
-    for bad in ("/etc/passwd", "..", "../x", "a/../../x", ".", "", "   ", 123, None):
-        with pytest.raises(ServiceError):
-            safe_relative_path(bad)
-
-
-def test_candidate_files_maps_text_and_named_parts() -> None:
-    """A text version becomes the instructions file; a dict version becomes its safe parts."""
-    assert candidate_files("hello", "AGENTS.md") == {"AGENTS.md": "hello"}
-    assert candidate_files({"./AGENTS.md": "x", "docs/y.md": "y"}, "AGENTS.md") == {"AGENTS.md": "x", "docs/y.md": "y"}
-
-    with pytest.raises(ServiceError):
-        candidate_files({"../escape": "x"}, "AGENTS.md")
 
 
 def _gateway_settings(**values: Any) -> Settings:

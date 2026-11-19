@@ -2,18 +2,13 @@
 
 Every run optimizes a repository (SKY-834). The agent-target scorer that ran a
 task harness in a box for each case is gone; what stays is how a box reaches
-the model gateway and how a version maps onto files.
+the model gateway.
 """
 
 from __future__ import annotations
 
-import posixpath
-from typing import Any
-
 from ....config import Settings
-from ....exceptions import ServiceError
 from .harness import GatewayConfig
-from .protocol import Candidate
 from .sandbox import sandbox_unavailable_reason
 
 _GATEWAY_MISSING = (
@@ -58,38 +53,3 @@ def agent_target_unavailable_reason(settings: Settings) -> str | None:
     if not settings.local_mode and gateway_from_settings(settings) is None:
         return _GATEWAY_MISSING
     return None
-
-
-def safe_relative_path(path: Any) -> str:
-    """Normalize a workspace-relative path, refusing anything that could escape it.
-
-    Args:
-        path: The path as the case or version gave it.
-
-    Returns:
-        The normalized relative path.
-
-    Raises:
-        ServiceError: When the path is empty, absolute, or climbs out of the workspace.
-    """
-    if not isinstance(path, str) or not path.strip():
-        raise ServiceError("file paths must be non-empty strings")
-    normalized = posixpath.normpath(path.strip())
-    if normalized.startswith(("/", "../")) or normalized in (".", ".."):
-        raise ServiceError(f"file path '{path}' must stay inside the workspace")
-    return normalized
-
-
-def candidate_files(candidate: Candidate, instructions_file: str) -> dict[str, str]:
-    """Map a version onto the files it becomes in the sandbox.
-
-    Args:
-        candidate: Text (the harness's instruction file) or named parts (one file each).
-        instructions_file: Where the harness reads its instructions.
-
-    Returns:
-        Relative path → content.
-    """
-    if isinstance(candidate, str):
-        return {instructions_file: candidate}
-    return {safe_relative_path(path): text for path, text in candidate.items()}

@@ -401,7 +401,7 @@ def run_strategy(
             engine=_LaneEngine(name, phase, context, caps, lanes, progress_callback, lane_ids),
             max_evals=allowance,
             max_token_cost=token_budget,
-            max_concurrency=ctx.concurrency,
+            max_concurrency=1,
             output_dir=str(Path(ctx.run_dir) / f"{phase}-{name}-evals"),
         )
 
