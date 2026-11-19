@@ -43,10 +43,16 @@ from core.service_gateway.optimization.blackbox.protocol import (
     Result,
     Task,
 )
-from core.storage.step_log_store import StepLogStore
+from core.storage.step_log_store import StepLogStore, step_id_for
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop, LoopStoppedError, ModelCallBilledError, ModelCallFailedError
+from core.worker.engine_loop import (
+    ROOT_AGENT_ID,
+    EngineLoop,
+    LoopStoppedError,
+    ModelCallBilledError,
+    ModelCallFailedError,
+)
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -1637,6 +1643,88 @@ def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
     result = _run(loop, stop_at_score=2.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
 
     assert loop.read_file(result.best_candidate, "a.py") == b"ax"
+
+
+def _protected_options(entry: str, setup: list[str]) -> SimpleNamespace:
+    """Build the native options of a protected run whose route key is ``_ROUTE_KEY``.
+
+    Args:
+        entry: The ``[proposer] entry`` command.
+        setup: The ``[proposer] setup`` argv.
+
+    Returns:
+        The options.
+    """
+    options = _command_options(entry=entry, setup=setup)
+    options.budget_route = {"url": "https://gw.example/v1", "token": _ROUTE_KEY}
+    options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key=_ROUTE_KEY)
+    return options
+
+
+# Long enough that no other text of the run holds it by chance.
+_ROUTE_KEY = "scoped-route-key-of-this-test"
+
+
+def test_an_entry_that_prints_the_route_key_leaves_it_out_of_the_step_log_and_the_run_events(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The step log and the failure's run event keep the command's output, so the key shows as ``[redacted]``.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    events: list[tuple[str, dict[str, Any]]] = []
+    entry = 'echo "$APP_API_KEY"; echo "key $APP_API_KEY" >&2; exit 1'
+    options = _protected_options(entry, ["sh", "-c", "mkdir deps"])
+
+    with caplog.at_level(logging.WARNING):
+        _run(loop, events=events, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    bodies = [
+        json.dumps(step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, seq)))
+        for seq, kind, _ in _steps(engine)
+        if kind == "command"
+    ]
+    assert any("key [redacted]" in body for body in bodies)
+    assert not any(_ROUTE_KEY in body for body in bodies)
+    assert "key [redacted]" in caplog.text
+    assert _ROUTE_KEY not in caplog.text
+    assert _ROUTE_KEY not in json.dumps(events, default=str)
+
+
+def test_a_setup_that_prints_the_route_key_fails_with_it_redacted(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup's error copies the end of its output, so the key shows as ``[redacted]`` there.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    options = _protected_options("true", ["sh", "-c", 'echo "key $APP_API_KEY" >&2; exit 3'])
+
+    with pytest.raises(ServiceError) as error:
+        _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert "key [redacted]" in str(error.value)
+    assert _ROUTE_KEY not in str(error.value)
 
 
 @pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])

@@ -338,6 +338,29 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
 
 
+def _redacted(result: CommandResult, env: Mapping[str, str] | None) -> CommandResult:
+    """Replace each env value in a command's output with ``[redacted]``.
+
+    The step log keeps the output, and failure messages and run events copy its end, so a command that prints its
+    scoped model key must not put the key there.
+
+    Args:
+        result: The command's result.
+        env: The command's extra environment; ``None`` holds no secret.
+
+    Returns:
+        The result with clean output.
+    """
+    secrets = sorted({value for value in (env or {}).values() if value}, key=len, reverse=True)
+    if not secrets:
+        return result
+    stdout, stderr = result.stdout, result.stderr
+    for secret in secrets:
+        stdout = stdout.replace(secret, "[redacted]")
+        stderr = stderr.replace(secret, "[redacted]")
+    return replace(result, stdout=stdout, stderr=stderr)
+
+
 def _close_box(box: SandboxSession) -> None:
     """Close a box, and log only the type of a close failure.
 
@@ -685,7 +708,8 @@ class TreeSandbox:
             grants: The box's network grants.
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
             timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
-            env: Extra environment for the command only; ``None`` adds none.
+            env: Extra environment for the command only; ``None`` adds none. Each value is a secret, so the
+                result's output holds ``[redacted]`` in its place.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -723,7 +747,7 @@ class TreeSandbox:
             # Before the unpack, so nothing that the unpack starts can join the baseline.
             before = None if fresh else _processes(box)
             self._unpack(box, archive, TREE_DIR)
-            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout, env=env)
+            result = _redacted(box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout, env=env), env)
             new_tree_id = self._pack(box, step.run_id, TREE_DIR)
             if result.timed_out:
                 # The kill reaches only the command's process group, so a process outside it can live on.

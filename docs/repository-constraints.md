@@ -165,7 +165,10 @@ U+2066 to U+2069), because they can hide what a command does.
   is a failed attempt, not a failed run. AutoResearch then ends the run,
   because a round with no version ends it. Meta-Harness goes on to its next
   iteration. In these two engines, the command gets `ASCENT_TASK`,
-  `APP_PROMPT_FILE` and `APP_MODEL`, but no model relay.
+  `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
+  command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
+  key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
+  A run that is not protected gets no model relay and no key.
 - ShinkaEvolve cannot use the command, because it writes versions with its
   own editor. A single ShinkaEvolve run with `entry` fails the setup check,
   and the message names `[proposer] entry` and the engine. Auto leaves out
