@@ -8,23 +8,30 @@ measure here. Both bound the prompt in UTF-8 bytes, as SKY-722 decided.
 In a repository run (SKY-825), a version is a tree. A session starts on the
 parent version's tree with the engine's lab folder over it, and the tree it
 leaves, without the lab folder, is the new version. The lab helpers are here.
+
+When the contract file names ``[proposer] entry`` (SKY-816), :class:`FileProposer`
+runs that command once per new version in place of the tool loop. The engine
+keeps its own search and lab state; only the step that makes the version changes.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
-from ....models.blackbox import BLACKBOX_HARNESS_CODEX
+from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
+from ....sandbox.grants import Grant, GrantError
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from .native_runtime import NativeOptions
-from .protocol import EngineContext, EvalServer, ModelReply
+from .protocol import EngineContext, EvalServer, FileTooLargeError, ModelReply
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
@@ -51,6 +58,13 @@ MODEL_RETRY_WAIT_SECONDS = 10.0
 # token a character). A 200k-token context, less 64k tokens of answer and 8k for the tool and message framing,
 # leaves 128k (SKY-722).
 MAX_PROMPT_BYTES = 128_000
+# The file in the lab folder that ``ASCENT_TASK`` names for a ``[proposer] entry`` command. Its name differs from
+# every lab file of the engines, so it never replaces one.
+TASK_FILE = "ascent-task.md"
+# The file in the lab folder where the setup box lists the paths that ``[proposer] setup`` added.
+_SETUP_ROOTS = "setup-roots"
+# A failed command's message keeps the end of its output, where the error usually is.
+_COMMAND_ERROR_CHARS = 2000
 
 # Tests replace this, so a retry test does not wait.
 _sleep = time.sleep
@@ -411,15 +425,16 @@ def _run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]
     return json.dumps(output, ensure_ascii=False), tree
 
 
-def refuse_unsupported_proposer(options: NativeOptions, engine: str) -> None:
+def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_proposer: bool = False) -> None:
     """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
 
-    The tool loop is the only proposer here: a file proposer command, a host CLI, ``[proposer] mcp`` servers and a
-    reasoning effort would be silently dropped. SKY-816 brings the file proposer command back.
+    A host CLI, ``[proposer] mcp`` servers and a reasoning effort would be silently dropped. A command is run only
+    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816).
 
     Args:
         options: The run's native options.
         engine: The engine's display name, for the message.
+        file_proposer: Whether :class:`FileProposer` runs the options' command.
 
     Raises:
         ServiceError: When the options name a proposer setting that the tool loop does not run.
@@ -428,13 +443,14 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str) -> None:
     refused = [
         name
         for name, value in (
-            ("run_command", proposer.run_command),
+            ("run_command", not file_proposer and proposer.run_command),
             ("install_command", proposer.install_command),
             ("host_cli", proposer.host_cli),
         )
         if value
     ]
-    if proposer.harness != BLACKBOX_HARNESS_CODEX:
+    # Repository staging sets the custom harness for the file's command.
+    if proposer.harness != (BLACKBOX_HARNESS_CUSTOM if file_proposer else BLACKBOX_HARNESS_CODEX):
         refused.append("harness")
     if ((options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}).get("servers"):
         refused.append("mcp")
@@ -515,3 +531,211 @@ def drop_lab(ctx: EngineContext, start: str, tree: str, parent: str, lab: str) -
     except (TreeRejectedError, BoxFailureError):
         return None
     return version if result.exit_code == 0 and not result.timed_out else None
+
+
+def task_text(intro: str, lab: str, files: Mapping[str, bytes], names: tuple[str, ...]) -> bytes:
+    """Write the task file of a ``[proposer] entry`` command: the session's prompt and the named lab files.
+
+    Args:
+        intro: The prompt that the tool loop would send.
+        lab: The lab folder, relative to the repository root.
+        files: The session's lab file bytes, keyed by path inside the lab folder.
+        names: The lab files to copy into the task, in order; a missing one is left out.
+
+    Returns:
+        The task file bytes.
+    """
+    parts = [intro.encode("utf-8")]
+    parts.extend(f"## `{lab}/{name}`\n\n".encode() + files[name] for name in names if name in files)
+    return b"\n\n".join(parts)
+
+
+class FileProposer:
+    """Run the contract file's ``[proposer] entry`` once per new version, over the parent's tree (SKY-816).
+
+    The command starts on the parent's tree with the engine's lab folder over it, and ``ASCENT_TASK`` names the
+    task file there. The tree it leaves, without the lab folder and without the files that ``[proposer] setup``
+    added, is the new version, so the command needs no ``eval.sh`` or ``save.sh``. Each command is one committed
+    ``command`` step, so a resume replays it. A failed command gives no version, so the run goes on.
+    """
+
+    def __init__(self, ctx: EngineContext, options: NativeOptions, lab: str) -> None:
+        """Bind the proposer to the run's boxes and the contract file's commands.
+
+        Args:
+            ctx: The engine context, with its ``repo_seed``, its command call and its tree calls.
+            options: The run's native options, with the file's commands and the proposer's hosts.
+            lab: The engine's lab folder, relative to the repository root.
+        """
+        assert ctx.repo_seed is not None
+        repo = options.repo or {}
+        self._ctx = ctx
+        self._lab = lab
+        self._entry = options.proposer.run_command or ""
+        self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
+        # The run's gateway holds the deployment's managed key, so the box gets no grant for it, as in SKY-815.
+        model_host = urlsplit(options.gateway.url or "").hostname
+        self._grants = tuple(
+            Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host
+        )
+        self._exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        self._roots: list[str] | None = None
+        # Each version's tree with the setup's output, so the next session from it gets that output back.
+        self._full: dict[str, str] = {}
+
+    def base(self, parent: str) -> str:
+        """Return the tree that a session from a version starts on: the version with the setup's output.
+
+        The first call runs ``[proposer] setup`` over the seed tree, once, before the first session.
+
+        Args:
+            parent: The version's tree id.
+
+        Returns:
+            The tree to put the lab over.
+
+        Raises:
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+        """
+        if self._roots is None:
+            self._roots = self._setup()
+        return self._full.get(parent, parent)
+
+    def run(self, start: str) -> tuple[str, str | None]:
+        """Run the command once over the session's first tree.
+
+        Args:
+            start: The parent's tree with the lab folder and the task file over it.
+
+        Returns:
+            The tree that the command left and ``None``; or ``start`` and the reason when the command failed, so
+            the session leaves no version.
+
+        Raises:
+            GrantError: When the grants cannot resolve; every command would fail the same way, so the run stops.
+        """
+        assert self._ctx.run_command is not None
+        task = f"{self._lab}/{TASK_FILE}"
+        script = "\n".join(
+            [*self._exports, f'export ASCENT_TASK="$PWD/{task}" APP_PROMPT_FILE="$PWD/{task}"', self._entry]
+        )
+        try:
+            result, tree = self._ctx.run_command(start, script, self._grants)
+        except GrantError:
+            raise
+        except (ValueError, TreeRejectedError, BoxFailureError) as error:
+            # The step committed the failure, so a resume gets the same failed version.
+            return start, f"The [proposer] entry command left no usable version: {error}"
+        if result.timed_out or result.exit_code != 0:
+            return start, _command_failure("[proposer] entry command", result)
+        return tree, None
+
+    def version(self, start: str, tree: str, parent: str) -> str | None:
+        """Return the version that a session left: its last tree without the lab folder and the setup's output.
+
+        Args:
+            start: The session's first tree.
+            tree: The session's last tree.
+            parent: The tree of the version that the session started from.
+
+        Returns:
+            The version's tree id, or ``None`` when a box could not remove the paths.
+        """
+        if tree == start:
+            return parent
+        full = drop_lab(self._ctx, start, tree, parent, self._lab)
+        version = full if full is None or not self._roots else _remove(self._ctx, full, self._roots)
+        if version is not None and full is not None:
+            self._full.setdefault(version, full)
+        return version
+
+    def _setup(self) -> list[str]:
+        """Run ``[proposer] setup`` once over the seed tree, and list the top paths that it added.
+
+        One box runs the setup and lists the new paths, so the list also holds links and empty folders, which no
+        tree read sees. Two more boxes check that only those paths changed.
+
+        Returns:
+            The added paths that hold no seed path, relative to the repository root; empty with no setup.
+
+        Raises:
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+        """
+        assert self._ctx.repo_seed is not None
+        assert self._ctx.run_command is not None
+        assert self._ctx.read_file is not None
+        seed = self._ctx.repo_seed.tree_id
+        self._full[seed] = seed
+        if not self._setup_argv:
+            return []
+        name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
+        listing = "find . -mindepth 1 -print | LC_ALL=C sort"
+        lab = shlex.quote(self._lab)
+        # A new path whose folder existed before the setup is a top path of its output.
+        script = "\n".join(
+            [
+                *self._exports,
+                "paths=$(mktemp) || exit 1",
+                f'{listing} > "$paths"',
+                f"{shlex.join(self._setup_argv)} || exit $?",
+                f"mkdir -p {lab}",
+                f"{listing} | awk 'NR == FNR {{ seen[$0]; next }} !($0 in seen) {{ dir = $0; "
+                f'sub("/[^/]*$", "", dir); if (dir == "." || (dir in seen)) print }}\' "$paths" - '
+                f"> {lab}/{_SETUP_ROOTS}",
+            ]
+        )
+        result, tree = self._ctx.run_command(seed, script, self._grants)
+        if result.timed_out or result.exit_code != 0:
+            raise ServiceError(_command_failure(name, result))
+        try:
+            data = self._ctx.read_file(tree, f"{self._lab}/{_SETUP_ROOTS}", MAX_COMMAND_BYTES // 2)
+        except FileTooLargeError:
+            raise ServiceError(f"The {name} added too many top-level paths. Put its output in fewer folders.") from None
+        lines = (data or b"").decode("utf-8", "replace").splitlines()
+        # The lab folder that the listing's own ``mkdir`` made is no setup output.
+        roots = [path for path in (line.removeprefix("./") for line in lines if line) if path != self._lab]
+        full = drop_lab(self._ctx, seed, tree, seed, self._lab)
+        stripped = full if full is None or not roots else _remove(self._ctx, full, roots)
+        # The same box round trip on the seed gives the tree to compare with, without the hidden paths.
+        same, untouched = self._ctx.run_command(seed, "true", ())
+        if full is None or stripped is None or same.exit_code != 0 or stripped != untouched:
+            raise ServiceError(
+                f"The {name} changed or removed files of the repository. Those changes would enter every version. "
+                "Make the setup write only new files."
+            )
+        self._full[seed] = full
+        return roots
+
+
+def _remove(ctx: EngineContext, tree: str, paths: list[str]) -> str | None:
+    """Remove paths from a tree with one ``rm`` command in a box.
+
+    Args:
+        ctx: The engine context, with its command call.
+        tree: The tree.
+        paths: The paths, relative to the repository root.
+
+    Returns:
+        The tree without the paths, or ``None`` when the box failed.
+    """
+    assert ctx.run_command is not None
+    try:
+        result, after = ctx.run_command(tree, f"rm -rf -- {shlex.join(paths)}", ())
+    except (TreeRejectedError, BoxFailureError):
+        return None
+    return after if result.exit_code == 0 and not result.timed_out else None
+
+
+def _command_failure(name: str, result: Any) -> str:
+    """Describe a failed box command for the run's log or error.
+
+    Args:
+        name: The command's name in the message.
+        result: The command's result.
+
+    Returns:
+        The message, with the end of the command's stderr, or of its stdout when stderr is empty.
+    """
+    how = "ran out of time" if result.timed_out else f"failed with exit code {result.exit_code}"
+    detail = (result.stderr or result.stdout or "").strip()[-_COMMAND_ERROR_CHARS:]
+    return f"The {name} {how}." + (f" {detail}" if detail else "")

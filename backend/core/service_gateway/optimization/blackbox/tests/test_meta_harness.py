@@ -282,6 +282,7 @@ def _options(
         reasoning_effort=reasoning_effort,
         budget_route=budget_route,
         proposer=BlackboxProposer(**proposer),
+        repo=None,
     )
 
 
@@ -655,6 +656,61 @@ def test_a_repository_iteration_starts_from_the_best_frontier_version(
     # Iteration two appends ``xx`` to iteration one's ``ax``, not to the seed's ``a``.
     assert scored == [b"a", b"a", b"ax", b"ax", b"axxx", b"axxx"]
     assert loop.read_file(result.best_candidate, "a.py") == b"axxx"
+
+
+def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_called(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Each iteration runs the entry once, with the setup's output, and its tree without the lab is the version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    scored: list[tuple[str, bytes | None]] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the version and its ``a.py``, and score it by the length of ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: Not used.
+
+        Returns:
+            The length and no side information.
+        """
+        del case
+        assert loop.list_files(candidate, ".") == ["a.py"]
+        text = loop.read_file(candidate, "a.py")
+        scored.append((candidate, text))
+        return float(len(text or b"")), {}
+
+    entry = (
+        'grep -qF "## \\`.meta-harness/task.md\\`" "$ASCENT_TASK" && [ "$(cat deps/lib.txt)" = lib ] '
+        "&& printf x >> a.py"
+    )
+    options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command=entry)
+    options.gateway = SimpleNamespace(url="")
+    options.repo = {
+        "file_proposer": True,
+        "proposer_setup": ["sh", "-c", "mkdir deps && printf lib > deps/lib.txt"],
+        "proposer_hosts": [],
+    }
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert model.calls == []
+    assert [text for _, text in scored] == [b"a", b"a", b"ax", b"ax", b"axx", b"axx"]
+    versions = list(dict.fromkeys(candidate for candidate, _ in scored))
+    assert versions[0] == seed
+    assert result.best_candidate == versions[2]
 
 
 def test_a_repository_session_tree_has_no_agents_folder(

@@ -435,8 +435,7 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     assert proposer.install_command is None
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
-        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-        " proposer command in the contract file.",
+        "Auto leaves out the ShinkaEvolve lane, because it cannot use the proposer command in the contract file.",
     ]
     # The launch as native_runtime builds it for a protected run.
     launch = build_launch(
@@ -531,29 +530,43 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
 _ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
-@pytest.mark.parametrize(
-    ("engine", "message"),
-    [
-        (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
-        (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
-        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve never runs the [proposer] entry command."),
-    ],
-)
-def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(
-    engine: str, message: str, monkeypatch: pytest.MonkeyPatch
+def test_a_single_shinka_evolve_run_with_a_files_proposer_fails_the_setup_check(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A single run of a refused engine names ``[proposer] entry`` and the engine (SKY-753).
+    """A single ShinkaEvolve run names ``[proposer] entry`` and the engine (SKY-753).
 
     Args:
-        engine: An engine that cannot use the file's proposer command.
-        message: The reason the setup check gives for it.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}}
+
+    with pytest.raises(
+        ConstraintsError, match=re.escape("ShinkaEvolve never runs the [proposer] entry command.")
+    ) as caught:
+        _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+
+
+@pytest.mark.parametrize("engine", [BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS])
+def test_a_single_autoresearch_or_meta_harness_run_with_a_files_proposer_passes_the_setup_check(
+    engine: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AutoResearch and Meta-Harness run the file's command in the engine loop, so the check passes (SKY-816).
+
+    Args:
+        engine: An engine that runs the file's proposer command.
         monkeypatch: Pytest fixture for the fake fetch.
     """
     payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}}
 
-    with pytest.raises(ConstraintsError, match=re.escape(message)) as caught:
-        _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
-    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["run_command"] == "node agent.js"
+    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
+        "The run uses the proposer command in the contract file: node agent.js",
+    ]
 
 
 def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
@@ -572,8 +585,7 @@ def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run uses the proposer command in the contract file: node agent.js",
-        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-        " proposer command in the contract file.",
+        "Auto leaves out the ShinkaEvolve lane, because it cannot use the proposer command in the contract file.",
     ]
 
 

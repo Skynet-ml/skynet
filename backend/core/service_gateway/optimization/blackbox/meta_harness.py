@@ -18,7 +18,10 @@ back only ``pending_eval.json`` and the candidate files that it lists.
 In a repository run (SKY-825), a version is a tree. Each session works on the
 frontier leader's tree, with the workspace files under ``.meta-harness/``. The
 tree that it leaves, without that folder, is the iteration's one candidate.
-The engine names it and benchmarks it as the native loop does.
+The engine names it and benchmarks it as the native loop does. When the
+contract file names ``[proposer] entry`` (SKY-816), that command makes the
+candidate in place of the tool loop, with the skill and the prompt in
+``ASCENT_TASK``.
 
 A run outside the worker engine loop still uses the native box runtime until
 the SKY-728 cutover; the loop path never calls it.
@@ -302,16 +305,25 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
 
     record_timing = False
 
-    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext, max_tool_calls: int | None = None) -> None:
+    def __init__(
+        self,
+        config: OptimizeAnythingConfig,
+        ctx: EngineContext,
+        max_tool_calls: int | None = None,
+        proposer: loop_tools.FileProposer | None = None,
+    ) -> None:
         """Build the native engine and bind the context.
 
         Args:
             config: The native engine's config.
             ctx: The engine loop's context, with its model, command and tree calls.
             max_tool_calls: The most tool calls in one session; ``None`` takes the proposer default.
+            proposer: The contract file's command, which makes each repository candidate in place of the tool
+                loop; ``None`` runs the tool loop.
         """
         super().__init__(config)
         self._ctx = ctx
+        self._proposer = proposer
         self._tree: str | None = None
         # The tree holds the agent's candidate files: the local copies serve only ``_validate`` and the benchmark,
         # so they never go back up over the tree, where the agent may have changed or deleted them since.
@@ -455,6 +467,8 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         else:
             leader = self._leader()
             parent = self._repo.tree_id if leader is None else leader[0]
+            if self._proposer is not None:
+                return self._command_session(iteration, parent, files)
             tree = start = loop_tools.put_lab(ctx, parent, _REPO_LAB, files)
         tool = BASH_TOOL if self._repo is None else REPO_BASH_TOOL
         messages: list[dict[str, Any]] = [
@@ -522,6 +536,40 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             is_error=failed,
             text=text,
             budget_exhausted=exhausted,
+            killed=False,
+        )
+
+    def _command_session(self, iteration: int, parent: str, files: dict[str, bytes]) -> native_engines.ProposerOutcome:
+        """Run one repository iteration with the contract file's command.
+
+        Args:
+            iteration: One-based iteration number.
+            parent: The tree of the version that the session starts from.
+            files: The session's workspace files.
+
+        Returns:
+            The session's outcome. A failed command leaves no candidate, so the iteration benchmarks nothing and
+            the run goes on.
+        """
+        assert self._proposer is not None
+        logs = self.logs_dir.relative_to(self.work_dir).as_posix()
+        task = loop_tools.task_text(
+            f"{self.skill()}\n\n{self._task_prompt(iteration)}",
+            _REPO_LAB,
+            files,
+            ("task.md", f"{logs}/evolution_summary.jsonl", f"{logs}/frontier_val.json"),
+        )
+        start = loop_tools.put_lab(
+            self._ctx, self._proposer.base(parent), _REPO_LAB, {**files, loop_tools.TASK_FILE: task}
+        )
+        tree, failure = self._proposer.run(start)
+        self._repo_pull(iteration, start, tree, parent)
+        return native_engines.ProposerOutcome(
+            session_id=f"iter{iteration}",
+            cost_usd=0.0,
+            is_error=False,
+            text=failure or "",
+            budget_exhausted=False,
             killed=False,
         )
 
@@ -641,7 +689,11 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
-        version = loop_tools.drop_lab(self._ctx, start, tree, parent, _REPO_LAB)
+        version = (
+            loop_tools.drop_lab(self._ctx, start, tree, parent, _REPO_LAB)
+            if self._proposer is None
+            else self._proposer.version(start, tree, parent)
+        )
         if version is None or any(entry["candidate"] == version for entry in self.results.values()):
             pending.write_text("", encoding="utf-8")
             return
@@ -705,9 +757,13 @@ class MetaHarnessEngine:
             # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
             return run_native_engine(self.name, task, server, ctx)
         options = ctx.native_options
+        # The contract file's command makes a repository version; with no repository, it would edit nothing.
+        file_proposer = bool(
+            options is not None and (options.repo or {}).get("file_proposer") and ctx.repo_seed is not None
+        )
         if options is not None:
-            # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
-            loop_tools.refuse_unsupported_proposer(options, "Meta-Harness")
+            # A setting that the run would drop fails the run.
+            loop_tools.refuse_unsupported_proposer(options, "Meta-Harness", file_proposer=file_proposer)
         # A repository run's candidate is a tree id, so its seed is the visible seed tree.
         seed_tree = None if ctx.repo_seed is None else loop_tools.repo_seed_tree(ctx, _REPO_LAB, "Meta-Harness")
         if seed_tree is None and not task.str_mode:
@@ -734,7 +790,8 @@ class MetaHarnessEngine:
             sandbox=False,
             engine_config=engine_config,
         )
-        worker = _WorkerMetaHarness(config, ctx, options.proposer.max_tool_calls if options else None)
+        command = loop_tools.FileProposer(ctx, options, _REPO_LAB) if file_proposer and options is not None else None
+        worker = _WorkerMetaHarness(config, ctx, options.proposer.max_tool_calls if options else None, command)
         adapter = _UpstreamServer(server, list(task.cases), ctx)
         upstream = worker.run(UpstreamTask(**payload), adapter)
         # A best version with no finite mean, or with a crashed case, has no score (SKY-350, SKY-367, SKY-751).

@@ -17,7 +17,9 @@ In a repository run (SKY-825), a version is a tree. Each round's session works
 on the leader's tree, or the seed's in the first round, with the lab under
 ``.autoresearch/``. The tree that the session leaves, without the lab, is the
 round's version, and the engine gives it a full evaluation. The agent has only
-the bash tool, since the engine scores the version.
+the bash tool, since the engine scores the version. When the contract file names
+``[proposer] entry`` (SKY-816), that command makes each round's version in place
+of the tool loop, with the round's prompt and lab files in ``ASCENT_TASK``.
 
 The session watchdogs count model turns and tool calls, not seconds, so a
 resume stops a session at the same place. A run outside the worker engine loop
@@ -408,16 +410,26 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
 
     scorer = "the evaluate tool"
 
-    def __init__(self, config: OptimizeAnythingConfig, ctx: EngineContext, *, max_tool_calls: int) -> None:
+    def __init__(
+        self,
+        config: OptimizeAnythingConfig,
+        ctx: EngineContext,
+        *,
+        max_tool_calls: int,
+        proposer: loop_tools.FileProposer | None = None,
+    ) -> None:
         """Build the native engine and bind the context.
 
         Args:
             config: The native engine's config.
             ctx: The engine loop's context, with its model, command and tree calls.
             max_tool_calls: The tool calls one round's session may start.
+            proposer: The contract file's command, which makes each repository round's version in place of the
+                tool loop; ``None`` runs the tool loop.
         """
         super().__init__(config)
         self._ctx = ctx
+        self._proposer = proposer
         self._max_tool_calls = max_tool_calls
         self._no_eval_turns = (
             None
@@ -681,6 +693,8 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 for name in _REPO_LAB_FILES
                 if (self.work_dir / name).is_file()
             }
+            if self._proposer is not None:
+                return self._command_session(server, directive, parent, files)
             tree = start = loop_tools.put_lab(ctx, parent, _REPO_LAB, files)
         messages: list[dict[str, Any]] = [{"role": "user", "content": self._round_prompt(directive)}]
         spent = Decimal(0)
@@ -771,6 +785,39 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             text=text,
             budget_exhausted=exhausted,
             killed=killed,
+        )
+
+    def _command_session(
+        self, server: Any, directive: str, parent: str, files: dict[str, bytes]
+    ) -> native_engines.ProposerOutcome:
+        """Run one repository round with the contract file's command, and give its version a full evaluation.
+
+        Args:
+            server: The upstream server adapter, with the engine's recording wrappers.
+            directive: This round's directive.
+            parent: The tree of the version that the round starts from.
+            files: The round's lab files.
+
+        Returns:
+            The session's outcome. A failed command leaves no version, so the round spends nothing and the native
+            stop rule ends the run without an error.
+        """
+        assert self._proposer is not None
+        task = loop_tools.task_text(self._round_prompt(directive), _REPO_LAB, files, _REPO_LAB_FILES)
+        start = loop_tools.put_lab(
+            self._ctx, self._proposer.base(parent), _REPO_LAB, {**files, loop_tools.TASK_FILE: task}
+        )
+        tree, failure = self._proposer.run(start)
+        self._pull_notebook(tree)
+        version = self._proposer.version(start, tree, parent)
+        exhausted = version is not None and version not in self._swept and not self._sweep(server, version)
+        return native_engines.ProposerOutcome(
+            session_id=f"round{self.round}",
+            cost_usd=0.0,
+            is_error=False,
+            text=failure or "",
+            budget_exhausted=exhausted,
+            killed=False,
         )
 
     def _lab_files(self) -> dict[str, bytes]:
@@ -1042,9 +1089,13 @@ class AutoResearchEngine:
             # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
             return run_native_engine(self.name, task, server, ctx)
         options = ctx.native_options
+        # The contract file's command makes a repository version; with no repository, it would edit nothing.
+        file_proposer = bool(
+            options is not None and (options.repo or {}).get("file_proposer") and ctx.repo_seed is not None
+        )
         if options is not None:
-            # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
-            loop_tools.refuse_unsupported_proposer(options, "AutoResearch")
+            # A setting that the run would drop fails the run.
+            loop_tools.refuse_unsupported_proposer(options, "AutoResearch", file_proposer=file_proposer)
         # A repository run's candidate is a tree id, so its seed is the visible seed tree.
         seed_tree = None if ctx.repo_seed is None else loop_tools.repo_seed_tree(ctx, _REPO_LAB, "AutoResearch")
         if seed_tree is None and not task.str_mode:
@@ -1073,7 +1124,8 @@ class AutoResearchEngine:
             engine_config=engine_config,
         )
         adapter = _UpstreamServer(server, task, ctx)
-        upstream = _WorkerAutoResearch(config, ctx, max_tool_calls=proposer.max_tool_calls).run(
+        command = loop_tools.FileProposer(ctx, options, _REPO_LAB) if file_proposer and options is not None else None
+        upstream = _WorkerAutoResearch(config, ctx, max_tool_calls=proposer.max_tool_calls, proposer=command).run(
             UpstreamTask(**payload), adapter
         )
         # The incumbent always has a finite mean: the adapter keeps no non-finite best, and the ranking skips one.
