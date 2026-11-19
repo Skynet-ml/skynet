@@ -2637,6 +2637,31 @@ def test_a_command_that_leaves_too_many_files_is_a_failed_mutation_with_no_read(
     assert reads == []
 
 
+def test_a_command_that_leaves_exactly_the_file_cap_is_read_in_full(tmp_path: Path) -> None:
+    """Read every file of a command that changes exactly as many files as a tree listing holds (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    paths = [f"gen/m{index}.js" for index in range(shinka_bundle._MAX_TREE_ENTRIES)]
+    trees = {"after": {path: path for path in paths}, "parent": {}}
+    reads: list[str] = []
+    options = _proposer_options("node gen.js")
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    ctx = _box_context(
+        options,
+        tmp_path,
+        run_command=lambda *args: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._Proposer(ctx, options).propose({}, "task")
+
+    assert reply == {"files": dict.fromkeys(paths, "text\n")}
+    assert sorted(reads) == sorted(paths)
+
+
 _BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
 
 

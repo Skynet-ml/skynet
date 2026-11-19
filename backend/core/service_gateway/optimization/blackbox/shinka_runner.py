@@ -383,9 +383,9 @@ class EvaluatorMailbox:
         with self._write_lock:
             self.total_evals += 1
         score = response.get("score")
-        # SKY-751: the worker sends null for a case with no score (a
-        # failed [run] entry or a metric error); ``score_program``
-        # fails the program on a failed [run] entry, with its feedback.
+        # SKY-751: the worker sends null for a case with no score (a failed
+        # [run] entry or a metric error); ``score_program`` fails the program
+        # on a failed [run] entry, with its feedback.
         return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
 
     def complete(self, messages: list[dict[str, Any]]) -> str:
@@ -2149,7 +2149,7 @@ class ProgramScorer:
                 "error": str(exc),
                 "metrics": {"combined_score": 0.0, "text_feedback": f"Rejected without scoring: {exc}"},
             }
-        case_failed = threading.Event()
+        crashed = threading.Event()
 
         def score_case(example: Any) -> tuple[float, dict[str, Any]]:
             """Score one case, unless an earlier case of this version already failed.
@@ -2166,12 +2166,12 @@ class ProgramScorer:
             # The failure is recorded on the case's own thread, before the pool
             # takes the next case, so with one case thread the skipped cases are
             # the same live and on a replay.
-            if case_failed.is_set():
+            if crashed.is_set():
                 raise RuntimeError("An earlier case of this version failed.")
             try:
                 return self.mailbox.evaluate(value, example, candidate_id=generation)
             except BaseException:
-                case_failed.set()
+                crashed.set()
                 raise
 
         futures = [self._cases.submit(score_case, example) for example in self.examples]
