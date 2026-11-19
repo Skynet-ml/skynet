@@ -287,8 +287,11 @@ class _ParentSandboxRuntime:
             The box.
 
         Raises:
-            ServiceError: When the spec asks for hosts the run was not funded for.
+            ServiceError: When the spec asks for a GPU, or for hosts the run was not funded for.
         """
+        if spec.gpu is not None:
+            # The parent's boxes use one fixed runtime profile with no GPU.
+            raise ServiceError(f"The parent's box cannot start with GPU type {spec.gpu!r}.")
         if not set(spec.allowed_hosts) <= set(self._allowed_hosts):
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
         return self._broker._open_parent(spec)

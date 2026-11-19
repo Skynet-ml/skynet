@@ -61,6 +61,9 @@ class SandboxSpec:
     # ``docker commit``). Runtimes ignore it: the opener unpacks the archive
     # and checks its digest, because the broker rebuilds the spec (SKY-398).
     snapshot_archive: str | None = None
+    # The box's GPU type, such as ``a100``, from a ``gpu:<type>`` grant. Only the Modal
+    # provider starts such a box; every other runtime refuses the spec (SKY-804).
+    gpu: str | None = None
 
 
 @dataclass(frozen=True)

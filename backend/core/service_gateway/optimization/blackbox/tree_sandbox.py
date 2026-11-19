@@ -70,17 +70,18 @@ import shlex
 import tarfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, TypeVar
 
 from ....billing.budgets import BudgetError
-from ....billing.operation_pricing import UnpricedOperationError
+from ....billing.operation_pricing import UnpricedOperationError, json_fingerprint
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....sandbox.box_lease import BoxLease
+from ....sandbox.capabilities import MODAL_GPU_TYPES, modal_gpu_name
 from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
-from ....sandbox.placement import VERCEL, Placement, gpu_type, network_grants
+from ....sandbox.placement import MODAL, VERCEL, Placement, gpu_type, network_grants
 from ....sandbox.trees import (
     MAX_ARCHIVE_BYTES,
     BadArchiveError,
@@ -215,8 +216,12 @@ class RuntimeBoxSource:
             The open box.
 
         Raises:
-            GrantError: When the grant list does not resolve.
+            GrantError: When the grant list does not resolve or asks for a GPU.
         """
+        gpu = gpu_type(grants)
+        if gpu is not None:
+            # Refused before any box opens: this source opens CPU boxes only, and a GPU step must not run without it.
+            raise GrantError(f"This box source cannot start a box with GPU type {gpu!r}; only the warm box lease can.")
         return self._runtime.open(resolve_grants(grants, self._registry).apply(self._spec))
 
     def release(self, box: SandboxSession, healthy: bool) -> None:
@@ -276,7 +281,7 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         return self._registry
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
-        """Return the agent's warm box, or open a new one; refuse a GPU box or a denied grant first.
+        """Return the agent's warm box, or open a new one; refuse a GPU that cannot start or a denied grant first.
 
         Args:
             agent_id: The box key (``run_id:agent_id``).
@@ -286,13 +291,18 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
             The box.
 
         Raises:
-            GrantError: When the box needs a GPU, or the network grants do not resolve.
+            GrantError: When the GPU grants or the network grants do not resolve, Modal has no GPU of the
+                asked type, or no runtime here starts a Modal box with a GPU.
         """
-        # Both refusals come before the claim, so the agent keeps its warm box and no start is spent.
+        # These refusals can never succeed on a retry, so they come before the claim: the agent keeps
+        # its warm box and no start is spent, like a Cloudflare instance type checked before start.
         gpu = gpu_type(grants)
         if gpu is not None:
-            # The blackbox spec has no GPU field, so a runtime here would open the box without the GPU.
-            raise GrantError(f"No tree sandbox runtime opens a box with a {gpu} GPU.")
+            if modal_gpu_name(gpu) is None:
+                raise GrantError(f"Modal has no {gpu!r} GPU. Use one of: {', '.join(sorted(MODAL_GPU_TYPES))}.")
+            # Placement sends every GPU box to Modal (placement.choose).
+            if not getattr(self._runtimes.get(MODAL), "gpu_types", False):
+                raise GrantError(f"No runtime here starts a Modal box with GPU type {gpu!r}.")
         resolve_grants(network_grants(grants), self._registry)
         return super().acquire(agent_id, grants)
 
@@ -300,20 +310,20 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         """Open a new box on the placed provider's runtime.
 
         Args:
-            placement: The provider of the box; :meth:`acquire` refuses a GPU first.
+            placement: The provider of the box and its GPU type, if any.
             grants: The box's grants.
 
         Returns:
             The open box.
 
         Raises:
-            GrantError: When the network grants do not resolve.
-            LookupError: When no runtime opens the placed provider's boxes.
+            Exception: The runtime's open error, raw. :meth:`acquire` and the constructor first refuse the
+                grants, GPUs and providers that no runtime here can open.
         """
-        runtime = self._runtimes.get(placement.provider)
-        if runtime is None:
-            raise LookupError(f"No runtime opens {placement.provider} boxes.")
-        return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
+        runtime = self._runtimes[placement.provider]
+        spec = resolve_grants(network_grants(grants), self._registry).apply(self._spec)
+        # Placement sends a GPU box to Modal; a runtime that cannot start the GPU refuses the spec (SKY-804).
+        return runtime.open(replace(spec, gpu=placement.gpu))
 
 
 def _close_box(box: SandboxSession) -> None:
@@ -801,16 +811,19 @@ class TreeSandbox:
             grants: The grants.
 
         Returns:
-            The grant-list id the step records.
+            The grant-list id the step records; it names the GPU type when a grant asks for one.
 
         Raises:
             GrantDeniedError: When the grants do not resolve.
         """
         try:
             # A gpu:<type> grant places the box; it is not a network grant.
-            return resolve_grants(network_grants(grants), self._registry).grant_list_id
+            network_id = resolve_grants(network_grants(grants), self._registry).grant_list_id
+            gpu = gpu_type(grants)
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
+        # The step log is the record, so it shows the hardware; a CPU step keeps its network-only id.
+        return network_id if gpu is None else json_fingerprint([network_id, f"gpu:{gpu}"])
 
     def _in_box(
         self,
