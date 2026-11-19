@@ -41,6 +41,7 @@ from core.models.blackbox import (
     BlackboxTarget,
 )
 from core.models.results import ModelTokenUsage
+from core.models.tests.test_blackbox import _repo_request
 
 from .. import autoresearch as autoresearch_mod
 from .. import autosaddler as autosaddler_mod
@@ -3010,3 +3011,52 @@ def test_a_budget_stop_keeps_the_case_positions(
 
     split = caught.value.result.details[service_mod.CASE_SPLIT_KEY]
     assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(len(_CASES)))
+
+
+def test_a_loop_route_moves_only_its_single_repo_engine_off_the_native_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A row in ``LOOP_ROUTES`` sends that engine's repository runs to the engine loop, and nothing else (SKY-829)."""
+    repo = BlackboxRunRequest.model_validate(_repo_request())
+    auto = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
+    assert not service_mod.LOOP_ROUTES
+    assert not service_mod.has_loop_route(repo)
+    assert service_mod.uses_native_runtime(repo)
+
+    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
+
+    assert service_mod.has_loop_route(repo)
+    assert not service_mod.uses_native_runtime(repo)
+    assert not service_mod.has_loop_route(auto)
+    assert service_mod.uses_native_runtime(auto)
+    # Auto composes many engines, so an Auto run stays native also when it names a routed engine.
+    auto_named = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto", "engine": "autoresearch"}))
+    assert not service_mod.has_loop_route(auto_named)
+    other = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "gepa"}))
+    assert not service_mod.has_loop_route(other)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"reflection_model_config": {"name": "gpt-4o", "temperature": 0.5}, "max_cost_cents": 100}, "custom sampling"),
+        ({}, "total spending budget"),
+    ],
+    ids=["custom-sampling", "no-budget"],
+)
+def test_a_loop_routed_run_keeps_the_proposer_model_and_budget_checks(
+    overrides: dict[str, Any], message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine loop calls the same proposer models with the same budget, so validation does not relax (SKY-829).
+
+    Args:
+        overrides: The request fields that break one check.
+        message: The expected refusal.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
+    # The test deployment has no model gateway; the engine's availability is not what this test checks.
+    monkeypatch.setattr(service_mod, "get_engine", lambda name, caps: None)
+    payload = BlackboxRunRequest.model_validate(_repo_request(**overrides))
+    assert service_mod.has_loop_route(payload)
+
+    with pytest.raises(ServiceError, match=message):
+        service_mod.validate_job(payload)
