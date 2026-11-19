@@ -383,10 +383,12 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
     return "skynet-" + json_fingerprint(parts)[:48]
 
 
-# One path segment below a credential prefix: at least one character that is not a dot, and no '%'. So a
-# '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never matches. Single
-# characters in classes only, because the edge's regex dialect is not known to support escapes or lookarounds.
-_CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+,;=:@-][A-Za-z0-9._~!$&'()+,;=:@-]*"
+# One path segment below a credential prefix: no '%' and no ';', and after any leading dots a character that is
+# not ',' or '='. So a '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never
+# matches, and neither does a path parameter such as '..;' or '..=x', which Tomcat and Jetty read as '..'.
+# Single characters in classes only, because the edge's regex dialect is not known to support escapes or
+# lookarounds.
+_CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+:@-][A-Za-z0-9._~!$&'()+,=:@-]*"
 
 
 def _path_regex(path: str) -> str:

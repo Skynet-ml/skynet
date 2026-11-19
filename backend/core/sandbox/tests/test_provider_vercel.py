@@ -1859,12 +1859,19 @@ async def test_granted_headers_reach_only_their_server_path(client: FakeClient, 
         "/team/..%5cadmin",
         "/team/x/../../admin",
         "/team\\..\\admin",
+        "/team/..;/admin",
+        "/team/.;/admin",
+        "/team/%2e%2e;/admin",
+        "/team/..;x=1/admin",
+        "/team/..,x/admin",
+        "/team/..=x/admin",
+        "/team/sse;jsessionid=1",
     ],
 )
 async def test_granted_headers_skip_a_path_that_leaves_the_prefix(
     path: str, client: FakeClient, log: list[str]
 ) -> None:
-    """Check that a dot, empty, percent-encoded or backslash segment gets no headers (SKY-728).
+    """Check that a dot, empty, percent-encoded, backslash or path-parameter segment gets no headers (SKY-728).
 
     Args:
         path: A raw request path that a normalizing server could serve outside ``/team``.
