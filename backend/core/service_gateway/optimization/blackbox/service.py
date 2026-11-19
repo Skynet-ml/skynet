@@ -593,7 +593,8 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
 
     Returns:
         Each name's mean score; its feedback verbatim with one case, else one
-        ``Case n: ...`` line per case, capped like any feedback text. A case
+        ``Case n: ...`` line per case that has feedback, capped like any
+        feedback text. A case
         that failed (its side info is an ``error``) counts as 0 on every name,
         as it does in the total, so a failure never vanishes from the parts.
     """
@@ -654,8 +655,7 @@ def _final_run(
         errors, and on a repository run the failed runs.
 
     Raises:
-        ServiceError: When the scorer fails on the candidate, including when
-            it returns no feedback.
+        ServiceError: When the scorer fails on the candidate.
     """
     targets: list[Any] = cases or [None]
     observed = getattr(scorer, "score_observed", None)

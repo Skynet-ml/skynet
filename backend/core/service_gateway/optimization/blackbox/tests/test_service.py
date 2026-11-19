@@ -1419,6 +1419,20 @@ def test_final_run_averages_named_scores_over_cases() -> None:
     assert run.named["accuracy"].feedback == "Case 1: case 1 acc\nCase 2: case 2 acc"
 
 
+def test_final_run_named_feedback_skips_a_case_with_no_feedback() -> None:
+    """A case whose named score has no feedback adds no empty ``Case n:`` line."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float, dict[str, Any]]:
+        """Score each case with one named score, with feedback only on the second case."""
+        return 0.5, {"scores": {"accuracy": {"score": 0.5, "feedback": case["feedback"]}}}
+
+    run = service_mod._final_run(
+        scorer, "v", [{"feedback": ""}, {"feedback": "x"}], label="optimized version", phase=PHASE_FINAL
+    )
+
+    assert run.named["accuracy"].feedback == "Case 2: x"
+
+
 def test_a_failed_case_counts_as_zero_in_every_named_score() -> None:
     """A case whose run failed lowers each part's mean as it lowers the total, instead of vanishing."""
 
