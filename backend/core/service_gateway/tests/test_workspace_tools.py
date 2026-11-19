@@ -866,6 +866,16 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
     assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
 
 
+def test_a_new_text_that_is_not_toml_is_refused_when_the_current_text_is_not_toml_either() -> None:
+    """A commented-out rules path in a broken new text does not keep the broken current text's rules file."""
+    refusal = workspace_tools.dropped_rule_files(
+        'illegal = "docs/rules.md"\n[broken\n', '# illegal = "docs/rules.md"\n[broken\n'
+    )
+
+    assert refusal is not None
+    assert "not valid TOML, so it cannot keep 'docs/rules.md'" in refusal
+
+
 @pytest.mark.parametrize(
     "line",
     [

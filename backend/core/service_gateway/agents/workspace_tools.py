@@ -368,18 +368,21 @@ def dropped_rule_files(current: str, text: str) -> str | None:
     """
     before = _rule_settings(current)
     after = _rule_settings(text)
+    # A current text that is not TOML gives only its paths; the raw search never runs on the new text.
+    raw_paths = _rule_line_paths(current) if before is None else []
     if before is None:
-        # The current text is not TOML, so only its paths are known: each must stay in the new text.
-        kept = set(after.values()) if after is not None else set(_rule_line_paths(text))
-        dropped = [f"{path!r}" for path in _rule_line_paths(current) if path not in kept]
-    elif not before:
-        return None
-    elif after is None:
+        named = [f"{path!r}" for path in raw_paths]
+    else:
         named = [f"{setting} = {path!r}" for setting, path in before.items()]
+    if not named:
+        return None
+    if after is None:
         return (
             f"The new optimize.toml is not valid TOML, so it cannot keep {', '.join(named)}. "
             "Send a valid file that keeps these settings."
         )
+    if before is None:
+        dropped = [f"{path!r}" for path in raw_paths if path not in after.values()]
     else:
         dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
     if not dropped:
