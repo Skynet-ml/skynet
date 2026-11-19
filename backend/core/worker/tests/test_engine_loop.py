@@ -33,6 +33,7 @@ from core.sandbox.trees import GrantDeniedError, MetricFailedError, TreeRejected
 from core.service_gateway.optimization.blackbox import auto
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import (
+    TOO_DEEP_ARGUMENTS,
     EngineContext,
     EvalServer,
     FileTooLargeError,
@@ -49,10 +50,11 @@ from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRu
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSession
 from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
+from core.storage import step_log_store
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import SEQ_MAX, StepLogStore, step_id_for
-from core.storage.tree_store import TreeEntry, TreeStore
+from core.storage.tree_store import TreeEntry, TreeStore, object_id_of
 from core.storage.workspace_store import WorkspaceStore
 from core.worker import engine_loop
 from core.worker.actors import LeaseExhaustedError, User
@@ -557,6 +559,15 @@ def test_a_command_time_limit_reaches_the_tree_sandbox(
     loop.run(seed_tree, "echo other")
 
     assert limits == [1800, None]
+
+
+def test_the_context_names_the_job_as_its_log_owner(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The context's log owner is the job id, so the worker's log router keeps the engine's forwarded records."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+
+    assert loop.context().log_owner == RUN_ID
 
 
 def test_a_resumed_loop_continues_from_its_last_step_and_repeats_no_model_call(
@@ -1489,6 +1500,436 @@ def test_converted_openai_tool_calls_commit_and_a_resume_replays_them_unchanged(
     _new_generation(engine)
     resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def _nested(levels: int) -> dict[str, Any]:
+    """Build tool call arguments nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested objects, the outer one included.
+
+    Returns:
+        ``{"a": {"a": ... {}}}``, ``levels`` objects deep.
+    """
+    value: dict[str, Any] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+def _nested_tuples(levels: int) -> dict[str, Any]:
+    """Build tool call arguments that hold tuples nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested tuples.
+
+    Returns:
+        ``{"a": ((... (),),)}``, with ``levels`` tuples under the outer object.
+    """
+    value: tuple[Any, ...] = ()
+    for _ in range(levels - 1):
+        value = (value,)
+    return {"a": value}
+
+
+# An in-process model client can give tool calls that hold tuples, which the JSON encoder also walks recursively.
+@pytest.mark.parametrize("arguments", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
+def test_tool_arguments_nested_past_the_bound_commit_as_refused_text_and_a_resume_replays_them(
+    arguments: dict[str, Any],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Arguments too deep for the commit's JSON encoder fail only their call: the reply commits, with its cost.
+
+    Args:
+        arguments: Tool call arguments nested 2000 levels, in objects or in tuples.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # 2000 levels is past Python's default recursion limit, so the commit's JSON encoder would raise RecursionError.
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": arguments},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.cost_cents == Decimal(1)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    committed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert "error" not in committed["body"]
+    assert Decimal(committed["body"]["cost_cents"]) == 1
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+# 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack, for example
+# LiteLLM's Anthropic conversion, can raise and fail every later model call.
+@pytest.mark.parametrize(
+    "arguments",
+    ["[" * 900 + "]" * 900, '{"a": ' * 900 + "1" + "}" * 900, "[" * 900],
+    ids=["array", "object", "bad-json"],
+)
+def test_deep_tool_argument_text_commits_as_refused_text_whatever_the_stack(
+    arguments: str,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Argument text that opens more levels than the bound fails only its call; shallow text that is no JSON stays.
+
+    Args:
+        arguments: Tool call argument text that opens 900 levels.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": arguments},
+        {"id": "call_1", "name": "edit", "arguments": '{"text": '},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert reply.cost_cents == Decimal(1)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": '{"text": '},
+    ]
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_tool_argument_text_at_the_depth_bound_commits_and_one_level_deeper_commits_as_refused_text(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Argument text that opens exactly the arguments' bound of levels stays; one level more is refused.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # A literal, not the constant, so a change to the bound fails this test.
+    levels = 97
+    at_bound = "[" * levels + "]" * levels
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": at_bound},
+        {"id": "call_1", "name": "edit", "arguments": f"[{at_bound}]"},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+
+    assert [call["arguments"] for call in reply.tool_calls] == [at_bound, TOO_DEEP_ARGUMENTS]
+
+
+@pytest.mark.parametrize("deep", [_nested(2000), _nested_tuples(2000)], ids=["objects", "tuples"])
+def test_a_reply_nested_past_the_bound_outside_tool_arguments_is_a_failed_model_call_with_its_cost(
+    deep: dict[str, Any],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A deep part of the reply that is not tool call arguments gives the engine a failed call, not a stop.
+
+    Args:
+        deep: A value nested 2000 levels, in objects or in tuples.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": deep, "arguments": {}}]  # type: ignore[typeddict-item]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "ModelReplyTooDeepError"
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model"]
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as replayed:
+        resumed.call_model("improve seed", _TOOLS)
+    assert replayed.value.cost_cents == Decimal(1)
+    assert resumed.call_model("improve other", _TOOLS).text == "otherx"
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_at_the_body_bound_outside_tool_arguments_commits_and_one_level_deeper_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A body that nests exactly 100 levels outside tool call arguments commits; 101 levels give a failed call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # The step body, its tool call list and the call sit above the name: 97 levels there make 100 in the body.
+    # Literals, not the constants, so a change to the body bound fails this test.
+    at_bound = [{"id": "call_0", "name": _nested(97), "arguments": {}}]
+    model.reply_calls = at_bound  # type: ignore[assignment]
+    assert first.call_model("improve seed", _TOOLS).tool_calls == at_bound
+    model.reply_calls = [{"id": "call_0", "name": _nested(98), "arguments": {}}]  # type: ignore[typeddict-item]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError"):
+        first.call_model("improve other", _TOOLS)
+
+
+def _deep_tuple_keys(levels: int) -> dict[Any, int]:
+    """Build an object whose two keys are different tuples nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested tuples in each key.
+
+    Returns:
+        ``{((...(0,)...),): 0, ((...(1,)...),): 1}``; the keys differ only at their deepest level.
+    """
+    keys: list[Any] = [(0,), (1,)]
+    for _ in range(levels - 1):
+        keys = [(key,) for key in keys]
+    return {keys[0]: 0, keys[1]: 1}
+
+
+def test_deep_tuple_keys_fail_only_their_call_or_their_reply_and_the_cost_is_billed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Deep tuple keys make the encoder's key sort recurse; they give a refusal with its cost, not a loop stop.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # 3000 levels is past Python's default recursion limit, so a sort of the two keys would raise RecursionError.
+    model.reply_calls = [
+        {"id": "call_0", "name": "edit", "arguments": _deep_tuple_keys(3000)},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    reply = first.call_model("improve seed", _TOOLS)
+    assert reply.tool_calls == [
+        {"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_1", "name": "edit", "arguments": {"text": "seedx"}},
+    ]
+    assert reply.cost_cents == Decimal(1)
+
+    model.reply_calls = [{"id": "call_0", "name": _deep_tuple_keys(3000), "arguments": {}}]  # type: ignore[typeddict-item]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
+        first.call_model("improve other", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 1))
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+    assert first.remaining_cost_usd() == pytest.approx(9.97)
+
+
+class _RecursiveKey:
+    """A key whose order comparison recurses without end, as a key type that the depth walk does not enter can."""
+
+    def __lt__(self, other: object) -> bool:
+        """Compare by comparing again, which raises :class:`RecursionError`.
+
+        Args:
+            other: The other key.
+
+        Returns:
+            Never; the comparison recurses until Python stops it.
+        """
+        return self < other
+
+
+def test_a_reply_whose_key_sort_recurses_is_a_failed_model_call_with_its_cost(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A :class:`RecursionError` in the commit's key sort gives a refused reply that the lease bills.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {_RecursiveKey(): 0, _RecursiveKey(): 1}}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+
+def test_too_deep_arguments_is_a_shallow_json_object_with_no_command() -> None:
+    """The text must be a flat JSON object with no ``command``, so a provider accepts it and an engine refuses it."""
+    value = json.loads(TOO_DEEP_ARGUMENTS)
+    assert isinstance(value, dict)
+    assert "command" not in value
+    assert all(not isinstance(item, (dict, list)) for item in value.values())
+
+
+def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as_refused_text(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Arguments that fill the body to exactly 100 levels commit as they are; deeper ones are refused.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # The step body, its tool call list and the call hold the arguments: three levels above them.
+    arguments = _nested(97)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
+    reply = first.call_model("improve seed", _TOOLS)
+    assert reply.tool_calls == model.reply_calls
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {"a": arguments}}]
+    deeper = first.call_model("improve other", _TOOLS)
+    assert deeper.tool_calls == [{"id": "call_0", "name": "edit", "arguments": TOO_DEEP_ARGUMENTS}]
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed.call_model("improve other", _TOOLS) == deeper
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_larger_than_the_bound_is_a_failed_model_call_with_its_cost(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply past ``_MAX_REPLY_BYTES`` gives a failed call with its cost, and the run goes on.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to make the bound small.
+    """
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", 1000)
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": {"text": "y" * 1000}}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooLargeError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+
+def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply whose committed JSON, cost field included, is exactly ``_MAX_REPLY_BYTES`` commits; one byte more fails.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch, to set the bound.
+    """
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    reply = first.call_model("improve seed", _TOOLS)
+    committed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))["body"]
+    assert "cost_cents" in committed
+    size = len(step_log_store._encode_body(committed))
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size)
+    assert first.call_model("improve seed", _TOOLS) == reply
+    assert step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 1))["body"] == committed
+    monkeypatch.setattr(engine_loop, "_MAX_REPLY_BYTES", size - 1)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooLargeError"):
+        first.call_model("improve seed", _TOOLS)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    # json.loads accepts the escape of a lone surrogate, but UTF-8 cannot hold it; a set is no JSON value at all.
+    [json.loads('{"text": "\\ud800"}'), {"items": {1, 2}}],
+    ids=["lone-surrogate", "set"],
+)
+def test_a_reply_that_is_not_utf8_json_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    arguments: dict[str, Any],
+) -> None:
+    """A reply that the commit cannot encode gives a failed call that the lease bills, not a stop with a lost cost.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        arguments: Tool call arguments that are not UTF-8 JSON.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as live:
+        first.call_model("improve seed", _TOOLS)
+    assert live.value.cost_cents == Decimal(1)
+    failed = step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, 0))
+    assert failed["body"]["error"] == "ModelReplyNotJSONError"
+    assert Decimal(failed["body"]["cost_cents"]) == 1
+    assert first.remaining_cost_usd() == pytest.approx(9.99)
+    model.reply_calls = None
+    assert first.call_model("improve other", _TOOLS).text == "otherx"
+
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(ModelCallFailedError, match="ModelReplyNotJSONError") as replayed:
+        resumed.call_model("improve seed", _TOOLS)
+    assert replayed.value.cost_cents == Decimal(1)
     assert resumed_model.prompts == []
 
 
@@ -2807,7 +3248,9 @@ def test_finish_does_not_count_a_harness_capture_of_the_run(
     assert model.prompts == []
 
 
-@pytest.mark.parametrize("path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/"])
+@pytest.mark.parametrize(
+    "path", ["eval/secret/../x", "a/./b", "a//b", "a/b\0c", "a/", ".git/config", "a/.GIT/x", "a/.Git"]
+)
 def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     path: str,
     owner: tuple[User, int],
@@ -2820,7 +3263,7 @@ def test_put_files_refuses_a_bad_path_part_before_it_writes_any_object(
     """The tree store refuses a bad name only at its folder, so put_files checks each part before the first blob.
 
     Args:
-        path: A path with an empty, ``.`` or ``..`` part, or a NUL byte.
+        path: A path with an empty, ``.`` or ``..`` part, a ``.git`` part in any letter case, or a NUL byte.
     """
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     writes: list[Any] = []
@@ -2996,3 +3439,182 @@ def test_a_capped_read_gives_none_for_a_hidden_missing_or_folder_path(
     assert loop.read_file(tree, "src/a.py") == b"a"
     assert boxes.opened == 0
     assert _steps(engine) == []
+
+
+def _put_raw_tree(trees: TreeStore, rows: list[list[str]]) -> str:
+    """Store a tree object without :func:`encode_tree`, as a tree stored before SKY-810 can be.
+
+    Args:
+        trees: The tree store.
+        rows: The ``[name, mode, object_id]`` entries, unchecked.
+
+    Returns:
+        The tree's object id.
+    """
+    stored = b"tree\0" + json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    object_id = object_id_of(stored)
+    trees._step_log.put_object(RUN_ID, object_id, stored)
+    return object_id
+
+
+def test_a_tree_stored_before_sky_810_loses_its_git_entries_on_a_rewrite(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The context and put_files write back a legacy tree without its ``.git`` entries, as other writers do."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    secret = trees.put_blob(RUN_ID, b"secret")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    raw = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["metric.py", "file", secret], ["sub", "tree", sub]]
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(raw, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    written = loop.put_files({"sub/b.py": b"b"}, raw)
+    assert written == _store(trees, {"README": b"seed", "metric.py": b"secret", "sub/a.py": b"seed", "sub/b.py": b"b"})
+
+
+def test_a_legacy_tree_with_only_git_entries_reads_as_a_tree_without_them(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Reads, listings and the context hide ``.git`` entries at any depth, as if the tree never held them.
+
+    The ``empty/`` folder holds only a ``.Git`` file, so it reads as an empty folder, not as a hidden one.
+    """
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob], ["x", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    empty = _put_raw_tree(trees, [[".Git", "file", blob]])
+    legacy = _put_raw_tree(
+        trees, [[".GIT", "tree", git], ["README", "file", blob], ["empty", "tree", empty], ["sub", "tree", sub]]
+    )
+    clean_sub = trees.put_tree(RUN_ID, [TreeEntry("a.py", "file", blob)])
+    clean = trees.put_tree(
+        RUN_ID,
+        [
+            TreeEntry("README", "file", blob),
+            TreeEntry("empty", "tree", trees.put_tree(RUN_ID, [])),
+            TreeEntry("sub", "tree", clean_sub),
+        ],
+    )
+
+    ctx = loop.context(repo_seed=RepoSeed(legacy, hidden_hashes=hidden))
+    assert ctx.repo_seed is not None
+    assert ctx.repo_seed.tree_id == clean
+    assert loop.list_files(legacy) == ["README", "sub/a.py"]
+    for path in ["", "sub", "empty", ".GIT", ".git", "sub/.GIT", "empty/.Git"]:
+        assert loop.list_files(legacy, path) == loop.list_files(clean, path)
+    for path in ["README", "sub/a.py", "sub/.GIT/x", ".GIT/config", ".git/config", "empty/.Git"]:
+        assert loop.read_file(legacy, path) == loop.read_file(clean, path)
+    assert loop.read_file(legacy, "sub/.GIT/x") is None
+
+
+def test_a_legacy_folder_with_only_a_hidden_folder_and_git_lists_as_missing(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A folder that holds only a hidden folder and a ``.git`` file lists as missing, as without the ``.git``."""
+    hidden = hidden_hashes(["d/eval"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    evals = trees.put_tree(RUN_ID, [TreeEntry("score.py", "file", blob)])
+    folder = _put_raw_tree(trees, [[".git", "file", blob], ["eval", "tree", evals]])
+    tree = _put_raw_tree(trees, [["README", "file", blob], ["d", "tree", folder]])
+
+    assert loop.list_files(tree, "d") is None
+
+
+def test_a_symlink_below_a_legacy_git_entry_does_not_stop_the_loop(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The link check skips a ``.git`` entry, as the box never gets it, so a link below it stops nothing."""
+    hidden = hidden_hashes(["metric.py"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    readme = trees.put_blob(RUN_ID, b"x")
+    git = _put_raw_tree(trees, [["l", "symlink", trees.put_blob(RUN_ID, b"/etc")]])
+    tree = _put_raw_tree(trees, [[".git", "tree", git], ["README", "file", readme]])
+
+    assert loop.read_file(tree, "README") == b"x"
+
+
+def test_put_files_drops_git_entries_from_folders_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """An unchanged folder of the base loses its ``.git`` entries too, so the id matches a base without them."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    sub = _put_raw_tree(trees, [[".GIT", "tree", git], ["a.py", "file", blob]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_drops_git_entries_two_levels_below_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A ``.git`` entry deep in an unchanged folder goes too, so the id matches a base without it."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["b.py", "file", blob]])
+    sub = _put_raw_tree(trees, [["a.py", "file", blob], ["x", "tree", x]])
+    root = _put_raw_tree(trees, [["README", "file", blob], ["sub", "tree", sub]])
+
+    clean = _store(trees, {"README": b"seed", "sub/a.py": b"seed", "sub/x/b.py": b"seed"})
+
+    assert loop.put_files({"README": b"y"}, root) == loop.put_files({"README": b"y"}, clean)
+
+
+def test_put_files_keeps_hidden_paths_in_a_folder_it_does_not_change(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Dropping ``.git`` from an unchanged folder keeps its hidden files, which the proposer never wrote."""
+    hidden = hidden_hashes(["eval/x/answer.txt"])
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
+    blob = trees.put_blob(RUN_ID, b"seed")
+    git = _put_raw_tree(trees, [["config", "file", blob]])
+    x = _put_raw_tree(trees, [[".git", "tree", git], ["answer.txt", "file", blob]])
+    evals = _put_raw_tree(trees, [["score.py", "file", blob], ["x", "tree", x]])
+    base = _put_raw_tree(trees, [["README", "file", blob], ["eval", "tree", evals]])
+
+    tree = loop.put_files({"README": b"y"}, base)
+
+    def stored(tree_id: str) -> dict[str, str]:
+        """Return the ids of a stored tree's entries by name."""
+        return {entry.name: entry.object_id for entry in trees.get_tree(RUN_ID, tree_id)}
+
+    folder = stored(tree)["eval"]
+    assert sorted(stored(folder)) == ["score.py", "x"]
+    assert sorted(stored(stored(folder)["x"])) == ["answer.txt"]
+
+
+def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second write over the same base does not read its unchanged folder again."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    base = _store(trees, {"README": b"seed", "sub/a.py": b"seed"})
+    sub = next(entry.object_id for entry in trees.get_tree(RUN_ID, base) if entry.name == "sub")
+    reads: list[str] = []
+    stored = loop._stored
+    monkeypatch.setattr(loop, "_stored", lambda tree_id: reads.append(tree_id) or stored(tree_id))
+
+    first = loop.put_files({"README": b"y"}, base)
+    second = loop.put_files({"README": b"z"}, base)
+
+    assert first != second
+    assert reads.count(sub) == 1

@@ -57,7 +57,7 @@ Skynet 对运行、文件、存储和请求速率设有限制。这些限制可�
 | 文件夹深度         | 3 层文件夹                                                              |
 | 文件类型           | `.py`、`.txt`、`.md`、`.json`、`.yaml`、`.csv`、`.toml`、`.ini`、`.cfg` |
 
-`scorer.py` 包含你的评分器。Skynet 对每个用例调用其中的 `score(repo_path, case)` 函数。
+`scorer.py` 包含你的评分器。Skynet 对每个用例调用其中的 `score(repo_path, case, output=None)` 函数。`output` 参数保存 `[run]` 入口为该用例返回的值。
 
 ## 请求速率
 

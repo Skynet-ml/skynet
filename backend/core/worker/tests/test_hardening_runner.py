@@ -765,6 +765,43 @@ def test_a_drafted_fix_that_does_not_apply_fails_every_check(tmp_path: Path, mon
     assert current.fix.checks.reference_not_lower == "fail"
 
 
+def test_a_failed_run_scores_nan_and_fails_every_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed ``[run]`` entry has no score: the round gets NaN, fails its checks, no TypeError (SKY-751)."""
+    runner = _fixed_tree(tmp_path, ())
+    failed = SimpleNamespace(
+        score=lambda patch: {"score": None, "status": "run_failed", "feedback": "Run failed: boom"}, close=lambda: None
+    )
+    monkeypatch.setattr(runner, "open_scorer", lambda archive, fixes: failed)
+    fix = _diff("v1", "v2")
+    monkeypatch.setattr(runner, "draft_fix", lambda **kwargs: (fix, 0.0))
+    reference = tmp_path / "reference.diff"
+    reference.write_text("")
+    exploit = HardeningExploit(
+        id="e1",
+        kind="case",
+        label="exploit",
+        confidence=0.9,
+        reason="r",
+        unsure=False,
+        patch_diff="",
+        why_md="w",
+        user_verdict="confirmed",
+    )
+    job = new_job(attacker_model="m", judge_model="m", place="local")
+    current = HardeningRound(index=1, status="waiting_review", exploits=[exploit])
+    try:
+        assert math.isnan(runner._score(None, ""))
+        assert math.isnan(runner._score(fix, ""))
+        _draft_fix(job, current, runner, tmp_path / "exploits", reference)
+    finally:
+        runner.close()
+
+    assert job.status == "waiting_fix"
+    assert current.fix is not None
+    assert current.fix.checks.base_score_unchanged == "fail"
+    assert current.fix.checks.reference_not_lower == "fail"
+
+
 def test_an_approved_fix_that_does_not_apply_still_raises(tmp_path: Path) -> None:
     """When the approved fixes alone do not apply, the base score raises and the pass fails."""
     runner = _fixed_tree(tmp_path, (_diff("other", "v2"),))
@@ -1204,7 +1241,9 @@ def _compose_tree(root: Path) -> Path:
     """
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("VALUE = 1\n")
-    (root / "optimize.toml").write_text('version = 1\n[sandbox]\ncompose = "compose.yaml"\n')
+    (root / "optimize.toml").write_text(
+        'version = 1\n[sandbox]\ncompose = "compose.yaml"\n[run]\nentry = "src/app.py:main"\n'
+    )
     (root / "compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n")
     return root
 
@@ -1218,7 +1257,8 @@ _RENAME_SERVICE_FIX = (
 _BREAK_CONSTRAINTS_FIX = (
     "diff --git a/optimize.toml b/optimize.toml\n"
     "--- a/optimize.toml\n+++ b/optimize.toml\n"
-    '@@ -1,3 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n+not = [valid\n'
+    '@@ -1,5 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n-[run]\n-entry = "src/app.py:main"\n'
+    "+not = [valid\n"
 )
 
 
@@ -1521,7 +1561,7 @@ def test_the_runner_reads_the_trusted_tree_with_the_staging_version_rule(
     (trusted / "src").mkdir(parents=True)
     (trusted / "src" / "app.py").write_text("VALUE = 1\n")
     (trusted / "intent.md").write_text("Keep the app fast.\n")
-    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n')
+    (trusted / "optimize.toml").write_text('instructions = "intent.md"\n[run]\nentry = "src/app.py:main"\n')
 
     class Gateway:
         """Protects nothing and opens no box."""

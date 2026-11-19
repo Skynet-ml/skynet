@@ -54,7 +54,7 @@ from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import harness_bridge, runner
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
@@ -207,7 +207,9 @@ instructions = "docs/intent.md"
 editable = ["src/geocode"]
 protected = ["src/geocode/eval"]
 """
-_FILES = {"optimize.toml": _CONSTRAINTS, "docs/intent.md": "Pick the place the sender means.\n"}
+# The metric scores only what a [run] or a target stage gives it, so a contract needs one (SKY-761).
+_RUN = '\n[run]\nentry = "run.py:main"\n'
+_FILES = {"optimize.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place the sender means.\n"}
 
 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
@@ -335,7 +337,7 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
     proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
-    files = {**_FILES, "optimize.toml": _CONSTRAINTS + proposer}
+    files = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + proposer}
     monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
@@ -359,8 +361,14 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
 @pytest.mark.parametrize(
     ("files", "message"),
     [
-        ({"optimize.toml": 'version = 1\n[paths]\neditable = ["tests"]\n'}, "outside the approved editable paths"),
-        ({"optimize.toml": 'version = 1\n[services]\ngeocoder = ["search"]\n'}, "cannot grant services"),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["tests"]\n'},
+            "outside the approved editable paths",
+        ),
+        (
+            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n'},
+            "cannot grant services",
+        ),
     ],
 )
 def test_staging_refuses_a_file_that_asks_for_more(
@@ -409,7 +417,7 @@ def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
     """
     files = {
         "optimize.toml": (
-            "version = 1\n[proposer]\n"
+            'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
             f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
             f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
         ),
@@ -478,7 +486,7 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
     payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -498,7 +506,7 @@ def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_defa
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": "version = 1\n"}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     payload = {**_payload("c" * 40), "proposer": {"max_tool_calls": 100}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -518,7 +526,7 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
         proposer: The request's proposer, without a harness.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
     staged.cleanup()
@@ -527,7 +535,7 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
 
 
-_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\n'}
+_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
 def test_a_single_shinka_evolve_run_with_a_files_proposer_fails_the_setup_check(
@@ -650,7 +658,10 @@ def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeyp
         monkeypatch: Pytest fixture for the fake fetch.
     """
     files = {
-        "optimize.toml": 'version = 1\n[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n',
+        "optimize.toml": (
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n'
+        ),
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
     }
 
@@ -679,7 +690,7 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
-_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + "\n[outcome]\ntarget = 0.9\n"}
+_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget = 0.9\n"}
 
 
 def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
@@ -721,7 +732,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert staged.require_version is True
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
 
@@ -736,7 +747,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
     """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
-    unversioned = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
 
     staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
     staged.cleanup()
@@ -745,9 +756,21 @@ def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     assert staged_payload["target"]["repo"]["editable_paths"] == ["src/geocode"]
 
 
+def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761)."""
+    first, staged = _stage_with(_FILES, monkeypatch)
+    staged.cleanup()
+    resumed = _payload("c" * 40)
+    resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
+    no_run = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+
+    with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
+        _stage_with(no_run, monkeypatch, resumed)
+
+
 _RULED = {
     **_FILES,
-    "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
+    "optimize.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',
     "docs/rules.md": "- Do not hardcode answers for dataset cases.\n- Do not call an outside geocoding service.\n",
 }
 
@@ -806,10 +829,12 @@ def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest
 
 def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     """The contract can come from the repository tree or from the draft files."""
-    _, staged = _stage_with({"optimize.toml": "version = 1\n"}, monkeypatch, require_constraints=True)
+    _, staged = _stage_with(
+        {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
+    )
     staged.cleanup()
     drafted = _payload("c" * 40)
-    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     _, staged = _stage_with({}, monkeypatch, drafted, require_constraints=True)
     staged.cleanup()
     assert staged.constrained is True
@@ -1017,7 +1042,10 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
     payload = _payload("c" * 40)
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
     payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
-    toml = 'version = 1\n[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    toml = (
+        'version = 1\n[run]\nentry = "run.py:main"\n'
+        '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+    )
 
     _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
 
@@ -2167,6 +2195,123 @@ def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, An
     assert repo_staging.improved_patch(result) is None
 
 
+_RUN_FAILED_START = {
+    "candidate": "",
+    "score": None,
+    "side_info": {"error": "Run failed: ConnectionError", "status": RUN_FAILED_STATUS},
+}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(
+            None,
+            0.4,
+            versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}],
+            details={"baseline_run_failed": True},
+        ),
+        _result(None, None, versions=[_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]),
+    ],
+)
+def test_a_scored_version_beats_a_starting_code_with_no_score(result: dict[str, Any]) -> None:
+    """A starting code whose ``[run]`` failed has no score, so a scored version opens a PR (SKY-751).
+
+    Args:
+        result: Finished result whose starting code has no score.
+    """
+    assert repo_staging.improved_patch(result) == _EDIT
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+    assert "The starting code has no score" in body
+    assert "This version scored 0.4." in body
+
+
+def test_a_starting_code_whose_final_run_failed_loses_to_a_scored_version() -> None:
+    """The search scored the starting code, but its final ``[run]`` failed, so the winner opens a PR (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": True})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_the_pr_body_says_the_starting_code_has_no_score_when_its_final_run_failed() -> None:
+    """The final run decides the PR body: the search scores never stand in for a failed starting code (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.2}, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.6, versions=versions, details={"baseline_run_failed": True})
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "The starting code has no score: it failed on at least one case. This version scored 0.6." in body
+    assert "Score went from" not in body
+
+
+def test_a_metric_error_in_the_final_run_never_lets_a_version_win() -> None:
+    """The final run decides: a metric error there opens no PR, even after a search ``[run]`` failure (SKY-751)."""
+    versions = [_RUN_FAILED_START, {"candidate": _EDIT, "score": 0.4}]
+    result = _result(None, 0.4, versions=versions, details={"baseline_run_failed": False})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+@pytest.mark.parametrize("run_failed", [True, False])
+def test_a_final_run_with_no_score_for_either_version_publishes_nothing(run_failed: bool) -> None:
+    """Both final-run scores are empty, so the search scores never stand in and no PR opens (SKY-751).
+
+    Args:
+        run_failed: The final run's ``baseline_run_failed`` flag.
+    """
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": run_failed})
+
+    assert repo_staging.improved_patch(result) is None
+
+
+def test_a_stopped_run_still_compares_the_search_scores() -> None:
+    """A run stopped before its final run has no run-failed flag, so the version scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(None, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+def test_a_budget_stop_in_the_winners_held_out_run_compares_the_search_scores() -> None:
+    """The starting code's held-out run finished, the winner's did not, so the search scores decide (SKY-751)."""
+    versions = [{"candidate": "", "score": 0.3}, {"candidate": _EDIT, "score": 0.5}]
+    result = _result(0.3, None, versions=versions, details={"baseline_run_failed": None})
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert "Score went from 0.3 to 0.5." in repo_staging._description(result, _EDIT, "https://x/run")
+
+
+def test_a_version_whose_run_failed_is_never_published() -> None:
+    """A best version with a failed ``[run]`` case has no score, so it opens no PR (SKY-751)."""
+    failed = {**_RUN_FAILED_START, "candidate": _EDIT}
+    result = _result(None, None, versions=[{"candidate": "", "score": 0.2}, failed])
+
+    assert repo_staging.improved_patch(result) is None
+
+
+_METRIC_ERROR_START = {"candidate": "", "score": None, "side_info": {"error": "KeyError", "status": METRIC_ERROR}}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, 0.4, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, None, versions=[_METRIC_ERROR_START, {"candidate": _EDIT, "score": 0.4}]),
+        _result(None, 0.4, versions=[{"candidate": _EDIT, "score": 0.4}]),
+    ],
+    ids=["final-run", "stopped", "starting-code-not-recorded"],
+)
+def test_a_scored_version_never_beats_a_starting_code_the_metric_crashed_on(result: dict[str, Any]) -> None:
+    """Only a failed ``[run]`` of the starting code lets a scored version open a PR; a metric error does not (SKY-751).
+
+    Args:
+        result: Finished result whose starting code had a metric error.
+    """
+    assert repo_staging.improved_patch(result) is None
+
+
 def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
     """Candidate branches leave out a crashed version and count it as skipped."""
     other = _EDIT.replace("+x = 2", "+x = 3")
@@ -3173,7 +3318,8 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
             "eval/labels.json",
         ),
         (
-            'version = 1\n[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
+            'version = 1\n[run]\nentry = "run.py:main"\n'
+            '[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n',
             ".optimize/exploits/cheat.py",
         ),
     ],
@@ -3397,7 +3543,7 @@ _OUTPUT_METRIC = """
 import json
 
 def score(repo_path, case, output=None):
-    return 1.0, json.dumps({"case": case, "output": output}, sort_keys=True)
+    return {"score": 1.0, "feedback": json.dumps({"case": case, "output": output}, sort_keys=True)}
 """
 
 

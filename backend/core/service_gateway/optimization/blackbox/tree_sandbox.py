@@ -7,6 +7,48 @@ metric tree, so no candidate code reaches it. Each call commits one step to
 the step log and returns only once that step is durable behind the run's
 fence. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
 it opens a new box for each acquire and closes it at release.
+:class:`RuntimeBoxLease` keeps one warm box for each agent of a run on the
+provider that placement picks (SKY-732); the lease key holds the run id, so
+two runs never share a box. A metric lease must use ``keep_warm=False``: no
+wipe resets /tmp, $HOME and stray processes on every provider, so each score
+gets a new box.
+
+A step's process must not live into the next step of a warm box, where it
+could write into the unpacked tree. No simple way kills every such process on
+every provider: a candidate can leave its process group and session. So the
+step goes back healthy only when it can show that no process is left: the
+command did not time out, and a scan of /proc after the pack finds no process
+that the scan before the unpack did not see. A box whose scan fails or that has
+other new processes goes back unhealthy, and the next step gets a new box.
+
+The box user can write a folder on the box PATH (``/app/.venv/bin`` on
+Vercel) and its own shell profile. A tool planted there could fake the scan,
+or add files to the next step's tree in the unpack. So the scan, the unpack
+and the pack run in a clean shell that finds its tools only in ``/usr/bin``
+and ``/bin``. A planted tool would also change what the next command finds,
+which a new box on a resume does not have. So the scan also prints a state
+line, a hash over the metadata of every file in the PATH folders and of the
+shell profile files, and a changed line makes the box unhealthy too.
+
+On Vercel, a box user command writes its output and exit code to files in
+/tmp that the box user owns, and the control plane reads them back. A stray
+process could put the scan before the step in the file of the scan after it.
+So the scan runs as root wherever the provider's root has capabilities, the
+same rule as the protected-file check of the repo workspace (TS-1). A root
+command's output goes into a root-owned folder. Under ``sudo``, root's
+``HOME`` and ``PATH`` are its own, so the root scan takes the box user from
+``SUDO_UID`` and the box PATH from the image's ``APP_ENTRY_PATH``, and it
+fails when one of them is missing.
+
+The limits: a candidate with root in the box can hide a process or change
+the root tools. The local subprocess box refuses ``sudo`` and the local
+Docker box has a root with no capabilities, so the scan runs as the box user
+there. Both give the output through a pipe, but a stray process of the same
+user can still trace the scan. Both are for development only. A provider
+whose ``sudo`` drops ``APP_ENTRY_PATH``, such as EC2 (dev only), fails each
+root scan, so each of its steps gets a new box. Other files outside the
+tree, such as in ``$TMPDIR``, ``$HOME`` or the working folder, still reach
+the agent's next step.
 
 :meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
 one box from a :class:`BoxSource`, starts it from a state, and gives the
@@ -14,7 +56,8 @@ caller a :class:`BoxSession`: commands with their own ``env``, ``on_output``,
 ``sudo`` and timeout, the box itself for checks, and one release. It needs no
 tree store and commits no step, so a caller such as ``RepoScorer`` that keeps
 its own records uses the same box path as :meth:`TreeSandbox.run` and
-:meth:`TreeSandbox.score`.
+:meth:`TreeSandbox.score`. It refuses a lease that keeps boxes warm, because
+it gives the box back with no process scan.
 """
 
 from __future__ import annotations
@@ -35,7 +78,9 @@ from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
+from ....sandbox.box_lease import BoxLease
 from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ....sandbox.placement import VERCEL, Placement, gpu_type, network_grants
 from ....sandbox.trees import (
     MAX_ARCHIVE_BYTES,
     BadArchiveError,
@@ -53,6 +98,7 @@ from ....storage.step_log_store import StepFenceError, StepLogStore, step_id_for
 from ....storage.tree_store import TreeStore
 from .repo_tree import ARCHIVE_CHUNK_BYTES
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox_runtime import LocalSubprocessSession
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +118,65 @@ _MAX_B64_CHARS = 4 * -(-MAX_ARCHIVE_BYTES // 3)
 _MAX_OUT_FILE_BYTES = _MAX_B64_CHARS + -(-_MAX_B64_CHARS // 76) + 5 * _MAX_OUT_PARTS
 # The pack command's exit code for an archive over the limit; the box's own tar errors use 1 and 2.
 _TOO_LARGE_EXIT = 97
+_CHECK_TIMEOUT_SECONDS = 30
+_SCAN_STDERR_CHARS = 200
+# Runs a control script in a clean shell. env -i drops the box environment, so a tool comes only from the
+# root-owned /usr/bin and /bin, and not from a folder that the box user can write. The box locale passes
+# through, so tar names files as the box shell does. BOX_PATH and HOME give the scan the folders to check.
+_CLEAN_ENV = '/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" LANG="$LANG" LC_ALL="$LC_ALL" BOX_PATH="$PATH"'
+_CLEAN_BASH = " /bin/bash --noprofile --norc -c "
+_CLEAN_SHELL = _CLEAN_ENV + _CLEAN_BASH
+# Prints a "state <hash>" line, then one "pid start-ticks" line for each process, except the scan's own shell,
+# its ancestors and its children (the loop, awk and sort), and the kernel threads (pid 2 and its children, only
+# when pid 2 is kthreadd: on Docker and gVisor it can be a normal process). A process of the box user can rename
+# itself kthreadd, so pid 2 must also have the PF_KTHREAD bit (0x00200000) in its flags, field 9, which only the
+# kernel sets. mawk has no bitwise operators, so awk tests the bit with division. A pid with its start time names one
+# process, also when the pid is used again. The scan reads /proc/<pid>/stat itself, because the box image
+# (python:3.12-slim) has no ps. The name in a stat line can hold spaces and parens, so the fields come after the
+# last ")": the parent pid is field 4 and the start time in clock ticks is field 22. A process that ends between
+# the list and its read could fork a child and hide it, so a stat file that does not read fails the scan. The
+# scan's own processes live through the read: bash waits for each command substitution before the list. After the
+# reads the scan lists /proc again, so a process that a fork-and-exit chain starts after the first list fails the
+# scan too ("+" marks it for awk), unless its parent is the scan's shell (awk and sort) or a kernel thread
+# parent. Any other read failure, a bad line or no process at all fails the scan. SCAN_PROC_ROOT is for tests
+# only: env -i in PROCESS_SCAN drops it, so the box cannot set it.
+# The SHA-256 hash covers the metadata of each file in the box PATH folders and of the shell profile files. A
+# CRC can be forged, so it is not used. stat -L follows a link to its target. The change time of a file changes
+# on each write, and the box user cannot set it back. stat has GNU flags in a box and BSD flags on a macOS host.
+# A box has sha256sum and a macOS host has shasum; with neither, the hash line is bad and the scan fails.
+# A root scan under sudo gets root's HOME and PATH, so it checks the home of the user that sudo names and the
+# image's box PATH. A provider that already runs as root sets no SUDO_UID and keeps the box values.
+SCAN_SCRIPT = (
+    'set -o pipefail; if [ -n "$SUDO_UID" ] && [ "$(id -u)" = 0 ]; then'
+    ' [ "$SUDO_UID" != 0 ] && [ -n "$ENTRY_PATH" ] || exit 1;'
+    ' HOME=$(getent passwd "$SUDO_UID" | cut -d: -f6) && [ -n "$HOME" ] || exit 1; BOX_PATH=$ENTRY_PATH; fi;'
+    " if stat -c %i / >/dev/null 2>&1; then fmt=(-L -c '%n %i %s %Y %Z');"
+    " else fmt=(-L -f '%N %i %z %m %c'); fi;"
+    " if command -v sha256sum >/dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi;"
+    ' state=$({ printf "%s\\n" "$BOX_PATH" | tr : "\\n" | while IFS= read -r d; do'
+    ' find -H "$d" -maxdepth 1 -exec stat "${fmt[@]}" {} +; done;'
+    ' for f in .bash_profile .bash_login .profile .bashrc; do stat "${fmt[@]}" "$HOME/$f"; done; } 2>&1 | "${sum[@]}");'
+    " [[ $state =~ ^[0-9a-f]{64}[[:space:]] ]] || exit 1;"
+    ' echo "state ${state%% *}"; proc=${SCAN_PROC_ROOT:-/proc}; k=0;'
+    ' if [ "$(cat "$proc/2/comm" 2>/dev/null)" = kthreadd ]; then k=2; fi; shopt -s nullglob;'
+    ' { for f in "$proc"/[0-9]*/stat; do p=${f%/stat}; p=${p##*/}; [[ $p =~ ^[1-9][0-9]*$ ]] || exit 1; seen[p]=1;'
+    ' { IFS= read -r l < "$f"; } 2>/dev/null || exit 1; [[ $l == *")"* ]] || exit 1;'
+    ' printf "%s%s\\n" "${l%% *}" "${l##*)}"; done;'
+    ' for d in "$proc"/[0-9]*; do p=${d##*/}; [[ $p =~ ^[1-9][0-9]*$ ]] || exit 1; [ -n "${seen[p]}" ] && continue;'
+    ' { IFS= read -r l < "$d/stat"; } 2>/dev/null || exit 1; [[ $l == *")"* ]] || exit 1;'
+    ' printf "+%s%s\\n" "${l%% *}" "${l##*)}"; done; } | awk -v me=$$ -v k=$k \''
+    '{n = sub(/^[+]/, "", $1)} $1 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $21 !~ /^[0-9]+$/ {bad = 1}'
+    " n {late[$1] = $3; next} {parent[$1] = $3; start[$1] = $21}"
+    " $1 == 2 {flags = $8} END {if (bad || !NR) exit 1; if (int(flags / 2097152) % 2 != 1) k = 0;"
+    " for (pid in late) if (late[pid] != me && !(k && late[pid] == k)) exit 1;"
+    " p = me; while ((p in parent) && p > 1) {skip[p] = 1; p = parent[p]}"
+    " for (pid in start) if (!(pid in skip) && parent[pid] != me && !(k && (pid == k || parent[pid] == k)))"
+    " print pid, start[pid]}"
+    "' | LC_ALL=C sort"
+)
+# sudo keeps APP_ENTRY_PATH (the image's sudoers has !env_reset) and sets SUDO_UID; env -i would drop both.
+_SUDO_ENV = ' ENTRY_PATH="$APP_ENTRY_PATH" SUDO_UID="$SUDO_UID"'
+PROCESS_SCAN = _CLEAN_ENV + _SUDO_ENV + _CLEAN_BASH + shlex.quote(SCAN_SCRIPT)
 
 _Result = TypeVar("_Result")
 
@@ -103,7 +208,7 @@ class RuntimeBoxSource:
         """Open a new box whose network is the grant list.
 
         Args:
-            agent_id: The agent that runs the step; each call gets its own box.
+            agent_id: The box key (``run_id:agent_id``); each call gets its own box.
             grants: The step's grants; empty means no network.
 
         Returns:
@@ -124,13 +229,200 @@ class RuntimeBoxSource:
         Raises:
             BudgetReached: And the other budget errors, from the close's settlement.
         """
-        try:
-            box.close()
-        except _BUDGET_ERRORS:
-            raise
-        except Exception as error:
-            # Only the type: the provider's text can name the box.
-            logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
+        _close_box(box)
+
+
+class RuntimeBoxLease(BoxLease[SandboxSession]):
+    """Keep one warm box for each agent on the runtime of its placed provider (SKY-732)."""
+
+    # Every budget error from an idle box's settlement must stop the run, so each one wins over a box error.
+    stop_errors = _BUDGET_ERRORS
+
+    def __init__(
+        self,
+        runtimes: Mapping[str, SandboxRuntime],
+        spec: SandboxSpec,
+        registry: Mapping[str, Mapping[str, str]] | None = None,
+        **options: Any,
+    ) -> None:
+        """Bind the lease to one runtime for each provider and the spec of its boxes.
+
+        Args:
+            runtimes: Maps each provider name that placement can pick to the runtime that opens its boxes.
+            spec: The box spec; the network grants replace its network fields.
+            registry: Maps each capability host to the headers that the edge
+                injects for it; ``None`` holds no credential.
+            **options: The :class:`BoxLease` options, such as ``vercel_cap`` and ``keep_warm``.
+
+        Raises:
+            ValueError: When the cap, the spill provider or sleep_after_seconds
+                is not valid, or no runtime opens the Vercel boxes or the
+                spill provider's boxes.
+            TypeError: When keep_warm is not a bool, or a function option is not callable.
+        """
+        self._runtimes = runtimes
+        self._spec = spec
+        self._registry = registry or {}
+        # The lease checks the options first, so the spill provider below is a valid name.
+        super().__init__(self._open_on_runtime, _close_box, check=_box_alive, **options)
+        # Checked now: a missing spill runtime would fail only at the cap, as a retryable box failure.
+        missing = sorted({VERCEL, self._spill} - set(runtimes))
+        if missing:
+            raise ValueError(f"The lease needs a runtime for each provider it can place on: {', '.join(missing)}.")
+
+    @property
+    def registry(self) -> Mapping[str, Mapping[str, str]]:
+        """Return the capability registry that this lease resolves grants against."""
+        return self._registry
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Return the agent's warm box, or open a new one; refuse a GPU box or a denied grant first.
+
+        Args:
+            agent_id: The box key (``run_id:agent_id``).
+            grants: The box's grants.
+
+        Returns:
+            The box.
+
+        Raises:
+            GrantError: When the box needs a GPU, or the network grants do not resolve.
+        """
+        # Both refusals come before the claim, so the agent keeps its warm box and no start is spent.
+        gpu = gpu_type(grants)
+        if gpu is not None:
+            # The blackbox spec has no GPU field, so a runtime here would open the box without the GPU.
+            raise GrantError(f"No tree sandbox runtime opens a box with a {gpu} GPU.")
+        resolve_grants(network_grants(grants), self._registry)
+        return super().acquire(agent_id, grants)
+
+    def _open_on_runtime(self, placement: Placement, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new box on the placed provider's runtime.
+
+        Args:
+            placement: The provider of the box; :meth:`acquire` refuses a GPU first.
+            grants: The box's grants.
+
+        Returns:
+            The open box.
+
+        Raises:
+            GrantError: When the network grants do not resolve.
+            LookupError: When no runtime opens the placed provider's boxes.
+        """
+        runtime = self._runtimes.get(placement.provider)
+        if runtime is None:
+            raise LookupError(f"No runtime opens {placement.provider} boxes.")
+        return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
+
+
+def _close_box(box: SandboxSession) -> None:
+    """Close a box, and log only the type of a close failure.
+
+    Args:
+        box: The box.
+
+    Raises:
+        BudgetReached: And the other budget errors, from the close's settlement.
+    """
+    try:
+        box.close()
+    except _BUDGET_ERRORS:
+        raise
+    except Exception as error:
+        # Only the type: the provider's text can name the box.
+        logger.warning("A tree sandbox box did not close (%s)", type(error).__name__)
+
+
+def _processes(box: SandboxSession) -> frozenset[str] | None:
+    """Return the state line of a box and its processes, each as its pid and start time.
+
+    Args:
+        box: The box.
+
+    Returns:
+        The lines of :data:`PROCESS_SCAN`, or ``None`` when the scan fails,
+        so the caller cannot show that no process is left.
+
+    Raises:
+        BudgetReached: And the other budget errors; the run stops.
+    """
+    try:
+        result = box.run(PROCESS_SCAN, timeout_seconds=_CHECK_TIMEOUT_SECONDS, sudo=_scan_as_root(box))
+    except _BUDGET_ERRORS:
+        raise
+    except Exception as error:
+        # Only the type: the provider's text can name the box.
+        logger.warning("The process scan of a %s box did not run (%s)", type(box).__name__, type(error).__name__)
+        return None
+    lines = frozenset(result.stdout.splitlines())
+    if result.ok and not result.timed_out and lines:
+        return lines
+    # The first stderr line names the cause, such as a box without /proc. The box controls that text, so a cap
+    # keeps a long line out of the log.
+    first = next(iter(result.stderr.splitlines()), "")[:_SCAN_STDERR_CHARS]
+    logger.warning(
+        "The process scan of a %s box failed (exit code %s, timed out %s): %s",
+        type(box).__name__,
+        result.exit_code,
+        result.timed_out,
+        first,
+    )
+    return None
+
+
+def _scan_as_root(box: SandboxSession) -> bool:
+    """Return whether the process scan of a box runs as root.
+
+    A box user command on Vercel writes its output to a file that the box
+    user owns, so a stray process could replace the scan's lines. A root
+    command's output goes into a root-owned folder. The rule is the one of the
+    repo workspace's protected check (TS-1): a provider whose root has no
+    capability, local Docker, gives the output through a pipe and runs the
+    scan as the box user, and an unknown box keeps root.
+
+    Args:
+        box: The box.
+
+    Returns:
+        False for the local subprocess box, which refuses ``sudo``, and for a
+        provider whose root has no capability; True for any other box.
+    """
+    if isinstance(box, LocalSubprocessSession):
+        return False
+    return bool(getattr(box, "root_has_capabilities", True))
+
+
+def _clean(script: str) -> str:
+    """Wrap a control script so it runs in the clean shell.
+
+    Args:
+        script: The bash script.
+
+    Returns:
+        The command line that runs the script with only the root-owned tools.
+    """
+    return _CLEAN_SHELL + shlex.quote(script)
+
+
+def _box_alive(box: SandboxSession) -> bool:
+    """Return whether a warm box still runs a command.
+
+    Args:
+        box: The box.
+
+    Returns:
+        False when the box fails or dies.
+
+    Raises:
+        BudgetReached: And the other budget errors; the run stops.
+    """
+    try:
+        return box.run("true", timeout_seconds=_CHECK_TIMEOUT_SECONDS).ok
+    except _BUDGET_ERRORS:
+        raise
+    except Exception:
+        return False
 
 
 class StepCommittedError(TreeSandboxError):
@@ -256,6 +548,12 @@ class StepRef:
         """Return the step id, ``run_id:agent_id:seq``."""
         return step_id_for(self.run_id, self.agent_id, self.seq)
 
+    @property
+    def box_key(self) -> str:
+        """Return the key of the agent's box, ``run_id:agent_id``, so two runs with one agent id never share a box."""
+        # A run id holds no ":", so the key names one run and one agent.
+        return f"{self.run_id}:{self.agent_id}"
+
 
 class TreeSandbox:
     """Run commands and metrics on stored trees, in boxes from two sources."""
@@ -281,7 +579,8 @@ class TreeSandbox:
             timeout_seconds: The limit of one command or metric.
 
         Raises:
-            ValueError: When a runtime box source has another registry.
+            ValueError: When a runtime box source has another registry, or
+                the metric boxes come from a lease that keeps boxes warm.
         """
         self._trees = trees
         self._step_log = step_log
@@ -289,9 +588,13 @@ class TreeSandbox:
         self._metrics = metrics
         self._registry = registry or {}
         self._timeout = timeout_seconds
+        if isinstance(metrics, BoxLease) and metrics.keeps_warm:
+            # A warm box keeps /tmp, $HOME and stray processes from the last score or candidate,
+            # and no wipe clears them on every provider, so each score needs a new box.
+            raise ValueError("The metric boxes must come from a lease with keep_warm=False.")
         for source in (candidates, metrics):
             # The layer records the grant list that it resolves, so a box must open with the same registry.
-            if isinstance(source, RuntimeBoxSource) and source.registry != self._registry:
+            if isinstance(source, (RuntimeBoxSource, RuntimeBoxLease)) and source.registry != self._registry:
                 raise ValueError("A runtime box source must use the same capability registry as the tree sandbox.")
 
     @staticmethod
@@ -321,10 +624,15 @@ class TreeSandbox:
             The session that holds the started box.
 
         Raises:
+            ValueError: When the source keeps boxes warm.
             Exception: The source's acquire error or the start's error, raw.
             BudgetReached: And the other budget errors of the release after
                 a failed start, in place of the start's own error.
         """
+        if isinstance(source, BoxLease) and source.keeps_warm:
+            # A session gives the box back with no process scan and keys it by the bare agent id, so a stray
+            # process of one session, or of another run's agent with the same id, could reach the next session.
+            raise ValueError("A box session needs a source that does not keep boxes warm.")
         session = BoxSession(source, source.acquire(agent_id, grants))
         if start is None:
             return session
@@ -373,19 +681,33 @@ class TreeSandbox:
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
         timeout = self._timeout if timeout_seconds is None else timeout_seconds
+        # A fresh-box source closes every box at its release, so only another source needs the scans.
+        fresh = isinstance(self._candidates, RuntimeBoxSource) or (
+            isinstance(self._candidates, BoxLease) and not self._candidates.keeps_warm
+        )
 
-        def work(box: SandboxSession) -> tuple[CommandResult, str]:
-            """Unpack the tree, run the command and store the new tree.
+        def work(box: SandboxSession) -> tuple[tuple[CommandResult, str], bool]:
+            """Unpack the tree, run the command, store the new tree and say whether the box can serve a next step.
 
             Args:
                 box: The candidate box.
 
             Returns:
-                The command's result and the new tree id.
+                The command's result and the new tree id, and False when a
+                process of the command can still be alive in the box.
             """
+            # Before the unpack, so nothing that the unpack starts can join the baseline.
+            before = None if fresh else _processes(box)
             self._unpack(box, archive, TREE_DIR)
             result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout)
-            return result, self._pack(box, step.run_id, TREE_DIR)
+            new_tree_id = self._pack(box, step.run_id, TREE_DIR)
+            if result.timed_out:
+                # The kill reaches only the command's process group, so a process outside it can live on.
+                return (result, new_tree_id), False
+            if fresh:
+                return (result, new_tree_id), True
+            after = _processes(box)
+            return (result, new_tree_id), before is not None and after is not None and after <= before
 
         result, new_tree_id = self._in_box(self._candidates, step, grants, work)
         if refuse is not None and refuse(new_tree_id):
@@ -445,18 +767,20 @@ class TreeSandbox:
                 raise TreeRejectedError(step.step_id, "The outputs tree holds a link.")
         metric = tree_to_tar(self._trees, step.run_id, metric_tree_id)
 
-        def work(box: SandboxSession) -> CommandResult:
+        def work(box: SandboxSession) -> tuple[CommandResult, bool]:
             """Unpack the two trees and run the metric.
 
             Args:
                 box: The metric box.
 
             Returns:
-                The metric command's result.
+                The metric command's result, and False when it timed out, so
+                its processes can still be alive in the box.
             """
             self._unpack(box, outputs, OUTPUTS_DIR)
             self._unpack(box, metric, METRIC_DIR)
-            return box.run(command, timeout_seconds=self._timeout)
+            result = box.run(command, timeout_seconds=self._timeout)
+            return result, not result.timed_out
 
         result = self._in_box(self._metrics, step, grants, work)
         lines = result.stdout.strip().splitlines()
@@ -486,7 +810,8 @@ class TreeSandbox:
             GrantDeniedError: When the grants do not resolve.
         """
         try:
-            return resolve_grants(grants, self._registry).grant_list_id
+            # A gpu:<type> grant places the box; it is not a network grant.
+            return resolve_grants(network_grants(grants), self._registry).grant_list_id
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
 
@@ -495,7 +820,7 @@ class TreeSandbox:
         source: BoxSource[SandboxSession],
         step: StepRef,
         grants: Sequence[Grant],
-        work: Callable[[SandboxSession], _Result],
+        work: Callable[[SandboxSession], tuple[_Result, bool]],
     ) -> _Result:
         """Do one piece of work in a box from a source and give the box back.
 
@@ -503,10 +828,11 @@ class TreeSandbox:
             source: Gives the box.
             step: The step the work is.
             grants: The box's grants.
-            work: What to do in the box.
+            work: What to do in the box; it also returns False when the box
+                must not serve another step, so it goes back unhealthy.
 
         Returns:
-            What ``work`` returns.
+            The first value that ``work`` returns.
 
         Raises:
             GrantDeniedError: When the source refuses the grants.
@@ -515,17 +841,18 @@ class TreeSandbox:
             BudgetReached: And the other budget errors, from the work or the release.
         """
         try:
-            session = self.open_session(source, step.agent_id, grants)
+            # Not open_session, which refuses a warm lease: run() scans the processes of a warm box itself.
+            session = BoxSession(source, source.acquire(step.box_key, grants))
         except _BUDGET_ERRORS:
             raise
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
         except Exception as error:
             raise BoxFailureError(step.step_id, f"The box did not open ({type(error).__name__}).") from error
-        healthy = False
+        healthy = done = False
         try:
-            outcome = work(session.box)
-            healthy = True
+            outcome, healthy = work(session.box)
+            done = True
         except _BUDGET_ERRORS:
             raise
         except BadArchiveError as error:
@@ -540,7 +867,7 @@ class TreeSandbox:
                 # A budget stop wins over the step's own error, so the run stops.
                 raise
             except Exception as error:
-                if healthy:
+                if done:
                     # Only the type: the provider's text can name the box.
                     raise BoxFailureError(step.step_id, f"The box did not go back ({type(error).__name__}).") from error
                 # The step's own error is the one the caller acts on.
@@ -567,7 +894,10 @@ class TreeSandbox:
         files = " ".join(shlex.quote(name) for name in parts)
         # A source can give back a used box, so old files in the folder must not join the tree.
         result = box.run(
-            f"set -e; rm -rf {folder}; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder}; rm -rf {_IN_DIR}",
+            _clean(
+                f"set -e; rm -rf {folder}; mkdir -p {folder}; cat {files} | base64 -d | tar -xzf - -C {folder};"
+                f" rm -rf {_IN_DIR}"
+            ),
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if not result.ok:
@@ -590,15 +920,22 @@ class TreeSandbox:
         """
         result = box.run(
             # macOS tar would add AppleDouble ``._`` files to the tree without COPYFILE_DISABLE.
-            # The box checks the archive bytes against the archive limit first, so a normal oversized tree stops in the box.
+            # The box checks the archive bytes against the archive limit first, so a normal oversized tree
+            # stops in the box.
             # tar writes a file first, so set -e sees its exit code; a pipe would hide it.
+            # The tree store refuses a ``.git`` part in any letter case (SKY-810), so a command that runs
+            # ``git init`` would fail the step; the box's own ``.git`` is left out, as harness snapshots do.
             # The broker caps one read at 16 MiB, so the archive goes out in numbered base64 parts,
             # one read each, and the command prints the part count.
-            f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} -C {folder} .;"
-            f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
-            f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR}; split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
-            f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part"; i=$((i + 1)); done;'
-            " echo $i",
+            _clean(
+                f"set -e; COPYFILE_DISABLE=1 tar -czf {_TAR_FILE} --exclude='[.][gG][iI][tT]' -C {folder} .;"
+                f' [ "$(wc -c < {_TAR_FILE})" -le {MAX_ARCHIVE_BYTES} ] || exit {_TOO_LARGE_EXIT};'
+                f" rm -rf {_OUT_DIR}; mkdir {_OUT_DIR};"
+                f" split -b {ARCHIVE_CHUNK_BYTES} -a 4 {_TAR_FILE} {_OUT_DIR}/raw.;"
+                f' i=0; for part in {_OUT_DIR}/raw.*; do base64 < "$part" > {_OUT_DIR}/$i.b64; rm "$part";'
+                " i=$((i + 1)); done;"
+                " echo $i",
+            ),
             timeout_seconds=_MOVE_TIMEOUT_SECONDS,
         )
         if result.exit_code == _TOO_LARGE_EXIT:

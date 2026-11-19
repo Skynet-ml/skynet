@@ -32,7 +32,10 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from .. import runner
+from .. import scorer as scorer_mod
 from ..preflight import verify_anything_in_sandbox
+from ..protocol import RUN_FAILED_STATUS, EvalServer, ScorerAbortError
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
@@ -83,7 +86,7 @@ def run(value):
 # The metric box holds no repository file, so the version's own call runs
 # in the candidate box through the [run] entry, and the metric gets its output (SKY-398).
 SCORER = f"""
-import os
+import json, os
 
 def score(repo_path, case, output):
     direct = output["direct"]
@@ -91,13 +94,13 @@ def score(repo_path, case, output):
     leaked = output["leaked"] or any(
         key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r})
     )
-    return {{
-        "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
-        "feedback": direct + " " + judged,
+    probe = {{
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
         "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
     }}
+    # The answer allows no other keys (SKY-769), so the probe travels in the feedback.
+    return {{"score": 1.0 if direct == "OK" and judged == "OK" else 0.0, "feedback": json.dumps(probe)}}
 """
 
 
@@ -274,11 +277,12 @@ def test_a_managed_call_from_the_box_is_metered(
     assert all(command.startswith(f"{sys.executable} -I -S -c ") for command in supervisors)
 
     document = result["document"]
+    probe = json.loads(document["feedback"])
     assert document["score"] == 1.0
-    assert document["leaked"] is False
-    assert document["has_key"] is True
+    assert probe["leaked"] is False
+    assert probe["has_key"] is True
     # No run secret enters the box (E38); the parent keeps it for redaction.
-    assert document["secret"] is None
+    assert probe["secret"] is None
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {MANAGED_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
@@ -303,7 +307,7 @@ def test_a_byok_call_from_the_box_uses_the_users_key_in_the_parent(
 
     document = result["document"]
     assert document["score"] == 1.0
-    assert document["leaked"] is False
+    assert json.loads(document["feedback"])["leaked"] is False
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {BYOK_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]
@@ -492,6 +496,98 @@ def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     assert check["status"] == "failed"
     assert "The scorer raised an error" in check["message"]
     assert "evaluator_readiness" not in result
+
+
+class _FailedRunRelay:
+    """Stand in for the parent relay: the repository scorer reports a failed ``[run]`` entry."""
+
+    def __init__(self, route: dict[str, str], *, timeout_seconds: float, label: str) -> None:
+        """Accept the relay's arguments.
+
+        Args:
+            route: The parent-issued capability.
+            timeout_seconds: The request timeout.
+            label: Names the scorer in failure messages.
+        """
+
+    def __call__(self, candidate: Any, case: Any = None) -> dict[str, Any]:
+        """Return the repository scorer's reply for a failed run.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            A reply with no score and the ``run_failed`` status.
+        """
+        return {"score": None, "feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_the_setup_check_trusts_the_failed_run_status_of_the_repository_scorer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup check reads its own scorer's ``run_failed`` reply as a failed run, not a wrong answer (SKY-769).
+
+    Args:
+        monkeypatch: Sets the relay.
+    """
+    monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
+    payload = {
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return {'score': 1.0}\n"},
+        "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
+        "cases": [{"input": "x"}],
+        "_skynet_evaluator_route": {"token": "route"},
+    }
+
+    result = verify_anything_in_sandbox(
+        payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
+    )
+
+    assert result["scorer_result"]["score"] is None
+    assert result["scorer_result"]["side_info"] == {"feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_a_wrong_answer_form_stops_a_repository_run_before_any_score(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """A bare number from the metric stops the run after one evaluation, through the parent's relay (SKY-769).
+
+    The relay turns the parent's refusal into a 422, so the stop works only
+    when the parent's fixed text keeps the answer form.
+    """
+    model_gateway, _ = gateway
+    metric_code = "def score(repo_path, case=None):\n    return 0.8\n"
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=model_gateway.parent_sandbox_runtime(),
+            spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
+            archive=_archive(tmp_path, {"README": "hello"}),
+            editable_paths=["README"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric_code,
+        timeout_seconds=60,
+    )
+    relayed = scorer_mod.RemoteScorer(
+        "unused",
+        secret=None,
+        timeout_seconds=60,
+        protected_route=model_gateway.bind_evaluator(scorer),
+        label="repository scorer",
+        trusted_reply=True,
+    )
+    server = EvalServer(relayed, max_evals=5)
+    try:
+        with pytest.raises(ScorerAbortError) as caught:
+            server.evaluate("")
+    finally:
+        scorer.close()
+
+    assert str(caught.value).endswith(runner.ANSWER_FORM)
+    assert "return 0.8" not in str(caught.value)
+    assert server.used == 1
 
 
 def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:

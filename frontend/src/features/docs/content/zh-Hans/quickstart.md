@@ -55,26 +55,27 @@ Skynet 会在你的 GitHub 账户中创建这个仓库。助手根据你的任�
 
 ## 5. 指标和运行
 
-最后一步是 **指标和运行**。助手会为你编写评分器。你可以编辑它。评分器会收到仓库某个版本的路径和一个用例：
+最后一步是 **指标和运行**。助手会为你编写评分器和 `optimize.toml` 文件。你可以编辑它们。`[run]` 入口对一个用例运行仓库的一个版本。评分器会收到入口的输出和该用例：
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` 包含一个用例的输入列。`case["expected"]` 包含输出列，以列名作为键。仓库中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。运行结束后，Skynet 用同一个函数来部署最好的版本。
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-然后运行检查。检查会在沙箱中，在起始版本上运行你的安装步骤和评分器。只有检查通过后，你才能开始运行。
+`case["input"]` 包含一个用例的输入列。`case["expected"]` 包含输出列，以列名作为键。仓库中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口调用它，`output` 就是它的返回值。评分器在一个只包含你的指标文件、不包含版本代码的独立沙箱中运行，所以它不能导入 `serve.py`。运行结束后，Skynet 用同一个函数来部署最好的版本。
+
+然后运行检查。检查会在沙箱中，在起始版本上运行你的安装步骤、`[run]` 入口和评分器。只有检查通过后，你才能开始运行。
 
 ## 6. 开始并观察
 

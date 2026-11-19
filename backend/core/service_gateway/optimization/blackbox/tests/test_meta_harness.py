@@ -37,6 +37,7 @@ from core.service_gateway.optimization.blackbox.loop_tools import OUTPUT_BYTES
 from core.service_gateway.optimization.blackbox.meta_harness import BASH_TOOL, MetaHarnessEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
+    TOO_DEEP_ARGUMENTS,
     BudgetExhaustedError,
     EngineContext,
     EvalServer,
@@ -2198,16 +2199,15 @@ def _nested(depth: int) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [
-        # Text nested past the bound is refused by a bracket count, so the parser's stack-dependent limit never decides.
-        ("[" * 990, "nested at most"),
+        # Past the engine loop's depth bound, the step commits a shallow error object in place of the arguments
+        # (SKY-817), so the engine sees no command.
+        ("[" * 990, "command string"),
         (json.dumps({"command": "true", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}), "nested at most"),
         # Long JSON text whose parsed object is small: only the text bound refuses it.
         ('{"command": "true"}' + " " * loop_tools.MAX_ARGUMENT_CHARS, "nested at most"),
         ({"command": "x" * (loop_tools.MAX_ARGUMENT_CHARS + 1)}, "nested at most"),
         ({"command": "true", "pad": "x" * loop_tools.MAX_ARGUMENT_CHARS}, "nested at most"),
-        # Close to the depth past which the engine loop cannot commit the reply. How deep ``json.dumps`` can go
-        # depends on the stack at the call, so the transcript must not depend on it.
-        (_nested(900), "nested at most"),
+        (_nested(900), "command string"),
         # Short JSON text nested past the depth bound: the transcript holds an empty object, as in AutoResearch.
         (json.dumps(_nested(loop_tools.MAX_ARGUMENT_DEPTH)), "nested at most"),
         # Short text that is not JSON breaks no bound, so the transcript keeps it and the error asks for a command.
@@ -2254,8 +2254,13 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     assert result.best_candidate == "seed"
     assert boxes.opened == 0
     assert error in json.loads(model.calls[1][-1]["content"])["error"]
-    refused = error == "nested at most"
-    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == ("{}" if refused else arguments)
+    sent = model.calls[1][-2]["tool_calls"][0]["function"]["arguments"]
+    if error == "nested at most":
+        assert sent == "{}"
+    elif arguments == "not json":
+        assert sent == arguments
+    else:
+        assert sent == TOO_DEEP_ARGUMENTS
     resumed, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(die_at=0), generation=2)
     assert _run(resumed).best_candidate == "seed"
 

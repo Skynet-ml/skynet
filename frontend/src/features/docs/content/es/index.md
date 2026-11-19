@@ -11,7 +11,7 @@ Cada ejecución optimiza un repositorio. Puedes empezar de dos formas:
 
 El código del repositorio puede ser cualquier cosa: una aplicación, un servicio, un script o una biblioteca. Puede usar cualquier biblioteca.
 
-Todas las ejecuciones usan el mismo contrato. Tu evaluador define `score(repo_path, case)`. Devuelve una puntuación y comentarios por escrito. El optimizador lee los comentarios para que la siguiente versión sea mejor.
+Todas las ejecuciones usan el mismo contrato. Tu evaluador define `score(repo_path, case, output=None)`. El evaluador lee `output`, lo que la entrada `[run]` devolvió para el caso. No se ejecuta en la carpeta de la versión ni importa código del repositorio. Devuelve una puntuación y comentarios por escrito. El optimizador lee los comentarios para que la siguiente versión sea mejor.
 
 > [!NOTE]
 > Cada versión se ejecuta en un sandbox. El agente de código que escribe las versiones no puede ver el código fuente del evaluador ni los valores esperados.

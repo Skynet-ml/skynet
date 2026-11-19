@@ -35,6 +35,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "agent_settings.invalid_value": "The value for {field} is not valid.",
     "agent_settings.missing_target": "The {action} action needs a target.",
     "agent_settings.not_writable": "The chat cannot change {key}. Change it on the {tab} tab.",
+    "accounts.deletion_storage_unavailable": (
+        "Your account was not deleted: its stored run data could not be removed right now. Try again in a few minutes."
+    ),
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",
@@ -211,10 +214,17 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "hosted_link.linked_unknown_account": "your account",
     "notifier.body.stuck": "No improvement over the last {percent}% of the optimization's evaluation budget.",
     "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
+    "optimization.cancel_conflict": (
+        "The optimization changed its state during the cancel. It is now in '{status}'. Try to cancel it again."
+    ),
     "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",
     "optimization.cannot_resubmit_payload": "Cannot resubmit the saved payload: {error}",
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
+    "optimization.deletion_storage_unavailable": (
+        "The optimization was not deleted: its stored run data could not be removed right now. "
+        "Try again in a few minutes."
+    ),
     "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
     "optimization.no_result_pending": "Optimization has no result yet.",
     "optimization.not_found": "Optimization not found: '{optimization_id}'.",

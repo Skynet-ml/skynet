@@ -27,8 +27,8 @@ A host that runs an engine on the loop must follow this contract. It calls
 ends before it replays every committed step raises
 :class:`StepDivergedError` there. Its model client bills no call itself, and
 raises :class:`ModelCallBilledError` for a provider failure that the provider
-billed (see the ``model`` argument of :class:`EngineLoop`). No host calls the
-loop yet: SKY-728 (remove the one-box run path) connects it.
+billed (see the ``model`` argument of :class:`EngineLoop`). The production
+host is :mod:`core.worker.loop_host` (SKY-829).
 
 A loop that cannot go on raises :class:`LoopStoppedError`: its replay
 diverged, its run lost the fence, no lease is left, the budget refused the
@@ -41,6 +41,13 @@ catches it and calls again gets it again, before any work.
 
 A step's own failure is no stop: a failed model call, or a box step that
 raises one of the box errors, commits a record that a replay raises again.
+Model output is untrusted, so a reply that nests deeper than
+``_MAX_REPLY_DEPTH``, is larger than ``_MAX_REPLY_BYTES`` or is not UTF-8
+JSON is a failed model call too, and its step settles the reply's cost
+(SKY-817). Tool call arguments that nest too deep fail only their call: the
+step commits ``TOO_DEEP_ARGUMENTS`` in their place. That text is a shallow
+JSON object with no tool fields, so an engine treats it as a bad call and
+gives an error result for that tool call only.
 Every other error of a step is a stop. It can come after the step committed,
 for example from a settle or the durable wait, so the live engine must not
 act on it: a resume would replay the committed result instead. A stop gives
@@ -92,6 +99,16 @@ caller's :class:`RepoSeed` on the :class:`EngineContext`. The engine's seed
 names the seed tree without its hidden paths. The raw seed tree id is a hash
 of the hidden content too, so the engine never gets it.
 
+:meth:`EngineLoop.evaluate` runs a caller's own evaluation, such as one call of
+the run's repository scorer, and commits its JSON result as a step with no
+cost. The evaluation's boxes bill through the run's budget runtime, not the
+lease. A replay gives the committed result, so a resume does not run or pay for
+the evaluation again. An error of the evaluation commits nothing and stops the
+loop; a result that the engine must see as a failure goes in the result. An
+:class:`InfrastructureInterruptionError` or a pending usage of the evaluation,
+and a pending usage of any step, stops it with :class:`LoopInterruptedError`:
+the worker puts the run back in the queue, and the resume runs that work again.
+
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
 Calls outside a lane go to the root agent, ``loop``. Other writers of the run's
@@ -123,6 +140,7 @@ from ..billing.operation_pricing import UnpricedOperationError
 from ..billing.runtime import UsagePendingError
 from ..billing.usage_tags import LANE_KEY, current_tags
 from ..constants import HARDENING_EXPLOITS_DIR
+from ..exceptions import InfrastructureInterruptionError
 from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
 from ..sandbox.trees import (
     BoxFailureError,
@@ -135,6 +153,8 @@ from ..sandbox.trees import (
 from ..service_gateway.optimization.blackbox.harness_bridge import hashed_kind
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes as path_hashes
 from ..service_gateway.optimization.blackbox.protocol import (
+    MAX_ARGUMENTS_DEPTH,
+    TOO_DEEP_ARGUMENTS,
     Candidate,
     EngineContext,
     EvalServer,
@@ -143,6 +163,8 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    nests_deeper,
+    text_nests_deeper,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
 from ..service_gateway.optimization.blackbox.tree_sandbox import (
@@ -153,8 +175,8 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
 )
 from ..storage.models import AgentStepModel
 from ..storage.step_log_store import ObjectTooLargeError, StepFenceError, step_id_for
-from ..storage.tree_store import TreeEntry, TreeStore
-from .actors import Agent, LeaseExhaustedError, Run, StepResult
+from ..storage.tree_store import TreeEntry, TreeStore, is_git_part
+from .actors import Agent, LeaseExhaustedError, Run, StepResult, cost_text, ledger_cents
 from .step_recovery import last_committed_step, still_owns_run
 
 ROOT_AGENT_ID = "loop"
@@ -165,6 +187,14 @@ _LANE_AGENT_PREFIX = f"{ROOT_AGENT_ID}/"
 _MAX_LINK_HOPS = 40
 # Links can reach a path count that grows fast with their nesting, so a tree that reaches more stops the loop.
 _MAX_LINKED_PATHS = 100_000
+# The step commit's JSON encoder recurses for each level, and a resume reads the reply again. So a reply that nests
+# near Python's default recursion limit of 1000 would stop the run on every resume (SKY-817). 100 levels keeps a wide
+# margin for the stack under the encoder, and no real tool call nests that deep. The step body, its tool call list
+# and the call sit above the arguments, so the bound is the arguments' bound plus three levels.
+_MAX_REPLY_DEPTH = MAX_ARGUMENTS_DEPTH + 3
+# Far above the largest reply that a model's output token limit allows. It bounds the bytes that the step log commits
+# and that every resume reads again, not the memory that the model client uses to hold the reply.
+_MAX_REPLY_BYTES = 4 * 1024 * 1024
 # A box step that fails with one of these still commits a record, so a replay raises it at the same place.
 _BOX_ERRORS = {
     error.__name__: error for error in (BoxFailureError, GrantDeniedError, MetricFailedError, TreeRejectedError)
@@ -192,6 +222,13 @@ class LoopStoppedError(ScorerAbortError):
     Its replay diverged, its run lost the fence, no lease is left, the budget refused the work, a model call
     cost more than its bound, the run or the step log is closed, a step failed outside its own work, or an agent
     could not open because its committed log has a gap or the step log read fails.
+    """
+
+
+class LoopInterruptedError(LoopStoppedError, InfrastructureInterruptionError):
+    """The loop stopped on a failure that can pass, such as a scorer outage or a pending usage.
+
+    The worker marks it as an interruption, so the run goes back to the queue and its resume replays the log.
     """
 
 
@@ -235,6 +272,73 @@ class ModelCallBilledError(RuntimeError):
         self.cost_cents = Decimal(str(cost_cents))
 
 
+class ModelReplyTooDeepError(ValueError):
+    """A model reply nests deeper than the code that reads or stores it can follow (SKY-817)."""
+
+
+class ModelReplyTooLargeError(ValueError):
+    """A model reply is larger than ``_MAX_REPLY_BYTES`` (SKY-817)."""
+
+
+class ModelReplyNotJSONError(ValueError):
+    """A model reply holds a value that the step commit cannot write as UTF-8 JSON (SKY-817)."""
+
+
+def _bounded_call(call: Any) -> Any:
+    """Put ``TOO_DEEP_ARGUMENTS`` in place of tool call arguments that push the step body past its depth bound.
+
+    A bad tool call fails only itself: the engine gives that call an error result, and the run goes on (SKY-817).
+
+    Args:
+        call: One tool call of a model reply.
+
+    Returns:
+        The call, or a copy of it with ``TOO_DEEP_ARGUMENTS`` as its arguments.
+    """
+    if not isinstance(call, dict):
+        return call
+    arguments = call.get("arguments")
+    # Text is bounded by the levels that it opens, because a later call reads it again, for example LiteLLM's
+    # Anthropic conversion at a deeper stack.
+    if isinstance(arguments, str):
+        too_deep = text_nests_deeper(arguments, MAX_ARGUMENTS_DEPTH)
+    else:
+        too_deep = nests_deeper(arguments, MAX_ARGUMENTS_DEPTH)
+    if too_deep:
+        return {**call, "arguments": TOO_DEEP_ARGUMENTS}
+    return call
+
+
+def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
+    """Refuse a model step body that nests or weighs more than its bounds, before any recursive work on it.
+
+    The walk keeps its own stack, and the encoder's :class:`RecursionError` becomes a refusal, so no reply escapes.
+
+    Args:
+        body: The model step body that holds the reply; it is one level of depth.
+        cost_cents: The reply's reported cost, which :meth:`Agent.step` adds to the body as it commits.
+
+    Raises:
+        ModelReplyTooDeepError: When it nests more than ``_MAX_REPLY_DEPTH`` levels of objects and arrays.
+        ModelReplyTooLargeError: When its JSON is more than ``_MAX_REPLY_BYTES`` bytes.
+        ModelReplyNotJSONError: When it holds a value or key that is not JSON, or a lone surrogate that UTF-8 cannot
+            hold.
+    """
+    if nests_deeper(body, _MAX_REPLY_DEPTH):
+        raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
+    # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
+    # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
+    cost = ledger_cents(cost_cents)
+    committed = {**body, "cost_cents": cost_text(Decimal(0) if cost is None else cost)}
+    try:
+        size = len(json.dumps(committed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    # A key type that the walk does not enter, such as a frozenset of deep tuples, can still recurse in the sort.
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ModelReplyNotJSONError(f"The model reply is not UTF-8 JSON: {type(error).__name__}: {error}") from error
+    if size > _MAX_REPLY_BYTES:
+        raise ModelReplyTooLargeError(f"The model reply is {size} bytes, more than {_MAX_REPLY_BYTES}.")
+
+
 def _loop_agent(agent_id: str) -> bool:
     """Return whether an agent id is one that the loop gives to its root agent or a lane.
 
@@ -245,6 +349,21 @@ def _loop_agent(agent_id: str) -> bool:
         Whether the loop owns the agent.
     """
     return agent_id == ROOT_AGENT_ID or agent_id.startswith(_LANE_AGENT_PREFIX)
+
+
+def _shown(stored: list[TreeEntry]) -> dict[str, TreeEntry]:
+    """Return a tree's stored entries by name, without a ``.git`` entry in any letter case.
+
+    A tree stored before SKY-810 can hold a ``.git`` entry. The tree store refuses to write it back, and the box
+    never gets it, so every read and write of the loop acts as if the tree did not hold it.
+
+    Args:
+        stored: The entries as stored.
+
+    Returns:
+        The entries that the loop shows.
+    """
+    return {entry.name: entry for entry in stored if not is_git_part(entry.name)}
 
 
 def _reply(record: dict[str, Any]) -> ModelReply:
@@ -268,7 +387,7 @@ def _call(record: dict[str, Any]) -> str:
         record: The committed step.
 
     Returns:
-        ``model``, ``run``, ``score`` or ``room``.
+        ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
     """
     if record["kind"] == "model":
         return "model"
@@ -363,6 +482,8 @@ class EngineLoop:
         # box gets no hidden file and a run output with a hidden path is refused, so these trees hold no hidden
         # content and are not walked. A replay adds the same trees in the same order as the live run.
         self._run_outputs: set[str] = set()
+        # _without_git results by tree id. A tree id is the hash of its content, so a result never goes stale.
+        self._git_free: dict[str, str] = {}
         # The loop builds its sandbox, so the sandbox uses the run's step log and the loop's registry.
         self._sandbox = TreeSandbox(trees, run.step_log, candidates, metrics, registry=self._registry)
         self._model = model
@@ -414,6 +535,7 @@ class EngineLoop:
                 put_files=self.put_files,
                 read_file=self.read_file,
                 list_files=self.list_files,
+                log_owner=self._run.run_id,
                 **fields,
             )
 
@@ -500,8 +622,9 @@ class EngineLoop:
 
         Both shapes are flat and provider-neutral. A tool definition is ``{"name", "description",
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
-        (:class:`ToolCall`), with ``arguments`` as a dict, or as raw text when it is not a JSON object. The
-        model client converts with :func:`openai_tools` and :func:`tool_calls_from_openai`.
+        (:class:`ToolCall`), with ``arguments`` as a dict, as raw text when it is not a JSON object, or as
+        ``TOO_DEEP_ARGUMENTS`` when it nests too deep. The model client converts with :func:`openai_tools` and
+        :func:`tool_calls_from_openai`.
 
         Args:
             prompt: The prompt text or messages.
@@ -516,9 +639,10 @@ class EngineLoop:
             LoopStoppedError: When the loop stopped, the prompt or the tools are not JSON, the run is fenced or
                 closed, no lease or budget covers the call, the call cost more than its bound, or the agent cannot
                 open.
-            ModelCallFailedError: When the model call fails; its step settles the cost of a
-                :class:`ModelCallBilledError`, and a replay raises a committed failure again. Its ``cost_cents``
-                is the committed cost, live and on a replay.
+            ModelCallFailedError: When the model call fails, or its reply nests too deep outside tool call arguments,
+                is too large or is not UTF-8 JSON; its step settles the cost of a :class:`ModelCallBilledError` or
+                of the refused reply, and a replay raises a committed failure again. Its ``cost_cents`` is the
+                committed cost, live and on a replay.
         """
         with self._stops():
             # A call with no tools keeps the plain prompt hash, so the steps that a plain call committed still match.
@@ -559,7 +683,13 @@ class EngineLoop:
                     replies.append(reply)
                     body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
                     if reply.tool_calls:
-                        body["tool_calls"] = reply.tool_calls
+                        body["tool_calls"] = [_bounded_call(call) for call in reply.tool_calls]
+                    try:
+                        _check_reply(body, reply.cost_cents)
+                    except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
+                        failures.append(error)
+                        # The provider billed the reply, so its failed step settles the reply's cost.
+                        return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, reply.cost_cents)
                     return StepResult(body, reply.cost_cents)
 
                 try:
@@ -603,9 +733,10 @@ class EngineLoop:
             The new tree id.
 
         Raises:
-            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part or a NUL byte, or is both a file
-                and a folder; or when a write would change a hidden path. A bad part is refused before any write. The
-                message names only the written path, so it does not name another hidden path.
+            ValueError: When a path is empty, holds an empty, ``.`` or ``..`` part, ``.git`` in any letter case or a
+                NUL byte, or is both a file and a folder; or when a write would change a hidden path. A bad part is
+                refused before any write. The message names only the written path, so it does not name another hidden
+                path.
             LookupError: When the run cannot see the base tree or one of its folders.
             LoopStoppedError: When the loop stopped; it writes nothing.
         """
@@ -615,7 +746,7 @@ class EngineLoop:
                     raise ValueError(f"path {path} may not be changed")
                 # The tree store refuses a bad name only when it writes the folder, after the blobs below it, so
                 # every part is checked before the first write.
-                if any(part in {"", ".", ".."} or "\0" in part for part in path.split("/")):
+                if any(part in {"", ".", ".."} or "\0" in part or is_git_part(part) for part in path.split("/")):
                     raise ValueError(f"bad tree entry name in path {path!r}")
             tree_id = self._put_tree(
                 base_tree_id, {tuple(path.split("/")): data for path, data in files.items()}, frozenset(executables)
@@ -639,7 +770,8 @@ class EngineLoop:
             max_bytes: The most bytes to load; ``None`` loads the file at any size.
 
         Returns:
-            The file bytes, or ``None`` when the path is hidden or is not a file or executable in the tree.
+            The file bytes, or ``None`` when the path is hidden, has a ``.git`` part in any letter case, or is not a
+            file or executable in the tree.
 
         Raises:
             FileTooLargeError: When the file has more than ``max_bytes`` bytes. A hidden path gives ``None``
@@ -672,8 +804,8 @@ class EngineLoop:
 
         Returns:
             The sorted paths of the files and executables below the folder, at any depth, from the tree's root,
-            without a hidden path; or ``None`` when the path is hidden, holds only hidden paths, or is not a
-            folder in the tree.
+            without a hidden path or a ``.git`` part in any letter case; or ``None`` when the path is hidden, has a
+            ``.git`` part, holds only hidden paths, or is not a folder in the tree.
 
         Raises:
             LoopStoppedError: When the loop stopped, or a symlink of the tree could show a hidden path, as
@@ -738,6 +870,72 @@ class EngineLoop:
                 except Exception as error:
                     raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
                 return float(Decimal(rooms[0]) / 100)
+
+    def evaluate(self, key: Mapping[str, Any], work: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Run one caller evaluation, such as a repository scorer call, and commit its JSON result as one step.
+
+        The step has no lease cost: the evaluation's boxes bill through the run's budget runtime. A replay gives
+        the committed result and does not run ``work``, so a resume does not pay for the evaluation again.
+
+        Args:
+            key: What the evaluation is of, such as the candidate and the case; a replay must ask with the same key.
+            work: Runs the evaluation and returns its result as a JSON object. A result that the engine must see
+                as a failure goes in the object, since an error of ``work`` stops the loop.
+
+        Returns:
+            The result; on a replay, the committed result, with no work.
+
+        Raises:
+            StepDivergedError: When the committed step at this place is not an evaluation with this key.
+            LoopStoppedError: When the loop stopped, the key or the result is not JSON, the run is fenced or
+                closed, the agent cannot open, ``work`` raises, or the commit fails.
+            LoopInterruptedError: When ``work`` raises an :class:`InfrastructureInterruptionError` or a
+                :class:`UsagePendingError`.
+            BudgetReached: From ``work``, with no step: the run stops on the budget, and a resume runs it again.
+        """
+        with self._stops():
+            try:
+                digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
+            except (TypeError, ValueError) as error:
+                raise LoopStoppedError(
+                    f"The evaluation key cannot be hashed: {type(error).__name__}: {error}"
+                ) from error
+            log = self._log()
+            with log.lock:
+                record = self._replayed(log, "evaluate", {"key_sha256": digest})
+                if record is not None:
+                    return dict(record["body"]["result"])
+                self._check_owner()
+                run = self._run
+                try:
+                    result = work()
+                    # A result that does not commit as JSON fails the same way on a resume, so it stops here.
+                    json.dumps(result)
+                except LoopStoppedError:
+                    raise
+                except (InfrastructureInterruptionError, UsagePendingError) as error:
+                    # The evaluation can pass on a new try, so the run requeues and the resume runs it again.
+                    raise LoopInterruptedError(
+                        f"The evaluation was interrupted: {type(error).__name__}: {error}"
+                    ) from error
+                except Exception as error:
+                    raise LoopStoppedError(f"The evaluation failed: {type(error).__name__}: {error}") from error
+                if not isinstance(result, dict):
+                    raise LoopStoppedError(f"The evaluation gave a {type(result).__name__}, not a JSON object.")
+                try:
+                    step_id = log.agent.commit_unpaid(
+                        "command",
+                        run.grant_list_id,
+                        lambda: (
+                            {"call": "evaluate", "key_sha256": digest, "result": result},
+                            self._trees.put_tree(run.run_id, []),
+                        ),
+                    )
+                    # The engine acts on the result only once its step can never be lost, as for a model reply.
+                    self._durable(step_id)
+                except Exception as error:
+                    raise LoopStoppedError(f"{type(error).__name__}: {error}") from error
+                return result
 
     def run(
         self,
@@ -846,7 +1044,8 @@ class EngineLoop:
 
         Raises:
             LoopStoppedError: The kept stop, with its own type, such as :class:`StepDivergedError`; or a new one
-                when the run lost the fence or the budget stopped it.
+                when the run lost the fence or the budget stopped it, a :class:`LoopInterruptedError` for a
+                pending usage.
         """
         stopped = self._stopped
         if stopped is not None:
@@ -858,6 +1057,9 @@ class EngineLoop:
         except LoopStoppedError as error:
             self._stop(error)
             raise
+        except UsagePendingError as error:
+            # Pending usage settles later, so the run must go back to the queue, not end.
+            raise self._stop(LoopInterruptedError(f"{type(error).__name__}: {error}")) from error
         except _STOP_ERRORS as error:
             raise self._stop(LoopStoppedError(f"{type(error).__name__}: {error}")) from error
 
@@ -900,8 +1102,25 @@ class EngineLoop:
         if not owns:
             raise LoopStoppedError(f"Run {run.run_id} is no longer active at generation {run.execution_generation}.")
 
+    def _stored(self, tree_id: str) -> list[TreeEntry]:
+        """Return a tree's entries as stored, with any ``.git`` entry.
+
+        Args:
+            tree_id: The tree.
+
+        Returns:
+            The stored entries.
+
+        Raises:
+            LookupError: When the run cannot see the tree.
+        """
+        entries = self._trees.get_tree(self._run.run_id, tree_id)
+        if entries is None:
+            raise LookupError(f"run {self._run.run_id} cannot see tree {tree_id}")
+        return entries
+
     def _entries(self, tree_id: str) -> dict[str, TreeEntry]:
-        """Return a tree's entries by name.
+        """Return a tree's entries by name, without a ``.git`` entry in any letter case, as :func:`_shown` tells.
 
         Args:
             tree_id: The tree.
@@ -912,10 +1131,7 @@ class EngineLoop:
         Raises:
             LookupError: When the run cannot see the tree.
         """
-        entries = self._trees.get_tree(self._run.run_id, tree_id)
-        if entries is None:
-            raise LookupError(f"run {self._run.run_id} cannot see tree {tree_id}")
-        return {entry.name: entry for entry in entries}
+        return _shown(self._stored(tree_id))
 
     def _visible_tree(self, tree_id: str) -> str:
         """Return the tree without its hidden paths and without ``.optimize/exploits``.
@@ -936,7 +1152,9 @@ class EngineLoop:
         """Return a folder without its hidden paths, or ``None`` when it holds only hidden paths.
 
         A folder that the filter leaves empty is dropped, not kept empty: an empty ``eval/`` would show the
-        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays.
+        proposer that the folder holds hidden files (SKY-353). A folder that was empty before stays. The folder
+        has the entries of :func:`_shown`, so a ``.git`` entry is left out, and a folder that held only one
+        counts as empty before.
 
         Args:
             tree_id: The folder.
@@ -949,7 +1167,8 @@ class EngineLoop:
         Raises:
             LookupError: When the run cannot see the tree or one of its folders.
         """
-        entries = self._entries(tree_id)
+        stored = self._stored(tree_id)
+        entries = _shown(stored)
         kept = []
         for name, entry in entries.items():
             path = f"{prefix}{name}"
@@ -961,9 +1180,9 @@ class EngineLoop:
                     continue
                 entry = TreeEntry(name, "tree", visible)
             kept.append(entry)
-        if kept == list(entries.values()):
+        if kept == stored:
             return tree_id
-        if not kept:
+        if not kept and entries:
             return None
         return self._trees.put_tree(self._run.run_id, kept)
 
@@ -1237,6 +1456,8 @@ class EngineLoop:
     ) -> str:
         """Write files over one tree level, and each changed folder below it.
 
+        An unchanged folder loses its ``.git`` entries too, so the new tree holds none, as :func:`_shown` tells.
+
         Args:
             tree_id: The tree of this level; ``None`` for an empty one.
             files: The file bytes by path parts below this level.
@@ -1273,7 +1494,34 @@ class EngineLoop:
             old = entries.get(name)
             base = old.object_id if old is not None and old.mode == "tree" else None
             entries[name] = TreeEntry(name, "tree", self._put_tree(base, nested, executables, f"{prefix}{name}/"))
+        for name, entry in entries.items():
+            if entry.mode == "tree" and name not in folders:
+                entries[name] = TreeEntry(name, "tree", self._without_git(entry.object_id))
         return self._trees.put_tree(self._run.run_id, entries.values())
+
+    def _without_git(self, tree_id: str) -> str:
+        """Return a folder without a ``.git`` entry in any letter case, at any depth, as :func:`_shown` tells.
+
+        The loop walks each folder id once and keeps the result, since a run writes over the same base many times.
+
+        Args:
+            tree_id: The folder.
+
+        Returns:
+            The folder's id without ``.git`` entries; the same id when it holds none.
+
+        Raises:
+            LookupError: When the run cannot see the folder or one below it.
+        """
+        if tree_id in self._git_free:
+            return self._git_free[tree_id]
+        stored = self._stored(tree_id)
+        kept = [
+            TreeEntry(entry.name, "tree", self._without_git(entry.object_id)) if entry.mode == "tree" else entry
+            for entry in _shown(stored).values()
+        ]
+        self._git_free[tree_id] = tree_id if kept == stored else self._trees.put_tree(self._run.run_id, kept)
+        return self._git_free[tree_id]
 
     def _refuse_hidden(self, folder: TreeEntry, path: str) -> None:
         """Refuse to replace a folder with a file when a path below the folder is hidden.
@@ -1402,7 +1650,7 @@ class EngineLoop:
 
         Args:
             log: The agent's log.
-            call: ``model``, ``run``, ``score`` or ``room``.
+            call: ``model``, ``run``, ``score``, ``room`` or ``evaluate``.
             fingerprint: The body fields that the committed step must hold.
             tree_id: The tree that a committed score step must name.
             grant_list_id: The grant-list id that a committed box step must name.

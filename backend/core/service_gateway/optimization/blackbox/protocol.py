@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import threading
 from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +24,7 @@ from gepa.oa.budget import BudgetExhausted
 from ....billing.usage_tags import usage_scope
 from ..cost_ceiling import CostCeilingExceededError
 from ..timing import STAGE_TRAINING
-from .runner import FEEDBACK_REQUIRED
+from .runner import ANSWER_FORM
 
 if TYPE_CHECKING:
     from ....sandbox.grants import Grant
@@ -39,12 +41,20 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
+# SKY-751: the status of a case whose ``[run]`` entry failed (crash, timeout,
+# a function entry that exits before it returns; a command entry's non-zero exit
+# is an output). The runner never invents a score, so that case has no score
+# too; it keeps its own status so the final run can report the failure text.
+RUN_FAILED_STATUS = "run_failed"
 STATUS_KEY = "status"
 # SKY-367: the pinned upstream engines need a number for every case, and they
 # use negative infinity as their own "no score" value. A single case scored
 # alone gets it; a batch fills each null case with its version's mean over the
 # scored cases (see :func:`fill_unscored`), so the null cases do not change the
 # mean upstream ranks by. Only a version with no scored case is UNSCORED.
+# SKY-751: a failed [run] entry is the version's fault, not the metric's, so it
+# gets no fill: that version is UNSCORED on every case of the batch and ranks
+# below every fully scored version.
 UNSCORED = float("-inf")
 
 
@@ -60,25 +70,37 @@ def engine_score(score: float | None) -> float:
     return UNSCORED if score is None else score
 
 
-def fill_unscored(candidates: list[Candidate], scores: list[float | None]) -> list[float]:
+def fill_unscored(
+    candidates: list[Candidate], scores: list[float | None], side_infos: list[SideInfo] | None = None
+) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
     Args:
         candidates: The version scored on each case, aligned with ``scores``.
-        scores: Each case's score, ``None`` after a metric error.
+        scores: Each case's score, ``None`` after a metric error or a failed ``[run]`` entry.
+        side_infos: Each case's side info, when known; it tells a failed ``[run]`` entry apart.
 
     Returns:
         A number for every case: the score, the mean of the same version's
         scored cases for a null case, or :data:`UNSCORED` when the version
-        has no scored case in the batch.
+        has no scored case in the batch or a failed ``[run]`` entry.
     """
+    infos = side_infos if side_infos is not None else [{} for _ in candidates]
+    # A scorer's own run_failed status with a real score is not a failed [run] entry.
+    failed = {
+        candidate_key(candidate)
+        for candidate, score, info in zip(candidates, scores, infos, strict=True)
+        if score is None and is_run_failed(info)
+    }
     scored: dict[str, list[float]] = {}
     for candidate, score in zip(candidates, scores, strict=True):
         if score is not None:
             scored.setdefault(candidate_key(candidate), []).append(score)
     filled: list[float] = []
     for candidate, score in zip(candidates, scores, strict=True):
-        if score is None:
+        if candidate_key(candidate) in failed:
+            score = UNSCORED
+        elif score is None:
             values = scored.get(candidate_key(candidate))
             score = sum(values) / len(values) if values else UNSCORED
         filled.append(score)
@@ -110,7 +132,9 @@ def score_batch(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(lambda pair: score_one(*pair), pairs))
-    filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+    filled = fill_unscored(
+        [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+    )
     return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
 
@@ -124,6 +148,67 @@ def is_metric_error(side_info: SideInfo) -> bool:
         Whether its ``status`` is :data:`METRIC_ERROR`.
     """
     return side_info.get(STATUS_KEY) == METRIC_ERROR
+
+
+def is_run_failed(side_info: SideInfo) -> bool:
+    """Return True when the side info marks a case whose ``[run]`` entry failed (SKY-751).
+
+    Args:
+        side_info: What the scorer returned for one case.
+
+    Returns:
+        Whether its ``status`` is :data:`RUN_FAILED_STATUS`.
+    """
+    return isinstance(side_info, dict) and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+
+
+NO_FEEDBACK_WARNING = (
+    "The metric gives no feedback, so the proposer sees only the scores. "
+    'Add "feedback" to the metric answer to say what was wrong or missing.'
+)
+
+
+def warn_once_without_feedback(scorer: ScorerFn) -> ScorerFn:
+    """Wrap a run's scorer so the run log says once that the metric gives no feedback.
+
+    Feedback is optional (SKY-769). A command metric has no static check, so
+    this line is how its author learns the proposer gets no text. A named
+    score with no feedback gives no line.
+
+    The warning comes once for each run attempt, that is, once in each
+    process that runs the job. The state is in memory only, so a run that
+    resumes in a new process can warn again. This is by design: no flag is
+    persisted.
+
+    Args:
+        scorer: The run's scorer.
+
+    Returns:
+        The same scorer, which logs one warning at the first score with no feedback.
+    """
+    lock = threading.Lock()
+    warned = False
+
+    def score(candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
+        """Score ``candidate`` on ``case`` with the wrapped scorer.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            What the wrapped scorer returned.
+        """
+        nonlocal warned
+        value, side_info = scorer(candidate, case)
+        if value is not None and not side_info.get("feedback"):
+            with lock:
+                first, warned = not warned, True
+            if first:
+                logger.warning(NO_FEEDBACK_WARNING)
+        return value, side_info
+
+    return score
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -231,6 +316,9 @@ class CandidateRecord:
     # Set once the metric or scorer crashed on any case: the version then has
     # no score at all, so it can never be the best or be published.
     metric_error: str | None = None
+    # SKY-751: whether any case of the version had a failed [run] entry, not
+    # only a metric crash. ``metric_error`` then holds the first run failure's text.
+    run_failed: bool = False
 
     @property
     def mean_score(self) -> float | None:
@@ -238,6 +326,83 @@ class CandidateRecord:
         if self.metric_error is not None:
             return None
         return self.total / self.count
+
+
+# A tool call keeps this text in place of arguments that nest too deep to write or commit (SKY-817). The text is a
+# shallow JSON object with no tool fields, so an engine treats it as a bad call for that tool call only, and the run
+# goes on. It must stay valid JSON: engines put it unchanged into the next prompt, and a provider that gets text that
+# is not a JSON object can fail every later call in the session.
+TOO_DEEP_ARGUMENTS = '{"error": "tool call arguments nest too deep"}'
+# The most levels that tool call arguments may nest. The engine loop derives its reply bound from it, so a call that
+# passes here also commits there. It is far below Python's recursion limit, so later code that reads the arguments
+# again does not run out of stack, whatever stack depth it reads them at.
+MAX_ARGUMENTS_DEPTH = 97
+_JSON_STRUCTURE = re.compile(r'[\[\]{}"\\]')
+
+
+def nests_deeper(value: Any, levels: int) -> bool:
+    """Tell whether a value nests more than a number of levels of objects and arrays, with no recursion.
+
+    The walk also enters mapping keys: the commit's ``sort_keys`` encoding compares keys, and two deep tuple keys
+    would make that comparison raise :class:`RecursionError`.
+
+    Args:
+        value: The value; a mapping, a list or a tuple is one level.
+        levels: The most levels that the value may nest.
+
+    Returns:
+        ``True`` when a mapping, a list or a tuple sits deeper than ``levels``.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = [*item, *item.values()]
+        elif isinstance(item, list | tuple):
+            children = item
+        else:
+            continue
+        if depth > levels:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def text_nests_deeper(text: str, levels: int) -> bool:
+    """Tell whether JSON text opens more than a number of levels of objects and arrays, with no parse.
+
+    The answer does not depend on the stack, unlike a parse that raises :class:`RecursionError` only when it runs out
+    of stack. It holds for text that is not valid JSON too, which a later parse can still recurse into.
+
+    Args:
+        text: The text; brackets inside JSON strings do not count.
+        levels: The most levels that the text may open.
+
+    Returns:
+        ``True`` when the text opens more than ``levels`` brackets at one time.
+    """
+    depth = 0
+    in_string = False
+    escaped_at = -1
+    for match in _JSON_STRUCTURE.finditer(text):
+        position, char = match.start(), match.group()
+        if position == escaped_at:
+            continue
+        if in_string:
+            if char == "\\":
+                escaped_at = position + 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > levels:
+                return True
+        elif char in "]}":
+            # A stray closer must not hide later openers: a reader that repairs or skips text still nests them.
+            depth = max(depth - 1, 0)
+    return False
 
 
 class ToolDefinition(TypedDict):
@@ -255,8 +420,9 @@ class ToolCall(TypedDict):
     """One tool call that a model reply asks for, in the engine loop's flat form.
 
     ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
-    parsed JSON object, or the raw text when the model sent text that is not a JSON object. The engine gives
-    the model an error tool result for raw text, so the model can correct its call.
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object, or
+    :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model can
+    correct its call.
     """
 
     id: str
@@ -290,9 +456,13 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
-    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
-    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+    call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
+    ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
+    keeps the value and the arguments stay a dict or text. Text or a value, a dict included, that nests more than
+    ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
+    only that call. Deep text must not reach the transcript: a later call would read it again, raise
+    :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
+    stack, so the same reply always gives the same calls.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -306,17 +476,31 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         raw = function.get("arguments")
         if raw is None or raw == "":
             raw = "{}"
-        if isinstance(raw, dict):
+        if (
+            text_nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
+            if isinstance(raw, str)
+            else nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
+        ):
+            arguments: dict[str, Any] | str = TOO_DEEP_ARGUMENTS
+        elif isinstance(raw, dict):
             # Some clients parse the arguments already.
-            arguments: dict[str, Any] | str = raw
+            arguments = raw
         elif not isinstance(raw, str):
-            arguments = json.dumps(raw, default=str)
+            try:
+                arguments = json.dumps(raw, default=str)
+            except RecursionError:
+                # Same stack limit as the parse below: the depth check counts levels, not frames.
+                arguments = TOO_DEEP_ARGUMENTS
         else:
             try:
                 parsed = json.loads(raw)
-            except (TypeError, ValueError):
-                parsed = None
-            arguments = parsed if isinstance(parsed, dict) else raw
+            except RecursionError:
+                # The depth check counts levels, not stack frames; a deep caller stack can still overflow.
+                arguments = TOO_DEEP_ARGUMENTS
+            except ValueError:
+                arguments = raw
+            else:
+                arguments = parsed if isinstance(parsed, dict) else raw
         calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
     return calls
 
@@ -481,6 +665,9 @@ class EngineContext:
     read_file: ReadFile | None = None
     list_files: ListFiles | None = None
     repo_seed: RepoSeed | None = None
+    # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
+    # keeps only its own job's records.
+    log_owner: str | None = None
 
 
 class Engine(Protocol):
@@ -536,6 +723,8 @@ class EvalServer:
         self._on_eval = on_eval
         self.used = 0
         self._records: dict[str, CandidateRecord] = {}
+        # Set on the root at the first score: after it, a wrong answer is one version's error.
+        self._scored = False
         # Locks are only ever taken child → parent, so lanes cannot deadlock.
         self._lock = threading.Lock()
 
@@ -622,6 +811,8 @@ class EvalServer:
             side_info: What the scorer said about it.
         """
         root = self._root
+        if score is not None:
+            root._scored = True
         server: EvalServer | None = self
         while server is not None and candidate is not None:
             with server._lock:
@@ -660,16 +851,17 @@ class EvalServer:
             The score and side information, or ``(None, {"error": ..., "status": "metric_error"})``.
 
         Raises:
-            ScorerAbortError: When the scorer asks to stop the run, or returns no feedback.
+            ScorerAbortError: When the scorer asks to stop the run, or the
+                metric answer has a wrong form before any version has a score.
         """
         try:
             score, side_info = self._scorer(candidate, example)
         except (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError):
             raise
         except Exception as exc:
-            # A scorer without feedback lacks it on every version, so flooring
-            # would spend the whole budget teaching the proposer nothing.
-            if FEEDBACK_REQUIRED in str(exc):
+            # A wrong answer form usually comes on every version, so going on
+            # spends the whole budget on errors. After a score, it is one version's error.
+            if ANSWER_FORM in str(exc) and not self._scored:
                 raise ScorerAbortError(str(exc)) from exc
             error = f"{type(exc).__name__}: {exc}"
             logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
@@ -677,8 +869,12 @@ class EvalServer:
         # A nested server (an Auto lane) scores through the upstream server,
         # which hands back UNSCORED or a batch-filled number; the status marks
         # it as no score.
-        if score is None or is_metric_error(side_info):
-            return None, {**side_info, STATUS_KEY: METRIC_ERROR}
+        # A scorer's own ``run_failed`` status never drops a score; only a
+        # failed [run] entry, which sends no score, keeps it (SKY-751). In an
+        # Auto lane that entry arrives as UNSCORED, not None.
+        failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
+        if score is None or is_metric_error(side_info) or failed_run:
+            return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
         return score, side_info
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
@@ -686,24 +882,36 @@ class EvalServer:
 
         Args:
             candidate: The scored version.
-            score: Its score on the case just evaluated, or ``None`` after a metric error.
+            score: Its score on the case just evaluated, or ``None`` after a
+                metric error or a failed ``[run]`` entry (``status: run_failed``).
             side_info: What the scorer said about it on that case.
         """
         key = candidate_key(candidate)
         record = self._records.get(key)
         failed = score is None or is_metric_error(side_info)
-        error = str(side_info.get("error") or METRIC_ERROR) if failed else None
+        failed_run = score is None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+        # A failed [run] entry carries its failure text as feedback, not as an error.
+        fallback = (side_info.get("feedback") or RUN_FAILED_STATUS) if failed_run else METRIC_ERROR
+        error = str(side_info.get("error") or fallback) if failed else None
         crashed = failed or "error" in side_info
         # A failed case adds nothing to the total: the version's mean is None.
         value = 0.0 if failed or score is None else float(score)
         if record is None:
-            self._records[key] = CandidateRecord(candidate, value, 1, self._root.used, side_info, crashed, error)
+            self._records[key] = CandidateRecord(
+                candidate, value, 1, self._root.used, side_info, crashed, error, failed_run
+            )
             return
         record.total += value
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
-        record.metric_error = record.metric_error or error
+        # Any failed [run] case marks the version, whatever failed first, so
+        # the error text then is the run failure's, to match its status.
+        if failed_run and not record.run_failed:
+            record.metric_error = error
+            record.run_failed = True
+        elif record.metric_error is None:
+            record.metric_error = error
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -735,6 +943,19 @@ class EvalServer:
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.metric_error
+
+    def run_failed(self, candidate: Candidate) -> bool:
+        """Return whether any case of ``candidate`` had a failed ``[run]`` entry (SKY-751).
+
+        Args:
+            candidate: The version to look up.
+
+        Returns:
+            ``True`` when a ``[run]`` entry of the version failed on any case,
+            also after a metric crash, else ``False`` (also when it was not scored).
+        """
+        record = self._records.get(candidate_key(candidate))
+        return record is not None and record.run_failed
 
     @property
     def best_candidate(self) -> Candidate | None:

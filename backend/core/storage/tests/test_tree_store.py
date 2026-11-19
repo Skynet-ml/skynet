@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from core.storage.models import Base, JobModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import ObjectTooLargeError, StepLogStore
-from core.storage.tree_store import TreeEntry, TreeStore, encode_blob, encode_tree, object_id_of
+from core.storage.tree_store import TreeEntry, TreeStore, decode_tree, encode_blob, encode_tree, object_id_of
 from core.storage.usage import compute_user_storage
 
 
@@ -92,6 +92,57 @@ def test_a_bad_tree_entry_is_refused(entry: TreeEntry) -> None:
     """A tree refuses unsafe names, unknown modes and ids that are not hashes."""
     with pytest.raises(ValueError):
         encode_tree([entry])
+
+
+@pytest.mark.parametrize("name", [".git", ".GIT", ".Git"])
+def test_a_git_name_in_any_letter_case_is_refused(name: str) -> None:
+    """A ``.git`` entry in any letter case makes no tree, as a file or as a folder (SKY-810)."""
+    with pytest.raises(ValueError, match="bad tree entry name"):
+        encode_tree([TreeEntry(name, "file", "a" * 64)])
+    with pytest.raises(ValueError, match="bad tree entry name"):
+        encode_tree([TreeEntry(name, "tree", "a" * 64)])
+
+
+@pytest.mark.parametrize("path", [".git/config", "a/.GIT/x", ".Git"])
+def test_a_tree_with_a_git_path_part_stores_nothing(step_log, engine, path: str) -> None:
+    """The tree that holds the ``.git`` part raises and stores nothing, in the buffer or a pack (SKY-810).
+
+    The trees below the ``.git`` part are valid and stay stored; only the
+    refused tree and the trees above it never reach the store.
+    """
+    trees = TreeStore(step_log)
+    *folders, leaf = path.split("/")
+    object_id = trees.put_blob("job-ada", b"x")
+    mode = "file"
+    name = leaf
+    while name.lower() != ".git":
+        object_id = trees.put_tree("job-ada", [TreeEntry(name, mode, object_id)])
+        mode, name = "tree", folders.pop()
+
+    step_log.flush()
+    rows_before = _tree_rows(engine)
+    with pytest.raises(ValueError, match="bad tree entry name"):
+        trees.put_tree("job-ada", [TreeEntry(name, mode, object_id)])
+    step_log.flush()
+
+    assert _tree_rows(engine) == rows_before
+
+
+@pytest.mark.parametrize("name", [".gitignore", ".gitattributes", "x.git", ".github", "git"])
+def test_names_near_git_stay_allowed(name: str) -> None:
+    """Only the exact ``.git`` name is refused; names that only contain it stay valid."""
+    assert decode_tree(encode_tree([TreeEntry(name, "file", "a" * 64)])) == [TreeEntry(name, "file", "a" * 64)]
+
+
+def test_a_folder_named_x_git_holds_files(step_log) -> None:
+    """``a.git/b`` stores and reads back as before."""
+    trees = TreeStore(step_log)
+    blob = trees.put_blob("job-ada", b"b")
+    sub = trees.put_tree("job-ada", [TreeEntry("b", "file", blob)])
+    root = trees.put_tree("job-ada", [TreeEntry("a.git", "tree", sub)])
+
+    assert trees.get_tree("job-ada", root) == [TreeEntry("a.git", "tree", sub)]
+    assert trees.get_tree("job-ada", sub) == [TreeEntry("b", "file", blob)]
 
 
 def test_a_tree_refuses_the_same_name_twice() -> None:

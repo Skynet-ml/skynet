@@ -15,31 +15,28 @@ Without that env var the module is skipped.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, make_url, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from alembic import command
 from core.config import app_env, settings
 from core.notifications.catalog import MACOS
 from core.notifications.dispatch import notify, release_held
 from core.notifications.native import CLAIM_BATCH, CLAIM_LEASE, EXPIRE_BATCH, claim_native, confirm_native
 from core.notifications.preferences import configure_notification_preferences
 from core.storage.models import NotificationModel, NotificationPreferenceModel
-from core.storage.tests.test_remote_jobstore_postgres import _reset_legacy_schema
+from core.storage.tests.test_remote_jobstore_postgres import migrate_test_db
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
-BACKEND_DIR = Path(__file__).resolve().parents[3]
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -49,24 +46,53 @@ pytestmark = pytest.mark.skipif(
 _T0 = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
+def _migrated_engine(db_url: str) -> Engine:
+    """Upgrade ``db_url`` to Alembic head and open an engine on it.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+
+    Returns:
+        The engine. The caller disposes it.
+    """
+    migrate_test_db(db_url)
+    return create_engine(db_url, pool_size=12)
+
+
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
     """Upgrade the live database to Alembic head.
 
-    Returns:
+    Yields:
         The engine.
     """
-    _reset_legacy_schema(TEST_DB_URL or "")
-    alembic_cfg = Config(str(BACKEND_DIR / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
-    alembic_cfg.set_main_option("sqlalchemy.url", TEST_DB_URL or "")
-    command.upgrade(alembic_cfg, "head")
-
-    engine = create_engine(TEST_DB_URL or "", pool_size=12)
+    engine = _migrated_engine(TEST_DB_URL or "")
     try:
         yield engine
     finally:
         engine.dispose()
+
+
+def test_engine_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Migrate the ``APP_TEST_DB_URL`` database even when ``REMOTE_DB_URL`` names another database.
+
+    The ``engine`` fixture migrates the database first, so the upgrade here has no migration to run.
+    An upgrade that went to the other database still raises, because it cannot connect.
+
+    Args:
+        engine: The live engine. Only its migration is used.
+        monkeypatch: pytest's ``MonkeyPatch`` fixture.
+    """
+    other_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_{uuid.uuid4().hex[:8]}")
+    other = other_url.render_as_string(hide_password=False)
+    monkeypatch.setenv("REMOTE_DB_URL", other)
+
+    # The other database does not exist, so an upgrade that went to it would raise.
+    _migrated_engine(TEST_DB_URL or "").dispose()
+
+    assert os.environ["REMOTE_DB_URL"] == other
 
 
 @pytest.fixture

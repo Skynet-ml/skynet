@@ -74,11 +74,13 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import difflib
 import http.server
 import importlib.util
 import inspect
 import io
 import json
+import math
 import os
 import pwd
 import shutil
@@ -183,7 +185,6 @@ HELPER_MODULE_NAME = "skynet"
 # Where Vercel's egress proxy leaves its CA when a network policy rewrites headers.
 PROXY_CA_PATH = "/usr/local/share/ca-certificates/vercel-proxy-ca.crt"
 _ENTRYPOINT_NAMES = ("score", "metric")
-_NUMBER_TYPES = (bool, int, float)
 _RETRY_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 _ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
@@ -558,7 +559,7 @@ def missing_stage(name: Any = None, input: Any = None) -> Any:
 
 @dataclass
 class Image:
-    """An image a scorer hands to ``llm()`` or puts in side info for the optimizer to look at.
+    """An image a scorer hands to ``llm()``.
 
     Mirrors ``gepa.image.Image`` so a scorer written against the optimizer's
     wrapper works unchanged inside the box.
@@ -727,7 +728,7 @@ def missing_llm(prompt: Any = None, input: Any = None, **kwargs: Any) -> str:
 
 
 def side_info_json_default(value: Any) -> str:
-    """JSON fallback for side info: images become data URLs, anything else ``str()``.
+    """JSON fallback for scorer payloads and log fields: an image becomes a data URL, anything else ``str()``.
 
     Args:
         value: A side-info value ``json.dumps`` cannot encode.
@@ -793,97 +794,176 @@ def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) 
     stream.flush()
 
 
-FEEDBACK_REQUIRED = (
-    'The scorer must return feedback: return {"score": <number>, "feedback": "<why it scored that>"}, '
-    'optionally with "scores": {"<name>": {"score": <number>, "feedback": "<why>"}} for each thing you '
-    'measure, or a (score, "feedback") pair. The optimizer learns from the feedback, so say what was wrong '
-    "or missing."
+# The one form of a metric answer (SKY-769). Every answer error ends with it.
+ANSWER_FORM = (
+    'Return one object: {"score": <number>, "feedback": "<optional text>", '
+    '"scores": {"<name>": {"score": <number>, "feedback": "<optional text>"}}}. '
+    'Only "score" is required.'
 )
+_ANSWER_KEYS = ("score", "feedback", "scores")
+_NAMED_SCORE_KEYS = ("score", "feedback")
+# Keys of an older answer form, and the key that replaced each one.
+_REPLACED_KEYS = {"cases": "scores"}
 
 
-def _feedback(value: Any, where: str) -> str:
-    """Return a non-empty feedback string or explain what is missing.
+def _answer_error(problem: str) -> ScorerError:
+    """Build the error for a wrong metric answer: the wrong part, then the valid form.
 
     Args:
-        value: The feedback the scorer gave.
+        problem: What is wrong, and where.
+
+    Returns:
+        The error to raise.
+    """
+    return ScorerError(f"{problem} {ANSWER_FORM}")
+
+
+def _kind(value: Any) -> str:
+    """Name the kind of a value for an answer error, without its content.
+
+    Args:
+        value: A part of the metric answer.
+
+    Returns:
+        A short name such as ``a bare number`` or ``a pair``.
+    """
+    if isinstance(value, (bool, int, float)):
+        return "a bare number"
+    if isinstance(value, (tuple, list)):
+        return "a pair" if len(value) == 2 else type(value).__name__
+    return type(value).__name__
+
+
+def _finite(value: Any, where: str) -> float:
+    """Return a score as a float when it is a finite number.
+
+    Args:
+        value: The score the metric gave.
+        where: Names the score, for the error.
+
+    Returns:
+        The score as a float.
+
+    Raises:
+        ScorerError: When the score is not a number, is a boolean, or is not finite.
+    """
+    # A bool is an int in Python, but True is not a measurement.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _answer_error(f"{where} must be a finite number, not {type(value).__name__}.")
+    if not math.isfinite(value):
+        raise _answer_error(f"{where} must be a finite number, not {value!r}.")
+    return float(value)
+
+
+def _check_keys(entry: dict, allowed: Sequence[str], where: str) -> None:
+    """Refuse each key of an answer object that the answer form does not have.
+
+    Args:
+        entry: The answer object or one named score.
+        allowed: The keys the object may hold.
+        where: Names the object, for the error.
+
+    Raises:
+        ScorerError: At the first unknown key, with the nearest valid key when one is close.
+    """
+    for key in entry:
+        if key in allowed:
+            continue
+        name = str(key)
+        replaced = _REPLACED_KEYS.get(name)
+        if replaced in allowed:
+            raise _answer_error(f"{where} has the unknown key `{name}`. Use `{replaced}`.")
+        close = difflib.get_close_matches(name, allowed, n=1)
+        hint = f" Did you mean `{close[0]}`?" if close else ""
+        raise _answer_error(f"{where} has the unknown key `{name}`.{hint}")
+
+
+def feedback(value: Any, where: str) -> str:
+    """Return the feedback text, or an empty string when there is none.
+
+    Feedback is optional: absent feedback, ``None`` and a blank string all
+    mean no feedback, stored as ``""``.
+
+    Args:
+        value: The feedback the metric gave.
         where: Names the score the feedback belongs to, for the error.
 
     Returns:
-        The feedback text.
+        The feedback text, or ``""``.
 
     Raises:
-        ScorerError: When the feedback is absent, not text, or blank.
+        ScorerError: When the feedback is given but is not text.
     """
-    if isinstance(value, str) and value.strip():
-        return value
-    raise ScorerError(f"{FEEDBACK_REQUIRED} ({where} has no feedback.)")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _answer_error(f"The feedback of {where} must be text, not {type(value).__name__}.")
+    return value if value.strip() else ""
 
 
 def named_scores(raw: Any) -> dict[str, dict[str, Any]]:
     """Validate the optional named scores into ``{name: {"score", "feedback"}}``.
 
     Args:
-        raw: The scorer's ``scores`` value.
+        raw: The metric's ``scores`` value.
 
     Returns:
-        Each named score with its float score and feedback.
+        Each named score with its float score and its feedback (``""`` when none).
 
     Raises:
-        ScorerError: When ``scores`` is not a mapping, or a named score lacks a number or feedback.
+        ScorerError: When ``scores`` is not an object, or a named score is not
+            an object with a finite ``score``, optional text ``feedback`` and no other key.
     """
     if not isinstance(raw, dict):
-        raise ScorerError(f'{FEEDBACK_REQUIRED} ("scores" must map each name to a score and feedback.)')
+        raise _answer_error(f'"scores" must be an object that maps each name to a score object, not {_kind(raw)}.')
     named: dict[str, dict[str, Any]] = {}
     for name, entry in raw.items():
-        if isinstance(entry, (tuple, list)) and len(entry) == 2:
-            entry = {"score": entry[0], "feedback": entry[1]}
-        value = entry.get("score") if isinstance(entry, dict) else None
-        if not isinstance(value, _NUMBER_TYPES):
-            raise ScorerError(f"{FEEDBACK_REQUIRED} (The named score {name!r} has no numeric score.)")
+        where = f"the named score {name!r}"
+        if not isinstance(entry, dict):
+            raise _answer_error(f'A named score is an object such as {{"score": 1.0}}; {where} is {_kind(entry)}.')
+        _check_keys(entry, _NAMED_SCORE_KEYS, f"The named score {name!r}")
+        if "score" not in entry:
+            raise _answer_error(f'The named score {name!r} has no "score".')
         named[str(name)] = {
-            "score": float(value),
-            "feedback": _feedback(entry.get("feedback"), f"The named score {name!r}"),
+            "score": _finite(entry["score"], f'The "score" of {where}'),
+            "feedback": feedback(entry.get("feedback"), where),
         }
     return named
 
 
-def normalize_score(raw: Any) -> tuple[float, SideInfo]:
-    """Coerce a scorer's return value into ``(score, side_info)``, feedback included.
+def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float, SideInfo]:
+    """Check a metric answer and split it into ``(score, side_info)``.
 
-    Accepted shapes: a mapping ``{"score", "feedback", "scores"?, ...}``
-    (other keys stay in the side info); a ``(score, feedback)`` pair whose
-    second item is the feedback text or a mapping holding it; an object
-    with numeric ``score`` and text ``feedback`` attributes. Every score
-    carries feedback, the top-level one and each named score, because the
-    engines' proposers learn from it.
+    The answer is one object: ``score`` (a finite number) is required,
+    ``feedback`` (text) and ``scores`` (named score objects) are optional,
+    and every other key is an error. A bare number, a pair and an object
+    with ``score`` attributes are errors too.
 
     Args:
-        raw: Whatever the scorer returned.
+        raw: The metric's answer.
+        own_keys: Keep the keys Skynet adds after the check (``status``,
+            ``error`` and others). Set it only for a document Skynet built
+            from an answer it already checked.
 
     Returns:
-        The float score and side info with ``feedback`` and, when given,
-        ``scores`` as ``{name: {"score": float, "feedback": str}}``.
+        The float score and side info with ``feedback`` (``""`` when none)
+        and, when given, ``scores`` as ``{name: {"score": float, "feedback": str}}``.
 
     Raises:
-        ScorerError: When the value has none of the accepted shapes or lacks feedback.
+        ScorerError: When the answer does not have the one valid form.
     """
-    if isinstance(raw, (tuple, list)) and len(raw) == 2 and isinstance(raw[0], _NUMBER_TYPES):
-        score, side = raw
-        side_info = dict(side) if isinstance(side, dict) else {"feedback": side}
-    elif isinstance(raw, dict) and isinstance(raw.get("score"), _NUMBER_TYPES):
-        score = raw["score"]
-        side_info = {key: value for key, value in raw.items() if key != "score"}
-    elif isinstance(getattr(raw, "score", None), _NUMBER_TYPES):
-        score = raw.score
-        side_info = {"feedback": getattr(raw, "feedback", None)}
-    elif isinstance(raw, _NUMBER_TYPES):
-        raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned a bare number.)")
-    else:
-        raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned {type(raw).__name__}.)")
-    side_info["feedback"] = _feedback(side_info.get("feedback"), "The score")
+    if not isinstance(raw, dict):
+        raise _answer_error(f"The metric answer must be an object, not {_kind(raw)}.")
+    if not own_keys:
+        _check_keys(raw, _ANSWER_KEYS, "The metric answer")
+    if "score" not in raw:
+        raise _answer_error('The metric answer has no "score".')
+    score = _finite(raw["score"], 'The "score" of the metric answer')
+    side_info = {key: value for key, value in raw.items() if key != "score"}
+    side_info["feedback"] = feedback(raw.get("feedback"), "the metric answer")
     if "scores" in side_info:
         side_info["scores"] = named_scores(side_info["scores"])
-    return float(score), side_info
+    return score, side_info
 
 
 def helper_module(helpers: dict[str, Any]) -> types.ModuleType:

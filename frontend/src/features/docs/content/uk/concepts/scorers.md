@@ -3,44 +3,55 @@
 ## Контракт
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Аргумент    | Що містить                                                                       |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | Папка однієї версії репозиторію після виконання команди налаштування              |
+| `repo_path` | Папка, у якій є лише ваші файли метрики. У ній немає інших файлів репозиторію й коду версії |
 | `case`      | Словник. `case["input"]` містить вхідні поля. `case["expected"]` містить очікуване значення або `None` |
+| `output`    | Що точка входу `[run]` повернула для кейсу, або `None`, якщо у файлі немає `[run]` |
 
-Якщо ваша функція приймає лише один аргумент, Skynet викликає `score(repo_path)`. Використовуйте цю форму, коли оцінювач запускає власні тести й не потребує кейсів.
+Файл `optimize.toml` репозиторію має містити секцію `[run]` або етап `[target.<name>]`. Точка входу `[run]` (`entry`) запускає одну версію на одному кейсі у власній окремій пісочниці. Skynet відхиляє файл, у якому немає ні того, ні іншого, бо всі версії отримали б однакову оцінку.
 
-Оцінювач виконується в пісочниці, у папці версії. Він може імпортувати код із репозиторію, запустити команду або викликати `serve()` з `serve.py`. Прочитайте [Як працює оптимізація](/docs/concepts/optimization).
+- Точка входу-функція, наприклад `entry = "serve.py:serve"`, отримує `case["input"]` як аргумент. `output` — це значення, яке вона повертає.
+- Точка входу-команда, наприклад `entry = ["python", "-m", "pytest", "-q"]`, отримує вхідні дані як JSON у stdin. `output` — це `{"exit_code": ..., "stdout": "..."}`.
+
+Оцінювач виконується в окремій пісочниці. У ній є лише ваші файли метрики. Оцінювач не може імпортувати чи запускати код версії. Він бачить версію лише через `output` або через `call()` до етапу `[target.<name>]`. Імпортуйте `call` так: `from skynet import call`. Прочитайте [Як працює оптимізація](/docs/concepts/optimization).
 
 ## Значення, яке повертає функція
 
-`score` має повертати оцінку з відгуком. Коректні такі форми:
+`score` повертає один об'єкт:
 
-1. Пара: число й рядок відгуку або словник із ключем `"feedback"`.
-2. Словник із числом під ключем `"score"` і рядком під ключем `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Відгук має бути непорожнім рядком.
+- `"score"` обов'язковий. Це скінченне число. Лише ця оцінка впорядковує версії.
+- `"feedback"` — необов'язковий текст. Його радимо давати, бо GEPA та Auto вчаться на ньому. Без відгуку рушії бачать лише оцінки, і журнал запуску повідомляє про це один раз.
+- `"scores"` необов'язковий. Він зіставляє назви з іменованими оцінками. Кожна іменована оцінка — це об'єкт із власним `"score"` і необов'язковим `"feedback"`. Кожен рушій використовує кожну іменовану оцінку як окрему ціль.
 
-Додаткова інформація також може містити ключ `"scores"`. Він зіставляє назви з іменованими оцінками. Кожна іменована оцінка має власну оцінку й відгук, наприклад `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Будь-яка інша форма або ключ — це помилка. Перевірка показує хибну частину й коректну форму.
 
-Додаткова інформація також може містити ключ `"cases"` тієї самої форми. Кожен запис — це результат одного кейсу. Кожен рушій використовує кожен кейс як окрему ціль.
-
-Якщо значення має іншу форму, перевірка не проходить і показує причину.
-
-| Значення, яке повертає функція                                                  | Чи коректне                              |
-| ------------------------------------------------------------------------------- | ---------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Так                                      |
-| `(0.8, "Close. Missing the date.")`                                             | Так                                      |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Так                           |
-| `0.8`                                                                           | Ні. Немає відгуку.                       |
-| `(0.8, {})`                                                                     | Ні. Немає рядка з відгуком.              |
-| `("0.8", {"feedback": "OK"})`                                                   | Ні. Оцінка — це рядок.                   |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Ні. Іменована оцінка — не число.        |
+| Значення, яке повертає функція | Чи коректне |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Так |
+| `{"score": 0.8}` | Так. Відгуку немає. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Так |
+| `0.8` | Ні. Значення — не об'єкт. |
+| `(0.8, "Close. Missing the date.")` | Ні. Значення — не об'єкт. |
+| `{"score": "0.8"}` | Ні. Оцінка — це рядок. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Ні. Іменована оцінка має бути об'єктом. |
+| `{"score": 0.8, "feedbak": "OK"}` | Ні. Ключ `feedbak` невідомий. |
 
 ## Пишіть корисний відгук
 
@@ -58,59 +69,68 @@ GEPA і Auto читають текст відгуку, щоб написати �
 
 ### Точний збіг
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    if output == want:
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` — це словник, ключем у якому є назва вашого стовпця виводу. Прочитайте [Набори даних і розбиття](/docs/concepts/datasets).
 
 ### Запуск тестів репозиторію
 
-```python tab="scorer.py"
-import subprocess
+Точка входу `[run]` запускає тести. Оцінювач читає код виходу й вивід тестів.
 
+```toml tab="optimize.toml"
+version = 1
 
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+[run]
+entry = ["python", "-m", "pytest", "-q"]
+timeout = 300
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["exit_code"] == 0:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+```
+
+Коли точка входу `[run]` завершується збоєм на випадку, цей випадок не має оцінки. Якщо точка входу не запускається, перевищує тайм-аут або її зупиняє сигнал, або якщо точка входу-функція викидає виняток чи завершується до повернення значення, відгук — `Run failed: …`, і Skynet не викликає оцінювач. Ненульовий код виходу точки входу-команди — не збій: оцінювач отримує його в `output`. Версія з таким випадком не має оцінки. Вона не може бути найкращою версією, не досягає жодного `[outcome] target` і не відкриває pull request. Якщо збій має рахуватися як число, перехопіть збій у своїй програмі, запишіть вивід і дайте оцінювачу його оцінити. Прочитайте [правила репозиторію](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Модель як суддя
 
 Оцінювач може викликати модель. Імпортуйте `llm` з допоміжного модуля `skynet`. Виклик іде через шлюз моделей Skynet до моделі оцінювача запуску.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
+[run]
+entry = "serve.py:serve"
+```
+
+```python tab="scorer.py"
 from skynet import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 Оцінювач також може використовувати будь-який клієнт, сумісний з OpenAI, зі змінними середовища `OPENAI_BASE_URL`, `APP_API_KEY` і `APP_MODEL`. Шлюз приймає лише модель оцінювача запуску.
@@ -118,7 +138,7 @@ def score(repo_path, case):
 ## Виклики моделей і секрети
 
 - Виклики на ключах Skynet враховуються в бюджеті запуску. З вашим власним ключем (BYOK) виклик іде на ключ вашого провайдера, без плати Skynet за модель. Прочитайте [Бюджети й оплата](/docs/concepts/billing).
-- Секрети запуску потрапляють в оцінювач як змінні середовища. Назва змінної — це назва секрету, наприклад `os.environ["SEARCH_API_KEY"]`.
+- Оцінювач не отримує секрети запуску як змінні середовища. Секрет потрапляє в оцінювач лише через таблицю `[services.<name>]`, яку перелічує `[metric] services`, або через сервер із файлу `[metric] mcp`. Запишіть секрет у `headers` таблиці як `${NAME}`. Оцінювач надсилає запити на URL з `SKYNET_SERVICE_<NAME>_URL`. Skynet додає секрет поза пісочницею.
 - Skynet приховує значення секретів у виводі оцінювача й у журналах.
 
 ## Обмеження

@@ -11,8 +11,11 @@ The step log's worker id is the pod name, the same value as
 packs in :func:`open_step_log`. No other worker reads a dead worker's
 packs: their steps never became durable, the sweep's generation bump fences
 them, and the next worker continues from the last committed step. When a
-dead pod comes back under a new name, its unapplied packs stay in object
-storage, and no worker applies or removes them.
+dead pod comes back under a new name, no worker applies its unapplied packs.
+The tree compactor claims and deletes such a pack once it is older than
+``UNRECORDED_FLUSH_PACK_AGE_SECONDS`` (seven days); the claim row, and
+after it the pack's age, keep a late recovery from applying it
+(:mod:`core.storage.tree_compactor`).
 
 A run that waits frees its worker: :func:`park_run` moves it to ``paused``
 with no lease and stores ``wake_at`` in its recovery state. The orphan sweep
@@ -93,9 +96,8 @@ def park_run(engine: Engine, optimization_id: str, *, expected_generation: int, 
     finished leg's duration goes into ``accumulated_runtime_seconds``, so the
     wait does not count as run time.
 
-    The API treats ``paused`` as a terminal status, so today a user cannot
-    cancel a waiting run. Before an engine calls this function, the cancel
-    path must accept a ``paused`` run whose recovery phase is ``waiting``.
+    A user can cancel a waiting run. The cancel clears ``wake_at`` and frees
+    the run's unstarted budget holds (SKY-800).
 
     Args:
         engine: Engine with the jobs table.

@@ -22,8 +22,8 @@ and ``headers`` and a ``query`` table that name secrets only as ``${NAME}``
 placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
-timeout; with no ``[run]``, nothing runs and the metric judges only the tree
-and the patch), and ``[data] cases`` (the path of a JSONL file that holds
+timeout; a contract needs ``[run]`` or a ``[target.<name>]`` stage, and the
+parser enforces this), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
 files), and ``[outcome]`` (the ``target`` score and, in ``[outcome.require]``,
@@ -298,7 +298,7 @@ class RepoConstraints:
     editable_paths: tuple[str, ...] | None = None
     protected_paths: tuple[str, ...] = ()
     setup_command: str | None = None
-    # None means the file has no [run] section, so no candidate runs (E39).
+    # None means the file has no [run] section; a [target.<name>] stage then runs the version (E39, SKY-761).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
     # The candidate box runs [run] and the metric box runs [metric] (SKY-398),
@@ -1579,11 +1579,17 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
     metric_vcpus = _vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None
     # The metric box holds no repository tree (SKY-398), so a metric with no [run]
     # and no target stage sees nothing of the version and gives each one the same score.
-    if "metric" in document and run_entry is None and not targets:
+    # The metric code can come with the run request, so the rule holds with no [metric] too (SKY-761).
+    if run_entry is None and not targets:
+        if "metric" in document:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
+                " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
+                section="metric",
+            )
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
-            " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
-            section="metric",
+            f"{CONSTRAINTS_FILE}: the metric cannot score a version with no output. Add a [run] section"
+            " or a [target.<name>] stage whose outputs the metric scores."
         )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),

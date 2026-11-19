@@ -43,6 +43,7 @@ from ..billing import (
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
 from ..billing.byok_vault import byok_provider_for_litellm
+from ..billing.data_policy import data_policy_for
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
@@ -85,7 +86,7 @@ from ..notifications.run_watcher import RunNotificationWatcher
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway.embedding_pipeline import embed_finished_job
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
+from ..service_gateway.optimization.blackbox.service import has_loop_route, validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..storage import JobStore
 from ..storage.models import JobModel
@@ -116,6 +117,7 @@ from .constants import (
 )
 from .hardening_runner import process_next_hardening_job
 from .log_handler import route_sandbox_logs
+from .loop_host import LOOP_HOST_KEY, run_loop_job
 from .memory_guard import memory_usage_fraction
 from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
@@ -541,9 +543,8 @@ class BackgroundWorker:
         The worker ``worker_id`` must be processing the run now. Its later
         ``_mark_job_done`` for the run then does nothing.
 
-        The API treats ``paused`` as a terminal status, so today a user cannot
-        cancel a waiting run. Before an engine calls this method, the cancel
-        path must accept a ``paused`` run whose recovery phase is ``waiting``.
+        A user can cancel a waiting run. The cancel clears ``wake_at`` and
+        frees the run's unstarted budget holds (SKY-800).
 
         Args:
             worker_id: The worker thread that processes the run.
@@ -1078,12 +1079,28 @@ class BackgroundWorker:
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
+                loop_route = has_loop_route(execution_payload)
+                if loop_route:
+                    # After the exposure check: the worker's own child runs this run, not a guest box, so it may
+                    # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
+                    payload_dict[LOOP_HOST_KEY] = {
+                        "run_id": optimization_id,
+                        "username": execution_payload.username,
+                        "budget_id": job_data["execution_budget_id"],
+                        "budget_generation": job_data["execution_budget_generation"],
+                        "execution_generation": execution_generation,
+                        "worker_id": self._pod_name,
+                        "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
+                        "token_source": parent_payload.get("token_source"),
+                        # The child has no database for the owner's setting, so the parent reads it.
+                        "data_policy": data_policy_for(execution_payload.username),
+                    }
 
                 execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
                 budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_vercel_dspy,
+                    target=run_loop_job if loop_route else run_vercel_dspy,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"

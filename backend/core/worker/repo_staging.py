@@ -73,7 +73,7 @@ from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from ..service_gateway.optimization.blackbox.protocol import is_metric_error
+from ..service_gateway.optimization.blackbox.protocol import RUN_FAILED_STATUS, STATUS_KEY, is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
@@ -1146,6 +1146,21 @@ def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:
     return scorer_gateway(ModelConfig.model_validate(model), settings)
 
 
+def _has_no_score(side_info: dict[str, Any]) -> bool:
+    """Return whether a version's recorded side info marks it as having no score.
+
+    The repository scorer drops a metric's own ``run_failed`` status, so on a
+    repository run that status always means a failed ``[run]`` entry.
+
+    Args:
+        side_info: The version's recorded side info.
+
+    Returns:
+        ``True`` after a metric error (SKY-350) or a failed ``[run]`` entry (SKY-751).
+    """
+    return is_metric_error(side_info) or side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+
+
 def _version_score(result: dict[str, Any], candidate: str) -> float | None:
     """Return the score the run ranked one version by.
 
@@ -1154,13 +1169,13 @@ def _version_score(result: dict[str, Any], candidate: str) -> float | None:
         candidate: The version's patch.
 
     Returns:
-        Its recorded score, or ``None`` when the run never scored it or the
-        metric crashed on it.
+        Its recorded score, or ``None`` when the run never scored it, the
+        metric crashed on it, or its ``[run]`` entry failed.
     """
     for version in result.get("versions") or []:
         if isinstance(version, dict) and version.get("candidate") == candidate:
-            # SKY-350: a crash has no score, even if an older result stored a number.
-            if is_metric_error(version.get("side_info") or {}):
+            # SKY-350, SKY-751: a crash has no score, even if an older result stored a number.
+            if _has_no_score(version.get("side_info") or {}):
                 return None
             score = version.get("score")
             return float(score) if isinstance(score, int | float) else None
@@ -1181,20 +1196,41 @@ def _ranking_score(result: dict[str, Any], candidate: str) -> float:
     return float("-inf") if score is None else score
 
 
-def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
-    """Return whether the metric or scorer crashed on one version during the run.
+def _version_has_no_score(result: dict[str, Any], candidate: str) -> bool:
+    """Return whether one version has no score in the run's version list.
 
     Args:
         result: Finished black-box result.
         candidate: The version's patch.
 
     Returns:
-        ``True`` when the version's recorded side info has the metric-error status.
+        ``True`` when the metric or scorer crashed on the version, or its
+        ``[run]`` entry failed, on any case.
     """
     return any(
         isinstance(version, dict)
         and version.get("candidate") == candidate
-        and is_metric_error(version.get("side_info") or {})
+        and _has_no_score(version.get("side_info") or {})
+        for version in result.get("versions") or []
+    )
+
+
+def _seed_run_failed(result: dict[str, Any]) -> bool:
+    """Return whether the starting code has no score because its own ``[run]`` entry failed.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the run's version list marks the starting code with the
+        ``run_failed`` status; ``False`` after a metric error or when the run
+        never recorded the starting code.
+    """
+    seed = result.get("seed_candidate") or ""
+    return any(
+        isinstance(version, dict)
+        and version.get("candidate") == seed
+        and (version.get("side_info") or {}).get(STATUS_KEY) == RUN_FAILED_STATUS
         for version in result.get("versions") or []
     )
 
@@ -1238,29 +1274,63 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
                 entry["candidate"] = _scored_candidate(entry["candidate"], hidden_paths)
 
 
+def _final_run_finished(result: dict[str, Any]) -> bool:
+    """Return whether the final run finished for both the starting code and the best version.
+
+    A final run where every version failed a ``[run]`` case leaves both
+    scores empty, so the boolean ``details.baseline_run_failed`` flag marks
+    a finished final run; the service sets it only when both runs finished.
+    A result without the flag finished only when it has both scores.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the final run's scores decide, ``False`` when the
+        versions' own scores must stand in.
+    """
+    if isinstance((result.get("details") or {}).get("baseline_run_failed"), bool):
+        return True
+    return result.get("baseline_score") is not None and result.get("best_score") is not None
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
-    The final run's fresh scores decide; a run stopped before its final run
-    compares the versions' own scores instead.
+    The final run's fresh scores decide, also when both are empty; a run
+    stopped before its final run finished for both versions compares the
+    versions' own scores instead. A scored version beats a starting version
+    with no score only when the starting code's own ``[run]`` entry failed
+    in the run that gave that missing score: the final run's
+    ``details.baseline_run_failed`` flag, or the version list for a stopped
+    run (SKY-751).
 
     Args:
         result: Finished black-box result.
 
     Returns:
         The best version's patch, or ``None`` when it is empty, no better,
-        or a version the metric crashed on.
+        or a version with no score.
     """
     best = result.get("best_candidate")
     if not isinstance(best, str) or not best.strip() or result.get("regression_guard_applied"):
         return None
-    if _version_metric_error(result, best):
+    if _version_has_no_score(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    if baseline is None or optimized is None:
+    run_failed_flag = (result.get("details") or {}).get("baseline_run_failed")
+    final_run = _final_run_finished(result)
+    if not final_run:
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, best)
-    if baseline is None or optimized is None:
+    if optimized is None:
         return None
+    if baseline is None:
+        # A metric error on the starting code is the metric's fault, not the
+        # code's, so a scored version proves no improvement over it. The
+        # search may have scored the starting code while its final run
+        # failed, so the final run's own flag decides when there is one.
+        seed_run_failed = run_failed_flag is True if final_run else _seed_run_failed(result)
+        return best if seed_run_failed else None
     return best if optimized > baseline else None
 
 
@@ -1591,15 +1661,20 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
         Markdown body.
     """
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    if baseline is None or optimized is None:
+    if not _final_run_finished(result):
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, patch)
+    went = (
+        f"Score went from {baseline:.4g} to {optimized:.4g}."
+        if baseline is not None
+        else f"The starting code has no score: it failed on at least one case. This version scored {optimized:.4g}."
+    )
     files = sorted(set(patch_paths(patch)))
     listed = "\n".join(f"- `{path}`" for path in files[:50])
     more = f"\n- and {len(files) - 50} more" if len(files) > 50 else ""
     return (
         f"{APP_NAME} found this version while optimizing the repository with "
         f"{result.get('engine_used', 'an agent')}.\n\n"
-        f"Score went from {baseline:.4g} to {optimized:.4g}.\n\n"
+        f"{went}\n\n"
         f"Changed files:\n{listed}{more}\n\n"
         f"{_record_block(result)}"
         f"Review the run: {run_url}\n"
@@ -1930,7 +2005,7 @@ def _candidate_versions(
         seen.add(patch)
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
-        if _version_metric_error(result, patch) or patch_violations(
+        if _version_has_no_score(result, patch) or patch_violations(
             patch,
             repo["editable_paths"],
             staged.snapshot.readonly_paths,

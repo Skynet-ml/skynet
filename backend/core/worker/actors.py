@@ -102,7 +102,7 @@ def _check_count(name: str, value: Any, maximum: int) -> None:
         raise ValueError(f"{name} is not an int from 0 to {maximum}: {value!r}")
 
 
-def _ledger_cents(cost: Any) -> Decimal | None:
+def ledger_cents(cost: Any) -> Decimal | None:
     """Turn a reported step cost into an amount the ledger can hold, rounded up to nine fractional digits.
 
     Args:
@@ -121,13 +121,13 @@ def _ledger_cents(cost: Any) -> Decimal | None:
     return max(min(amount, Decimal(MAX_CENTS)), -Decimal(MAX_CENTS)).quantize(LEDGER_CENT_STEP, rounding=ROUND_CEILING)
 
 
-def _cost_text(cost: Decimal) -> str:
+def cost_text(cost: Decimal) -> str:
     """Write a ledger amount in plain notation, with no exponent, no trailing zeros and no negative zero.
 
     The text goes into the step body and the settle evidence, so the same cost always gives the same text.
 
     Args:
-        cost: A ledger amount from :func:`_ledger_cents`.
+        cost: A ledger amount from :func:`ledger_cents`.
 
     Returns:
         The text, for example ``0``, ``0.0000001`` or ``1.5``.
@@ -710,7 +710,7 @@ class Agent:
             # ledger records bound_exceeded and blocks the budget, instead of hiding the overrun. A negative
             # cost counts 0, and a cost that is not a finite number counts the full bound. The spend stays an
             # amount the ledger can hold, so the lease can always settle and close.
-            cost = _ledger_cents(result.cost_cents)
+            cost = ledger_cents(result.cost_cents)
             counted = bound if cost is None else max(cost, Decimal(0))
             lease.spent_cents = min(lease.spent_cents + counted, Decimal(MAX_CENTS))
             if cost is None or not 0 <= cost <= bound:
@@ -722,7 +722,7 @@ class Agent:
                 kind=kind,
                 execution_generation=self.run.execution_generation,
                 grant_list_id=self.run.grant_list_id,
-                body={**result.body, "cost_cents": _cost_text(cost)},
+                body={**result.body, "cost_cents": cost_text(cost)},
                 tree_id=result.tree_id,
             )
             self.next_seq += 1
@@ -732,7 +732,7 @@ class Agent:
             self._settle(
                 lease,
                 evidence_key=step_id,
-                evidence={"step_id": step_id, "cost_cents": _cost_text(cost)},
+                evidence={"step_id": step_id, "cost_cents": cost_text(cost)},
                 final=False,
             )
             return step_id

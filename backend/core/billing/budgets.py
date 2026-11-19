@@ -29,6 +29,7 @@ from ..storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     ExecutionUsageEvidenceModel,
+    JobModel,
     WalletLedgerModel,
 )
 from .budget_amounts import (
@@ -43,9 +44,15 @@ from .service import StripeBillingService, account_committed_cents, free_grant_c
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
+# Admission that a user's cancel or pause closed. Only the user's own resume
+# reopens it; a recovery sweep that races the cancel never does (SKY-814).
+USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
+# The cost kind of a worker agent's lease slice (core/worker/actors.py). No provider reconciler reads it back, so
+# only the worker or a fence settles it (SKY-829).
+AGENT_LEASE_COST_KIND = "agent_lease"
 # A context variable, not a service field: concurrent calls on one service each see only their own settles.
 _SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)
 
@@ -1443,7 +1450,7 @@ class BudgetService:
     def fence_generation(
         self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
     ) -> BudgetSnapshot:
-        """Revoke old admission and release only its provably undispatched reservations.
+        """Revoke old admission, release undispatched reservations and end the old lease slices.
 
         Args:
             budget_id: Envelope whose old worker is being fenced.
@@ -1452,7 +1459,8 @@ class BudgetService:
             session: Optional recovery transaction, retaining account-before-budget locking.
 
         Returns:
-            New epoch, retaining all old dispatched coverage until reconciliation.
+            New epoch. Each old dispatched agent lease slice without a refused settle is settled at its last
+            settle; all other old dispatched coverage stays until reconciliation.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
@@ -1467,6 +1475,26 @@ class BudgetService:
                 budget.reserved_units -= operation.max_units
                 budget.wallet_reserved_units -= operation.max_wallet_units
                 operation.state = "released"
+                operation.updated_at = datetime.now(UTC)
+            # A dead worker's lease slice has no provider record to reconcile, so recovery would wait for it
+            # forever. Its last settle holds all the work that the worker can still prove; the fence ends the
+            # slice there, and the old worker can settle it no more. A slice with a refused settle stays for review.
+            refused = (
+                select(ExecutionUsageEvidenceModel.operation_id)
+                .join(ExecutionOperationModel, ExecutionOperationModel.id == ExecutionUsageEvidenceModel.operation_id)
+                .where(ExecutionOperationModel.budget_id == budget_id, ExecutionUsageEvidenceModel.issue.is_not(None))
+            )
+            for operation in session.scalars(
+                select(ExecutionOperationModel).where(
+                    ExecutionOperationModel.budget_id == budget_id,
+                    ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND,
+                    ExecutionOperationModel.state.in_(_DISPATCHED_STATES),
+                    ExecutionOperationModel.id.not_in(refused),
+                )
+            ):
+                budget.reserved_units -= operation.max_units - operation.actual_units
+                budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+                operation.state = "settled"
                 operation.updated_at = datetime.now(UTC)
             budget.updated_at = datetime.now(UTC)
             return self._snapshot(session, budget, wallet)
@@ -1504,11 +1532,14 @@ class BudgetService:
                 return self._snapshot(session, budget, wallet)
             # Setup work ran before the budget joined the run, and no resume
             # repeats it, so only run work can be lost.
-            lost_operations = select(ExecutionOperationModel.id).where(
+            interrupted = (
                 ExecutionOperationModel.budget_id == budget_id,
                 ExecutionOperationModel.generation == generation,
                 ExecutionOperationModel.phase == "run",
                 ExecutionOperationModel.state == "settled",
+            )
+            lost_operations = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind != AGENT_LEASE_COST_KIND
             )
             if settled_after is not None:
                 lost_operations = lost_operations.where(ExecutionOperationModel.updated_at > settled_after)
@@ -1517,6 +1548,31 @@ class BudgetService:
                 func.coalesce(func.sum(ExecutionOperationModel.actual_wallet_units), 0),
             ).where(ExecutionOperationModel.id.in_(lost_operations))
             scope, charge = (int(value) for value in session.execute(lost).one())
+            # One lease slice pays for many steps, and its last settle can come after the steps that the resume
+            # keeps. So only a lease's usage that settled after the bound is lost: each settle is cumulative.
+            leases = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND
+            )
+            lost_evidence = ExecutionUsageEvidenceModel.operation_id.in_(leases)
+            if settled_after is not None:
+                lost_evidence = lost_evidence & (ExecutionUsageEvidenceModel.created_at > settled_after)
+            for lease in session.scalars(select(ExecutionOperationModel).where(ExecutionOperationModel.id.in_(leases))):
+                kept = None
+                if settled_after is not None:
+                    kept = session.execute(
+                        select(
+                            ExecutionUsageEvidenceModel.actual_units, ExecutionUsageEvidenceModel.actual_wallet_units
+                        )
+                        .where(
+                            ExecutionUsageEvidenceModel.operation_id == lease.id,
+                            ExecutionUsageEvidenceModel.created_at <= settled_after,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
+                        .order_by(ExecutionUsageEvidenceModel.actual_units.desc())
+                        .limit(1)
+                    ).first()
+                scope += lease.actual_units - (kept.actual_units if kept else 0)
+                charge += lease.actual_wallet_units - (kept.actual_wallet_units if kept else 0)
             if not scope:
                 return self._snapshot(session, budget, wallet)
             budget.settled_units -= scope
@@ -1535,7 +1591,7 @@ class BudgetService:
                     WalletLedgerModel.delta_cents < 0,
                     WalletLedgerModel.settlement_key.in_(
                         select(ExecutionUsageEvidenceModel.id).where(
-                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations)
+                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations) | lost_evidence
                         )
                     ),
                 )
@@ -1585,11 +1641,21 @@ class BudgetService:
             session: Optional caller transaction for atomic lifecycle publication.
 
         Returns:
-            Closed authority with pending usage and holds retained.
+            Closed authority with pending usage and holds retained. A user's
+            cancel or pause keeps its reason against any later non-user reason.
         """
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.state == "blocked":
+                return self._snapshot(session, budget, wallet)
+            # A later budget_reached from a stale worker, or a sweep's job_failed,
+            # must not hide the user's stop: an automatic resume would then reopen
+            # it (SKY-814).
+            if (
+                budget.state == "closed"
+                and budget.blocked_reason in USER_STOP_REASONS
+                and reason not in USER_STOP_REASONS
+            ):
                 return self._snapshot(session, budget, wallet)
             budget.state = "closed"
             budget.blocked_reason = _identifier(reason)
@@ -1680,7 +1746,9 @@ class BudgetService:
             budget.updated_at = now
         return released
 
-    def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def close_for_failed_job(
+        self, budget_id: str, username: str, *, expected_generation: int, session: Session | None = None
+    ) -> BudgetSnapshot:
         """Close a failed job's envelope and return the holds of work that never started.
 
         Settled usage stays billed. Dispatched and pending work keeps its
@@ -1691,12 +1759,13 @@ class BudgetService:
             budget_id: Envelope of the job that reached a terminal failure.
             username: Authenticated owner.
             expected_generation: Epoch of the worker that saw the failure.
+            session: Optional caller transaction that already holds the job row.
 
         Returns:
             Closed budget with only the coverage of started work still held,
             or the unchanged budget when a resume already fenced that epoch.
         """
-        with self._transaction() as session:
+        with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             # A manual resume can fence a new epoch between the failed status
             # write and this close. The new epoch's holds and admission are
@@ -1711,7 +1780,43 @@ class BudgetService:
             budget.updated_at = now
             return self._snapshot(session, budget, wallet)
 
-    def resume_admission(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+    def close_for_cancelled_job(self, budget_id: str, username: str, *, job_id: str, expected_generation: int) -> bool:
+        """Close a cancelled run's admission and free its unstarted holds while the run is still cancelled.
+
+        A resume can follow the cancel's status write and reopen the budget. The
+        close must then leave that budget alone (SKY-800). The job row lock comes
+        before the budget lock, in the order that ``requeue_for_resume`` takes
+        them, so a resume cannot change the row between the check and the close.
+
+        Args:
+            budget_id: Envelope of the cancelled run.
+            username: Authenticated owner.
+            job_id: The cancelled run.
+            expected_generation: Budget generation on the row that the cancel read after its write.
+
+        Returns:
+            ``True`` when the budget closed; ``False`` when the run is no longer
+            cancelled at that generation, because a newer action owns it.
+        """
+        with self._transaction() as session:
+            still_cancelled = session.scalar(
+                select(JobModel.optimization_id)
+                .where(
+                    JobModel.optimization_id == job_id,
+                    JobModel.status == "cancelled",
+                    func.coalesce(JobModel.execution_budget_generation, 0) == expected_generation,
+                )
+                .with_for_update()
+            )
+            if still_cancelled is None:
+                return False
+            self.stop_admission(budget_id, username, reason="user_cancelled", session=session)
+            self.close_for_failed_job(budget_id, username, expected_generation=expected_generation, session=session)
+            return True
+
+    def resume_admission(
+        self, budget_id: str, username: str, *, expected_generation: int, automatic: bool = False
+    ) -> BudgetSnapshot:
         """Reopen an explicitly resumed attached job after obligations are reconciled.
 
         The lifecycle coordinator must first verify the same job's checkpoint
@@ -1721,9 +1826,11 @@ class BudgetService:
             budget_id: Closed execution envelope bound to the resumed root job.
             username: Authenticated owner.
             expected_generation: Epoch authorized by the recovery coordinator.
+            automatic: Whether the orphan sweep, not the user, resumes the job.
 
         Returns:
-            Attached authority ready for new per-operation admission.
+            Attached authority ready for new per-operation admission, or the
+            unchanged closed budget when ``automatic`` and a user action closed it.
 
         Raises:
             BudgetUnreconciledError: When prior work still owns a reservation.
@@ -1733,6 +1840,10 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             if budget.generation != expected_generation:
                 raise BudgetFencedError("The execution generation is obsolete.")
+            # The budget row lock orders this check with the cancel's stop_admission,
+            # so a user's cancel or pause that lands first always wins over a sweep.
+            if automatic and budget.state == "closed" and budget.blocked_reason in USER_STOP_REASONS:
+                return self._snapshot(session, budget, wallet)
             if budget.job_id is None or budget.state not in {"closed", "attached"}:
                 raise BudgetConflictError("Only an attached, reconciled job can resume admission.")
             active = session.scalar(
@@ -1777,7 +1888,8 @@ class BudgetService:
             Updated attempt and authoritative budget snapshot.
 
         Raises:
-            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path.
+            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path. For a fenced
+                lease's late settle, it keeps only the evidence and blocks nothing.
             BudgetFundingLostError: After preserving evidence when an external adjustment removed funding.
         """
         key = _identifier(evidence_key)
@@ -1803,13 +1915,37 @@ class BudgetService:
                     )
                 issue = prior.issue
             else:
-                if operation.state not in _DISPATCHED_STATES:
+                # The fence settles a lease slice while its old worker can still be alive. That worker's
+                # in-flight call can still report usage, but recovery already settled and waived the slice, and
+                # the step log drops the old generation's step, so the resume repeats and bills that call again.
+                # So a late settle keeps only its evidence, and Skynet takes its cost (SKY-719: for an unknown
+                # bill, charge nothing). This also frees a step that flushed between its commit and its settle.
+                fenced = (
+                    operation.state == "settled"
+                    and operation.cost_kind == AGENT_LEASE_COST_KIND
+                    and operation.generation < budget.generation
+                )
+                if operation.state not in _DISPATCHED_STATES and not fenced:
                     raise BudgetConflictError("Usage may only settle a dispatched attempt.")
-                if scope < operation.actual_units or charge < operation.actual_wallet_units:
+                floor_units, floor_wallet = operation.actual_units, operation.actual_wallet_units
+                if fenced:
+                    # A late settle never moves the operation's totals, so the last late settle is the floor.
+                    late_units, late_wallet = session.execute(
+                        select(
+                            func.max(ExecutionUsageEvidenceModel.actual_units),
+                            func.max(ExecutionUsageEvidenceModel.actual_wallet_units),
+                        ).where(
+                            ExecutionUsageEvidenceModel.operation_id == operation_id,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
+                    ).one()
+                    floor_units = max(floor_units, late_units or 0)
+                    floor_wallet = max(floor_wallet, late_wallet or 0)
+                if scope < floor_units or charge < floor_wallet:
                     raise BudgetConflictError("Cumulative usage cannot decrease.")
                 scope_delta = scope - operation.actual_units
                 wallet_delta = charge - operation.actual_wallet_units
-                billed = ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
+                billed = 0 if fenced else ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
                 if scope > operation.max_units or charge > operation.max_wallet_units:
                     issue = "bound_exceeded"
                 elif billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
@@ -1830,11 +1966,11 @@ class BudgetService:
                         created_at=datetime.now(UTC),
                     )
                 )
-                if issue:
+                if issue and not fenced:
                     budget.state = "blocked"
                     budget.blocked_reason = issue
                     operation.state = "pending"
-                else:
+                elif not fenced:
                     budget.settled_units += scope_delta
                     budget.wallet_settled_units += wallet_delta
                     budget.reserved_units -= scope_delta

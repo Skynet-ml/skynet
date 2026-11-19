@@ -65,6 +65,7 @@
   },
   "messages": {
     "submit.preflight.scorer_model": "יש להגדיר את המודל באמצעות llm(model=...) בקוד המדד.",
+    "accounts.deletion_storage_unavailable": "החשבון לא נמחק: לא ניתן היה למחוק כרגע את נתוני הריצות השמורים שלו. נסו שוב בעוד כמה דקות.",
     "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
     "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
     "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",
@@ -121,7 +122,9 @@
     "optimization.not_success_status_for_serve": "ה{term.optimization} במצב '{status}' — רק {term.optimizationPlural} שהושלמו בהצלחה אפשר להגיש.",
     "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
+    "optimization.cancel_conflict": "ה{term.optimization} שינתה את מצבה בזמן הביטול. היא כעת במצב '{status}'. אפשר לנסות לבטל אותה שוב.",
     "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
+    "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
     "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",
     "optimization.retry_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות להרצה חוזרת.",
     "optimization.retry_wrong_status": "אפשר להריץ מחדש רק {term.optimizationPlural} במצב 'נכשלה' או 'בוטלה' — זו במצב '{status}'. ניתן לשכפל אותה במקום.",
@@ -532,7 +535,7 @@
           "label": "label"
         },
         "signature_code": "import dspy\n\n\nclass ClassifySentiment(dspy.Signature):\n    \"\"\"סווג את הטקסט לאחת משלוש קטגוריות: חיובי, שלילי, נייטרלי.\"\"\"\n\n    text: str = dspy.InputField(desc=\"טקסט הביקורת\")\n    label: str = dspy.OutputField(desc=\"חיובי / שלילי / נייטרלי\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"label\", \"\")).strip().lower()\n    expected = str(getattr(example, \"label\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"label\", \"\")).strip().lower()\n    expected = str(getattr(example, \"label\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       },
       "email-triage-he": {
         "name": "מיון פניות בדוא״ל",
@@ -606,7 +609,7 @@
           "category": "category"
         },
         "signature_code": "import dspy\n\n\nclass ClassifyEmail(dspy.Signature):\n    \"\"\"סווג את הפנייה לפי המחלקה המתאימה: תמיכה, חיוב, או מכירות.\"\"\"\n\n    subject: str = dspy.InputField(desc=\"נושא ההודעה\")\n    body: str = dspy.InputField(desc=\"גוף ההודעה\")\n    category: str = dspy.OutputField(desc=\"תמיכה / חיוב / מכירות\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"category\", \"\")).strip().lower()\n    expected = str(getattr(example, \"category\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"category\", \"\")).strip().lower()\n    expected = str(getattr(example, \"category\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       },
       "qa-general-he": {
         "name": "שאלות ותשובות כלליות",
@@ -676,7 +679,7 @@
           "answer": "answer"
         },
         "signature_code": "import dspy\n\n\nclass AnswerQuestion(dspy.Signature):\n    \"\"\"ענה על השאלה בתשובה קצרה ומדויקת.\"\"\"\n\n    question: str = dspy.InputField(desc=\"השאלה\")\n    answer: str = dspy.OutputField(desc=\"תשובה קצרה\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"answer\", \"\")).strip().lower()\n    expected = str(getattr(example, \"answer\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"answer\", \"\")).strip().lower()\n    expected = str(getattr(example, \"answer\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       }
     }
   }
