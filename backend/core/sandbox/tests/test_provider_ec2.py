@@ -425,6 +425,18 @@ async def _until(check: Callable[[], bool]) -> None:
     raise AssertionError("The condition did not come true in time.")
 
 
+def _jump_loop_clock(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """Move the running event loop's clock forward, so a deadline on it passes at once.
+
+    Args:
+        monkeypatch: Restores the loop clock after the test.
+        seconds: How far to move the clock.
+    """
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: real_time() + seconds)
+
+
 def _run_kwargs(fake: FakeEC2) -> dict[str, Any]:
     """Return the arguments of the last ``run_instances`` call.
 
@@ -838,21 +850,32 @@ async def test_a_late_probe_cannot_leave_the_known_hosts_file_behind(
     temp.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp))
     monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
-    monkeypatch.setattr(ec2_provider, "_SSH_PROBE_INTERVAL_SEC", 0.3)
+    # A 0.3 s real probe interval let the launch wake and pass its file
+    # removal before a slow test wrote the file. The launch now sleeps until
+    # the clock jump below, which comes only after the write.
+    monkeypatch.setattr(ec2_provider, "_SSH_PROBE_INTERVAL_SEC", 3600.0)
     (fake_ec2.state / "ssh_down").touch()
     env = EC2Environment(_spec())
     task = asyncio.create_task(env.start())
-    await _until(lambda: len(_ssh_calls(fake_ec2)) == 1)
+    await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
+    launch = next(item for item in asyncio.all_tasks() if item.get_coro().__name__ == "_launch")
     path = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("UserKnownHostsFile="))
     path = path.split("=", 1)[1]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert list(temp.glob("skynet-ec2-*")) == []
+    assert not launch.done()
     # ssh with accept-new writes the file again when a late probe connects.
     os.close(os.open(path, os.O_CREAT | os.O_WRONLY))
-    await _until(lambda: not list(temp.glob("skynet-ec2-*")))
-    await _until(lambda: not ec2_provider._LATE_TERMINATES)
+    _jump_loop_clock(monkeypatch, 3600.0)
+    # These bounds only stop a broken provider from hanging the run; no timing decides the result.
+    await asyncio.wait({launch}, timeout=60)
+    assert launch.done()
+    if ec2_provider._LATE_TERMINATES:
+        await asyncio.wait(set(ec2_provider._LATE_TERMINATES), timeout=60)
+    assert list(temp.glob("skynet-ec2-*")) == []
+    assert not ec2_provider._LATE_TERMINATES
     assert fake_ec2.live() == []
 
 
@@ -1498,17 +1521,22 @@ async def test_a_stop_after_the_launch_returns_never_leaves_a_terminated_instanc
     assert env not in ec2_provider._LIVE
 
 
-async def test_a_failed_start_removes_the_host_key_that_its_probe_wrote(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+async def test_a_failed_start_removes_the_host_key_that_its_probe_wrote(
+    fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Remove the alias line of the instance from a configured known hosts file when the SSH wait fails."""
     known = tmp_path / "known_hosts"
     (fake_ec2.state / "ssh_down").touch()
     env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
-    env._connect_timeout = 1.0
+    # A short real deadline raced the probe's Python start and the key write
+    # below on a loaded machine. The clock jump ends the wait only after the write.
+    env._connect_timeout = 600.0
     task = asyncio.create_task(env.start())
     await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
     alias = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("HostKeyAlias=")).split("=", 1)[1]
     # ssh with accept-new writes the key once the probe reaches the host, also when the probe then fails.
     known.write_text(f"{alias} ssh-ed25519 AAAA1\ni-other ssh-ed25519 AAAA2\n")
+    _jump_loop_clock(monkeypatch, env._connect_timeout)
     with pytest.raises(StartTimeoutError):
         await task
     assert known.read_text() == "i-other ssh-ed25519 AAAA2\n"

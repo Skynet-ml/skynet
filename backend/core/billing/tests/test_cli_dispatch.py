@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from core import config
-from core.billing import cli_dispatch
+from core.billing import cli_dispatch, cli_runners
 from core.billing.cli_dispatch import CliDispatcher, local_subscription_route
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.tests.test_cli_runners import (
@@ -239,14 +239,33 @@ def test_fallback_drops_the_capped_cli_thinking(tmp_path: Path, monkeypatch: pyt
     assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
 
 
-def test_timeout_is_not_retried(tmp_path: Path) -> None:
+def test_timeout_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer a timed-out call with 502 after one attempt, so a hung CLI holds a slot once."""
     fake_cli(tmp_path, "claude", "time.sleep(30)")
-    settings = local_settings(tmp_path, cli_call_timeout_seconds=3.0)
+    real_start = cli_runners._start
+    starts: list[str] = []
+
+    def counting_start(provider: str, *args: Any) -> Any:
+        """Count one CLI process start, then start the process.
+
+        Args:
+            provider: The CLI.
+            *args: The other arguments of the real start.
+
+        Returns:
+            The running process.
+        """
+        starts.append(provider)
+        return real_start(provider, *args)
+
+    # The fake CLI logs its call only after Python starts; on a loaded machine
+    # the timeout can kill it first, so its log cannot count the starts.
+    monkeypatch.setattr(cli_runners, "_start", counting_start)
+    settings = local_settings(tmp_path, cli_call_timeout_seconds=0.5)
     result = CliDispatcher(None, "claude", MODEL, "judge", settings).dispatch("/chat/completions", REQUEST)
     assert result.status == 502
     assert _body(result)["error"]["message"] == "claude timed out"
-    assert len(calls(tmp_path, "claude")) == 1
+    assert starts == ["claude"]
 
 
 def test_messages_request_answers_in_the_anthropic_shape(tmp_path: Path) -> None:
