@@ -1168,6 +1168,18 @@ def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWor
     assert record.call_args.kwargs == {"image": None}
 
 
+def test_a_stored_job_with_the_files_proposer_fails_on_an_engine_that_ignores_it(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """Fail an Auto job staged with the file's proposer, which the loop would replace in silence (SKY-728)."""
+    _gateway, publish, _staged = _run_repository_job(worker, store, {"file_proposer": True})
+
+    publish.assert_not_called()
+    job = store._jobs["repo-hardened"]
+    assert job["status"] == "failed"
+    assert "only a single AutoResearch or Meta-Harness run can use it" in str(job)
+
+
 _MAPS_TOML = (
     b'version = 1\n[run]\nentry = "run.py:main"\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'

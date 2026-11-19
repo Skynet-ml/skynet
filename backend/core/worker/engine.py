@@ -127,6 +127,7 @@ from .repo_staging import (
     infer_repo_setup,
     is_repo_payload,
     publish_improvement,
+    runs_proposer_entry,
     stage_repository,
 )
 from .step_recovery import park_run, still_owns_run
@@ -1084,6 +1085,15 @@ class BackgroundWorker:
                     # Every engine has a loop route since the cutover (SKY-728); a stored job of an engine
                     # without one has no other place to run.
                     raise ValueError("The stored job names an engine that the worker engine loop does not run.")
+                # Staging at each claim refuses this too. A job stored before the cutover must never reach the
+                # loop with the file's command, because the loop would run the built-in proposer in silence (SKY-728).
+                staged_snapshot = payload_dict.get(REPO_SNAPSHOT_KEY) or {}
+                if staged_snapshot.get("file_proposer") and not runs_proposer_entry(payload_dict.get("strategy") or {}):
+                    raise ValueError(
+                        "The stored job runs the [proposer] entry command of optimize.toml, but only a single"
+                        " AutoResearch or Meta-Harness run can use it now. Remove [proposer] entry, or choose"
+                        " one of those engines, and start the run again."
+                    )
                 # After the exposure check: the worker's own child runs this run, not a guest box, so it may
                 # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
                 payload_dict[LOOP_HOST_KEY] = {
