@@ -27,7 +27,14 @@ from urllib.parse import urlsplit
 
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
-from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
+from ....models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CODEX,
+    BLACKBOX_HARNESS_CUSTOM,
+    BlackboxProposer,
+)
 from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
@@ -449,22 +456,60 @@ def _run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]
     return json.dumps(output, ensure_ascii=False), tree
 
 
-def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_proposer: bool = False) -> None:
-    """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
+# The proposer settings, besides the default harness, that each engine's built-in proposer reads on the worker
+# engine loop. AutoResearch and Meta-Harness run tool loops, which count tool calls and reach the services.
+# Every engine's model calls go through the loop's model client, which applies the reasoning effort (SKY-829);
+# the two tool-loop engines keep their older refusal of it. The ShinkaEvolve agent editor is a tool loop that
+# loads the [proposer] mcp servers but not the services. An Auto run has AutoResearch and Meta-Harness lanes,
+# which refuse at start what their rule refuses, so Auto takes their rule.
+TOOL_LOOP_SETTINGS = frozenset({"max_tool_calls", "services"})
+_MODEL_ONLY_SETTINGS = frozenset({"reasoning_effort"})
+_SHINKA_AGENT_SETTINGS = frozenset({"max_tool_calls", "mcp", "reasoning_effort"})
+_DEFAULT_MAX_TOOL_CALLS = BlackboxProposer().max_tool_calls
 
-    A host CLI, ``[proposer] mcp`` servers and a reasoning effort would be silently dropped. A command is run only
-    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816). That command does not reach
-    ``[proposer] services``.
+
+def proposer_support(engine: str | None, shinka_editor: str | None = None) -> frozenset[str]:
+    """Return the proposer settings that an engine's built-in proposer reads on the worker engine loop.
 
     Args:
-        options: The run's native options.
-        engine: The engine's display name, for the message.
-        file_proposer: Whether :class:`FileProposer` runs the options' command.
+        engine: The single run's engine, or ``None`` for an Auto run.
+        shinka_editor: The ShinkaEvolve editor setting; only ``agent`` loads the [proposer] mcp servers.
 
-    Raises:
-        ServiceError: When the options name a proposer setting that the tool loop does not run.
+    Returns:
+        A subset of ``max_tool_calls``, ``services``, ``mcp`` and ``reasoning_effort``.
     """
-    proposer = options.proposer
+    if engine in (None, BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS):
+        return TOOL_LOOP_SETTINGS
+    if engine == BLACKBOX_ENGINE_SHINKA_EVOLVE and shinka_editor == "agent":
+        return _SHINKA_AGENT_SETTINGS
+    return _MODEL_ONLY_SETTINGS
+
+
+def unsupported_proposer_settings(
+    proposer: BlackboxProposer,
+    *,
+    supports: frozenset[str],
+    file_proposer: bool = False,
+    mcp_servers: bool = False,
+    services: bool = False,
+    reasoning_effort: bool = False,
+) -> list[str]:
+    """List the proposer settings that the engine loop would drop, so staging and the engine refuse the same ones.
+
+    A command is run only when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816). That
+    command does not reach ``[proposer] services`` or the reasoning effort.
+
+    Args:
+        proposer: The run's proposer settings.
+        supports: What the engine's built-in proposer reads, from :func:`proposer_support`.
+        file_proposer: Whether :class:`FileProposer` runs the proposer's command.
+        mcp_servers: Whether the run names ``[proposer] mcp`` servers.
+        services: Whether the run names ``[proposer] services``.
+        reasoning_effort: Whether the run sets a reasoning effort.
+
+    Returns:
+        The names of the refused settings, in a fixed order; empty when the engine runs them all.
+    """
     refused = [
         name
         for name, value in (
@@ -477,14 +522,41 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     # Repository staging sets the custom harness for the file's command.
     if proposer.harness != (BLACKBOX_HARNESS_CUSTOM if file_proposer else BLACKBOX_HARNESS_CODEX):
         refused.append("harness")
-    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
-    if mcp_route.get("servers"):
+    # Only a value other than the default is a choice, and the wizard sends the default.
+    if "max_tool_calls" not in supports and proposer.max_tool_calls != _DEFAULT_MAX_TOOL_CALLS:
+        refused.append("max_tool_calls")
+    if mcp_servers and "mcp" not in supports:
         refused.append("mcp")
     # FileProposer gives the command no relay token and no service list, so the services would not answer.
-    if file_proposer and mcp_route.get("services"):
+    if services and (file_proposer or "services" not in supports):
         refused.append("services")
-    if options.reasoning_effort:
+    if reasoning_effort and (file_proposer or "reasoning_effort" not in supports):
         refused.append("reasoning_effort")
+    return refused
+
+
+def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_proposer: bool = False) -> None:
+    """Refuse a proposer setting that the AutoResearch or Meta-Harness tool loop does not run, so the run fails.
+
+    Repository staging refuses the same settings before paid work; this check also covers a run with no staging.
+
+    Args:
+        options: The run's native options.
+        engine: The engine's display name, for the message.
+        file_proposer: Whether :class:`FileProposer` runs the options' command.
+
+    Raises:
+        ServiceError: When the options name a proposer setting that the tool loop does not run.
+    """
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    refused = unsupported_proposer_settings(
+        options.proposer,
+        supports=TOOL_LOOP_SETTINGS,
+        file_proposer=file_proposer,
+        mcp_servers=bool(mcp_route.get("servers")),
+        services=bool(mcp_route.get("services")),
+        reasoning_effort=bool(options.reasoning_effort),
+    )
     if refused:
         runs = (
             "runs the [proposer] entry command of the contract file"

@@ -66,14 +66,16 @@ from ..models.blackbox import (
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
+    BlackboxProposer,
 )
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
-from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox import loop_tools, runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import RUN_FAILED_STATUS, STATUS_KEY, is_metric_error
+from ..service_gateway.optimization.blackbox.registry import ENGINES
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
@@ -438,6 +440,8 @@ def stage_repository(
         if environment.proposer_entry is not None:
             _refuse_other_runs(result.get("strategy") or {})
             _refuse_engine_loop_settings(environment, result)
+        else:
+            _refuse_unsupported_proposer(environment, result)
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -599,7 +603,7 @@ def stage_repository(
 _ENGINE_LOOP_ENGINES = frozenset({BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS})
 
 
-def _on_engine_loop(strategy: Mapping[str, Any]) -> bool:
+def runs_proposer_entry(strategy: Mapping[str, Any]) -> bool:
     """Tell whether a run is a single AutoResearch or Meta-Harness run, which runs the file's command.
 
     Every run is on the engine loop since the cutover (SKY-728), but only these single runs give the
@@ -660,12 +664,52 @@ def _refuse_other_runs(strategy: Mapping[str, Any]) -> None:
     Raises:
         ConstraintsError: When the run is not a single AutoResearch or Meta-Harness run.
     """
-    if not _on_engine_loop(strategy):
+    if not runs_proposer_entry(strategy):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: Only a single AutoResearch or Meta-Harness run can use the [proposer] entry"
             " command yet. Remove [proposer] entry, or choose one of those engines.",
             section="proposer",
             key="entry",
+        )
+
+
+def _refuse_unsupported_proposer(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:
+    """Refuse the proposer settings that the run's engine does not run on the engine loop, before paid work.
+
+    Every engine runs on the worker engine loop since the cutover (SKY-728), and the built-in proposer of most
+    engines reads few of the proposer settings, so the run would drop the others in silence. The rules are the
+    engines' own (``loop_tools.unsupported_proposer_settings``). A host CLI that local mode filled in is not the
+    user's choice, so it is not refused here.
+
+    Args:
+        environment: The run's rules, with no ``[proposer] entry`` command.
+        payload: The stored run request.
+
+    Raises:
+        ConstraintsError: When the run names a proposer setting that its engine does not run.
+    """
+    strategy = payload.get("strategy") or {}
+    engine = strategy.get("engine") if strategy.get("mode", "auto") == "single" else None
+    stored = dict(payload.get("proposer") or {})
+    if stored.get(HOST_CLI_AUTO_KEY):
+        stored["host_cli"] = None
+    proposer_role = environment.constraints.proposer if environment.constraints is not None else None
+    # The stored payload is saved by alias, so the model settings are under ``reflection_model_config``.
+    effort = ((payload.get("reflection_model_config") or {}).get("extra") or {}).get("reasoning_effort")
+    refused = loop_tools.unsupported_proposer_settings(
+        BlackboxProposer.model_validate(stored),
+        supports=loop_tools.proposer_support(engine, (payload.get("shinka") or {}).get("editor")),
+        mcp_servers=bool(proposer_role is not None and proposer_role.mcp_servers),
+        services=bool(proposer_role is not None and proposer_role.services),
+        reasoning_effort=bool(effort),
+    )
+    if refused:
+        name = ENGINES[engine].label if engine in ENGINES else "Auto"
+        raise ConstraintsError(
+            f"{name} runs only its built-in proposer, so it cannot apply these proposer settings: {', '.join(refused)}."
+            " Remove them, or choose another engine.",
+            section="proposer",
+            key=refused[0],
         )
 
 

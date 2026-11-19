@@ -101,6 +101,8 @@ U+2066 to U+2069), because they can hide what a command does.
 - The run's own proposer wins. When the run request names a proposer, the
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
+  A setting of that proposer that the engine does not apply fails the setup
+  check (see "What fails the setup check").
 - `setup` without `entry` fails the setup check.
 - Only a single AutoResearch or Meta-Harness run can use `entry` today.
   Every other run with `entry` fails the setup check, and the message names
@@ -658,6 +660,22 @@ catch the failure in the program, as above, and let the metric score it.
   `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
   `[proposer] mcp`. An `entry` in any run that is not a single AutoResearch
   or Meta-Harness run.
+- A proposer setting that the run's engine does not apply (SKY-728). Every
+  run uses the worker's engine loop, and each engine runs only its built-in
+  proposer there. The setup check refuses these settings before paid work,
+  and the message names the engine and each setting:
+  - Every engine refuses a `harness` other than the default (such as
+    `opencode`, `pi` or `aider`), a `run_command`, an `install_command` and
+    a `host_cli` in the run request.
+  - GEPA, Best-of-N and AutoSaddler make model calls only. They also refuse
+    a `max_tool_calls` other than the default, `[proposer] mcp` and
+    `[proposer] services`. They apply the reasoning effort.
+  - ShinkaEvolve refuses the same settings as GEPA. With the `agent`
+    editor, it applies `max_tool_calls`, `[proposer] mcp` and the reasoning
+    effort, and it refuses `[proposer] services`.
+  - AutoResearch and Meta-Harness, and Auto, which runs their lanes, apply
+    `max_tool_calls` and `[proposer] services`. They refuse `[proposer] mcp`
+    and a reasoning effort.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
@@ -716,15 +734,15 @@ mcp = "eval/.mcp.json"
 - There are no default services. A role gets only the services that its own
   `services` list names. `[run]`, `[metric]` and `[proposer]` can have a
   `services` list now. In a `[target.<name>]`, it fails the setup check.
-- The proposer reaches the services of `[proposer] services` through the
-  parent's relay (SKY-612). Its box gets one `SKYNET_SERVICE_<NAME>_URL`
-  for each service, with a loopback url and no secret. Skynet checks each
-  call against the proposer's own list, fills the secrets in the parent,
-  and returns redirects without following them.
-  The `[proposer] entry` command of AutoResearch and Meta-Harness runs only
-  on the engine loop, and it does not get this relay yet. A single run of
-  these engines on the engine loop, with `entry` and `[proposer] services`,
-  fails the setup check, and the message names `services`.
+- Only the AutoResearch and Meta-Harness tool loops (also in Auto) reach
+  the services of `[proposer] services`. Skynet checks each call against the
+  proposer's own list, fills the secrets in the parent, and returns
+  redirects without following them. Every other engine refuses
+  `[proposer] services` at the setup check (see "What fails the setup
+  check"). The `[proposer] entry` command of AutoResearch and Meta-Harness
+  does not get the services. A single run of these engines with `entry` and
+  `[proposer] services` fails the setup check, and the message names
+  `services`.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
