@@ -133,7 +133,7 @@ class TestValidateScorerCode:
 
         assert validate_scorer_code(code) is None
 
-    def test_helpers_can_be_imported_from_skynet(self) -> None:
+    def test_helpers_can_be_imported_from_openascent(self) -> None:
         """The explicit ``from openascent import llm, Image`` form loads cleanly too."""
         code = "from openascent import llm, Image\n\ndef score(candidate, case=None):\n    return 1.0\n"
 
