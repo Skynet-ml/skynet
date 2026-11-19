@@ -17,6 +17,7 @@ keeps its own search and lab state; only the step that makes the version changes
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import time
 from collections.abc import Iterator, Mapping
@@ -30,6 +31,7 @@ from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
 from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
+from .native_engines import log_event
 from .native_runtime import NativeOptions
 from .protocol import EngineContext, EvalServer, FileTooLargeError, ModelReply
 from .sandbox_contract import CommandResult
@@ -676,18 +678,33 @@ class FileProposer:
             parent: The tree of the version that the session started from.
 
         Returns:
-            The version's tree id, or ``None`` when a box could not remove the paths.
-
-        Raises:
-            ServiceError: When the ``rm`` of the setup's output fails.
+            The version's tree id, or ``None`` when a box could not remove the paths. As with ``drop_lab``, only
+            this version is lost: the entry command can write a path that ``rm`` cannot remove, so the
+            run goes on.
         """
         if tree == start:
             return parent
         if not self._roots:
             return drop_lab(self._ctx, start, tree, parent, self._lab)
-        version = _remove(self._ctx, tree, [self._lab, *self._roots])
-        if version is not None:
-            self._last.setdefault(version, tree)
+        assert self._ctx.run_command is not None
+        name = "removal of the lab folder and the setup's output after the [proposer] entry command"
+        try:
+            result, version = self._ctx.run_command(tree, f"rm -rf -- {shlex.join([self._lab, *self._roots])}", ())
+        except (TreeRejectedError, BoxFailureError) as error:
+            log_event(
+                "proposer.done", f"The {name} could not run in a box: {error}", level=logging.WARNING, source="proposer"
+            )
+            return None
+        if result.timed_out or result.exit_code != 0:
+            log_event(
+                "proposer.done",
+                _command_failure(name, result)
+                + " The version is lost. Make the command write only files it can remove.",
+                level=logging.WARNING,
+                source="proposer",
+            )
+            return None
+        self._last.setdefault(version, tree)
         return version
 
     def _setup(self) -> list[str]:

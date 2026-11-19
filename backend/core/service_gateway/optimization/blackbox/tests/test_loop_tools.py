@@ -6,6 +6,7 @@ database, no tree store and no subprocess.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -406,6 +407,54 @@ def test_a_failed_lab_removal_for_a_parent_stops_the_run_and_caches_nothing(
         proposer.base(version)  # type: ignore[arg-type]
 
     assert version not in proposer._full
+
+
+def test_a_command_failure_keeps_the_end_of_a_long_output() -> None:
+    """The end of the output holds the real error, so the message keeps the end and drops the start."""
+    stderr = "START-MARKER " + "x" * (2 * loop_tools._COMMAND_ERROR_CHARS) + " END-MARKER"
+
+    message = loop_tools._command_failure("[proposer] entry command", CommandResult(1, stderr=stderr))
+
+    assert message.startswith("The [proposer] entry command failed with exit code 1. ")
+    assert message.endswith("END-MARKER")
+    assert "START-MARKER" not in message
+
+
+@pytest.mark.parametrize(
+    ("outcome", "says"),
+    [
+        (CommandResult(1, stderr="rm: .autoresearch/cache: Permission denied"), "Permission denied"),
+        (BoxFailureError("s", "box died"), "could not run in a box"),
+    ],
+    ids=["exit-1", "box-failure"],
+)
+def test_a_failed_removal_after_the_entry_command_loses_only_that_version(
+    outcome: CommandResult | Exception, says: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The entry command can write a path that ``rm`` cannot remove, so the version is lost, the run goes on, and a
+    warning names the entry command.
+
+    Args:
+        outcome: The result or the error of the removal box.
+        says: Text that the warning holds.
+        caplog: Pytest's log capture.
+    """
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+    proposer.base("seed")
+    commands.outcomes[f"rm -rf -- {_LAB} deps"] = outcome
+    last, full = dict(proposer._last), dict(proposer._full)
+
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        version = proposer.version("start", "last", "seed")
+
+    assert version is None
+    assert (proposer._last, proposer._full) == (last, full)
+    warnings = [record.getMessage() for record in caplog.records if record.name == "app.engine"]
+    assert len(warnings) == 1
+    assert "[proposer] entry command" in warnings[0]
+    assert says in warnings[0]
 
 
 def test_a_version_removes_the_lab_and_the_setup_output_in_one_box() -> None:
