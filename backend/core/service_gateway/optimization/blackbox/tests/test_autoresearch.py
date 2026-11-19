@@ -1128,6 +1128,52 @@ def test_a_repository_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_b
     assert model.calls == []
 
 
+def test_a_repository_budget_that_scores_only_the_seed_ends_the_run_on_the_seed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Two evaluations are left for two cases, so the seed gets its sweep and no session starts (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf x >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, max_evals=2, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert model.calls == []
+    assert (result.best_candidate, result.total_evals) == (seed, 2)
+
+
+def test_a_text_budget_too_small_for_a_full_sweep_still_starts_the_session(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A text session has the ``evaluate`` tool, so one evaluation for two cases is not out of budget (SKY-825).
+
+    The session spends the unit on a one-case probe, which is no full sweep, so the run has no scored candidate.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_WRITE, _evaluate(example_ids=["0"])])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(RuntimeError, match="finished without scoring any candidate"):
+        _run(loop, max_evals=1, stop_at_score=None)
+
+    assert model.calls
+    assert _tool_result(model, 2)["average_score"] == 5.0
+
+
 def test_a_repository_session_reads_the_task_brief_and_state_in_the_lab(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

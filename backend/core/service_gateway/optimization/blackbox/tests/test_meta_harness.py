@@ -702,6 +702,34 @@ def test_a_repository_session_that_changes_nothing_gives_no_candidate(
     assert (result.best_candidate, result.best_score, result.total_evals) == (seed, 1.0 * len(seed), 2)
 
 
+@pytest.mark.parametrize("repository", [True, False])
+def test_a_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_budget(
+    repository: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """One evaluation is left for two cases, so the seed gets no sweep: the run ends with no model call (SKY-825).
+
+    Args:
+        repository: Run on a repository seed, else on a text seed.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    fields = {"repo_seed": RepoSeed(tree_id=_tree(trees, "a.py", "a"))} if repository else {}
+
+    with pytest.raises(BudgetExhaustedError, match="needs 2 evaluation units to score the seed"):
+        _run(loop, max_evals=1, **fields)
+    assert model.calls == []
+
+
 def test_a_repository_with_a_file_at_the_workspace_path_is_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
