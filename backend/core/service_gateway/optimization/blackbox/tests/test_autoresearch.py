@@ -2987,6 +2987,114 @@ def test_a_lab_removal_that_fails_leaves_no_version_and_ends_the_run(
     assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
 
 
+def test_a_lab_removal_that_times_out_leaves_no_version_and_ends_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The ``rm`` of the lab times out with exit code 0, so the round leaves no version: nothing is swept (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf %s {x} >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    run = loop.run
+
+    def time_out_removal(tree_id: str, command: str, grants: tuple[Any, ...]) -> Any:
+        """Run the command, and mark the lab removal as timed out with exit code 0 and the tree it left.
+
+        Args:
+            tree_id: The tree to run in.
+            command: The shell command.
+            grants: The command's grants.
+
+        Returns:
+            The command result and the tree it left.
+        """
+        result, tree = run(tree_id, command, grants)
+        if command.startswith("rm -rf "):
+            result = dataclasses.replace(result, exit_code=0, timed_out=True)
+        return result, tree
+
+    loop.run = time_out_removal  # type: ignore[method-assign]
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
+
+
+def test_a_repository_session_with_no_tool_call_opens_no_box_to_remove_the_lab(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A session that runs no command leaves the parent's tree, so no ``rm`` box opens (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([])
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    run = loop.run
+    commands: list[str] = []
+
+    def recorded(tree_id: str, command: str, grants: tuple[Any, ...]) -> Any:
+        """Record each command, then run it.
+
+        Args:
+            tree_id: The tree to run in.
+            command: The shell command.
+            grants: The command's grants.
+
+        Returns:
+            The command result and the tree it left.
+        """
+        commands.append(command)
+        return run(tree_id, command, grants)
+
+    loop.run = recorded  # type: ignore[method-assign]
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
+    # The only command checks that the seed has no lab folder of its own.
+    assert commands == [f"test ! -e {ar_mod._REPO_LAB} && test ! -L {ar_mod._REPO_LAB}"]
+    assert boxes.opened == 1
+
+
+@pytest.mark.parametrize("repo", [False, True])
+def test_the_state_budget_line_of_a_repository_run_says_the_engine_gives_one_full_evaluation(
+    repo: bool, tmp_path: Path
+) -> None:
+    """A repository session cannot run the evaluator, so ``STATE.md`` names no round quota; a text run keeps it.
+
+    Args:
+        repo: Whether the run is a repository run.
+        tmp_path: Pytest's temporary folder.
+    """
+    config = OptimizeAnythingConfig(engine="autoresearch", run_dir=str(tmp_path), engine_config={"model": ""})
+    ctx = EngineContext(reflection_lm=str, run_dir=str(tmp_path), repo_seed=RepoSeed(tree_id="t") if repo else None)
+    worker = ar_mod._WorkerAutoResearch(config, ctx, max_tool_calls=100)
+    worker.example_ids = ["0", "1"]
+    (worker.work_dir / "frontier").mkdir(parents=True)
+
+    worker._write_state(SimpleNamespace(budget=SimpleNamespace(remaining=6)), "survey")
+
+    budget = (worker.work_dir / "STATE.md").read_text(encoding="utf-8").split("## Budget\n\n")[1].split("\n")[0]
+    if repo:
+        assert budget == "- The engine gives this round's version one full evaluation, of the 6 evaluation units left."
+    else:
+        assert budget.startswith("- This round may spend ")
+        assert budget.endswith(" of the 6 left.")
+
+
 def test_a_repository_run_never_gets_the_combine_directive(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

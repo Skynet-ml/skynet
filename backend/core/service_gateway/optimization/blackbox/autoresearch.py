@@ -590,6 +590,27 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             "hypothesis at the hard examples in the failure dossier, which no version handles well yet."
         )
 
+    def _write_state(self, server: Any, directive: str) -> None:
+        """Refresh ``STATE.md`` and ``frontier/``, with the budget line of a repository run where the engine scores.
+
+        A repository session cannot run the evaluator, so a round quota of evaluation units would mislead it.
+
+        Args:
+            server: Evaluation server with the budget state.
+            directive: This round's directive.
+        """
+        super()._write_state(server, directive)
+        remaining = server.budget.remaining
+        if self._repo is None or remaining is None:
+            return
+        state = self.work_dir / "STATE.md"
+        line = f"- The engine gives this round's version one full evaluation, of the {remaining} evaluation units left."
+        lines = [
+            line if text.startswith("- This round may spend ") else text
+            for text in state.read_text(encoding="utf-8").split("\n")
+        ]
+        state.write_text("\n".join(lines), encoding="utf-8")
+
     def _round_prompt(self, directive: str) -> str:
         """Write the prompt that starts one round's session, with the lab paths of a repository run.
 
