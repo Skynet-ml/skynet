@@ -560,7 +560,13 @@ class RunCommand(Protocol):
     """Run one command in a box over a tree, as one step of the worker engine loop."""
 
     def __call__(
-        self, tree_id: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+        self,
+        tree_id: str,
+        command: str,
+        grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run a command over a tree.
 
@@ -569,6 +575,8 @@ class RunCommand(Protocol):
             command: The shell command.
             grants: The box's network grants; empty means no network.
             timeout_seconds: The limit of the command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for this command only, such as the run's scoped model key. The step log does
+                not keep it.
 
         Returns:
             The command's result and the tree id after it.

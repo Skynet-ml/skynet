@@ -7,6 +7,7 @@ database, no tree store and no subprocess.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
@@ -35,9 +36,16 @@ class _Commands:
         self.outcomes = outcomes or {}
         self.calls: list[tuple[str, tuple[Grant, ...]]] = []
         self.timeouts: list[tuple[str, float | None]] = []
+        self.envs: list[tuple[str, Mapping[str, str] | None]] = []
 
     def __call__(
-        self, tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+        self,
+        tree: str,
+        command: str,
+        grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one fake box command.
 
@@ -46,6 +54,7 @@ class _Commands:
             command: The shell command.
             grants: The box's grants.
             timeout_seconds: The command's time limit; ``None`` keeps the box's limit.
+            env: The command's extra environment.
 
         Returns:
             The result and one fixed tree id, so each box round trip gives the same tree.
@@ -56,6 +65,7 @@ class _Commands:
         del tree
         self.calls.append((command, grants))
         self.timeouts.append((command, timeout_seconds))
+        self.envs.append((command, env))
         for start, outcome in self.outcomes.items():
             if command.startswith(start):
                 if isinstance(outcome, Exception):
@@ -76,7 +86,12 @@ class _Commands:
 
 
 def _proposer(
-    commands: _Commands, *, setup: list[str] | None = None, hosts: list[str] | None = None, gateway: str = ""
+    commands: _Commands,
+    *,
+    setup: list[str] | None = None,
+    hosts: list[str] | None = None,
+    gateway: str = "",
+    budget_route: dict[str, str] | None = None,
 ) -> loop_tools.FileProposer:
     """Build a proposer over the fake command call.
 
@@ -85,6 +100,8 @@ def _proposer(
         setup: The ``[proposer] setup`` argv; none when ``None``.
         hosts: The proposer's hosts.
         gateway: The run's model gateway URL.
+        budget_route: The protected run's route; its token is the gateway key. ``None`` for an unprotected run,
+            whose gateway holds the managed key.
 
     Returns:
         The proposer.
@@ -98,7 +115,8 @@ def _proposer(
     options = SimpleNamespace(
         model="m",
         proposer=BlackboxProposer(run_command="my-agent"),
-        gateway=SimpleNamespace(url=gateway),
+        gateway=SimpleNamespace(url=gateway, api_key=budget_route["token"] if budget_route else "managed-key"),
+        budget_route=budget_route,
         repo={"file_proposer": True, "proposer_setup": setup or [], "proposer_hosts": hosts or []},
     )
     return loop_tools.FileProposer(ctx, options, _LAB)  # type: ignore[arg-type]
@@ -118,6 +136,31 @@ def test_the_setup_and_the_entry_get_the_proposer_hosts_without_the_model_gatewa
     assert all(
         grants == () for command, grants in commands.calls if "mkdir deps" not in command and "my-agent" not in command
     )
+
+
+@pytest.mark.parametrize(
+    ("budget_route", "env"), [({"token": "route-key"}, {"APP_API_KEY": "route-key"}), (None, None)]
+)
+def test_only_a_protected_run_gives_the_setup_and_the_entry_its_route_key_and_never_in_the_script(
+    budget_route: dict[str, str] | None, env: dict[str, str] | None
+) -> None:
+    """The step log keeps each script, so the key goes in the box's environment; the managed key never goes in.
+
+    Args:
+        budget_route: The run's route, or ``None`` for an unprotected run.
+        env: The environment that the setup and the entry get.
+    """
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP, budget_route=budget_route)
+
+    proposer.base("seed")
+    proposer.run("start")
+
+    assert [given for command, given in commands.envs if "mkdir deps" in command or "my-agent" in command] == [env] * 2
+    assert all(
+        given is None for command, given in commands.envs if "mkdir deps" not in command and "my-agent" not in command
+    )
+    assert not any("route-key" in command or "managed-key" in command for command, _ in commands.calls)
 
 
 def test_an_entry_that_runs_out_of_time_gives_no_version() -> None:
@@ -175,7 +218,12 @@ def test_a_setup_whose_check_tree_differs_from_the_seed_changed_a_seed_file() ->
     original = commands.__call__
 
     def differ(
-        tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+        tree: str,
+        command: str,
+        grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Give the seed's round trip another tree than the setup's.
 
@@ -184,11 +232,12 @@ def test_a_setup_whose_check_tree_differs_from_the_seed_changed_a_seed_file() ->
             command: The shell command.
             grants: The box's grants.
             timeout_seconds: The command's time limit.
+            env: The command's extra environment.
 
         Returns:
             The result and the tree.
         """
-        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds)
+        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds, env=env)
         return result, "seed-again" if command == "true" else after
 
     proposer._ctx.run_command = differ  # type: ignore[attr-defined]
@@ -359,7 +408,12 @@ def test_the_seed_change_error_says_when_its_list_is_shortened_or_empty(
     original = commands.__call__
 
     def differ(
-        tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+        tree: str,
+        command: str,
+        grants: tuple[Grant, ...] = (),
+        *,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Give the seed's round trip another tree than the setup's.
 
@@ -368,11 +422,12 @@ def test_the_seed_change_error_says_when_its_list_is_shortened_or_empty(
             command: The shell command.
             grants: The box's grants.
             timeout_seconds: The command's time limit.
+            env: The command's extra environment.
 
         Returns:
             The result and the tree.
         """
-        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds)
+        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds, env=env)
         return result, "seed-again" if command == "true" else after
 
     proposer._ctx.run_command = differ  # type: ignore[attr-defined]

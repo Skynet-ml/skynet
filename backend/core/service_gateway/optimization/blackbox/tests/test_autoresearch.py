@@ -1613,6 +1613,32 @@ def test_a_files_proposer_run_replays_on_a_resume_with_no_box(
     assert boxes.opened == 0
 
 
+def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup and the entry boxes get the run's route key and model, so the command can reach the model relay.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    relay = '[ "$APP_API_KEY" = route-key ] && [ "$APP_MODEL" = m ]'
+    options = _command_options(
+        entry=f"{relay} && printf x >> a.py", setup=["sh", "-c", f"{relay} && mkdir deps && printf lib > deps/lib.txt"]
+    )
+    options.budget_route = {"url": "https://gw.example/v1", "token": "route-key"}
+    options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key="route-key")
+
+    result = _run(loop, stop_at_score=2.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert loop.read_file(result.best_candidate, "a.py") == b"ax"
+
+
 @pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])
 def test_a_repository_with_an_entry_at_the_lab_path_is_refused(
     links: dict[str, str],

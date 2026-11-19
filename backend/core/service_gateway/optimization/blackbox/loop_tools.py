@@ -31,6 +31,7 @@ from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
 from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
+from .harness import ENV_API_KEY
 from .native_engines import log_event
 from .native_runtime import NativeOptions
 from .protocol import EngineContext, EvalServer, FileTooLargeError, ModelReply
@@ -602,12 +603,17 @@ class FileProposer:
         self._entry = options.proposer.run_command or ""
         self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
         self._setup_name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
-        # The run's gateway holds the deployment's managed key, so the box gets no grant for it, as in SKY-815.
+        # A protected run's boxes reach the model through the parent's mailbox, which sets APP_GATEWAY_URL and
+        # refuses a grant with headers, so the box gets no grant for the gateway. Without a budget route the
+        # gateway holds the deployment's managed key, so the box gets no grant and no key, as in SKY-815.
         model_host = urlsplit(options.gateway.url or "").hostname
         self._grants = tuple(
             Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host
         )
         self._exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        # The scoped route key goes in the box's environment, not in the script: the step log keeps the script.
+        protected = options.budget_route is not None and options.gateway.api_key
+        self._env = {ENV_API_KEY: options.gateway.api_key} if protected else None
         self._roots: list[str] | None = None
         # Each version's tree with the setup's output, so the next session from it gets that output back.
         self._full: dict[str, str] = {}
@@ -663,7 +669,9 @@ class FileProposer:
             [*self._exports, f'export ASCENT_TASK="$PWD/{task}" APP_PROMPT_FILE="$PWD/{task}"', self._entry]
         )
         try:
-            result, tree = self._ctx.run_command(start, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS)
+            result, tree = self._ctx.run_command(
+                start, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS, env=self._env
+            )
         except (TreeRejectedError, BoxFailureError) as error:
             # The step committed the failure, so a resume gets the same failed version.
             return start, f"The [proposer] entry command left no usable version: {error}"
@@ -747,7 +755,9 @@ class FileProposer:
             ]
         )
         try:
-            result, tree = self._ctx.run_command(seed, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS)
+            result, tree = self._ctx.run_command(
+                seed, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS, env=self._env
+            )
         except BoxFailureError as error:
             raise ServiceError(f"The {name} could not run in a box. Start a new run. {error}") from error
         except TreeRejectedError as error:

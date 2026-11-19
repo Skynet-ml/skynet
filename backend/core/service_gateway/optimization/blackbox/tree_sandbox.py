@@ -674,6 +674,7 @@ class TreeSandbox:
         *,
         refuse: Callable[[str], bool] | None = None,
         timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
 
@@ -684,6 +685,7 @@ class TreeSandbox:
             grants: The box's network grants.
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
             timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for the command only; ``None`` adds none.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -721,7 +723,7 @@ class TreeSandbox:
             # Before the unpack, so nothing that the unpack starts can join the baseline.
             before = None if fresh else _processes(box)
             self._unpack(box, archive, TREE_DIR)
-            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout)
+            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout, env=env)
             new_tree_id = self._pack(box, step.run_id, TREE_DIR)
             if result.timed_out:
                 # The kill reaches only the command's process group, so a process outside it can live on.

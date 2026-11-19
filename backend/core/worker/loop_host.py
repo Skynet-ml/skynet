@@ -400,7 +400,12 @@ class _LoopBinding:
         assert run is not None
 
         def run_command(
-            tree_id: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+            tree_id: str,
+            command: str,
+            grants: tuple[Grant, ...] = (),
+            *,
+            timeout_seconds: float | None = None,
+            env: Mapping[str, str] | None = None,
         ) -> tuple[CommandResult, str]:
             """Run one loop command, with its limit cut so that it times out before its box dies.
 
@@ -409,13 +414,14 @@ class _LoopBinding:
                 command: The shell command.
                 grants: The box's network grants.
                 timeout_seconds: The command's limit; ``None`` keeps the sandbox's limit.
+                env: Extra environment for this command only.
 
             Returns:
                 The command's result and the tree id after it.
             """
             if timeout_seconds is not None:
                 timeout_seconds = command_timeout_seconds(timeout_seconds, self._lifetime)
-            return run(tree_id, command, grants, timeout_seconds=timeout_seconds)
+            return run(tree_id, command, grants, timeout_seconds=timeout_seconds, env=env)
 
         return replace(ctx, run_command=run_command)
 

@@ -944,6 +944,7 @@ class EngineLoop:
         grants: tuple[Grant, ...] = (),
         *,
         timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a box over a tree, as one ``command`` step.
 
@@ -957,6 +958,8 @@ class EngineLoop:
             command: The shell command.
             grants: The box's network grants; empty means no network.
             timeout_seconds: The limit of the command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for this command only. It can hold a scoped model key, so the step's identity
+                and record leave it out.
 
         Returns:
             The command's result and the tree id after it; on a replay, the committed ones, with no box.
@@ -994,6 +997,7 @@ class EngineLoop:
                         grants,
                         refuse=self._holds_hidden,
                         timeout_seconds=timeout_seconds,
+                        env=env,
                     ),
                 )
                 self._run_outputs.add(after)

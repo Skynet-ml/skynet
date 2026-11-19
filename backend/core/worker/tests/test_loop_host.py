@@ -1467,10 +1467,12 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The broker refuses a box past the run's deadline, so a 30-minute command in a 1000 s run gets a 1000 s box
-    and a 700 s limit, which leaves the pack room to end before the box dies.
+    and a 700 s limit, which leaves the pack room to end before the box dies. The command's own environment, such
+    as the file proposer's route key, reaches the loop.
     """
     lifetimes: list[float] = []
     timeouts: list[float | None] = []
+    envs: list[Any] = []
     real_open = LocalSubprocessRuntime.open
     real_run = EngineLoop.run
 
@@ -1500,6 +1502,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
             The command's result and tree.
         """
         timeouts.append(timeout_seconds)
+        envs.append(kwargs.get("env"))
         return real_run(self, *args, timeout_seconds=timeout_seconds, **kwargs)
 
     def strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
@@ -1518,7 +1521,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
         """
         assert ctx.run_command is not None
         assert ctx.repo_seed is not None
-        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800)
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"APP_API_KEY": "route-key"})
         return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
 
     payload = _host_payload(owner, tmp_path, monkeypatch)
@@ -1530,7 +1533,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
 
     assert [event["type"] for event in events][-1] == "result"
-    assert (lifetimes[0], timeouts[0]) == (1000, 700)
+    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"APP_API_KEY": "route-key"})
 
 
 def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:

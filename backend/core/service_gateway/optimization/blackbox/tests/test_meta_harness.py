@@ -717,6 +717,50 @@ def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_call
     assert result.best_candidate == versions[2]
 
 
+def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup and the entry boxes get the run's route key and model, so the command can reach the model relay.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score a version by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: Not used.
+
+        Returns:
+            The length and no side information.
+        """
+        del case
+        return float(len(loop.read_file(candidate, "a.py") or b"")), {}
+
+    relay = '[ "$APP_API_KEY" = route-key ] && [ "$APP_MODEL" = m ]'
+    options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command=f"{relay} && printf x >> a.py")
+    options.budget_route = {"url": "https://gw.example/v1", "token": "route-key"}
+    options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key="route-key")
+    options.repo = {
+        "file_proposer": True,
+        "proposer_setup": ["sh", "-c", f"{relay} && mkdir deps && printf lib > deps/lib.txt"],
+        "proposer_hosts": [],
+    }
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert loop.read_file(result.best_candidate, "a.py") == b"axx"
+
+
 def test_a_failed_files_proposer_command_leaves_the_seed_best_and_the_run_goes_on(
     owner: tuple[User, int],
     engine: Engine,
