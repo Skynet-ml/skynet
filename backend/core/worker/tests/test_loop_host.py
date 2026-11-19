@@ -624,9 +624,20 @@ def test_a_live_score_gives_the_side_info_in_the_form_of_its_replay(
 
 
 def test_a_tree_version_reaches_the_scorer_as_a_patch_against_the_seed(
-    owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    owner: tuple[User, str, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The engine's tree id becomes the patch that the repository scorer takes, and the score comes back."""
+    # Git ignores inode and ctime here, as it does when Linux reuses the inode, so
+    # the same-size edit stays hidden on every OS unless the stats are dropped (SKY-843).
+    for index, (key, value) in enumerate((("core.checkStat", "minimal"), ("core.trustctime", "false"))):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", value)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
     patches: list[str] = []
 
     def scores(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import subprocess
 import tarfile
 import unicodedata
@@ -20,6 +21,7 @@ from ..repo_tree import (
     archive_chunks,
     case_insensitive,
     drop_paths,
+    forget_file_stats,
     linked_hidden_paths,
     patch_paths,
     patch_violations,
@@ -544,3 +546,25 @@ def test_git_refuses_a_bare_repository_layout(
         repo_tree._git(["rev-parse", "--git-dir"], repo)
     monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     assert repo_tree._git(["rev-parse", "--git-dir"], repo).strip() == "."
+
+
+def test_forget_file_stats_shows_a_same_size_edit_that_keeps_its_mtime(tmp_path: Path) -> None:
+    """Show an edit that git's cached stat hides once the index is reloaded (SKY-843).
+
+    On Linux the scorer's checkout reuses the inode and the second of the ctime, so
+    the cached stat matches. Telling git to ignore inode and ctime does the same on
+    every OS.
+    """
+    checkout = _unpacked(tmp_path, {"src/app.py": "value = 1\n"})
+    for key, value in (("core.checkStat", "minimal"), ("core.trustctime", "false")):
+        subprocess.run([*_GIT, "-C", str(checkout), "config", key, value], check=True)
+    target = checkout / "src" / "app.py"
+    # An mtime older than the index keeps git from rehashing a "racily clean" file.
+    os.utime(target, (1_000_000_000, 1_000_000_000))
+    subprocess.run([*_GIT, "-C", str(checkout), "update-index", "--refresh"], check=True)
+    target.write_text("value = 2\n")
+    os.utime(target, (1_000_000_000, 1_000_000_000))
+
+    assert version_patch(checkout) == ""
+    forget_file_stats(checkout)
+    assert patch_paths(version_patch(checkout)) == ["src/app.py"]
