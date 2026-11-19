@@ -34,7 +34,7 @@ from ...models.blackbox import (
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
-from ..optimization.blackbox.repo_constraints import ConstraintsError, _rule_file_settings, parse_constraints
+from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints, rule_file_settings
 from .repo_browser import RepoBrowser, RepoRead
 
 if TYPE_CHECKING:
@@ -320,7 +320,7 @@ def _rule_settings(text: str) -> dict[str, str] | None:
     except ConstraintsError:
         pass
     else:
-        return dict(_rule_file_settings(parsed))
+        return dict(rule_file_settings(parsed))
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
@@ -616,10 +616,11 @@ def workspace_tools(
             The current text (``""`` when there is none), or ``{"error": ...}``
             when the repository's file cannot be checked.
         """
-        text = str({**state, **turn.wizard_patch}.get("optimize_toml") or "")
+        current = {**state, **turn.wizard_patch}
+        text = str(current.get("optimize_toml") or "")
         if text.strip():
             return text
-        if not str(state.get("repository") or "").strip():
+        if not str(current.get("repository") or "").strip():
             return ""
         if not repo_toml:
             read = await browse(read_repo_toml)

@@ -819,6 +819,23 @@ async def test_an_edit_of_a_blank_draft_optimize_toml_still_checks_the_repositor
 
 
 @pytest.mark.asyncio
+async def test_the_guard_reads_a_repository_chosen_in_this_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repository the agent set earlier in this turn is the one the write is checked against."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+    turn.wizard_patch["repository"] = "acme/shop"
+    state = {key: value for key, value in _REPO_METRIC.items() if key != "repository"}
+
+    result = await _tools(state, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert "optimize_toml" not in turn.wizard_patch
+
+
+@pytest.mark.asyncio
 async def test_the_guard_checks_the_repository_file_after_the_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard's read of the repository's optimize.toml works after the agent used every read of its turn."""
     _fake_repo_with_toml(monkeypatch, [])
