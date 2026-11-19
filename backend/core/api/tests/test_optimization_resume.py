@@ -518,6 +518,11 @@ def test_resume_skips_the_retired_target_rule_for_a_tagging_job(client: TestClie
 class _ListRowsWithoutPayloadStore(_RepoJobStore):
     """Return list rows without the payload, as the real store's list query does."""
 
+    def __init__(self) -> None:
+        """Start with no full-row loads counted."""
+        super().__init__()
+        self.full_loads: list[str] = []
+
     def list_jobs(self, **kwargs: Any) -> list[dict]:
         """Return the matching rows with ``payload`` set to ``None``.
 
@@ -529,9 +534,24 @@ class _ListRowsWithoutPayloadStore(_RepoJobStore):
         """
         return [{**row, "payload": None} for row in super().list_jobs(**kwargs)]
 
+    def get_job(self, optimization_id: str) -> dict:
+        """Count each full-row load, then return the row.
+
+        Args:
+            optimization_id: Identifier of the job to fetch.
+
+        Returns:
+            A shallow copy of the job row.
+        """
+        self.full_loads.append(optimization_id)
+        return super().get_job(optimization_id)
+
 
 def test_listings_never_offer_resume_for_a_stored_text_run() -> None:
-    """List rows load without the payload, yet a text run with a checkpoint still shows no Resume (SKY-834)."""
+    """List rows load without the payload, yet a text run with a checkpoint shows no Resume (SKY-834).
+
+    The listing reads the targets in one batch, so it never loads a full row.
+    """
     store = _ListRowsWithoutPayloadStore()
     store.seed_job("old_text", status="failed", username="alice", payload={"target": {"kind": "text"}})
     store.save_gepa_checkpoint("old_text", b"GEPA-STATE", iteration=7)
@@ -546,3 +566,4 @@ def test_listings_never_offer_resume_for_a_stored_text_run() -> None:
         assert response.status_code == 200
         flags = {row["optimization_id"]: row["resumable"] for row in response.json()["items"]}
         assert flags == {"old_text": False, "repo_run": True}
+    assert store.full_loads == []

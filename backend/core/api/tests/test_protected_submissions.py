@@ -42,6 +42,7 @@ from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
 from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
+from core.models.blackbox import TARGET_RETIRED
 from core.storage.models import (
     Base,
     BillingCustomerModel,
@@ -382,6 +383,7 @@ def test_anything_evaluation_protects_the_declared_scorer_model(
     payload = {
         "reflection_model_config": {"name": "openai/reflection"},
         "scorer": {"kind": "python", "metric_code": "llm(model='openai/judge')"},
+        "target": _payload()["target"],
     }
     response = harness.client.post(
         "/wizard/preflight",
@@ -410,6 +412,7 @@ def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> Non
             "payload": {
                 "reflection_model_config": {"name": "openai/reflection"},
                 "scorer": {"kind": "python", "metric_code": "llm(model=choice)"},
+                "target": _payload()["target"],
             },
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -418,6 +421,40 @@ def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> Non
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "failed"
     assert response.json()["checks"][0]["key"] == "setup"
+    assert not harness.calls
+
+
+@pytest.mark.parametrize("scope", ["evaluation", "execution"])
+@pytest.mark.parametrize("target", [None, {"kind": "text"}, {"kind": "agent", "model": "openai/agent"}])
+def test_the_setup_check_refuses_a_text_or_agent_target(
+    harness: _Harness, scope: str, target: dict[str, Any] | None
+) -> None:
+    """Refuse a retired target in every scope before any paid check runs (SKY-834).
+
+    Args:
+        harness: Funded real API fixture.
+        scope: The setup check scope.
+        target: The retired target, or none, which means a text run.
+    """
+    budget = harness.budgets.create(harness.username, 20, idempotency_key=f"retired-{scope}")
+    payload: dict[str, Any] = {
+        "reflection_model_config": {"name": "openai/reflection"},
+        "scorer": {"kind": "python", "metric_code": "def score(candidate, case=None):\n    return 1.0"},
+    }
+    if target is not None:
+        payload["target"] = target
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": scope,
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert TARGET_RETIRED in response.text
     assert not harness.calls
 
 

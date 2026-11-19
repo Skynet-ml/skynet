@@ -2947,6 +2947,27 @@ def test_immutable_columns_include_notification_and_idempotency_fields() -> None
     assert "idempotency_key" in remote_mod._IMMUTABLE_JOB_COLUMNS
 
 
+def test_payload_targets_read_only_the_target_and_judge_members(store: SQLiteJobStore) -> None:
+    """The batch read returns each payload's target and judge, and nothing else (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    for oid in ("repo", "text", "judge", "empty"):
+        store.create_job(oid)
+    store.update_job("repo", payload={"target": {"kind": "repo", "repo": {}}, "rows": [1, 2]})
+    store.update_job("text", payload={"target": {"kind": "text"}, "rows": [1]})
+    store.update_job("judge", payload={"judge": {"opening": True}})
+
+    assert store.payload_targets(["repo", "text", "judge", "empty", "missing"]) == {
+        "repo": {"target": {"kind": "repo", "repo": {}}},
+        "text": {"target": {"kind": "text"}},
+        "judge": {"judge": {"opening": True}},
+        "empty": None,
+    }
+    assert store.payload_targets([]) == {}
+
+
 def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> None:
     """A checkpoint saves, reads back with its iteration/size, replaces, and deletes.
 

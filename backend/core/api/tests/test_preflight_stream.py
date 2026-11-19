@@ -47,7 +47,10 @@ def test_stream_preserves_phase_order_and_returns_one_result(monkeypatch: pytest
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {"scorer": {"kind": "python", "metric_code": "def score(p):\n    return 1\n"}},
+                "payload": {
+                    "scorer": {"kind": "python", "metric_code": "def score(p):\n    return 1\n"},
+                    "target": {"kind": "repo"},
+                },
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },
@@ -115,7 +118,7 @@ def test_stream_logs_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, capl
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {"scorer": {"metric_code": "def metric(output): return 1.0"}},
+                "payload": {"scorer": {"metric_code": "def metric(output): return 1.0"}, "target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },

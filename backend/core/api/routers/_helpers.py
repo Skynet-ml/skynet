@@ -749,7 +749,7 @@ def _resume_candidate_id(job_data: dict) -> str | None:
     Returns:
         The optimization id when the row is a resume candidate, else ``None``.
     """
-    # List rows load without the payload: resumable_id_flags reads it for each candidate.
+    # List rows load without the payload: resumable_id_flags reads their targets in one batch.
     if has_retired_target(job_data):
         return None
     status = status_to_job_status(job_data.get("status", "pending"))
@@ -780,46 +780,49 @@ def is_budget_stop(status: OptimizationStatus, job_data: dict) -> bool:
     return status == OptimizationStatus.stopped and job_data.get("stop_reason") == "budget_reached"
 
 
-def _list_row_has_retired_target(job_store: Any, job_data: dict) -> bool:
-    """Return whether a list row names a text or agent target, reading its payload when the row has none.
+def _retired_list_ids(job_store: Any, rows: list[dict]) -> set[str]:
+    """Return the ids of list rows that name a text or agent target.
 
     List rows load without the payload, so :func:`has_retired_target` cannot judge them alone (SKY-834).
-    Only rows that pass the cheap resume gates come here, so the extra read stays small.
+    One query reads only the ``target`` and ``judge`` members of the payloads that the rows do not hold.
 
     Args:
-        job_store: The job store that holds the full row.
-        job_data: Raw job row from a list query.
+        job_store: The job store that holds the payloads.
+        rows: Raw job rows from a list query.
 
     Returns:
-        ``True`` when the stored payload names a target other than a repository.
+        The ids whose stored payload names a target other than a repository.
     """
-    if job_data.get("payload") is None:
-        try:
-            job_data = job_store.get_job(job_data["optimization_id"])
-        except KeyError:
-            return False
-    return has_retired_target(job_data)
+    missing = [row["optimization_id"] for row in rows if row.get("payload") is None]
+    targets = job_store.payload_targets(missing) if missing else {}
+    return {
+        row["optimization_id"]
+        for row in rows
+        if has_retired_target(
+            row if row.get("payload") is not None else {**row, "payload": targets.get(row["optimization_id"])}
+        )
+    }
 
 
 def resumable_id_flags(job_store: Any, rows: list[dict]) -> set[str]:
-    """Return the ids in ``rows`` whose runs can offer Resume, in one batch.
+    """Return the ids in ``rows`` whose runs can offer Resume, in batches.
 
-    The batched counterpart of :func:`is_resumable` for list pages: the cheap
-    gates run in Python, then a single ``IN (...)`` existence query covers all
-    candidates instead of one probe per row (up to page-size round trips).
-    Stores without the batch method fall back to the per-row probe with
-    identical results.
+    The batched counterpart of :func:`is_resumable` for list pages. The cheap
+    gates run in Python. Then one query reads the target of the candidates
+    that came without a payload, and the checkpoint check covers all
+    candidates together. Stores without the checkpoint batch method fall
+    back to the per-row probe with identical results.
 
     Args:
-        job_store: The job store used to test for saved checkpoints.
+        job_store: The job store used to read targets and test for saved checkpoints.
         rows: Raw job rows from the store.
 
     Returns:
         The set of resumable optimization ids.
     """
-    candidates = [
-        oid for row in rows if (oid := _resume_candidate_id(row)) and not _list_row_has_retired_target(job_store, row)
-    ]
+    passing = [row for row in rows if _resume_candidate_id(row)]
+    retired = _retired_list_ids(job_store, passing)
+    candidates = [row["optimization_id"] for row in passing if row["optimization_id"] not in retired]
     if not candidates:
         return set()
     restarts = {

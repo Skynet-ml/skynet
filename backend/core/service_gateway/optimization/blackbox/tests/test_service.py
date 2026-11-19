@@ -155,6 +155,8 @@ def _payload(**overrides: Any) -> BlackboxRunRequest:
         "budget": {"max_scorer_runs": 12},
         "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_BEST_OF_N},
         "reflection_model_config": {"name": "fake/model"},
+        # Every run now passes the native proposer checks, which need a total spending budget.
+        "max_cost_cents": 100,
     }
     data.update(overrides)
     # The engine and report tests keep the stored text shape: what they check does not depend on the target.
@@ -1750,9 +1752,11 @@ def test_budget_backed_native_run_leaves_its_cost_ceiling_to_the_ledger(
         strategy: Upstream recipe being validated.
     """
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
-    validate_blackbox_payload(_payload(strategy=strategy, execution_budget_id="budget-1"), verify_scorer=False)
+    validate_blackbox_payload(
+        _payload(strategy=strategy, execution_budget_id="budget-1", max_cost_cents=None), verify_scorer=False
+    )
     with pytest.raises(ServiceError, match="Set a total spending budget"):
-        validate_blackbox_payload(_payload(strategy=strategy), verify_scorer=False)
+        validate_blackbox_payload(_payload(strategy=strategy, max_cost_cents=None), verify_scorer=False)
 
 
 def test_new_requests_naming_claude_code_are_rejected() -> None:

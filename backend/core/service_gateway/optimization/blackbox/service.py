@@ -464,31 +464,29 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
     else:
         for name in AUTO_ENGINES:
             get_engine(name, caps)
-    # A loop-routed run calls the same proposer models with the same budget, so it keeps the same checks.
-    needs_native = uses_native_runtime(payload) or has_loop_route(payload)
-    if needs_native:
-        models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
-        # The proposer CLI applies the main model's effort; the extra models feed
-        # ShinkaEvolve's own calls, which have no effort setting.
-        allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
-        if any(
-            model.temperature is not None
-            or model.max_tokens is not None
-            or model.base_url
-            or any(key not in keys for key in model.extra)
-            or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
-            for model, keys in zip(models, allowed, strict=True)
-        ):
-            raise ServiceError(
-                "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
-            )
-        _check_proposer_effort(payload.proposer, payload.reflection_model_settings.extra.get("reasoning_effort"))
-        # A run backed by an execution budget keeps its allowance in the ledger
-        # and is metered by the gateway route; the parent hands its guest the
-        # ceiling the proposer plans against, so only a budget-less run must
-        # state one here.
-        if payload.max_cost_cents is None and payload.execution_budget_id is None:
-            raise ServiceError("Set a total spending budget before starting an upstream agent proposer.")
+    # A loop-routed run calls the same proposer models with the same budget, so every run gets the same checks.
+    models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
+    # The proposer CLI applies the main model's effort; the extra models feed
+    # ShinkaEvolve's own calls, which have no effort setting.
+    allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
+    if any(
+        model.temperature is not None
+        or model.max_tokens is not None
+        or model.base_url
+        or any(key not in keys for key in model.extra)
+        or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
+        for model, keys in zip(models, allowed, strict=True)
+    ):
+        raise ServiceError(
+            "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
+        )
+    _check_proposer_effort(payload.proposer, payload.reflection_model_settings.extra.get("reasoning_effort"))
+    # A run backed by an execution budget keeps its allowance in the ledger
+    # and is metered by the gateway route; the parent hands its guest the
+    # ceiling the proposer plans against, so only a budget-less run must
+    # state one here.
+    if payload.max_cost_cents is None and payload.execution_budget_id is None:
+        raise ServiceError("Set a total spending budget before starting an upstream agent proposer.")
     if payload.strategy.mode == "auto" and payload.budget.max_scorer_runs < len(AUTO_ENGINES) + 1:
         raise ServiceError(f"Auto needs at least {len(AUTO_ENGINES) + 1} scorer runs.")
 

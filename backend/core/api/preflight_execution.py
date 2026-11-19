@@ -503,11 +503,7 @@ def _perform_preflight(
     status = "failed"
     result: dict[str, Any] = {}
     try:
-        remote_evaluation = (
-            request.scope == "evaluation"
-            and payload.get("scorer", {}).get("kind") == "remote"
-            and payload.get("target", {}).get("kind") != "agent"
-        )
+        remote_evaluation = request.scope == "evaluation" and payload.get("scorer", {}).get("kind") == "remote"
         uses_managed_models = payload_uses_token_source(
             payload,
             TOKEN_SOURCE_MANAGED,

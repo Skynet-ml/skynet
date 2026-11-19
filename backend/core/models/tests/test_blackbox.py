@@ -164,6 +164,12 @@ def test_repo_run_starts_from_the_empty_patch() -> None:
     assert request.target.repo.editable_paths == ["src"]
 
 
+def test_repo_run_refuses_a_task_model() -> None:
+    """A repository run scores the checkout itself, so a task model has nothing to run (SKY-834)."""
+    with pytest.raises(ValidationError, match="does not apply to a repository run"):
+        BlackboxRunRequest.model_validate(_repo_request(task_model_config={"name": "gpt-4o-mini"}))
+
+
 def test_repo_run_accepts_auto_mode() -> None:
     """Auto mode takes a repository: it is the default way to optimize one."""
     request = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))

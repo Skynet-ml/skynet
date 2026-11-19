@@ -20,6 +20,7 @@ from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
 from ...i18n import request_locale, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
+from ...models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED
 from ...models.common import ModelConfig
 from ...storage.preflights import setup_seed
 from ..agent_engine import fill_proposer_host_cli
@@ -178,6 +179,12 @@ def checked_preflight(
     payload["execution_budget_revision"] = request.execution_budget_revision
     if payload.get("seed") is None:
         payload["seed"] = setup_seed(request.execution_budget_id)
+    target = payload.get("target")
+    # The evaluation check skips the run request model, so it refuses a retired target here (SKY-834).
+    if not isinstance(target, dict) or target.get("kind") != BLACKBOX_TARGET_REPO:
+        raise RequestValidationError(
+            [{"type": "value_error", "loc": ("body", "payload", "target"), "msg": TARGET_RETIRED, "input": target}]
+        )
     if request.scope == "execution":
         try:
             typed = BlackboxRunRequest.model_validate(payload)

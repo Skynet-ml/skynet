@@ -1837,6 +1837,42 @@ class RemoteDBJobStore:
         """
         self._checkpoints.delete(optimization_id, pair_index)
 
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Read only the ``target`` and ``judge`` members of each payload, in one query.
+
+        The list rows load without the payload. This read gives the retired-target
+        check what it needs, without the multi-MB training set (SKY-834).
+
+        Args:
+            optimization_ids: Jobs to read.
+
+        Returns:
+            For each id found, a payload that holds only its ``target`` and ``judge``
+            members, or ``None`` when the job has no payload.
+        """
+        if not optimization_ids:
+            return {}
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(
+                    JobModel.optimization_id,
+                    JobModel.payload.is_(None),
+                    JobModel.payload["target"],
+                    JobModel.payload["judge"],
+                )
+                .filter(JobModel.optimization_id.in_(optimization_ids))
+                .all()
+            )
+        finally:
+            session.close()
+        return {
+            oid: None
+            if no_payload
+            else {key: value for key, value in (("target", target), ("judge", judge)) if value is not None}
+            for oid, no_payload, target, judge in rows
+        }
+
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Return whether any resumable GEPA checkpoint exists for ``optimization_id``.
 

@@ -286,6 +286,21 @@ class _BaseFakeJobStore:
             raise KeyError(optimization_id)
         return dict(self._jobs[optimization_id])
 
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict | None]:
+        """Return only the ``target`` and ``judge`` members of each stored payload.
+
+        Args:
+            optimization_ids: Jobs to read.
+
+        Returns:
+            For each id found, the two members, or ``None`` when the job has no payload.
+        """
+        found = {oid: self._jobs[oid].get("payload") for oid in optimization_ids if oid in self._jobs}
+        return {
+            oid: None if payload is None else {key: payload[key] for key in ("target", "judge") if key in payload}
+            for oid, payload in found.items()
+        }
+
     def job_exists(self, optimization_id: str) -> bool:
         """Report whether a job with the given identifier is stored.
 
