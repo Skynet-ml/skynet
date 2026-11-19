@@ -49,9 +49,9 @@ Skynet vous fournit aussi des codes de récupération. Conservez-les en lieu sû
 
 ## Où s'exécute votre code
 
-Les charges de travail des utilisateurs s'exécutent dans des sandboxes isolées. Dans le produit hébergé, Vercel Sandbox constitue la frontière d'exécution. Cela couvre les vérifications de configuration, les exécutions d'optimisation, la reprise et le travail sur les exécutions terminées.
+Votre code s'exécute uniquement dans des sandboxes isolées. La sandbox constitue la frontière d'exécution. Le produit hébergé utilise aujourd'hui Vercel Sandbox. D'autres fournisseurs se branchent via une interface de sandbox commune. Chaque candidat s'exécute dans sa propre sandbox. La métrique l'évalue dans une sandbox distincte. Cela couvre les vérifications de configuration, les exécutions d'optimisation, la reprise et le travail sur les exécutions terminées.
 
-Les workers Skynet n'exécutent pas votre code. Ils constituent le plan de contrôle. Ils lancent les tâches, réservent et règlent les budgets, transmettent des identifiants à portée limitée aux sandboxes et enregistrent les points de contrôle.
+Les workers Skynet n'exécutent pas votre code. Ils constituent le plan de contrôle. Ils lancent les tâches, réservent et règlent les budgets, transmettent des identifiants à portée limitée aux sandboxes et enregistrent chaque étape de l'exécution.
 
 Avant de lancer un travail payant, Skynet réserve une marge dans votre portefeuille et dans le budget de l'exécution. Voir [Facturation](/docs/concepts/billing).
 

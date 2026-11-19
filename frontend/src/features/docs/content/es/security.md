@@ -49,9 +49,9 @@ Skynet también te da códigos de recuperación. Guárdalos en un lugar seguro. 
 
 ## Dónde se ejecuta tu código
 
-Las cargas de trabajo de los usuarios se ejecutan en sandboxes aislados. En el producto alojado, Vercel Sandbox es el límite de ejecución. Esto abarca las comprobaciones de configuración, las ejecuciones de optimización, la recuperación y el trabajo sobre ejecuciones completadas.
+Tu código se ejecuta solo en sandboxes aislados. El sandbox es el límite de ejecución. El producto alojado usa hoy Vercel Sandbox. Otros proveedores se conectan mediante una interfaz de sandbox compartida. Cada candidato se ejecuta en su propio sandbox. La métrica lo evalúa en un sandbox aparte. Esto abarca las comprobaciones de configuración, las ejecuciones de optimización, la recuperación y el trabajo sobre ejecuciones completadas.
 
-Los workers de Skynet no ejecutan tu código. Son el plano de control. Inician trabajos, reservan y liquidan presupuestos, entregan credenciales con ámbito limitado a los sandboxes y guardan puntos de control.
+Los workers de Skynet no ejecutan tu código. Son el plano de control. Inician trabajos, reservan y liquidan presupuestos, entregan credenciales con ámbito limitado a los sandboxes y guardan cada paso de la ejecución.
 
 Antes de que Skynet inicie trabajo de pago, reserva margen en tu monedero y en el presupuesto de la ejecución. Consulta [Facturación](/docs/concepts/billing).
 
