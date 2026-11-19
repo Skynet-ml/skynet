@@ -388,9 +388,9 @@ class EvaluatorMailbox:
         with self._write_lock:
             self.total_evals += 1
         score = response.get("score")
-        # SKY-751: the worker sends null for a case with no score (a failed
-        # [run] entry or a metric error); ``score_program`` fails the program
-        # on a failed [run] entry, with its feedback.
+        # SKY-751: the worker sends null for a case with no score (a
+        # failed [run] entry or a metric error); ``score_program``
+        # fails the program on a failed [run] entry, with its feedback.
         return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
 
     def complete(self, messages: list[dict[str, Any]]) -> str:
@@ -644,6 +644,22 @@ def job_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def run_seed(payload: Mapping[str, Any]) -> int:
+    """Read the run's seed as a value NumPy and upstream's model bandit accept.
+
+    The seed is an unbounded user value, and ``numpy.random.seed`` refuses one
+    below 0 or at 2**32 and above. Every seeded draw takes this one value, so a
+    replay of the run makes the same draws.
+
+    Args:
+        payload: Parent configuration carrying the optional ``seed``.
+
+    Returns:
+        The seed modulo 2**32.
+    """
+    return int(payload.get("seed") or 0) % 2**32
+
+
 def build_config(
     payload: Mapping[str, Any], results_dir: str, examples: int, *, repo: bool = False
 ) -> dict[str, dict[str, Any]]:
@@ -731,7 +747,7 @@ def build_config(
         # Gateway models carry no upstream catalog price, so the bandit must
         # not weigh cost it cannot see.
         "llm_dynamic_selection_kwargs": (
-            {"cost_aware_coef": 0.0, "seed": int(payload.get("seed") or 0)} if stepped else {"cost_aware_coef": 0.0}
+            {"cost_aware_coef": 0.0, "seed": run_seed(payload)} if stepped else {"cost_aware_coef": 0.0}
         ),
         "meta_rec_interval": int(settings.get("meta_rec_interval", 10)) if meta_model else None,
         "meta_llm_models": [meta_model] if meta_model else None,
@@ -1092,7 +1108,7 @@ _FILE_MODES = frozenset({"100644", "100755"})
 # Tolerant of any blank between the words and the mode, so an odd separator
 # cannot hide a mode that git still reads.
 _PATCH_MODE = re.compile(r"^[ \t]*(?:new file mode|new mode|index[ \t]+\S+)[ \t]+(\d+)[ \t]*$", re.MULTILINE)
-_SUMMARY_MODE = re.compile(r"\bmode (?:\d+ => )?(\d+)\b")
+_SUMMARY_MODE = re.compile(r"\bmode (?:change \d+ => )?(\d+)\b")
 
 
 def refuse_unsafe_tree(chunks: Sequence[str]) -> dict[str, str]:
@@ -1207,17 +1223,21 @@ def checked_target(checkout: Path, path: str) -> Path:
         The target file.
 
     Raises:
-        ValueError: When the path leaves the checkout, crosses a symlink, or names a non-file.
+        ValueError: When the path leaves the checkout, crosses a symlink, lies below a file, or names a non-file.
     """
     root = checkout.resolve()
     target = root / path
     if not target.resolve().is_relative_to(root):
         raise ValueError(f"'{path}' is outside the repository.")
     current = root
-    for part in Path(path).parts:
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
         current = current / part
         if current.is_symlink():
             raise ValueError(f"'{path}' crosses a symlink.")
+        # Creating the parent folders would raise an OSError whose message names the worker's scratch folder.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise ValueError(f"'{path}' is below a file.")
     if target.exists() and not target.is_file():
         raise ValueError(f"'{path}' is not a regular file.")
     return target
@@ -2223,7 +2243,7 @@ class ProgramScorer:
                 "error": str(exc),
                 "metrics": {"combined_score": 0.0, "text_feedback": f"Rejected without scoring: {exc}"},
             }
-        failed = threading.Event()
+        case_failed = threading.Event()
 
         def score_case(example: Any) -> tuple[float, dict[str, Any]]:
             """Score one case, unless an earlier case of this version already failed.
@@ -2240,12 +2260,12 @@ class ProgramScorer:
             # The failure is recorded on the case's own thread, before the pool
             # takes the next case, so with one case thread the skipped cases are
             # the same live and on a replay.
-            if failed.is_set():
+            if case_failed.is_set():
                 raise RuntimeError("An earlier case of this version failed.")
             try:
                 return self.mailbox.evaluate(value, example, candidate_id=generation)
             except BaseException:
-                failed.set()
+                case_failed.set()
                 raise
 
         futures = [self._cases.submit(score_case, example) for example in self.examples]
@@ -2490,7 +2510,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if stepped:
         mailbox.own_stdout()
         mailbox.listen(sys.stdin)
-        seed_randomness(int(payload.get("seed") or 0))
+        seed_randomness(run_seed(payload))
     if repo:
         shipped_links = refuse_unsafe_tree(repo["chunks"])
         refuse_unsafe_patch(seed)

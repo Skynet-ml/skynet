@@ -157,8 +157,8 @@ def test_auto_with_the_files_proposer_leaves_out_the_lanes_that_cannot_use_it(
 ) -> None:
     """AutoResearch, Meta-Harness and ShinkaEvolve cannot use ``[proposer] entry``, so Auto explores without them.
 
-    The other lanes and the GEPA continuation still run (SKY-753). ShinkaEvolve runs the command only on the
-    engine loop, which no production run builds until SKY-728 (SKY-815).
+    The other lanes and the GEPA continuation still run (SKY-753). The ShinkaEvolve engine refuses the command
+    on every route until SKY-828 wires it after SKY-728 (SKY-815).
 
     Args:
         tmp_path: Artifact directory.

@@ -1743,10 +1743,12 @@ def test_no_context_call_can_pass_its_own_hidden_paths(
     assert ctx.read_file is not None
     assert ctx.list_files is not None
     assert ctx.run_command is not None
+    assert ctx.file_ids is not None
     for call, args in [
         (ctx.read_file, (tree, "eval/metric.py")),
         (ctx.list_files, (tree, "eval")),
         (ctx.run_command, (tree, "cat eval/metric.py", ())),
+        (ctx.file_ids, (tree,)),
     ]:
         with pytest.raises(TypeError):
             call(*args, hidden_hashes={})

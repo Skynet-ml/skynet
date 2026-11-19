@@ -1795,6 +1795,88 @@ def test_a_result_takes_its_score_and_evaluations_from_the_worker(tmp_path: Path
     assert result.metadata["k"] == 1
 
 
+@pytest.mark.parametrize(
+    "seed_answer",
+    [(None, {}), (None, {"status": "run_failed", "feedback": "Run failed: boom"})],
+    ids=["metric-error", "run-failed"],
+)
+def test_a_run_where_every_version_fails_finishes_on_the_seed_with_no_score(
+    seed_answer: tuple[None, dict[str, str]], tmp_path: Path
+) -> None:
+    """Keep the seed with no score when the child ends cleanly on it after every version failed (SKY-751).
+
+    Args:
+        seed_answer: The scorer's answer for the seed.
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: seed_answer)
+    requests._evaluate({"candidate": "seed", "example": {"id": 0}})
+    workdir = tmp_path / "child"
+    _write_result(workdir, {"best_candidate": "seed", "best_score": None, "metadata": {"k": 1}})
+
+    result = ShinkaEvolveEngine._result(workdir, 0, requests)
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seed", None, 1)
+    assert result.metadata["k"] == 1
+
+
+@pytest.mark.parametrize(
+    ("seed", "returncode", "document"),
+    [
+        ("seed", 0, {"best_candidate": "bad", "best_score": None}),
+        ("seed", 1, {"best_candidate": "seed", "best_score": None}),
+        ("seed", 0, {"best_candidate": "seed", "best_score": None, "error": "upstream broke"}),
+        ("seed", 0, {"best_candidate": "seed", "best_score": 0.5}),
+        (None, 0, {"best_score": None}),
+    ],
+    ids=["not-the-seed", "child-failed", "child-reported-an-error", "child-claims-a-score", "task-with-no-seed"],
+)
+def test_a_result_with_no_score_fails_the_run_unless_it_is_a_clean_end_on_the_seed(
+    seed: str | None, returncode: int, document: dict[str, object], tmp_path: Path
+) -> None:
+    """Fail the run on a version with no score that is not the seed, or on a child that failed.
+
+    A claimed score for a seed the eval server holds no score for is also a
+    failure, and so is a result that names no version in a task with no seed.
+
+    Args:
+        seed: The task's seed.
+        returncode: The child's exit code.
+        document: The child's result document.
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: (None, {}))
+    requests.task = replace(requests.task, seed_candidate=seed)
+    for candidate in ("seed", "bad"):
+        requests._evaluate({"candidate": candidate, "example": {"id": 0}})
+    workdir = tmp_path / "child"
+    _write_result(workdir, document)
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine._result(workdir, returncode, requests)
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_a_version_with_a_score_that_is_not_finite_is_never_the_best_or_the_result(
+    score: float, tmp_path: Path
+) -> None:
+    """Keep no best version and fail the run when the scorer gives a score that is not finite.
+
+    Args:
+        score: The scorer's score for every case.
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: (score, {}))
+    requests._evaluate({"candidate": "good", "example": {"id": 0}})
+    _report(requests, "good", 1.0, 1)
+    workdir = tmp_path / "child"
+    _write_result(workdir, {"best_candidate": "good", "best_score": 1.0})
+
+    assert requests.best is None
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine._result(workdir, 0, requests)
+
+
 def test_a_partial_result_document_keeps_the_best_reported_version(tmp_path: Path) -> None:
     """Treat a result document cut off in its write as no document.
 
@@ -2530,7 +2612,7 @@ def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
 def test_a_proposal_leaves_git_metadata_out_of_the_version(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Leave each ``.git`` part, in any letter case, out of the version the command's tree makes (SKY-815).
+    """Leave a ``.git`` folder that the command writes out of the version, because the box does not keep it (SKY-815).
 
     Args:
         owner: Alice and her budget generation.
@@ -2553,6 +2635,25 @@ def test_a_proposal_leaves_git_metadata_out_of_the_version(
     )
 
     assert _propose(requests, "1", {"main.py": "parent\n"}, "task") == {"id": "1", "files": {"main.py": "child\n"}}
+
+
+def test_the_version_leaves_out_each_git_part_that_the_tree_holds(tmp_path: Path) -> None:
+    """Leave ``.git`` parts, in any letter case, out of a version even when the tree holds them (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    trees = {"after": {"main.py": "a", "sub/.GIT/x": "b", ".git/config": "c"}, "parent": {}}
+    ctx = _box_context(
+        _proposer_options("node agent.js"),
+        tmp_path,
+        file_ids=lambda tree: trees[tree],
+        read_file=lambda tree, path: b"text\n",
+    )
+
+    version = shinka_evolve._Proposer(ctx, _proposer_options("node agent.js"))._version("after", "parent", {})
+
+    assert version == {"main.py": "text\n"}
 
 
 _BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
