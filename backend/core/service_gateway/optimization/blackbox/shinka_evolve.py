@@ -134,7 +134,8 @@ class ShinkaEvolveEngine:
 
         Returns:
             The best version upstream found, or the best version scored before
-            upstream failed or the scorer cap stopped it.
+            upstream failed or the scorer cap stopped it. The seed with no score
+            when the child ends cleanly on the seed and no version has a full score.
 
         Raises:
             ServiceError: When the settings need a feature the worker does not run yet, when the child
@@ -369,10 +370,12 @@ class ShinkaEvolveEngine:
 
         Returns:
             The best version and its score. When upstream failed after it scored
-            a version, the best version scored before the failure.
+            a version, the best version scored before the failure. The seed with
+            no score when the child ends cleanly on the seed and no version has a
+            full score.
 
         Raises:
-            ServiceError: When the child failed before it scored a version without a metric error.
+            ServiceError: When no version has a full score, unless the child ended cleanly on the seed.
         """
         path = workdir / _RESULT_FILE
         try:

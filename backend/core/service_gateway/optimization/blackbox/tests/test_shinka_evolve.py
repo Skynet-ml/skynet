@@ -1802,6 +1802,27 @@ def test_a_result_with_no_score_fails_the_run_unless_it_is_a_clean_end_on_the_se
         ShinkaEvolveEngine._result(workdir, returncode, requests)
 
 
+@pytest.mark.parametrize("score", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_a_version_with_a_score_that_is_not_finite_is_never_the_best_or_the_result(
+    score: float, tmp_path: Path
+) -> None:
+    """Keep no best version and fail the run when the scorer gives a score that is not finite.
+
+    Args:
+        score: The scorer's score for every case.
+        tmp_path: Pytest's temporary folder.
+    """
+    requests = _requests(tmp_path, lambda candidate, case: (score, {}))
+    requests._evaluate({"candidate": "good", "example": {"id": 0}})
+    _report(requests, "good", 1.0, 1)
+    workdir = tmp_path / "child"
+    _write_result(workdir, {"best_candidate": "good", "best_score": 1.0})
+
+    assert requests.best is None
+    with pytest.raises(ServiceError, match="ShinkaEvolve failed"):
+        ShinkaEvolveEngine._result(workdir, 0, requests)
+
+
 def test_a_partial_result_document_keeps_the_best_reported_version(tmp_path: Path) -> None:
     """Treat a result document cut off in its write as no document.
 
