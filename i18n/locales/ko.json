@@ -251,6 +251,7 @@
     "notifier.title.failed": "최적화가 실패했습니다",
     "notifier.title.new": "새 최적화",
     "optimization.already_terminal": "최적화가 이미 종료 상태 '{status}'입니다.",
+    "optimization.cancel_conflict": "취소하는 동안 최적화의 상태가 바뀌었습니다. 현재 상태는 '{status}'입니다. 다시 취소해 보세요.",
     "optimization.cannot_delete": "'{status}' 상태의 최적화는 삭제할 수 없습니다. 먼저 취소하세요.",
     "optimization.deletion_storage_unavailable": "최적화가 삭제되지 않았습니다. 저장된 실행 데이터를 지금 삭제할 수 없습니다. 몇 분 후에 다시 시도하세요.",
     "optimization.cannot_resubmit_payload": "저장된 페이로드를 다시 제출할 수 없습니다: {error}",

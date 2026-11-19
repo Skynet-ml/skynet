@@ -251,6 +251,7 @@
     "notifier.title.failed": "ऑप्टिमाइज़ेशन विफल हुआ",
     "notifier.title.new": "नया ऑप्टिमाइज़ेशन",
     "optimization.already_terminal": "ऑप्टिमाइज़ेशन पहले से ही टर्मिनल स्थिति '{status}' में है।",
+    "optimization.cancel_conflict": "रद्द करने के दौरान ऑप्टिमाइज़ेशन की स्थिति बदल गई। यह अब '{status}' स्थिति में है। इसे फिर से रद्द करने का प्रयास करें।",
     "optimization.cannot_delete": "'{status}' स्थिति में किसी ऑप्टिमाइज़ेशन को हटाया नहीं जा सकता। पहले इसे रद्द करें।",
     "optimization.deletion_storage_unavailable": "ऑप्टिमाइज़ेशन नहीं हटाया गया: इसका सहेजा गया रन डेटा अभी नहीं हटाया जा सका। कुछ मिनट बाद फिर से कोशिश करें।",
     "optimization.cannot_resubmit_payload": "सहेजे गए पेलोड को पुनः सबमिट नहीं किया जा सकता: {error}",

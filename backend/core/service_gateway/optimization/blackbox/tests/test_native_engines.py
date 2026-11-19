@@ -1025,17 +1025,20 @@ def test_the_proposer_never_inherits_a_raw_anthropic_key(
 
 
 def test_named_scores_become_pareto_columns_without_cases() -> None:
-    """Without cases, named scores are the per-example table's columns, so the front and combine still work."""
-    named_a = {"scores": {"accuracy": {"score": 1.0, "feedback": "all right"}, "style": (0.0, "terse")}}
+    """Without cases, named scores are the per-example table's columns, so the front and combine still work.
+
+    A named score without feedback (SKY-769) still is a column, with an empty note.
+    """
+    named_a = {"scores": {"accuracy": {"score": 1.0, "feedback": "all right"}, "style": {"score": 0.0}}}
     named_b = {"scores": {"accuracy": {"score": 0.5, "feedback": "half"}, "style": {"score": 1.0, "feedback": "nice"}}}
 
     columns_a, notes_a = native_engines.named_score_columns([named_a])
     columns_b, _ = native_engines.named_score_columns([named_b])
 
-    assert columns_a == {"score:accuracy": 1.0}
-    assert notes_a == {"score:accuracy": "all right"}
+    assert columns_a == {"score:accuracy": 1.0, "score:style": 0.0}
+    assert notes_a == {"score:accuracy": "all right", "score:style": ""}
     assert columns_b == {"score:accuracy": 0.5, "score:style": 1.0}
-    table = {"a": columns_a | {"score:style": 0.0}, "b": columns_b}
+    table = {"a": columns_a, "b": columns_b}
     assert native_engines.pareto_front(table, {"a": 0.5, "b": 0.75}) == ["b", "a"]
 
 
@@ -1220,3 +1223,44 @@ def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
         assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
     finally:
         server.stop()
+
+
+def test_gepa_repo_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path, fake_home: Path) -> None:
+    """A repository version whose [run] fails on one case loses to the lower, fully scored seed (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the repository and the engine.
+        fake_home: Home folder whose ``bin`` holds the fake agent command.
+    """
+    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
+    calls: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        """Score the seed 0.25; score a patch 0.9 on case ``a`` and fail its [run] entry on case ``b``.
+
+        Args:
+            candidate: The version's patch; empty for the seed.
+            example: The case to score.
+
+        Returns:
+            The case's score, negative infinity for a failed [run] entry, and its side info.
+        """
+        calls.append(candidate)
+        if not candidate:
+            return 0.25, {"feedback": "seed"}
+        if example["id"] == "b":
+            return float("-inf"), {"feedback": "Run failed: boom", "status": native_engines.RUN_FAILED_STATUS}
+        return 0.9, {"feedback": "patch"}
+
+    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
+    server.start()
+    try:
+        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
+        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
+        result = engine.run(task, server)
+    finally:
+        server.stop()
+
+    assert any(calls), "the patched version was never scored"
+    assert (result.best_candidate, result.best_score) == ("", 0.25)
+    assert engine.incumbent(server) == ("", 0.25)

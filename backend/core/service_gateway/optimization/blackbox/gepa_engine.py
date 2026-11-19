@@ -42,6 +42,7 @@ from .harness_bridge import hashed_kind
 from .native_engines import ScoredThresholdStopper, record_text
 from .native_runtime import run_native_engine
 from .protocol import (
+    UNSCORED,
     BudgetExhaustedError,
     Candidate,
     EngineContext,
@@ -237,9 +238,16 @@ class GepaEngine:
                 example: The case, or ``None`` in single-task mode.
 
             Returns:
-                The score, :data:`UNSCORED` after a metric error, and side information.
+                The score, :data:`UNSCORED` after a metric error, and side
+                information. A version with a failed ``[run]`` entry on any
+                case scored so far, also after a metric error, gets :data:`UNSCORED`,
+                as a batch gives it.
             """
             score, side_info = score_one(candidate, example)
+            # A single call has no batch to fill, so the server's record carries
+            # the version's earlier failed [run] entry to this case (SKY-751).
+            if server.run_failed(candidate):
+                return UNSCORED, side_info
             return engine_score(score), side_info
 
         def batch_evaluator(pairs: list[tuple[Candidate, Any]]) -> list[tuple[float, dict[str, Any]]]:
@@ -247,7 +255,10 @@ class GepaEngine:
 
             GEPA averages a version's batch itself. A filled case leaves that
             mean at the scored cases' mean, so a case that always crashes does
-            not hide which version is better (SKY-367).
+            not hide which version is better (SKY-367). A version with a failed
+            ``[run]`` entry gets no fill: every case of it in the batch is
+            UNSCORED, so GEPA never accepts it, puts it on its front or picks it
+            as the best version (SKY-751).
 
             Args:
                 pairs: The ``(candidate, case)`` pairs of one GEPA batch.
@@ -262,7 +273,9 @@ class GepaEngine:
                 return score_batch(score_one, pairs, 1)
             calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
             results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
-            filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+            filled = fill_unscored(
+                [candidate for candidate, _ in pairs], [score for score, _ in results], [info for _, info in results]
+            )
             return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {

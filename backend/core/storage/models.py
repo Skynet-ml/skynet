@@ -1333,6 +1333,46 @@ class JobModel(Base):
     )
 
 
+# An engine that replays its committed steps on a resume sends their progress
+# events again (SKY-808). A unique partial index keeps one row per job and
+# string value under this metrics key, so a replayed keyed event adds no row.
+PROGRESS_EVENT_KEY = "progress_event_key"
+PROGRESS_EVENT_KEY_INDEX = "ux_job_progress_events_event_key"
+# A key from a user subprocess is untrusted. Only a string of this length
+# counts as a key; a longer one would also bloat the index entry.
+MAX_PROGRESS_EVENT_KEY_LENGTH = 200
+# Each dialect spells the JSON lookup its own way. The ON CONFLICT target of
+# the keyed insert repeats these exact expressions so the database finds the index.
+PROGRESS_EVENT_KEY_SQL = {
+    "postgresql": (
+        f"(metrics ->> '{PROGRESS_EVENT_KEY}')",
+        f"jsonb_typeof(metrics -> '{PROGRESS_EVENT_KEY}') = 'string' "
+        f"AND length(metrics ->> '{PROGRESS_EVENT_KEY}') BETWEEN 1 AND {MAX_PROGRESS_EVENT_KEY_LENGTH}",
+    ),
+    "sqlite": (
+        f"json_extract(metrics, '$.{PROGRESS_EVENT_KEY}')",
+        f"json_type(metrics, '$.{PROGRESS_EVENT_KEY}') = 'text' "
+        f"AND length(json_extract(metrics, '$.{PROGRESS_EVENT_KEY}')) BETWEEN 1 AND {MAX_PROGRESS_EVENT_KEY_LENGTH}",
+    ),
+}
+
+
+def progress_event_key(metrics: dict[str, Any]) -> str | None:
+    """Return the event key that the unique key index covers, or ``None``.
+
+    Args:
+        metrics: Metric payload of a progress event.
+
+    Returns:
+        The key when it is a string of 1 to ``MAX_PROGRESS_EVENT_KEY_LENGTH``
+        characters, else ``None``.
+    """
+    key = metrics.get(PROGRESS_EVENT_KEY)
+    if isinstance(key, str) and 1 <= len(key) <= MAX_PROGRESS_EVENT_KEY_LENGTH:
+        return key
+    return None
+
+
 class ProgressEventModel(Base):
     """SQLAlchemy model for the job_progress_events table."""
 
@@ -1346,7 +1386,19 @@ class ProgressEventModel(Base):
     event: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, default=dict)
 
-    __table_args__ = (Index("ix_job_progress_events_optimization_timestamp", "optimization_id", "timestamp"),)
+    __table_args__ = (
+        Index("ix_job_progress_events_optimization_timestamp", "optimization_id", "timestamp"),
+        *(
+            Index(
+                PROGRESS_EVENT_KEY_INDEX,
+                "optimization_id",
+                text(key_sql),
+                unique=True,
+                **{f"{dialect}_where": text(where_sql)},
+            ).ddl_if(dialect=dialect)
+            for dialect, (key_sql, where_sql) in PROGRESS_EVENT_KEY_SQL.items()
+        ),
+    )
 
 
 class LogEntryModel(Base):

@@ -287,6 +287,7 @@ class I18nKey(StrEnum):
     NOTIFIER_TITLE_STUCK = 'notifier.title.stuck'
     OPTIMIZATION_AGENT_RUN_NOT_FOUND = 'optimization.agent_run_not_found'
     OPTIMIZATION_ALREADY_TERMINAL = 'optimization.already_terminal'
+    OPTIMIZATION_CANCEL_CONFLICT = 'optimization.cancel_conflict'
     OPTIMIZATION_CANNOT_DELETE = 'optimization.cannot_delete'
     OPTIMIZATION_CANNOT_RESUBMIT_PAYLOAD = 'optimization.cannot_resubmit_payload'
     OPTIMIZATION_CLONE_NO_PAYLOAD = 'optimization.clone_no_payload'

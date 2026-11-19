@@ -18,34 +18,46 @@ unaffected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
+import logging
 import os
 import pickle
 import random
+import tempfile
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, make_url, text
+from pydantic import SecretStr
+from sqlalchemy import create_engine, event, make_url, text
 from sqlalchemy.orm import Session
 
 import core.storage.remote as remote_mod
 from alembic import command
 from core.billing.budgets import BudgetService
-from core.config import app_env
+from core.config import app_env, settings
+from core.constants import PROGRESS_BASELINE
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
 from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
 from core.sandbox.tests.fake_provider import InMemorySandbox
-from core.storage.models import BillingCustomerModel
+from core.storage.models import MAX_PROGRESS_EVENT_KEY_LENGTH, PROGRESS_EVENT_KEY, BillingCustomerModel
 from core.storage.remote import RemoteDBJobStore
 from core.worker.checkpoint_compat import checkpoint_manifest
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[3]
+# Shared by the job store and notification test modules, so their xdist workers migrate APP_TEST_DB_URL one at a time.
+_MIGRATE_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-migrate.lock"
+# xdist runs the tests of this module on several workers at once, and claim_next_job claims any pending job.
+_JOBS_TEST_LOCK = Path(tempfile.gettempdir()) / "skynet-postgres-tests-jobs.lock"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DB_URL or not TEST_DB_URL.startswith("postgresql"),
@@ -98,6 +110,9 @@ def _upgrade_to_head(db_url: str) -> None:
     that variable is set, and ``tests/conftest.py`` loads a developer's
     ``backend/.env`` (which points it at the dev database). So the variable
     is set to the test URL for the length of the upgrade only (SKY-803).
+    A call from code has no CLI options, so ``env.py`` also upgrades every
+    ``STEP_LOG_SHARDS`` database that ``backend/.env`` names. The shard map is
+    empty for the length of the upgrade (SKY-824).
 
     Args:
         db_url: SQLAlchemy URL of the live Postgres test target.
@@ -107,7 +122,75 @@ def _upgrade_to_head(db_url: str) -> None:
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("REMOTE_DB_URL", db_url)
+        mp.setattr(settings, "step_log_shards", {})
         command.upgrade(alembic_cfg, "head")
+
+
+def migrate_test_db(db_url: str) -> None:
+    """Reset a legacy schema in ``db_url`` and upgrade it to Alembic head, one xdist worker at a time.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+    """
+    # Each xdist worker migrates the same empty database from its own module fixture, and concurrent
+    # CREATE TABLE races in pg_type. A Postgres advisory lock would deadlock with CREATE INDEX CONCURRENTLY,
+    # which waits for the lock holder's open transaction, so a file lock lets one worker migrate at a time.
+    with _MIGRATE_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _reset_legacy_schema(db_url)
+        _upgrade_to_head(db_url)
+
+
+@contextlib.contextmanager
+def own_database(db_url: str, label: str) -> Iterator[str]:
+    """Create a new, empty database next to ``db_url`` for one test module, and drop it at the end.
+
+    A test that wipes ``public`` or changes the migrated tables uses this database. So it never
+    deletes the tables that other xdist workers use at the same time in ``APP_TEST_DB_URL`` (SKY-831).
+    It skips the test on a server that is not local, so a stray URL never creates or wipes a database
+    on a managed Postgres.
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target. The new database is on its server.
+        label: A short name part that tells which module made the database.
+
+    Yields:
+        The SQLAlchemy URL of the new database.
+    """
+    url = make_url(db_url)
+    if url.host not in ("localhost", "127.0.0.1"):
+        pytest.skip(f"refusing to create a test database on a non-local server (host={url.host!r})")
+    # Postgres cuts names at 63 bytes, so the unique part comes first and a long base name is cut instead.
+    name = f"{uuid.uuid4().hex[:8]}_{label}_{url.database}".encode()[:63].decode(errors="ignore")
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+        try:
+            yield url.set(database=name).render_as_string(hide_password=False)
+        finally:
+            with admin.connect() as conn:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    finally:
+        admin.dispose()
+
+
+def _open_store(db_url: str) -> RemoteDBJobStore:
+    """Open a store on ``db_url`` with no step log shards.
+
+    The store constructor runs Alembic on an adopted database, and that upgrade also migrates every
+    ``STEP_LOG_SHARDS`` database. The store also keeps the shard map of the settings. So the shard
+    map is empty while the store opens (SKY-831).
+
+    Args:
+        db_url: SQLAlchemy URL of the live Postgres test target.
+
+    Returns:
+        The store. The caller disposes its engine.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(settings, "step_log_shards", {})
+        return RemoteDBJobStore(db_url)
 
 
 @pytest.fixture(scope="module")
@@ -118,14 +201,29 @@ def store() -> Iterator[RemoteDBJobStore]:
     such as new indexed columns are present before rows are inserted.
     The store is reused across tests to avoid repeating that setup work.
     """
-    _reset_legacy_schema(TEST_DB_URL or "")
-    _upgrade_to_head(TEST_DB_URL or "")
+    migrate_test_db(TEST_DB_URL or "")
 
-    s = RemoteDBJobStore(TEST_DB_URL)
+    s = _open_store(TEST_DB_URL or "")
     try:
         yield s
     finally:
         s.engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _one_jobs_test_at_a_time() -> Iterator[None]:
+    """Run the tests of this module one at a time across xdist workers.
+
+    A claim in one test can take a job that another test seeded, and a resume
+    sets a claimed job back to pending, so the concurrent claimers saw foreign
+    and duplicate claims about 1 run in 3 (SKY-824).
+
+    Yields:
+        Nothing. The lock is held for the length of the test and its fixtures.
+    """
+    with _JOBS_TEST_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
 
 
 def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
@@ -149,6 +247,47 @@ def test_alembic_setup_uses_the_test_url_when_remote_db_url_points_elsewhere(
     finally:
         engine.dispose()
     assert os.environ["REMOTE_DB_URL"] == other
+
+
+def test_alembic_setup_skips_the_step_log_shards_from_the_settings(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade only the test database, even when ``STEP_LOG_SHARDS`` names another database.
+
+    Args:
+        store: Used only so that its fixture migrates the test database first.
+        monkeypatch: Sets ``settings.step_log_shards`` for this test.
+    """
+    shard_url = make_url(TEST_DB_URL or "").set(database=f"sky824_missing_shard_{uuid.uuid4().hex[:8]}")
+    shards = {"proof": SecretStr(shard_url.render_as_string(hide_password=False))}
+    monkeypatch.setattr(settings, "step_log_shards", shards)
+
+    # The shard database does not exist, so a shard upgrade would raise.
+    _upgrade_to_head(TEST_DB_URL or "")
+
+    assert settings.step_log_shards is shards
+
+
+def test_the_store_opens_without_the_step_log_shards_from_the_settings(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open a store that neither migrates nor keeps a ``STEP_LOG_SHARDS`` database (SKY-831).
+
+    Args:
+        store: Used only so that its fixture migrates the test database first.
+        monkeypatch: Sets ``settings.step_log_shards`` for this test.
+    """
+    shard_url = make_url(TEST_DB_URL or "").set(database=f"sky831_missing_shard_{uuid.uuid4().hex[:8]}")
+    shards = {"proof": SecretStr(shard_url.render_as_string(hide_password=False))}
+    monkeypatch.setattr(settings, "step_log_shards", shards)
+
+    # The database is adopted, so the store runs an upgrade; a shard upgrade would raise.
+    opened = _open_store(TEST_DB_URL or "")
+    try:
+        assert opened.step_log_shards.names() == ("main",)
+    finally:
+        opened.engine.dispose()
+    assert settings.step_log_shards is shards
 
 
 @pytest.fixture
@@ -242,11 +381,19 @@ def test_claim_records_owner_and_lease(store: RemoteDBJobStore, seeded_jobs: lis
     assert lease_expires_at > claimed_at
 
 
-def test_parallel_progress_writers_finish_quickly(store: RemoteDBJobStore) -> None:
-    """Parallel progress writers for distinct jobs avoid parent-row lock serialization."""
+def test_a_progress_writer_never_waits_for_the_open_write_of_another_job(store: RemoteDBJobStore) -> None:
+    """Progress writers for distinct jobs avoid parent-row lock serialization.
+
+    A real ``record_progress`` of one job stops before each of its two commits: the event row
+    and the latest metrics. While each one is open, a batch of writes of another job must finish.
+    A shared lock (a parent row, a table or an advisory lock) makes them wait for the open write.
+    The test had a 2-second limit on two parallel writers before; under xdist load that limit
+    measured the machine, not the locks (SKY-831). A blocked writer waits until the open write
+    ends, so the 60-second limit only stops the test, and a slow but free writer still passes.
+    """
     prefix = f"progress-test-{uuid.uuid4().hex[:8]}"
-    ids = [f"{prefix}-a", f"{prefix}-b"]
-    for oid in ids:
+    held, free = f"{prefix}-a", f"{prefix}-b"
+    for oid in (held, free):
         store.create_job(oid)
 
     def write_events(optimization_id: str) -> None:
@@ -254,17 +401,173 @@ def test_parallel_progress_writers_finish_quickly(store: RemoteDBJobStore) -> No
         for i in range(100):
             store.record_progress(optimization_id, "optimizer_progress", {"i": i})
 
-    try:
-        started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(write_events, ids))
-        elapsed = time.perf_counter() - started
+    # One (reached, go) pair for each commit of the held record_progress: the event row, then the metrics.
+    open_writes = [(threading.Event(), threading.Event()) for _ in range(2)]
+    pending = list(open_writes)
+    holder = threading.Thread(target=store.record_progress, args=(held, "optimizer_progress", {"i": -1}))
 
-        assert elapsed < 2.0
-        assert store.get_progress_count(ids[0]) == 100
-        assert store.get_progress_count(ids[1]) == 100
+    def hold_open(session: Session) -> None:
+        """Keep the held job's transaction open, with its writes sent, until the test lets it commit.
+
+        Args:
+            session: The session that commits.
+        """
+        if threading.current_thread() is not holder or not pending:
+            return
+        reached, go = pending.pop(0)
+        # before_commit runs before the commit flush, so the flush sends the event row now.
+        session.flush()
+        reached.set()
+        go.wait(60)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    event.listen(store._session_factory, "before_commit", hold_open)
+    try:
+        holder.start()
+        for reached, go in open_writes:
+            assert reached.wait(60), "the held record_progress did not reach its commit"
+            pool.submit(write_events, free).result(timeout=60)
+            go.set()
+        holder.join(60)
+
+        assert store.get_progress_count(free) == 200
+        assert store.get_progress_count(held) == 1
     finally:
-        store.delete_jobs(ids)
+        for _, go in open_writes:
+            go.set()
+        if holder.ident is not None:
+            holder.join(60)
+        event.remove(store._session_factory, "before_commit", hold_open)
+        pool.shutdown(wait=True)
+        store.delete_jobs([held, free])
+
+
+def test_replayed_keyed_progress_events_add_one_row_each(
+    store: RemoteDBJobStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A replay adds no rows for repeated keys and keeps the order of the others (SKY-808).
+
+    ``record_progress`` logs an insert error and goes on, so the test checks
+    the insert result and the log: a unique-index error must not stand in for the skip.
+    """
+    optimization_id = f"progress-key-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    key = PROGRESS_EVENT_KEY
+    now = datetime.now(UTC)
+    try:
+        inserted = [
+            store._insert_progress_event(optimization_id, "candidate", {key: f"candidate:{index}"}, now)
+            for index in (0, 1, 0, 1, 2)
+        ]
+        assert inserted == [True, True, False, False, True]
+        with caplog.at_level(logging.WARNING, logger=remote_mod.__name__):
+            store.record_progress(optimization_id, "candidate", {key: "candidate:1"})
+            store.record_progress(optimization_id, "tick", {})
+            store.record_progress(optimization_id, "tick", {})
+        assert "Failed to insert progress event" not in caplog.text
+
+        events = store.get_progress_events(optimization_id)
+        assert [e["metrics"].get(key) for e in events] == ["candidate:0", "candidate:1", "candidate:2", None, None]
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_record_progress_for_generation_replayed_keyed_event_adds_no_row(store: RemoteDBJobStore) -> None:
+    """The generation-fenced write also adds one row per key and still refreshes the metrics."""
+    optimization_id = f"progress-key-gen-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    store.update_job(optimization_id, status="running", execution_generation=1)
+    try:
+        for score in (0.5, 0.7):
+            assert store.record_progress_for_generation(
+                optimization_id,
+                "step",
+                {PROGRESS_EVENT_KEY: "step:3", "score": score},
+                source_optimization_id=optimization_id,
+                generation=1,
+            )
+        assert store.get_progress_count(optimization_id) == 1
+        assert store.get_job(optimization_id)["latest_metrics"]["score"] == 0.7
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_over_long_progress_event_key_counts_as_no_key(store: RemoteDBJobStore) -> None:
+    """An over-long key adds a row each time; the index predicate and the code agree on the limit."""
+    optimization_id = f"progress-key-long-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    metrics = {PROGRESS_EVENT_KEY: "k" * (MAX_PROGRESS_EVENT_KEY_LENGTH + 1)}
+    try:
+        store.record_progress(optimization_id, "step", metrics)
+        store.record_progress(optimization_id, "step", metrics)
+        assert store.get_progress_count(optimization_id) == 2
+    finally:
+        store.delete_jobs([optimization_id])
+
+
+def test_concurrent_copies_of_a_keyed_progress_event_add_one_row(store: RemoteDBJobStore) -> None:
+    """Writers that reach the insert at the same moment still add one row."""
+    optimization_id = f"progress-key-race-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    metrics = {PROGRESS_EVENT_KEY: "step:7", "score": 0.5}
+    writers = 4
+    barrier = threading.Barrier(writers)
+
+    def hold_progress_insert(*args: object) -> None:
+        """Hold each progress insert until every writer reaches its own insert.
+
+        Args:
+            *args: The ``before_cursor_execute`` arguments; the third one is the SQL text.
+        """
+        statement = str(args[2])
+        if statement.lstrip().upper().startswith("INSERT INTO JOB_PROGRESS_EVENTS"):
+            # A writer that waits on a lock before its insert breaks the barrier; the others go on.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=2)
+
+    event.listen(store.engine, "before_cursor_execute", hold_progress_insert)
+    try:
+        with ThreadPoolExecutor(max_workers=writers) as pool:
+            inserted = list(
+                pool.map(
+                    lambda _: store._insert_progress_event(optimization_id, "step", metrics, datetime.now(UTC)),
+                    range(writers),
+                )
+            )
+        assert sorted(inserted) == [False] * (writers - 1) + [True]
+        assert store.get_progress_count(optimization_id) == 1
+    finally:
+        event.remove(store.engine, "before_cursor_execute", hold_progress_insert)
+        store.delete_jobs([optimization_id])
+
+
+def test_progress_event_key_index_exists_after_migration(store: RemoteDBJobStore) -> None:
+    """The migration builds the unique partial index that the keyed insert targets."""
+    with store.engine.connect() as conn:
+        indexdef = conn.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = 'ux_job_progress_events_event_key'")
+        ).scalar()
+    assert indexdef is not None
+    assert indexdef.startswith("CREATE UNIQUE INDEX")
+    assert "jsonb_typeof" in indexdef
+
+
+def test_progress_trim_keeps_structural_events_while_keyed_events_cover_the_excess(
+    store: RemoteDBJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept keyed non-structural rows cover the excess, so the trim does not delete the baseline (SKY-808)."""
+    monkeypatch.setattr(store, "_max_progress_events", 3)
+    monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
+    optimization_id = f"progress-trim-{uuid.uuid4().hex[:8]}"
+    store.create_job(optimization_id)
+    try:
+        store.record_progress(optimization_id, PROGRESS_BASELINE, {"score": 0.1})
+        for i in range(3):
+            store.record_progress(optimization_id, "step", {PROGRESS_EVENT_KEY: f"step:{i}"})
+        events = store.get_progress_events(optimization_id)
+        assert [e["event"] for e in events] == [PROGRESS_BASELINE, "step", "step", "step"]
+    finally:
+        store.delete_jobs([optimization_id])
 
 
 def test_claim_orders_by_user_in_flight_then_age(store: RemoteDBJobStore) -> None:
@@ -547,6 +850,7 @@ def _fund_checkpoint(store: RemoteDBJobStore, job_id: str, monkeypatch: pytest.M
     service.attach_to_job(budget.id, username, job_id, expected_revision=budget.revision)
     payload = {
         "optimizer_name": "GEPA",
+        "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
         "execution_budget_id": budget.id,

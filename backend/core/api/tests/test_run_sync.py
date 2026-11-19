@@ -28,7 +28,14 @@ import core.storage.remote as remote_mod
 from ...config import settings
 from ...i18n_en import t_en
 from ...service_gateway import run_sync
-from ...storage.models import Base, ExecutionBudgetModel, JobModel, ProgressEventModel, WalletLedgerModel
+from ...storage.models import (
+    PROGRESS_EVENT_KEY,
+    Base,
+    ExecutionBudgetModel,
+    JobModel,
+    ProgressEventModel,
+    WalletLedgerModel,
+)
 from ...storage.remote import RemoteDBJobStore
 from .. import rate_limit
 from ..auth import AuthenticatedUser
@@ -241,6 +248,20 @@ def test_import_makes_no_wallet_or_budget_rows(hosted_store: _SQLiteJobStore, bu
     assert _count(hosted_store, ExecutionBudgetModel) == 0
     assert _count(hosted_store, JobModel) == 1
     assert _count(hosted_store, ProgressEventModel) == 2
+
+
+def test_import_keeps_the_first_event_of_a_repeated_key(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
+    """A bundle that repeats an event key imports the first event only, not a database error (SKY-808)."""
+    bundle["events"] = [
+        {"timestamp": "2026-10-01T10:01:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "a", "n": 1}},
+        {"timestamp": "2026-10-01T10:02:00+00:00", "event": "tick", "metrics": {}},
+        {"timestamp": "2026-10-01T10:03:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "a", "n": 2}},
+        {"timestamp": "2026-10-01T10:04:00+00:00", "event": "step", "metrics": {PROGRESS_EVENT_KEY: "b", "n": 3}},
+    ]
+    resp = _import(hosted_store, bundle)
+    assert resp.status_code == 201, resp.text
+    events = hosted_store.get_progress_events(resp.json()["optimization_id"])
+    assert [(e["event"], e["metrics"].get("n")) for e in events] == [("step", 1), ("tick", None), ("step", 3)]
 
 
 def test_imported_run_cannot_be_requeued(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:

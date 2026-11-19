@@ -127,7 +127,9 @@ class AutoSaddlerEngine:
         assert_metric_absent(document_text, task)
         workdir = Path(ctx.run_dir) / "autosaddler"
         # A resume replays the run from its start, so the child must not see the files of an earlier try.
-        shutil.rmtree(workdir, ignore_errors=True)
+        # No ``ignore_errors``: a folder that is not removed must fail here, not run the child on stale files.
+        if workdir.exists():
+            shutil.rmtree(workdir)
         workdir.mkdir(parents=True)
         with (workdir / "runner.log").open("w", encoding="utf-8") as log:
             child = subprocess.Popen(
@@ -236,16 +238,19 @@ class AutoSaddlerEngine:
                 elif op == "evaluate":
                     reply = _evaluate(task, server, ctx, request)
                 elif op == "progress":
-                    _progress(task, server, ctx, request.get("event") or {})
+                    event = request.get("event", {})
+                    if not isinstance(event, dict):
+                        raise TypeError("event")
+                    _progress(task, server, ctx, event)
                     reply = {}
                 elif op == "log":
-                    sandbox_log.forward(request.get("record"), owner=None, scrub=sandbox_log.Scrubber(()))
+                    sandbox_log.forward(request.get("record"), owner=ctx.log_owner, scrub=sandbox_log.Scrubber(()))
                     reply = {}
                 else:
                     raise ServiceError(f"The AutoSaddler runner sent an unknown request: {op!r}.")
-            except (TypeError, ValueError, LookupError) as error:
+            except (TypeError, ValueError, LookupError, ArithmeticError) as error:
                 # A missing, mistyped or malformed field, or a tree the run can not see, is the child's fault, not
-                # the host's.
+                # the host's. ArithmeticError covers a number the host can not convert, such as int(inf) from 1e999.
                 raise ServiceError(
                     f"The AutoSaddler runner sent a bad request: {op!r} ({type(error).__name__}); see runner.log in "
                     "the run folder."
@@ -423,7 +428,8 @@ def _progress(task: Task, server: EvalServer, ctx: EngineContext, event: dict[st
     candidate = event.get("candidate")
     if not _candidate_shape_ok(candidate, task.str_mode):
         return
-    # The child fills a crashed case with its version's mean (SKY-367); final selection drops that version.
+    # The child scores a case with no score at the floor and sends no version event for that version
+    # (SKY-751), so this check is only a guard.
     shown = None if server.metric_error(candidate) is not None else float(score)
     per_example = event.get("per_example")
     emit_candidate(

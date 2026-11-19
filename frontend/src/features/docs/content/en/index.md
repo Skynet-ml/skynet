@@ -11,7 +11,7 @@ Every run optimizes a repository. You can start in two ways:
 
 The code in the repository can be anything: an application, a service, a script or a library. It can use any library.
 
-Every run uses the same contract. Your scorer defines `score(repo_path, case)`. It returns a score and written feedback. The optimizer reads the feedback to make the next version better.
+Every run uses the same contract. Your scorer defines `score(repo_path, case, output=None)`. It reads `output`, what the `[run]` entry returned for the case. The scorer does not run in the version folder and does not import code from the repository. It returns a score and written feedback. The optimizer reads the feedback to make the next version better.
 
 > [!NOTE]
 > Each version runs in a sandbox. The coding agent that writes versions cannot see the scorer source or the expected values.

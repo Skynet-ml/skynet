@@ -251,6 +251,7 @@
     "notifier.title.failed": "Échec de l'optimisation",
     "notifier.title.new": "Nouvelle optimisation",
     "optimization.already_terminal": "L'optimisation est déjà dans l'état terminal '{status}'.",
+    "optimization.cancel_conflict": "L'optimisation a changé d'état pendant l'annulation. Elle est maintenant dans l'état '{status}'. Réessayez de l'annuler.",
     "optimization.cannot_delete": "Impossible de supprimer une optimisation dans l'état '{status}'. Annulez-la d'abord.",
     "optimization.deletion_storage_unavailable": "L'optimisation n'a pas été supprimée : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
     "optimization.cannot_resubmit_payload": "Impossible de resoumettre la charge utile enregistrée : {error}",

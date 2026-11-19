@@ -251,6 +251,7 @@
     "notifier.title.failed": "Optimizasyon başarısız oldu",
     "notifier.title.new": "Yeni optimizasyon",
     "optimization.already_terminal": "Optimizasyon zaten '{status}' nihai durumunda.",
+    "optimization.cancel_conflict": "Optimizasyonun durumu iptal sırasında değişti. Şu anda '{status}' durumunda. İptal etmeyi yeniden deneyin.",
     "optimization.cannot_delete": "'{status}' durumundaki bir optimizasyon silinemez. Önce iptal edin.",
     "optimization.deletion_storage_unavailable": "Optimizasyon silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
     "optimization.cannot_resubmit_payload": "Kaydedilen yük yeniden gönderilemez: {error}",

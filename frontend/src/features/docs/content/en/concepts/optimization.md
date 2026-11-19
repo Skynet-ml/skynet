@@ -2,26 +2,29 @@ Skynet is Optimize Anything: every run optimizes a repository. An engine propose
 
 ## The shared contract
 
-Every run has a repository and a scorer. The scorer is a Python function that gets the path of one version of the repository and one case.
+Every run has a repository, an `optimize.toml` file with a `[run]` entry or a `[target.<name>]` stage, and a scorer. The `[run]` entry runs one version of the repository on one case. The scorer is a Python function that gets the output of the entry and the case.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` is the folder of one version of the repository, after the setup command ran.
-- `case` is a dict. `case["input"]` holds the input fields of one case. `case["expected"]` holds the expected value, or `None` when the case has none.
-- `score` returns a pair: a number, and a dict with a `"feedback"` string.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-The repository has a `serve.py` file at its root with `def serve(input)`. The scorer can call it, and Skynet uses it to serve the best version after the run.
+- `output` is what the `[run]` entry returned for the case.
+- `case` is a dict. `case["input"]` holds the input fields of one case. `case["expected"]` holds the expected value, or `None` when the case has none.
+- `repo_path` is a folder that holds only your metric files.
+- `score` returns one object: a number under `"score"`, and an optional `"feedback"` string.
+
+The repository has a `serve.py` file at its root with `def serve(input)`. The `[run]` entry calls it in its own sandbox box. Skynet uses it to serve the best version after the run.
+
+The scorer runs in a separate sandbox box. That box holds only your metric files and no version code, so the scorer cannot import `serve.py`. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from skynet import call`. Without a `[run]` entry or a `[target.<name>]` stage, Skynet refuses the `optimize.toml` file.
 
 > [!NOTE]
 > The coding agent that writes versions cannot see the scorer source, the expected values or the run secrets.
@@ -58,7 +61,7 @@ def label(message):
 - Calls on Skynet's keys are metered against the run budget.
 - With your own key (BYOK), the call goes to your provider key. Skynet charges no model fee.
 - The gateway refuses requests for any other model.
-- Run secrets reach your code and your scorer as environment variables. The variable name is the secret name. Skynet hides secret values in the output.
+- Your code and your scorer get no run secrets as environment variables. A secret reaches a role only through a `[services.<name>]` table that the role lists in `[run] services` or `[metric] services`, or through a server in the role's `mcp` file. Write the secret in the table's `headers` as `${NAME}`. Skynet adds the secret outside the sandbox and hides secret values in the output.
 
 The sandbox has no other network access.
 

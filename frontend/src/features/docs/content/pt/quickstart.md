@@ -55,26 +55,27 @@ Leia [Motores](/docs/concepts/engines) para escolher um motor específico.
 
 ## 5. Métrica e execução
 
-A última etapa é **Métrica e execução**. O assistente escreve o avaliador para você. Você pode editá-lo. O avaliador recebe o caminho de uma versão do repositório e um caso:
+A última etapa é **Métrica e execução**. O assistente escreve o avaliador e o arquivo `optimize.toml` para você. Você pode editá-los. A entrada `[run]` executa uma versão do repositório em um caso. O avaliador recebe a saída da entrada e o caso:
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` contém as colunas de Entrada de um caso. `case["expected"]` contém a coluna de Saída, indexada pelo nome da coluna. O repositório tem um arquivo `serve.py` com `def serve(input)`. O Skynet usa a mesma função para servir a melhor versão depois da execução.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-Depois execute a verificação. A verificação executa a sua configuração e o seu avaliador na versão inicial, na sandbox. Você só pode iniciar a execução depois que a verificação passar.
+`case["input"]` contém as colunas de Entrada de um caso. `case["expected"]` contém a coluna de Saída, indexada pelo nome da coluna. O repositório tem um arquivo `serve.py` com `def serve(input)`. A entrada `[run]` o chama, e `output` é o valor que ele retorna. O avaliador roda em outra sandbox que contém apenas os seus arquivos de métrica e nenhum código da versão, então não pode importar `serve.py`. O Skynet usa a mesma função para servir a melhor versão depois da execução.
+
+Depois execute a verificação. A verificação executa a sua configuração, a entrada `[run]` e o seu avaliador na versão inicial, na sandbox. Você só pode iniciar a execução depois que a verificação passar.
 
 ## 6. Iniciar e acompanhar
 

@@ -20,7 +20,7 @@ from ....config import settings
 from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxScorer
 from . import runner
-from .protocol import Candidate, SideInfo
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY, Candidate, SideInfo
 from .remote_evaluator import RemoteEvaluatorClient
 from .sandbox import SandboxRuntime, scorer_runtime_from_settings
 from .sandbox_scorer import SandboxPythonScorer, ScorerUsage, scorer_gateway
@@ -31,7 +31,7 @@ class JobScorer(Protocol):
 
     usage: ScorerUsage | None
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case``.
 
         Args:
@@ -39,7 +39,7 @@ class JobScorer(Protocol):
             case: The case to score it on, if the task has cases.
 
         Returns:
-            The score and side information.
+            The score (``None`` for a failed ``[run]`` entry) and side information.
         """
         ...
 
@@ -48,22 +48,36 @@ class JobScorer(Protocol):
         ...
 
 
-def normalize_score(raw: Any) -> tuple[float, SideInfo]:
-    """Coerce a scorer's return value into ``(score, side_info)``, feedback required.
+def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float | None, SideInfo]:
+    """Read a scorer's reply into ``(score, side_info)``.
 
-    See :func:`runner.normalize_score` for the accepted shapes.
+    A relay reply is a document that Skynet built from a checked metric
+    answer, so it may hold Skynet's own keys, such as ``status``; see
+    :func:`runner.normalize_score` for the answer form. A reply with no
+    score and the ``run_failed`` status is a failed ``[run]`` entry: it
+    keeps no score (SKY-751).
 
     Args:
-        raw: Whatever the scorer returned.
+        raw: The scorer's reply.
+        own_keys: Whether the reply comes from Skynet. Set it only for a
+            document Skynet built; by default the reply is a metric answer
+            and gets the full check.
 
     Returns:
-        The float score and side info carrying ``feedback`` and any named ``scores``.
+        The float score, or ``None`` for a failed ``[run]`` entry, and side
+        info carrying ``feedback`` (``""`` when none) and any named ``scores``.
 
     Raises:
-        ServiceError: When the value has none of the accepted shapes or lacks feedback.
+        ServiceError: When the reply does not have the valid form.
     """
     try:
-        return runner.normalize_score(raw)
+        if own_keys and isinstance(raw, dict) and raw.get("score") is None and raw.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            side_info = {key: value for key, value in raw.items() if key != "score"}
+            side_info["feedback"] = runner.feedback(side_info.get("feedback"), "the failed run")
+            if "scores" in side_info:
+                side_info["scores"] = runner.named_scores(side_info["scores"])
+            return None, side_info
+        return runner.normalize_score(raw, own_keys=own_keys)
     except runner.ScorerError as exc:
         raise ServiceError(str(exc)) from exc
 
@@ -104,17 +118,22 @@ class RemoteScorer:
         timeout_seconds: float,
         protected_route: dict[str, str] | None = None,
         label: str = "remote scorer",
+        trusted_reply: bool = False,
     ) -> None:
         """Create a remote scorer.
 
         Args:
-            url: Endpoint that returns a JSON number or ``{"score": ..., ...}``.
+            url: Endpoint that returns ``{"score": ..., "feedback": ..., "scores": ...}``.
             secret: Shared secret sent as a bearer token, if any.
             timeout_seconds: Per-request timeout.
             protected_route: Parent-issued capability for a protected evaluator endpoint.
             label: Names the scorer in failure messages.
+            trusted_reply: Whether the relay reply comes from Skynet's own
+                repository scorer, which may add Skynet's keys, such as
+                ``status``. A user's endpoint is never trusted.
         """
         self._url = url
+        self._trusted_reply = trusted_reply
         self._secret = secret
         self._timeout_seconds = timeout_seconds
         self._relay = (
@@ -123,7 +142,7 @@ class RemoteScorer:
             else None
         )
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case`` via one HTTP request.
 
         Args:
@@ -131,14 +150,14 @@ class RemoteScorer:
             case: The case to score it on, if the task has cases.
 
         Returns:
-            The normalized score and side information.
+            The normalized score (``None`` for a failed ``[run]`` entry) and side information.
 
         Raises:
             ServiceError: When the request fails, returns an error status,
                 a non-JSON body, or a body without a usable score.
         """
         if self._relay is not None:
-            return normalize_score(self._relay(candidate, case))
+            return normalize_score(self._relay(candidate, case), own_keys=self._trusted_reply)
         headers = {"Authorization": f"Bearer {self._secret}"} if self._secret else {}
         try:
             response = httpx.post(
@@ -153,7 +172,8 @@ class RemoteScorer:
             raise ServiceError(f"remote scorer request failed: {exc}") from exc
         except ValueError as exc:
             raise ServiceError("remote scorer returned a non-JSON body.") from exc
-        return normalize_score(body)
+        # The endpoint's body is the metric answer itself, so it gets the full check.
+        return normalize_score(body, own_keys=False)
 
     def close(self) -> None:
         """Nothing to release: each call is one stateless request."""

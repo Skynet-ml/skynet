@@ -138,7 +138,14 @@ def notify_job_completed(
         optimized_score: Final score.
     """
     if status in ("success", "stopped"):
-        _emit(username, FINISHED, optimization_id, _score_facts(baseline_score, optimized_score))
+        facts = _score_facts(baseline_score, optimized_score)
+        # The inbox drops null facts, so a run whose final version has no
+        # score (a failed [run] entry or a metric error) says so explicitly
+        # and the notification shows "no score", never 0 (SKY-751). Only a
+        # successful run measured its final version; a stopped run may not.
+        if status == "success" and optimized_score is None:
+            facts["no_score"] = True
+        _emit(username, FINISHED, optimization_id, facts)
     elif status == "failed":
         detail = message
         if detail and len(detail) > _ERROR_DETAIL_CHARS:

@@ -1054,6 +1054,20 @@ function NavItem({
   );
 }
 
+/** Whether a sidebar row offers Cancel: the cancel route also cancels a paused run (SKY-800). */
+export function canCancelRun(canEdit: boolean, status: string): boolean {
+  return canEdit && (isActiveStatus(status) || status === "paused");
+}
+
+/** Whether a sidebar row offers Pause: only an active run can pause, even if `pausable` is still set. */
+export function canPauseRun(
+  canEdit: boolean,
+  status: string,
+  pausable: boolean | undefined,
+): boolean {
+  return canEdit && isActiveStatus(status) && !!pausable;
+}
+
 function JobRow({
   job,
   isShared,
@@ -1413,39 +1427,37 @@ function JobRow({
                     </PopoverPrimitive.Close>
                   ))}
 
-                {canEdit && isActiveStatus(job.status) && (
-                  <>
-                    {job.pausable && (
-                      <PopoverPrimitive.Close asChild>
-                        <button
-                          type="button"
-                          onClick={handlePause}
-                          className={COMPACT_POPOVER_ITEM_CLASS}
-                        >
-                          <Pause className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                          <span className="flex-1 text-start">{msg("optimization.pause")}</span>
-                        </button>
-                      </PopoverPrimitive.Close>
-                    )}
-                    <PopoverPrimitive.Close asChild>
-                      <button
-                        type="button"
-                        onClick={handleCancel}
-                        className={cn(
-                          COMPACT_POPOVER_ITEM_CLASS,
-                          "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
-                        )}
-                      >
-                        <XCircle
-                          className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")}
-                          aria-hidden="true"
-                        />
-                        <span className="flex-1 text-start">
-                          {msg("auto.app.optimizations.id.page.literal.5")}
-                        </span>
-                      </button>
-                    </PopoverPrimitive.Close>
-                  </>
+                {canPauseRun(canEdit, job.status, job.pausable) && (
+                  <PopoverPrimitive.Close asChild>
+                    <button
+                      type="button"
+                      onClick={handlePause}
+                      className={COMPACT_POPOVER_ITEM_CLASS}
+                    >
+                      <Pause className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                      <span className="flex-1 text-start">{msg("optimization.pause")}</span>
+                    </button>
+                  </PopoverPrimitive.Close>
+                )}
+                {canCancelRun(canEdit, job.status) && (
+                  <PopoverPrimitive.Close asChild>
+                    <button
+                      type="button"
+                      onClick={handleCancel}
+                      className={cn(
+                        COMPACT_POPOVER_ITEM_CLASS,
+                        "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
+                      )}
+                    >
+                      <XCircle
+                        className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")}
+                        aria-hidden="true"
+                      />
+                      <span className="flex-1 text-start">
+                        {msg("auto.app.optimizations.id.page.literal.5")}
+                      </span>
+                    </button>
+                  </PopoverPrimitive.Close>
                 )}
 
                 {canEdit && (

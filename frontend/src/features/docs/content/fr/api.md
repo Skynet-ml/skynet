@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 Champs importants :
 
 - `target.repo.repository` est le dépôt GitHub sous la forme `owner/name`. Connectez d'abord GitHub dans **Paramètres → Connecteurs**.
 - `target.repo.editable_paths` liste les fichiers et dossiers que l'optimiseur peut modifier. `"."` désigne le dépôt entier.
 - `target.repo.commit` est facultatif. C'est un SHA de 40 caractères. Sans lui, Skynet utilise le dernier commit de la branche.
-- `target.repo.secrets` est facultatif. Chaque secret a un `name` et une `value`. Il arrive à votre code et à votre évaluateur sous forme de variable d'environnement.
-- `scorer.metric_code` définit `score(repo_path, case)`. `scorer.model` est le modèle que votre code et votre évaluateur peuvent appeler via la passerelle de modèles.
+- `target.repo.secrets` est facultatif. Chaque secret a un `name` et une `value`. Il arrive à votre code ou à votre évaluateur seulement par un en-tête de `[services.<name>]` ou par un serveur du fichier `mcp` du rôle, jamais sous forme de variable d'environnement.
+- `scorer.metric_code` définit `score(repo_path, case, output=None)`. `output` est ce que l'entrée `[run]` a renvoyé pour le cas. L'onglet `optimize.toml` montre l'entrée `[run]` du dépôt d'exemple. `scorer.model` est le modèle que votre code et votre évaluateur peuvent appeler via la passerelle de modèles.
 - `strategy.mode` vaut `auto` (par défaut) ou `single`. Avec `single`, définissez `strategy.engine` sur le nom d'un moteur renvoyé par `GET /blackbox/engines`.
 - `max_cost_cents` est le plafond de dépenses de cette exécution, en cents de dollar américain.
 - `is_private` vaut `false` par défaut. Passez-le à `true` pour garder l'exécution privée.

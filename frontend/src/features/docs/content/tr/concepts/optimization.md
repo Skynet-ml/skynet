@@ -2,26 +2,29 @@ Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Bir 
 
 ## Ortak sözleşme
 
-Her çalıştırmanın bir deposu ve bir puanlayıcısı vardır. Puanlayıcı bir Python fonksiyonudur. Deponun bir sürümünün yolunu ve bir vakayı alır.
+Her çalıştırmanın bir deposu, `[run]` giriş noktası veya `[target.<name>]` aşaması içeren bir `optimize.toml` dosyası ve bir puanlayıcısı vardır. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı bir Python fonksiyonudur. Giriş noktasının çıktısını ve vakayı alır.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path`, kurulum komutu çalıştıktan sonra deponun bir sürümünün klasörüdür.
-- `case` bir dict'tir. `case["input"]` bir vakanın girdi alanlarını tutar. `case["expected"]` beklenen değeri tutar; vakanın beklenen değeri yoksa `None` olur.
-- `score` bir çift döndürür: bir sayı ve `"feedback"` dizesi içeren bir dict.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. Puanlayıcı bu fonksiyonu çağırabilir. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
+- `output`, `[run]` giriş noktasının vaka için döndürdüğü değerdir.
+- `case` bir dict'tir. `case["input"]` bir vakanın girdi alanlarını tutar. `case["expected"]` beklenen değeri tutar; vakanın beklenen değeri yoksa `None` olur.
+- `repo_path`, yalnızca metrik dosyalarınızı tutan bir klasördür.
+- `score` tek bir nesne döndürür: `"score"` altında bir sayı ve isteğe bağlı bir `"feedback"` dizesi.
+
+Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu kendi sandbox'ında çağırır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
+
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
 
 > [!NOTE]
 > Sürümleri yazan kodlama ajanı, puanlayıcının kaynak kodunu, beklenen değerleri veya çalıştırma gizli anahtarlarını göremez.
@@ -58,7 +61,7 @@ def label(message):
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür.
 - Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider. Skynet model ücreti almaz.
 - Ağ geçidi başka herhangi bir model için gelen istekleri reddeder.
-- Çalıştırma gizli anahtarları kodunuza ve puanlayıcınıza ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır. Skynet gizli değerleri çıktıda gizler.
+- Kodunuz ve puanlayıcınız çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar bir role yalnızca rolün `[run] services` veya `[metric] services` içinde listelediği bir `[services.<name>]` tablosu veya rolün `mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Skynet gizli anahtarı sandbox'ın dışında ekler ve gizli değerleri çıktıda gizler.
 
 Sandbox'ın başka bir ağ erişimi yoktur.
 
