@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "لم يتمكن وكيل {cli} على هذا الجهاز من إنهاء دوره: {detail}",
     "blackbox.host_agent_rate_limited": "وصل اشتراكك في {cli} إلى حد الاستخدام. يُعاد ضبطه في {reset_at}. ابدأ التشغيل مرة أخرى بعد هذا الوقت.",
     "blackbox.repo_target_unavailable": "تحسين مستودع غير متاح بعد.",
+    "blackbox.shinka_interpreter_missing": "لا يستطيع هذا الـ worker تشغيل ShinkaEvolve، لأن صورته لا تتضمن مفسّر ShinkaEvolve. اختر محركًا آخر، أو اطلب من المشغّل نشر صورة worker تتضمن ShinkaEvolve.",
     "secrets.invalid_name": "لا يمكن استخدام \"{name}\" اسمًا لسر. استخدم الأحرف والأرقام والشرطات السفلية، وابدأ بحرف أو شرطة سفلية.",
     "secrets.invalid_value": "يحتاج السر إلى قيمة لا تتجاوز {limit} بايت.",
     "secrets.limit_reached": "يمكنك حفظ ما يصل إلى {limit} سرًا. احذف واحدًا لإضافة آخر.",

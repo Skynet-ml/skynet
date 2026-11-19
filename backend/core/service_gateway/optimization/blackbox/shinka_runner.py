@@ -31,7 +31,11 @@ unchanged. Skynet contributes only:
   instead of upstream's single model call answering with a patch;
 * or, on the engine loop, a command editor: the worker runs the contract
   file's ``[proposer] entry`` command on the parent's tree, and the tree it
-  leaves is the new version (SKY-815).
+  leaves is the new version (SKY-815);
+* on the engine loop, the agent editor runs as a tool session in the worker,
+  where each model reply and command is one step, and novelty rejection embeds
+  programs with a fixed local embedder, so a resume compares the same vectors
+  (SKY-830).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import asyncio
 import base64
 import contextlib
 import difflib
+import hashlib
 import importlib.util
 import io
 import itertools
@@ -693,12 +698,18 @@ def build_config(
     )
     embedding = payload.get("shinka_embedding")
     novelty_env = payload.get("shinka_novelty_key_env")
-    novelty = bool(settings.get("novelty")) and bool(embedding) and bool(novelty_env)
+    # On the engine loop the child embeds with ``LocalEmbedder`` and the worker answers the judge's calls, so
+    # novelty needs no embedding route and no key (SKY-830).
+    novelty = bool(settings.get("novelty")) and (stepped or (bool(embedding) and bool(novelty_env)))
     embedding_model = (
-        local_model_name(str(embedding["model"]), str(embedding["url"]), str(embedding["key_env"])) if novelty else None
+        local_model_name(str(embedding["model"]), str(embedding["url"]), str(embedding["key_env"]))
+        if novelty and not stepped
+        else None
     )
     novelty_model = (
-        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), str(novelty_env)) if novelty else None
+        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), None if stepped else str(novelty_env))
+        if novelty
+        else None
     )
     task = payload.get("task") or {}
     objective = str(task.get("objective") or "").strip()
@@ -1385,6 +1396,43 @@ def install_repo_mode(bundle: Any, runner: Any) -> None:
     shinka_async_runner.get_code_embedding_async = embed_changes
 
 
+class LocalEmbedder:
+    """Embed a program with hashed character trigrams, for novelty rejection on the engine loop (SKY-830).
+
+    A provider embedding would be a model call with no step of its own, so a resume could get other vectors and
+    reject other programs. These vectors depend only on the text, and cost nothing.
+    """
+
+    dimensions = 512
+
+    def embed(self, text: str) -> list[float]:
+        """Embed one text.
+
+        Args:
+            text: The text.
+
+        Returns:
+            The unit-length vector, or a zero vector for a text shorter than three characters.
+        """
+        vector = [0.0] * self.dimensions
+        for start in range(len(text) - 2):
+            digest = hashlib.blake2b(text[start : start + 3].encode(), digest_size=4).digest()
+            vector[int.from_bytes(digest, "big") % self.dimensions] += 1.0
+        norm = math.sqrt(sum(value * value for value in vector))
+        return [value / norm for value in vector] if norm else vector
+
+    async def embed_async(self, text: str) -> tuple[list[float], float]:
+        """Embed one text, as upstream's async embeddings client does.
+
+        Args:
+            text: The text.
+
+        Returns:
+            Upstream's ``(embedding, cost)``, with no cost.
+        """
+        return self.embed(text), 0.0
+
+
 def agent_prompt(system: str, user: str, *, repo: bool) -> str:
     """Turn a mutation prompt into the task a coding agent gets.
 
@@ -1799,41 +1847,60 @@ class CommandEditor(AgentEditor):
     it goes through the same path rules and bundle limits as an agent session's workspace.
     """
 
-    def __init__(self, mailbox: EvaluatorMailbox, workdir: Path, *, ledger: UsageLedger, bundle: Any) -> None:
+    # The worker request that writes a version, and the writer's name in an error.
+    kind = "propose"
+    writer = "[proposer] entry command"
+
+    def __init__(
+        self,
+        mailbox: EvaluatorMailbox,
+        workdir: Path,
+        *,
+        ledger: UsageLedger,
+        bundle: Any,
+        part_names: Sequence[str] | None = None,
+    ) -> None:
         """Bind the editor to the worker.
 
         Args:
             mailbox: Sends each proposal to the worker.
             workdir: Run folder the scratch directories go under.
-            ledger: Usage ledger; the command's own model use is not in it.
-            bundle: ``shinka_bundle.RepoBundle`` of the run; the command works only on a repository.
+            ledger: Usage ledger; the worker meters the writer's model use, so it is not in it.
+            bundle: ``shinka_bundle.RepoBundle`` of a repository run, or ``None`` for a text run.
+            part_names: The starting version's part names, or ``None`` for a text version.
         """
-        super().__init__({}, workdir, ledger=ledger, deadline=math.inf, bundle=bundle)
+        super().__init__({}, workdir, ledger=ledger, deadline=math.inf, part_names=part_names, bundle=bundle)
         self.mailbox = mailbox
 
     def edit(self, parent_code: str, prompt: str, model_name: str, patch_dir: Path) -> dict[str, Any]:
         """Have the worker run the command on the parent's files, and read back the version it leaves.
 
         Args:
-            parent_code: The parent's bundle.
+            parent_code: The parent's bundle, or its program text on a text run.
             prompt: The task, which the command reads from ``ASCENT_TASK``.
-            model_name: Upstream model name the bandit picked; the command picks its own model.
+            model_name: Upstream model name the bandit picked; the worker picks the model.
             patch_dir: Upstream's generation folder; the new version is written there.
 
         Returns:
-            The report of :meth:`AgentEditor.edit`, with no cost and no tool calls.
+            The report of :meth:`AgentEditor.edit`, with no cost: the worker bills the writer's model use.
 
         Raises:
             EvaluationStopped: When the run stopped or the worker did not reply.
         """
+        parent = (
+            shinka_bundle.decode_bundle(parent_code) if self.bundle is not None else {_AGENT_PROGRAM_FILE: parent_code}
+        )
+        reply = self.mailbox.ask(self.kind, {"files": parent, "task": prompt})
+        text = reply.get("text")
+        name, description = parse_agent_answer(text if isinstance(text, str) else None)
+        tool_calls = reply.get("tool_calls")
         report: dict[str, Any] = {
             "cost": 0.0,
-            "tool_calls": 0,
-            "tool_cap_reached": False,
-            "name": None,
-            "description": None,
+            "tool_calls": tool_calls if type(tool_calls) is int else 0,
+            "tool_cap_reached": reply.get("tool_cap_reached") is True,
+            "name": name,
+            "description": description,
         }
-        reply = self.mailbox.ask("propose", {"files": shinka_bundle.decode_bundle(parent_code), "task": prompt})
         files = reply.get("files")
         if "error" in reply or not isinstance(files, dict):
             report["error"] = str(reply.get("error") or "The worker sent no new version.")
@@ -1845,10 +1912,25 @@ class CommandEditor(AgentEditor):
         for path in files:
             if any(part.lower() == ".git" for part in path.split("/")):
                 # A case-insensitive file system reads ``.GIT`` as ``.git`` (SKY-810).
-                report["error"] = f"The [proposer] entry command may not write Git metadata: '{path}'."
+                report["error"] = f"The {self.writer} may not write Git metadata: '{path}'."
                 return report
         workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
         workspace.parent.mkdir(parents=True, exist_ok=True)
+        if self.bundle is None:
+            # A text version is the one program file; the writer's other files are its own scratch work.
+            if not isinstance(files.get(_AGENT_PROGRAM_FILE), str):
+                report["error"] = f"The {self.writer} left no {_AGENT_PROGRAM_FILE}."
+                return report
+            workspace.mkdir()
+            try:
+                (workspace / _AGENT_PROGRAM_FILE).write_text(files[_AGENT_PROGRAM_FILE], encoding="utf-8")
+                code, patch, changed = self._collect(parent_code, workspace)
+            except ValueError as exc:
+                report["error"] = str(exc)
+                return report
+            finally:
+                self._discard(workspace)
+            return self._save_version(report, parent_code, code, patch, changed, patch_dir)
         with self._git_lock:
             _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
         try:
@@ -1875,6 +1957,18 @@ class CommandEditor(AgentEditor):
         finally:
             self._discard(workspace)
         return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+
+
+class LoopAgentEditor(CommandEditor):
+    """Write a new version with the agent editor's tool session in the worker, on the engine loop (SKY-830).
+
+    The worker runs the session over the parent's tree: each model reply is one ``model`` step and each
+    command one ``command`` step, so a resume replays it. It sends back the files of the tree the session
+    leaves, with the agent's last reply, and they go through the same checks as a command's version.
+    """
+
+    kind = "agent"
+    writer = "agent editor"
 
 
 def install_agent_editor(editor: AgentEditor, runner: Any) -> None:
@@ -2459,10 +2553,16 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if stepped:
         install_sequential_gate(runner)
+        if config["evolution"]["novelty_llm_models"]:
+            # Upstream builds its embeddings client only for an embedding model, which the loop does not give.
+            runner.embedding_client = LocalEmbedder()
     if bundle is not None:
         install_repo_mode(bundle, runner)
     editor = None
-    if payload.get("shinka_editor"):
+    if stepped and dict(payload.get("shinka") or {}).get("editor") == "agent":
+        editor = LoopAgentEditor(mailbox, workdir, ledger=ledger, bundle=bundle, part_names=part_names)
+        install_agent_editor(editor, runner)
+    elif payload.get("shinka_editor"):
         editor = AgentEditor(
             payload["shinka_editor"],
             workdir,

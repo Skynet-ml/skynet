@@ -18,8 +18,16 @@ model. The engine runs the command once in a proposer box over the parent's tree
 with ShinkaEvolve's mutation prompt in the ``ASCENT_TASK`` file, and the tree the
 command leaves is the new version.
 
-Without that context, the engine runs the runner in the managed sandbox, as
-before, until the cutover (SKY-728).
+With the agent editor (SKY-830), the child asks this engine for each new version,
+and the engine runs one tool session: each model reply is one ``model`` step and
+each ``run`` tool call one ``command`` step. The ``[proposer] mcp`` servers come
+only with the agent editor; their grants let the provider edge add their headers,
+so no secret enters a box. Novelty rejection embeds programs in the child with a
+fixed local embedder, and its judge's calls are model steps.
+
+Without the loop's context, the engine runs the runner in the managed sandbox, as
+before, until the cutover (SKY-728). On the loop, a worker image without the
+ShinkaEvolve interpreter fails the run.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -44,6 +53,7 @@ from urllib.parse import urlsplit
 
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
+from ....i18n import t
 from ....sandbox.grants import Grant, GrantError
 from ....sandbox.trees import TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
@@ -61,7 +71,7 @@ from .native_runtime import (
     run_native_engine,
     sanitize_side_info,
 )
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, candidate_key
+from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, ToolDefinition, candidate_key
 from .runner import side_info_json_default
 
 logger = logging.getLogger(__name__)
@@ -78,6 +88,45 @@ _REPO_CHUNK_DIR = "repo-tree"
 _WORKDIR = "shinka_evolve"
 # The proposer box reads the task from this file of the parent's tree. It is never part of a version.
 _TASK_PATH = ".ascent/task.md"
+# The most of a tool's output that the agent editor's model sees, so one call cannot fill its context.
+_TOOL_OUTPUT_CHARS = 16000
+# Room that a cut ``run`` output keeps for its note.
+_RUN_NOTE_CHARS = 200
+_AGENT_SYSTEM = (
+    "You edit a program to improve its score. Use the tools to read and change its files. The run tool runs a "
+    "shell command in a sandbox over your current files, and keeps the files the command writes. When you are "
+    "done, reply with no tool call."
+)
+_PATH_SCHEMA = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+_AGENT_TOOLS: list[ToolDefinition] = [
+    {
+        "name": "list_files",
+        "description": "List the files below a folder; an empty path is the root.",
+        "input_schema": _PATH_SCHEMA,
+    },
+    {
+        "name": "read_file",
+        "description": (
+            f"Read a text file. A file over {_TOOL_OUTPUT_CHARS} characters is cut, with a note at the end; "
+            "read the rest with the run tool, for example with sed."
+        ),
+        "input_schema": _PATH_SCHEMA,
+    },
+    {
+        "name": "write_file",
+        "description": "Write a text file, in full. It replaces the whole file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "run",
+        "description": "Run a shell command over the files, and return its exit code and output.",
+        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+]
 # Only the end of a failed command's stderr goes back to upstream as the mutation's error.
 _COMMAND_ERROR_CHARS = 2000
 # The runner never calls this URL: its model calls come back to the worker. Upstream
@@ -152,30 +201,36 @@ class ShinkaEvolveEngine:
             when the child ends cleanly on the seed and no version has a full score.
 
         Raises:
-            ServiceError: When the settings need a feature the worker does not run yet, when the child
-                sends a malformed request or candidate, or when upstream fails, goes quiet or writes an
-                overlong line before it scores a version.
+            ServiceError: When the worker has no ShinkaEvolve interpreter, when the settings need a feature
+                the worker does not run yet, when the child sends a malformed request or candidate, or when
+                upstream fails, goes quiet or writes an overlong line before it scores a version.
             BudgetExhaustedError: When no scorer call remains, or the cap stops the run before a version is scored.
             BudgetReached: When the budget stops the run; it carries the best version scored so far.
         """
-        # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter; a
-        # worker without it keeps the sandbox path instead of failing the run.
         options = ctx.native_options
-        if ctx.call_model is None or not Path(self.python).exists():
+        if ctx.call_model is None:
             if options is not None and (options.repo or {}).get("file_proposer"):
                 # The sandbox runner has no command editor; it would mutate with the model and drop the command.
                 raise ServiceError("ShinkaEvolve runs the [proposer] entry command only on the worker's engine loop.")
             return run_native_engine(self.name, task, server, ctx)
+        # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter. On the loop a worker without it
+        # fails the run: the sandbox path would run the features with other steps and no replay (SKY-830).
+        if not Path(self.python).exists():
+            raise ServiceError(t("blackbox.shinka_interpreter_missing"))
         settings = dict((options.shinka if options is not None else None) or {})
         route = ((options.budget_route if options is not None else None) or {}).get(MCP_RELAY_ROUTE_KEY) or {}
-        if settings.get("editor") == "agent":
-            raise ServiceError("The ShinkaEvolve agent editor does not run in the worker yet.")
-        if settings.get("novelty"):
-            raise ServiceError("ShinkaEvolve novelty rejection does not run in the worker yet.")
-        if route.get("servers"):
+        agent = settings.get("editor") == "agent"
+        if route.get("servers") and not agent:
+            # Upstream's own mutation calls have no tools, so the servers would go unused without a word.
             raise ServiceError(
-                "ShinkaEvolve cannot load the [proposer] mcp servers yet. "
-                "Choose another engine, or remove [proposer] mcp from optimize.toml."
+                "ShinkaEvolve loads the [proposer] mcp servers only with its agent editor. "
+                "Set the agent editor, choose another engine, or remove [proposer] mcp from optimize.toml."
+            )
+        if route.get("services") and agent:
+            # The agent's box gets only the proposer's hosts and the mcp servers, so the services would go unused.
+            raise ServiceError(
+                "The ShinkaEvolve agent editor cannot give the [proposer] services to its agent yet. "
+                "Choose another engine, or remove [proposer] services from optimize.toml."
             )
         repo = options.repo if options is not None else None
         # The loop checks the seed's hidden paths against its own (SKY-719), so
@@ -248,7 +303,8 @@ class ShinkaEvolveEngine:
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)
         (workdir / _INPUT_FILE).write_text(document_text, encoding="utf-8")
-        requests = _Requests(task, server, ctx, nonce)
+        agent_session = _AgentSession(ctx, options, list(route.get("servers") or ())) if agent else None
+        requests = _Requests(task, server, ctx, nonce, agent=agent_session)
         try:
             outcome = self._drive(requests, workdir)
         except BudgetReached as stop:
@@ -674,10 +730,6 @@ class _Proposer:
     def _version(self, after: str, parent_tree: str, parent: dict[str, str]) -> dict[str, str] | None:
         """Read the files of the command's tree that make up the new version.
 
-        A version holds the text files that differ from the seed, as an agent session's workspace does. The
-        setup's own output and the task file are not part of it. The content ids tell which files the command
-        changed, so only those are read.
-
         Args:
             after: The tree the command left.
             parent_tree: The tree the command started from.
@@ -687,37 +739,70 @@ class _Proposer:
             The version's files by path, or ``None`` when the command added or changed more files than a tree
             listing holds, before any read.
         """
-        assert self.ctx.file_ids is not None
-        assert self.ctx.read_file is not None
-        parent_ids = self.ctx.file_ids(parent_tree)
-        version: dict[str, str] = {}
-        changed: list[str] = []
-        for path, oid in self.ctx.file_ids(after).items():
-            setup_output = path in self.base_ids and path not in self.seed_ids
-            # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
-            git_part = any(part.lower() == ".git" for part in path.split("/"))
-            if git_part or path == _TASK_PATH or (setup_output and path not in parent):
-                continue
-            if path in parent and parent_ids.get(path) == oid:
-                version[path] = parent[path]
-                continue
-            if path not in parent and self.base_ids.get(path) == oid:
-                continue
-            changed.append(path)
-        # The editor drops ignored files only after it writes them, so a command that leaves an install
-        # (``node_modules``) would otherwise cost thousands of reads and a reply of many megabytes.
-        if len(changed) > shinka_bundle._MAX_TREE_ENTRIES:
-            return None
-        for path in changed:
-            # The tree entry has no size, so the limit is checked on the bytes.
-            data = self.ctx.read_file(after, path)
-            if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:
-                continue
-            try:
-                version[path] = data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-        return version
+        return _tree_version(
+            self.ctx, after, parent_tree, parent, self.seed_ids, self.base_ids, shinka_bundle._MAX_TREE_ENTRIES
+        )
+
+
+def _tree_version(
+    ctx: EngineContext,
+    after: str,
+    parent_tree: str,
+    parent: dict[str, str],
+    seed_ids: dict[str, str],
+    base_ids: dict[str, str],
+    max_files: int,
+) -> dict[str, str] | None:
+    """Read the files of a tree that make up a new version.
+
+    A version holds the text files that differ from the seed, as an agent session's workspace does. The
+    setup's own output and the task file are not part of it. The content ids tell which files changed, so only
+    those are read.
+
+    Args:
+        ctx: The run context, with the loop's tree reads.
+        after: The tree the work left.
+        parent_tree: The tree the work started from.
+        parent: The parent's files that differ from the seed.
+        seed_ids: The content id of each file of the seed.
+        base_ids: The content id of each file of the tree every session starts from.
+        max_files: The most files the work may add or change.
+
+    Returns:
+        The version's files by path, or ``None`` when the work added or changed more than ``max_files`` files,
+        before any read.
+    """
+    assert ctx.file_ids is not None
+    assert ctx.read_file is not None
+    parent_ids = ctx.file_ids(parent_tree)
+    version: dict[str, str] = {}
+    changed: list[str] = []
+    for path, oid in ctx.file_ids(after).items():
+        setup_output = path in base_ids and path not in seed_ids
+        # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
+        git_part = any(part.lower() == ".git" for part in path.split("/"))
+        if git_part or path == _TASK_PATH or (setup_output and path not in parent):
+            continue
+        if path in parent and parent_ids.get(path) == oid:
+            version[path] = parent[path]
+            continue
+        if path not in parent and base_ids.get(path) == oid:
+            continue
+        changed.append(path)
+    # The editor drops ignored files only after it writes them, so a command that leaves an install
+    # (``node_modules``) would otherwise cost thousands of reads and a reply of many megabytes.
+    if len(changed) > max_files:
+        return None
+    for path in changed:
+        # The tree entry has no size, so the limit is checked on the bytes.
+        data = ctx.read_file(after, path)
+        if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:
+            continue
+        try:
+            version[path] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return version
 
 
 def _command_failure(name: str, result: Any) -> str:
@@ -735,11 +820,271 @@ def _command_failure(name: str, result: Any) -> str:
     return f"The {name} {how}." + (f" {detail}" if detail else "")
 
 
+def _listing_output(listed: list[str]) -> str:
+    """Join a folder's file list for the agent editor, cut at whole lines.
+
+    Args:
+        listed: The paths below the folder.
+
+    Returns:
+        The list, one path a line, with a note when it is cut.
+    """
+    if not listed:
+        return "No files."
+    kept: list[str] = []
+    size = 0
+    for line in listed:
+        size += len(line) + 1
+        if size > _TOOL_OUTPUT_CHARS + 1:
+            break
+        kept.append(line)
+    text = "\n".join(kept)
+    if len(kept) < len(listed):
+        text += f"\n[cut: {len(kept)} of {len(listed)} files; use the run tool, for example find]"
+    return text
+
+
+def _run_output(result: Any) -> str:
+    """Describe a ``run`` tool call's result for the agent editor, within ``_TOOL_OUTPUT_CHARS``.
+
+    Args:
+        result: The command's result.
+
+    Returns:
+        The exit status line, then the ends of stdout and stderr, with a note when they are cut.
+    """
+    how = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+    out, err = result.stdout or "", result.stderr or ""
+    output = f"{how}\nstdout:\n{out}\nstderr:\n{err}"
+    if len(output) <= _TOOL_OUTPUT_CHARS:
+        return output
+    # The note's numbers vary, so the room keeps a fixed reserve for it instead of its exact length.
+    room = max(_TOOL_OUTPUT_CHARS - len(how) - len("\nstdout:\n\nstderr:\n\n") - _RUN_NOTE_CHARS, 0)
+    # Errors are usually at the end of each stream, so each keeps its end; stderr gets at least half the room.
+    err_kept = err[len(err) - min(len(err), max(room - len(out), room // 2)) :]
+    out_kept = out[len(out) - min(len(out), room - len(err_kept)) :]
+    note = (
+        f"[cut: kept the last {len(out_kept)} of {len(out)} stdout characters "
+        f"and the last {len(err_kept)} of {len(err)} stderr characters]"
+    )
+    return f"{how}\nstdout:\n{out_kept}\nstderr:\n{err_kept}\n{note}"
+
+
+class _AgentSession:
+    """Run ShinkaEvolve's agent editor on the engine loop: one tool session for each new version (SKY-830).
+
+    Each model reply is one committed ``model`` step and each ``run`` tool call one committed ``command`` step.
+    File reads and writes go to the loop's content-addressed trees, which are no steps, so a resume that
+    replays the steps rebuilds the same trees and the same messages.
+    """
+
+    def __init__(self, ctx: EngineContext, options: Any, servers: list[str]) -> None:
+        """Bind the session to the run's boxes, the proposer's hosts and the ``[proposer] mcp`` servers.
+
+        Args:
+            ctx: The run context; its ``repo_seed`` names the seed tree of a repository run.
+            options: The run's native options, with the proposer's tool-call limit and hosts.
+            servers: The names of the ``[proposer] mcp`` servers on the run's relay route.
+
+        Raises:
+            ServiceError: When the context has no boxes, or the options name no address for a server.
+        """
+        if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files, ctx.file_ids):
+            raise ServiceError("The ShinkaEvolve agent editor needs the engine loop's boxes.")
+        repo = (options.repo if options is not None else None) or {}
+        self.ctx = ctx
+        limit = getattr(getattr(options, "proposer", None), "max_tool_calls", None)
+        self.max_tool_calls = int(limit) if limit else None
+        known = {str(server["name"]): server for server in repo.get("proposer_mcp") or ()}
+        missing = sorted(set(servers) - set(known))
+        if missing:
+            raise ServiceError(f"The [proposer] mcp servers have no address in the run's options: {missing}.")
+        self.servers = {name: str(known[name]["url"]) for name in sorted(servers)}
+        mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
+        # A credential grant fails to resolve when the registry holds no headers for its host, so a server
+        # with no headers gets a plain grant.
+        credential_hosts = {
+            urlsplit(str(known[name]["url"])).hostname or "" for name in servers if known[name].get("has_headers")
+        }
+        gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
+        model_host = urlsplit(gateway).hostname
+        plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}
+        # The box never gets the gateway: the worker makes every model call. An MCP server's grant asks the
+        # provider edge to add the server's headers, so its secrets never enter the box (SKY-714).
+        self.grants = (
+            *(Grant(host) for host in sorted(plain_hosts | (mcp_hosts - credential_hosts))),
+            *(Grant(host, credential=True) for host in sorted(credential_hosts)),
+        )
+        self.seed = ctx.repo_seed.tree_id if ctx.repo_seed is not None else None
+        self.seed_ids = ctx.file_ids(self.seed) if self.seed is not None and ctx.file_ids is not None else {}
+
+    def edit(self, files: dict[str, str], task: str, charge: Callable[[Decimal], None]) -> dict[str, Any]:
+        """Run one session over the parent's files, and return the version it leaves.
+
+        Args:
+            files: The parent's files that differ from the seed, by path; a text run sends ``program.md``.
+            task: The agent's task, which ShinkaEvolve built from its mutation prompt.
+            charge: Adds the cost of each model call to the run's model cost.
+
+        Returns:
+            ``{"files", "text", "tool_calls", "tool_cap_reached"}``: the version's files, the agent's last
+            reply and the tool calls it spent; or ``{"error": ...}`` when a model call failed, the parent
+            could not be written, or the session added or changed more files than a tree listing holds.
+
+        Raises:
+            GrantError: When the loop cannot resolve the box's grants; every session would fail the same way.
+            Exception: Any stop of the loop, such as a budget stop.
+        """
+        assert self.ctx.call_model is not None
+        assert self.ctx.put_files is not None
+        try:
+            parent = self.ctx.put_files({path: text.encode() for path, text in files.items()}, self.seed)
+        except (ValueError, TreeRejectedError) as exc:
+            return {"error": f"The agent editor cannot write the parent's files: {exc}"}
+        tree = parent
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._system()},
+            {"role": "user", "content": task},
+        ]
+        calls = 0
+        text: str | None = None
+        cap_reached = False
+        while True:
+            if self.ctx.check_budget is not None:
+                self.ctx.check_budget()
+            try:
+                reply = self.ctx.call_model(messages, _AGENT_TOOLS)
+            except ModelCallFailedError as exc:
+                # The provider can bill a failed call, and its committed step keeps that cost on a replay.
+                charge(exc.cost_cents)
+                return {"error": f"The agent editor's model call failed: {exc}"}
+            charge(reply.cost_cents)
+            if not reply.tool_calls:
+                text = reply.text
+                break
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply.text or None,
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": (
+                                    call["arguments"]
+                                    if isinstance(call["arguments"], str)
+                                    else json.dumps(call["arguments"], sort_keys=True)
+                                ),
+                            },
+                        }
+                        for call in reply.tool_calls
+                    ],
+                }
+            )
+            for call in reply.tool_calls:
+                if self.max_tool_calls is not None and calls >= self.max_tool_calls:
+                    # The provider needs an answer to each call of the reply, but the session ends here.
+                    output = "The session reached its tool-call limit."
+                else:
+                    calls += 1
+                    output, tree = self._tool(call, tree)
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
+            if self.max_tool_calls is not None and calls >= self.max_tool_calls:
+                cap_reached = True
+                break
+        version = _tree_version(
+            self.ctx, tree, parent, files, self.seed_ids, self.seed_ids, shinka_bundle._MAX_TREE_ENTRIES
+        )
+        if version is None:
+            # The child reads the tool-call counts from every reply, an error reply too.
+            return {
+                "error": f"The agent editor's session added or changed more than {shinka_bundle._MAX_TREE_ENTRIES}"
+                " files. Make the agent write its tools and caches outside the repository, or remove them before"
+                " it ends.",
+                "tool_calls": calls,
+                "tool_cap_reached": cap_reached,
+            }
+        return {"files": version, "text": text, "tool_calls": calls, "tool_cap_reached": cap_reached}
+
+    def _system(self) -> str:
+        """Describe the tools, and the ``[proposer] mcp`` servers when the run has some.
+
+        Returns:
+            The session's system message.
+        """
+        text = _AGENT_SYSTEM
+        if self.servers:
+            listed = "\n".join(f"- {name}: {url}" for name, url in self.servers.items())
+            text += (
+                "\n\nThe run tool's box can call these MCP servers over HTTP (JSON-RPC). The network adds their "
+                f"credentials, so send no credentials yourself:\n{listed}"
+            )
+        return text
+
+    def _tool(self, call: Mapping[str, Any], tree: str) -> tuple[str, str]:
+        """Answer one tool call over the session's tree.
+
+        Args:
+            call: The tool call, in the loop's flat form.
+            tree: The session's current tree.
+
+        Returns:
+            The tool's output for the model, and the session's tree after the call.
+
+        Raises:
+            GrantError: When the loop cannot resolve the box's grants.
+        """
+        assert self.ctx.read_file is not None
+        assert self.ctx.list_files is not None
+        assert self.ctx.put_files is not None
+        assert self.ctx.run_command is not None
+        arguments = call["arguments"]
+        if not isinstance(arguments, dict):
+            return "The tool call's arguments are not a JSON object.", tree
+        name = call["name"]
+        value = {key: arguments.get(key) for key in ("path", "content", "command")}
+        try:
+            if name == "list_files":
+                listed = self.ctx.list_files(tree, str(value["path"] or ""))
+                return ("No such folder." if listed is None else _listing_output(listed)), tree
+            if name == "read_file" and isinstance(value["path"], str):
+                data = self.ctx.read_file(tree, value["path"])
+                if data is None:
+                    return "No such file.", tree
+                text = data.decode("utf-8", errors="replace")
+                if len(text) <= _TOOL_OUTPUT_CHARS:
+                    return text, tree
+                # Without the note, the model could write back only the part it saw and drop the rest.
+                return f"{text[:_TOOL_OUTPUT_CHARS]}\n[cut at {_TOOL_OUTPUT_CHARS} of {len(text)} characters]", tree
+            if name == "write_file" and isinstance(value["path"], str) and isinstance(value["content"], str):
+                return "Written.", self.ctx.put_files({value["path"]: value["content"].encode()}, tree)
+            if name == "run" and isinstance(value["command"], str):
+                if self.ctx.check_budget is not None:
+                    self.ctx.check_budget()
+                result, after = self.ctx.run_command(tree, value["command"], self.grants)
+                return _run_output(result), after
+        except GrantError:
+            # A grant the registry cannot resolve fails every session the same way, so it stops the run.
+            raise
+        except (ValueError, LookupError, TreeRejectedError) as exc:
+            # Such as a path a box may not write: the model gets the error and can correct its call.
+            return f"The tool call failed: {exc}", tree
+        return f"The tool call {name!r} is unknown or has malformed arguments.", tree
+
+
 class _Requests:
     """Answer the child's framed lines: evaluations and model calls, progress and logs."""
 
     def __init__(
-        self, task: Task, server: EvalServer, ctx: EngineContext, nonce: str, proposer: _Proposer | None = None
+        self,
+        task: Task,
+        server: EvalServer,
+        ctx: EngineContext,
+        nonce: str,
+        proposer: _Proposer | None = None,
+        agent: _AgentSession | None = None,
     ) -> None:
         """Bind the answers to the run.
 
@@ -749,9 +1094,11 @@ class _Requests:
             ctx: The run context.
             nonce: The framing token of the child's lines.
             proposer: Runs the contract file's ``[proposer] entry`` for each new version, or ``None``.
+            agent: Runs the agent editor's session for each new version, or ``None``.
         """
         self.task = task
         self.proposer = proposer
+        self.agent = agent
         self.server = server
         self.ctx = ctx
         self.nonce = nonce
@@ -880,7 +1227,8 @@ class _Requests:
             return {"id": request.get("id"), **self._model(request.get("messages"))}
         if request.get("kind") == "evaluate":
             return {"id": request.get("id"), **self._evaluate(request)}
-        if request.get("kind") == "propose" and self.proposer is not None:
+        kind = request.get("kind")
+        if (kind == "propose" and self.proposer is not None) or (kind == "agent" and self.agent is not None):
             files = request.get("files")
             task = request.get("task")
             if (
@@ -891,8 +1239,20 @@ class _Requests:
                 raise ServiceError("ShinkaEvolve sent a malformed proposal.")
             if self.ctx.check_budget is not None:
                 self.ctx.check_budget()
+            if kind == "agent":
+                assert self.agent is not None
+                return {"id": request.get("id"), **self.agent.edit(files, task, self._charge)}
+            assert self.proposer is not None
             return {"id": request.get("id"), **self.proposer.propose(files, task)}
         raise ServiceError("ShinkaEvolve sent an unknown request.")
+
+    def _charge(self, cents: Decimal) -> None:
+        """Add one model call's cost to the run's model cost.
+
+        Args:
+            cents: The call's cost in cents.
+        """
+        self.cost_cents += cents
 
     def _model(self, messages: Any) -> dict[str, Any]:
         """Call the loop's model: the reply is one committed step, and its cost adds to the run's.

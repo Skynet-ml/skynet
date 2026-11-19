@@ -2779,3 +2779,180 @@ def test_the_command_editors_git_runs_no_hook_and_no_fsmonitor(tmp_path: Path) -
 
     assert success is True
     assert not marker.exists()
+
+
+def test_on_the_engine_loop_novelty_needs_no_embedding_route_and_no_key(tmp_path: Path) -> None:
+    """Turn novelty on with no embedding model and a judge route without a key, which the worker answers (SKY-830).
+
+    Args:
+        tmp_path: Results directory.
+    """
+    settings = BlackboxShinkaSettings(novelty=True).model_dump()
+    evolution = shinka_runner.build_config(_payload(transport="stdio", shinka=settings), str(tmp_path), 1)["evolution"]
+
+    assert evolution["embedding_model"] is None
+    assert evolution["novelty_llm_models"] == ["local/claude-test@https://gw.example/v1"]
+
+
+def test_the_local_embedder_gives_the_same_unit_vector_for_the_same_text() -> None:
+    """Embed only from the text, so a resume compares the same vectors (SKY-830)."""
+    embedder = shinka_runner.LocalEmbedder()
+    first = embedder.embed("def score(x):\n    return x * 2\n")
+    near = embedder.embed("def score(x):\n    return x * 3\n")
+    far = embedder.embed("SELECT name FROM users WHERE id = 1;")
+
+    assert first == embedder.embed("def score(x):\n    return x * 2\n")
+    assert asyncio.run(embedder.embed_async("def score(x):\n    return x * 2\n")) == (first, 0.0)
+    assert np.isclose(np.linalg.norm(first), 1.0)
+    assert np.dot(first, near) > 0.8 > np.dot(first, far)
+    assert embedder.embed("ab") == [0.0] * embedder.dimensions
+
+
+def test_the_local_embedder_gives_fixed_vectors_in_every_process() -> None:
+    """Pin one vector, so a per-process hash such as ``hash()`` cannot replace the stable digest (SKY-830).
+
+    A resume runs in a new process; with a salted hash, its vectors would differ from the archive's.
+    """
+    vector = shinka_runner.LocalEmbedder().embed("abcabc")
+
+    # Trigrams abc (twice), bca and cab, scaled to unit length.
+    assert {index: value for index, value in enumerate(vector) if value} == pytest.approx(
+        {72: 2 / np.sqrt(6), 400: 1 / np.sqrt(6), 459: 1 / np.sqrt(6)}
+    )
+
+
+@pytest.mark.parametrize("settings", [{"editor": "agent", "novelty": True}, {"novelty": True}, {"editor": "agent"}, {}])
+def test_on_the_engine_loop_execute_installs_the_loop_agent_editor_and_the_local_embedder(
+    settings: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write versions through the worker's agent session and embed locally, only when the run asks (SKY-830).
+
+    Args:
+        settings: The run's ShinkaEvolve settings, over the defaults.
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream and the reply stream.
+    """
+    runners: list[_IdleRunner] = []
+    editors: list[Any] = []
+
+    def runner(**fields: Any) -> _IdleRunner:
+        """Build an idle runner and record it.
+
+        Args:
+            **fields: Upstream's runner arguments.
+
+        Returns:
+            The runner.
+        """
+        runners.append(_IdleRunner(**fields))
+        return runners[-1]
+
+    monkeypatch.chdir(tmp_path)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "install_agent_editor", lambda editor, runner: editors.append(editor))
+    monkeypatch.setattr(shinka_runner, "seed_randomness", lambda seed: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    shinka_runner.execute(
+        _payload(
+            nonce="testnonce",
+            timeout_seconds=5.0,
+            transport="stdio",
+            shinka=BlackboxShinkaSettings(**settings).model_dump(),
+            task={"seed_candidate": "seed", "train_set": []},
+        )
+    )
+
+    if settings.get("editor") == "agent":
+        assert [type(editor) for editor in editors] == [shinka_runner.LoopAgentEditor]
+    else:
+        assert editors == []
+    if settings.get("novelty"):
+        assert isinstance(runners[0].embedding_client, shinka_runner.LocalEmbedder)
+    else:
+        assert not hasattr(runners[0], "embedding_client")
+
+
+def _install_loop_agent_editor(tmp_path: Path, mailbox: _ProposalMailbox) -> Any:
+    """Make a stand-in upstream runner write each text version with the loop's agent editor.
+
+    Args:
+        tmp_path: Run folder.
+        mailbox: The fake worker.
+
+    Returns:
+        The runner.
+    """
+    editor = shinka_runner.LoopAgentEditor(mailbox, tmp_path, ledger=shinka_runner.UsageLedger(None), bundle=None)
+    runner = SimpleNamespace(
+        llm=SimpleNamespace(get_kwargs=lambda model_sample_probs=None: {"model_name": _EDITOR_MODEL}),
+        llm_selection=_Selection(),
+        prompt_sampler=SimpleNamespace(
+            task_sys_msg="TASK",
+            use_text_feedback=True,
+            sample=lambda **_: ("TASK", "Current program\n\n# Task\nRewrite it.", "full"),
+        ),
+        results_dir=str(tmp_path / "results"),
+    )
+    shinka_runner.install_agent_editor(editor, runner)
+    return runner
+
+
+def test_the_loop_agent_editor_files_the_text_version_the_session_leaves(tmp_path: Path) -> None:
+    """Send a text parent as ``program.md``, and file the session's ``program.md`` with its name and tool use (SKY-830).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    parent = shinka_runner.pack_program("Answer briefly.")
+    child = shinka_runner.pack_program("Answer in one line.")
+    mailbox = _ProposalMailbox(
+        {
+            "files": {"program.md": child, "notes.txt": "scratch"},
+            "text": "Name: shorter\nDescription: Ask for one line.",
+            "tool_calls": 7,
+            "tool_cap_reached": True,
+        }
+    )
+    runner = _install_loop_agent_editor(tmp_path, mailbox)
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(SimpleNamespace(code=parent), [], [], 3))
+
+    assert success is True
+    [(kind, fields)] = mailbox.requests
+    assert (kind, fields["files"]) == ("agent", {"program.md": parent})
+    assert "+Answer in one line." in patch
+    assert (tmp_path / "results" / "gen_3" / "main.md").read_text() == child
+    assert (meta["patch_name"], meta["patch_description"], meta["tool_calls"], meta["tool_cap_reached"]) == (
+        "shorter",
+        "Ask for one line.",
+        7,
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"files": {"notes.txt": "x"}}, "The agent editor left no program.md."),
+        ({"files": {".git/config": "x"}}, "The agent editor may not write Git metadata: '.git/config'."),
+        ({"error": "The agent editor's model call failed: boom"}, "The agent editor's model call failed: boom"),
+    ],
+)
+def test_the_loop_agent_editor_reports_a_failed_attempt(reply: dict[str, Any], error: str, tmp_path: Path) -> None:
+    """Hand upstream a failed attempt, named for the agent editor, when the session left no usable version.
+
+    Args:
+        reply: The worker's reply.
+        error: The attempt's error.
+        tmp_path: Run folder.
+    """
+    runner = _install_loop_agent_editor(tmp_path, _ProposalMailbox(reply))
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(SimpleNamespace(code="Answer briefly.\n"), [], [], 1))
+
+    assert (patch, success, meta["last_error_msg"]) == (None, False, error)
+    assert not (tmp_path / "results" / "gen_1").exists()

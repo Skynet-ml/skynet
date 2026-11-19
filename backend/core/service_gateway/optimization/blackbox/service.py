@@ -1405,6 +1405,7 @@ def _run_job(
                     "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
                     "file_proposer": bool(repo_snapshot.get("file_proposer")),
                     "proposer_setup": list(repo_snapshot.get("proposer_setup") or ()),
+                    "proposer_mcp": [dict(server) for server in repo_snapshot.get("proposer_mcp") or ()],
                 }
                 if target.repo is not None and repo_snapshot is not None
                 else None

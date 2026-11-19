@@ -544,6 +544,12 @@ def stage_repository(
         "outcome": record["outcome"],
         "file_proposer": environment.proposer_entry is not None,
         "proposer_setup": list(environment.proposer_setup or ()),
+        # Names, addresses and a has-headers flag only: an engine that calls the servers from a box grants their
+        # hosts, and the provider edge adds the headers, so their secrets stay out of the run's options (SKY-830).
+        "proposer_mcp": [
+            {"name": server.name, "url": server.url, "has_headers": bool(server.headers)}
+            for server in (environment.constraints.proposer.mcp_servers if environment.constraints is not None else ())
+        ],
     }
     return result, StagedRepository(
         snapshot=snapshot,

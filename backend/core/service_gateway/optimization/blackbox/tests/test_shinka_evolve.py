@@ -33,6 +33,7 @@ from sqlalchemy.engine import Engine
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
+from core.i18n import t
 from core.sandbox.grants import Grant, UnknownCapabilityError
 from core.sandbox.trees import GrantDeniedError
 from core.service_gateway.optimization.blackbox import sandbox_log, shinka_bundle, shinka_evolve
@@ -40,6 +41,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
     EngineContext,
     EvalServer,
+    ModelReply,
     RepoSeed,
     Result,
     Task,
@@ -49,7 +51,7 @@ from core.service_gateway.optimization.budget_stop import BudgetReached
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import LoopStoppedError, ModelCallFailedError
+from core.worker.engine_loop import LoopStoppedError, ModelCallBilledError, ModelCallFailedError
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     _KINDS,
@@ -395,18 +397,44 @@ def test_a_run_killed_in_a_model_call_resumes_from_its_last_committed_step(
     assert [generation for _, _, generation in steps] == [1] * 5 + [2] * 3
 
 
-@pytest.mark.parametrize(
-    ("settings", "refusal"),
-    [({"novelty": True}, "novelty"), ({"editor": "agent"}, "agent editor")],
-)
-def test_a_feature_the_worker_does_not_run_yet_is_refused_before_any_step(
-    settings: dict[str, object], refusal: str, tmp_path: Path
+@pytest.mark.parametrize("settings", [{"novelty": True}, {"editor": "agent"}])
+def test_novelty_rejection_and_the_agent_editor_run_on_the_engine_loop(
+    settings: dict[str, object],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse novelty rejection and the agent editor, which need model routes the loop does not give.
+    """Run novelty rejection and the agent editor on the loop, with no refusal and no sandbox fallback (SKY-830).
 
     Args:
         settings: The run's ShinkaEvolve settings.
-        refusal: Words the refusal names.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Fails the test on a sandbox run.
+    """
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    options = SimpleNamespace(shinka=settings, budget_route=None, repo=None, shinka_models=None, model="m")
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    result = ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+        Task("seed"), loop.server(scorer, max_evals=10), loop.context(max_iterations=2, native_options=options)
+    )
+
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)
+    assert [kind for _, kind, _ in _steps(engine)] == _KINDS
+
+
+def test_proposer_mcp_servers_without_the_agent_editor_are_refused_before_any_step(tmp_path: Path) -> None:
+    """Refuse ``[proposer] mcp`` servers unless the agent editor runs, since no other mutation uses tools (SKY-830).
+
+    Args:
         tmp_path: Pytest's temporary folder.
     """
     calls: list[object] = []
@@ -414,10 +442,36 @@ def test_a_feature_the_worker_does_not_run_yet_is_refused_before_any_step(
         reflection_lm=calls.append,
         run_dir=str(tmp_path),
         call_model=lambda prompt, tools: calls.append(prompt),  # type: ignore[arg-type,return-value]
-        native_options=SimpleNamespace(shinka=settings, budget_route=None),  # type: ignore[arg-type]
+        native_options=SimpleNamespace(  # type: ignore[arg-type]
+            shinka={"novelty": True}, budget_route={MCP_RELAY_ROUTE_KEY: {"servers": ["docs"]}}, repo=None
+        ),
     )
 
-    with pytest.raises(ServiceError, match=refusal):
+    with pytest.raises(ServiceError, match=r"\[proposer\] mcp servers only with its agent editor"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5), ctx
+        )
+    assert calls == []
+    assert not (tmp_path / "shinka_evolve").exists()
+
+
+def test_proposer_services_with_the_agent_editor_are_refused_before_any_step(tmp_path: Path) -> None:
+    """Refuse ``[proposer] services`` with the agent editor, whose box cannot reach them (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls: list[object] = []
+    ctx = EngineContext(
+        reflection_lm=calls.append,
+        run_dir=str(tmp_path),
+        call_model=lambda prompt, tools: calls.append(prompt),  # type: ignore[arg-type,return-value]
+        native_options=SimpleNamespace(  # type: ignore[arg-type]
+            shinka={"editor": "agent"}, budget_route={MCP_RELAY_ROUTE_KEY: {"services": ["db"]}}, repo=None
+        ),
+    )
+
+    with pytest.raises(ServiceError, match=r"agent editor cannot give the \[proposer\] services"):
         ShinkaEvolveEngine(_fake_python(tmp_path)).run(
             Task("seed"), EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5), ctx
         )
@@ -721,37 +775,33 @@ def test_a_child_that_fails_before_any_scored_version_fails_the_run(
         )
 
 
-def test_a_worker_without_the_shinka_interpreter_runs_the_engine_in_the_sandbox(
+def test_a_worker_without_the_shinka_interpreter_fails_the_loop_run_with_a_clear_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fall back to the sandbox runtime when the worker image holds no ``shinka-evolve`` interpreter.
+    """Fail a loop run when the worker image holds no ``shinka-evolve`` interpreter, with no sandbox run (SKY-830).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Replaces ``run_native_engine``.
+        monkeypatch: Fails the test on a sandbox run.
     """
-    expected = Result(best_candidate="seed", best_score=1.0, total_evals=1)
-    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
+    calls: list[object] = []
+    server = EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5)
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=lambda messages, tools: calls.append(messages),  # type: ignore[arg-type,return-value]
+        native_options=SimpleNamespace(  # type: ignore[arg-type]
+            shinka={"editor": "agent"}, budget_route=None, repo=None
+        ),
+    )
 
-    def native(*args: object) -> Result:
-        """Record the sandbox call.
+    with pytest.raises(ServiceError) as raised:
+        ShinkaEvolveEngine(str(tmp_path / "missing" / "python")).run(Task("seed"), server, ctx)
 
-        Args:
-            *args: ``run_native_engine``'s arguments.
-
-        Returns:
-            The sandbox run's result.
-        """
-        calls.append(args)
-        return expected
-
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", native)
-    task = Task("seed")
-    server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=5)
-    ctx = EngineContext(reflection_lm=lambda prompt: "", run_dir=str(tmp_path), call_model=lambda messages, tools: None)
-
-    assert ShinkaEvolveEngine(str(tmp_path / "missing" / "python")).run(task, server, ctx) is expected
-    assert calls == [("shinka_evolve", task, server, ctx)]
+    assert str(raised.value) == t("blackbox.shinka_interpreter_missing")
+    assert str(raised.value) != "blackbox.shinka_interpreter_missing"
+    assert calls == []
     assert not (tmp_path / "shinka_evolve").exists()
 
 
@@ -2838,3 +2888,727 @@ def test_a_proposal_checks_the_budget_before_the_command_runs(tmp_path: Path) ->
     with pytest.raises(BudgetReached):
         _propose(requests, "1", {"main.py": "parent\n"}, "task")
     assert commands == []
+
+
+class _ScriptedAgent:
+    """A fake agent model: the reply for each turn comes from a script, by the turn's number (SKY-830).
+
+    The turn is the number of assistant messages in the prompt, so a resumed run asks for the same replies.
+    """
+
+    def __init__(self, script: list[ModelReply | Exception], die_at: int | None = None) -> None:
+        """Set the replies.
+
+        Args:
+            script: The reply, or the error to raise, for each turn.
+            die_at: The turn in which the worker dies; ``None`` never dies.
+        """
+        self.script = script
+        self.die_at = die_at
+        self.prompts: list[list[dict[str, Any]]] = []
+        self.tools: list[object] = []
+
+    def __call__(self, prompt: list[dict[str, Any]], tools: object) -> ModelReply:
+        """Answer one turn from the script.
+
+        Args:
+            prompt: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            The turn's reply.
+
+        Raises:
+            _WorkerDiedError: In the turn at ``die_at``.
+            Exception: The turn's scripted error.
+        """
+        turn = sum(1 for message in prompt if message["role"] == "assistant")
+        if turn == self.die_at:
+            raise _WorkerDiedError
+        # The session appends to the same list, so keep the messages as this call saw them.
+        self.prompts.append(list(prompt))
+        self.tools.append(tools)
+        reply = self.script[turn]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def _call(index: int, name: str, **arguments: str) -> dict[str, Any]:
+    """Build one tool call in the loop's flat form.
+
+    Args:
+        index: The call's number.
+        name: The tool.
+        **arguments: The tool's arguments.
+
+    Returns:
+        The call.
+    """
+    return {"id": f"call_{index}", "name": name, "arguments": arguments}
+
+
+_EDIT_SCRIPT: list[ModelReply | Exception] = [
+    ModelReply("", Decimal(1), [_call(0, "read_file", path="main.py")]),  # type: ignore[list-item]
+    ModelReply(
+        "",
+        Decimal(1),
+        [  # type: ignore[list-item]
+            _call(1, "write_file", path="main.py", content="child\n"),
+            _call(2, "run", command="cp main.py out.txt"),
+        ],
+    ),
+    ModelReply("Name: copy\nDescription: Copy the program.", Decimal(1)),
+]
+
+
+def _agent_options(**repo: object) -> SimpleNamespace:
+    """Build native options for the agent editor.
+
+    Args:
+        **repo: Repository option fields that replace the defaults.
+
+    Returns:
+        The options.
+    """
+    return SimpleNamespace(
+        shinka={"editor": "agent"},
+        budget_route=None,
+        repo={"proposer_hosts": [], "proposer_mcp": [], **repo},
+        proposer=SimpleNamespace(max_tool_calls=None),
+        gateway=None,
+    )
+
+
+def _agent_request(requests: shinka_evolve._Requests, files: dict[str, str], task: str) -> dict:
+    """Send one ``agent`` request as the child's agent editor does, and read the reply.
+
+    Args:
+        requests: The engine's request handler.
+        files: The parent's files.
+        task: The agent's task.
+
+    Returns:
+        The reply.
+    """
+    replies = io.StringIO()
+    body = json.dumps({"id": "1", "kind": "agent", "files": files, "task": task})
+    assert requests.line(f"APP_NATIVE_RPC n {body}", replies) is True
+    return json.loads(replies.getvalue())
+
+
+def _agent_requests(loop: Any, trees: TreeStore) -> shinka_evolve._Requests:
+    """Build a request handler whose agent editor runs on the loop over a one-file seed.
+
+    Args:
+        loop: The engine loop.
+        trees: The tree store.
+
+    Returns:
+        The handler.
+    """
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    session = shinka_evolve._AgentSession(ctx, _agent_options(), [])
+    server = loop.server(lambda *args: (1.0, {}), max_evals=5)
+    return shinka_evolve._Requests(Task("seed"), server, ctx, "n", agent=session)
+
+
+def test_each_agent_reply_is_a_model_step_and_each_run_call_a_command_step(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Run the agent editor's tool session on the loop, and send the files it leaves back as the version (SKY-830).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    model = _ScriptedAgent(_EDIT_SCRIPT)
+    loop._model = model
+    requests = _agent_requests(loop, trees)
+
+    reply = _agent_request(requests, {"main.py": "parent\n"}, "Improve main.py.")
+
+    assert reply == {
+        "id": "1",
+        "files": {"main.py": "child\n", "out.txt": "child\n"},
+        "text": "Name: copy\nDescription: Copy the program.",
+        "tool_calls": 3,
+        "tool_cap_reached": False,
+    }
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command", "model"]
+    assert requests.cost_cents == 3
+    # The model reads the parent's file, not the seed's, and sees the run's exit code.
+    assert model.prompts[1][-1] == {"role": "tool", "tool_call_id": "call_0", "content": "parent\n"}
+    assert model.prompts[2][-1]["content"].startswith("exit code 0")
+    assert model.tools == [shinka_evolve._AGENT_TOOLS] * 3
+    assert boxes.opened == 1
+    assert not any(boxes.open.values())
+
+
+def test_an_agent_session_killed_in_a_model_call_resumes_from_its_last_committed_step(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Kill the worker in the session's last model call, then resume: the log replays, only the last call runs.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    first._model = _ScriptedAgent(_EDIT_SCRIPT, die_at=2)
+    with pytest.raises(_WorkerDiedError):
+        _agent_request(_agent_requests(first, trees), {"main.py": "parent\n"}, "Improve main.py.")
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model", "command"]
+
+    _new_generation(engine)
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    model = _ScriptedAgent(_EDIT_SCRIPT)
+    loop._model = model
+    requests = _agent_requests(loop, trees)
+    reply = _agent_request(requests, {"main.py": "parent\n"}, "Improve main.py.")
+
+    assert reply["files"] == {"main.py": "child\n", "out.txt": "child\n"}
+    assert len(model.prompts) == 1
+    assert boxes.opened == 0
+    assert [generation for _, _, generation in _steps(engine)] == [1, 1, 1, 2]
+    # The replayed steps keep their cost.
+    assert requests.cost_cents == 3
+
+
+def test_a_billed_failed_agent_call_charges_its_cost_and_fails_only_the_mutation(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Add a failed call's billed cost to the run's model cost, and send the failure back as the mutation's error.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    loop._model = _ScriptedAgent([_EDIT_SCRIPT[0], ModelCallBilledError("1.5")])
+    requests = _agent_requests(loop, trees)
+
+    reply = _agent_request(requests, {"main.py": "parent\n"}, "task")
+
+    assert reply["error"].startswith("The agent editor's model call failed")
+    assert requests.cost_cents == Decimal("2.5")
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model"]
+
+
+def test_a_budget_stop_in_an_agent_session_stops_the_run_before_the_next_command(tmp_path: Path) -> None:
+    """Let a budget stop before a ``run`` call leave the session, with no command run (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    checks: list[int] = []
+    commands: list[object] = []
+    models: list[object] = []
+
+    def check_budget() -> None:
+        """Stop at the third check: the one before the first command.
+
+        Raises:
+            BudgetReached: At the third check.
+        """
+        checks.append(1)
+        if len(checks) == 3:
+            raise BudgetReached
+
+    def call_model(messages: object, tools: object) -> ModelReply:
+        """Ask for one command.
+
+        Args:
+            messages: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            A reply with one ``run`` call.
+        """
+        models.append(messages)
+        return ModelReply("", Decimal(1), [_call(0, "run", command="true")])  # type: ignore[list-item]
+
+    options = _agent_options()
+    ctx = _box_context(
+        options, tmp_path, check_budget=check_budget, call_model=call_model, run_command=lambda *a: commands.append(a)
+    )
+    requests = shinka_evolve._Requests(
+        Task("seed"),
+        EvalServer(lambda *a: (1.0, {}), max_evals=5),
+        ctx,
+        "n",
+        agent=shinka_evolve._AgentSession(ctx, options, []),
+    )
+
+    with pytest.raises(BudgetReached):
+        _agent_request(requests, {"main.py": "parent\n"}, "task")
+    assert (len(models), commands) == (1, [])
+
+
+def test_an_agent_session_ends_at_the_tool_call_limit(tmp_path: Path) -> None:
+    """Answer each call past the limit with the limit's note, end the session and mark the cap (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    models: list[list[dict[str, Any]]] = []
+
+    def call_model(messages: list[dict[str, Any]], tools: object) -> ModelReply:
+        """Ask for two listings.
+
+        Args:
+            messages: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            A reply with two calls.
+        """
+        models.append(messages)
+        calls = [_call(0, "list_files", path=""), _call(1, "list_files", path="")]
+        return ModelReply("", Decimal(1), calls)  # type: ignore[arg-type]
+
+    options = _agent_options()
+    options.proposer.max_tool_calls = 1
+    ctx = _box_context(options, tmp_path, call_model=call_model, list_files=lambda *a: ["main.py"])
+
+    result = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert result == {"files": {}, "text": None, "tool_calls": 1, "tool_cap_reached": True}
+    assert len(models) == 1
+
+
+def test_an_agent_session_at_the_tool_call_limit_keeps_the_files_it_wrote(tmp_path: Path) -> None:
+    """Return the version the session wrote before the limit, not the parent's files (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def call_model(messages: list[dict[str, Any]], tools: object) -> ModelReply:
+        """Write a file, then ask for a listing past the limit.
+
+        Args:
+            messages: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            A reply with two calls.
+        """
+        calls = [_call(0, "write_file", path="new.py", content="new\n"), _call(1, "list_files", path="")]
+        return ModelReply("", Decimal(1), calls)  # type: ignore[arg-type]
+
+    def put_files(files: dict[str, bytes], base: str | None) -> str:
+        """Name the parent's tree, or the tree after the write.
+
+        Args:
+            files: The files to write.
+            base: The tree the files go on.
+
+        Returns:
+            The new tree.
+        """
+        return "parent" if base == "tree" else "child"
+
+    ids = {"child": {"new.py": "new-oid"}}
+    options = _agent_options()
+    options.proposer.max_tool_calls = 1
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=call_model,
+        put_files=put_files,
+        file_ids=lambda tree: ids.get(tree, {}),
+        read_file=lambda tree, path: b"new\n" if (tree, path) == ("child", "new.py") else None,
+    )
+
+    result = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert result == {"files": {"new.py": "new\n"}, "text": None, "tool_calls": 1, "tool_cap_reached": True}
+
+
+def test_an_agent_run_that_leaves_too_many_files_is_an_error_with_no_read(tmp_path: Path) -> None:
+    """Fail the session whose ``run`` adds more files than a tree listing holds, before any read (SKY-830).
+
+    An agent that runs ``npm install`` leaves thousands of ignored files in the session's tree.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    replies = [
+        ModelReply("", Decimal(1), [_call(0, "run", command="npm install")]),  # type: ignore[list-item]
+        ModelReply("done", Decimal(1), []),
+    ]
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}}
+    reads: list[str] = []
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: replies.pop(0),
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert reply == {
+        "error": f"The agent editor's session added or changed more than {shinka_bundle._MAX_TREE_ENTRIES} files."
+        " Make the agent write its tools and caches outside the repository, or remove them before it ends.",
+        "tool_calls": 1,
+        "tool_cap_reached": False,
+    }
+    assert reads == []
+
+
+def test_an_agent_run_past_the_file_cap_at_the_tool_call_limit_reports_the_cap(tmp_path: Path) -> None:
+    """Mark the tool-call cap in the error reply of a session that ends at the limit with too many files (SKY-830).
+
+    The child reads the tool-call counts from every reply, an error reply too.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}}
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    options.proposer.max_tool_calls = 1
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: ModelReply("", Decimal(1), [_call(0, "run", command="npm install")]),  # type: ignore[list-item]
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert "error" in reply
+    assert reply["tool_calls"] == 1
+    assert reply["tool_cap_reached"] is True
+
+
+def test_an_agent_run_that_leaves_exactly_the_file_cap_is_read_in_full(tmp_path: Path) -> None:
+    """Read every file of a session whose ``run`` changes exactly as many files as a tree listing holds (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    replies = [
+        ModelReply("", Decimal(1), [_call(0, "run", command="node gen.js")]),  # type: ignore[list-item]
+        ModelReply("done", Decimal(1), []),
+    ]
+    paths = [f"gen/m{index}.js" for index in range(shinka_bundle._MAX_TREE_ENTRIES)]
+    trees = {"after": {path: path for path in paths}}
+    reads: list[str] = []
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: replies.pop(0),
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert reply == {
+        "files": dict.fromkeys(paths, "text\n"),
+        "text": "done",
+        "tool_calls": 1,
+        "tool_cap_reached": False,
+    }
+    assert sorted(reads) == sorted(paths)
+
+
+@pytest.mark.parametrize(
+    ("first", "cut"), [(shinka_evolve._TOOL_OUTPUT_CHARS - 2, False), (shinka_evolve._TOOL_OUTPUT_CHARS - 1, True)]
+)
+def test_a_file_list_is_cut_only_when_its_joined_text_passes_the_output_limit(first: int, cut: bool) -> None:
+    """Keep a list that joins to exactly the output limit, and cut one that joins to one character more (SKY-830).
+
+    The newlines go only between paths, so the joined text has one character fewer than the paths with a
+    newline each.
+
+    Args:
+        first: The length of the first path; the second path is one character, with a newline between them.
+        cut: Whether the list is cut.
+    """
+    listed = ["a" * first, "b"]
+
+    text = shinka_evolve._listing_output(listed)
+
+    if cut:
+        assert text == f"{listed[0]}\n[cut: 1 of 2 files; use the run tool, for example find]"
+    else:
+        assert text == "\n".join(listed)
+        assert len(text) == shinka_evolve._TOOL_OUTPUT_CHARS
+
+
+def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gateway(tmp_path: Path) -> None:
+    """Grant an MCP host with headers with ``credential=True``, so the edge adds them and no secret enters the box.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_mcp=[
+            {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
+            {"name": "unused", "url": "https://x.test", "has_headers": True},
+        ],
+    )
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["docs"])
+
+    assert session.grants == (Grant("pypi.org"), Grant("mcp.test", credential=True))
+    assert "- docs: https://mcp.test/mcp" in session._system()
+    assert "unused" not in session._system()
+    with pytest.raises(ServiceError, match="no address"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["missing"])
+
+
+def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) -> None:
+    """Send the session's grants with each ``run`` call, so the box reaches its hosts and never the gateway (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    sent: list[object] = []
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Record the grants and succeed.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A clean result and the tree after the command.
+        """
+        sent.append(grants)
+        return SimpleNamespace(timed_out=False, exit_code=0, stdout="ok", stderr=""), "after"
+
+    options = _agent_options(
+        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_mcp=[{"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True}],
+    )
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, ["docs"])
+
+    _, tree = session._tool(_call(0, "run", command="true"), "tree")
+
+    assert tree == "after"
+    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True))]
+
+
+def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(tmp_path: Path) -> None:
+    """Grant a public MCP server's host plainly, since a credential grant with no headers fails to resolve.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=["pypi.org"],
+        proposer_mcp=[
+            {"name": "public", "url": "https://open.test/mcp", "has_headers": False},
+            {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
+        ],
+    )
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["public", "docs"])
+
+    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True))
+
+
+def test_read_file_marks_a_file_it_cuts_so_the_agent_does_not_write_back_a_part(tmp_path: Path) -> None:
+    """Say where and how much ``read_file`` cut, since ``write_file`` replaces the whole file (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    files = {"long.py": b"a" * size + b"tail", "short.py": b"b" * size}
+    options = _agent_options()
+    ctx = _box_context(options, tmp_path, read_file=lambda tree, path: files.get(path))
+    session = shinka_evolve._AgentSession(ctx, options, [])
+
+    long_text, _ = session._tool(_call(0, "read_file", path="long.py"), "tree")
+    short_text, _ = session._tool(_call(1, "read_file", path="short.py"), "tree")
+
+    assert long_text == "a" * size + f"\n[cut at {size} of {size + 4} characters]"
+    assert short_text == "b" * size
+
+
+def test_list_files_cuts_a_long_list_at_whole_lines_with_a_note(tmp_path: Path) -> None:
+    """Cut a file list over the output limit at a whole line, and say how many files it kept (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    listed = [f"src/file_{index:05d}.py" for index in range(size // 10)]
+    options = _agent_options()
+    ctx = _box_context(options, tmp_path, list_files=lambda tree, path: listed)
+    session = shinka_evolve._AgentSession(ctx, options, [])
+
+    text, _ = session._tool(_call(0, "list_files", path=""), "tree")
+
+    body, note = text.rsplit("\n", 1)
+    kept = body.split("\n")
+    assert len(body) <= size
+    assert kept == listed[: len(kept)]
+    assert len(kept) < len(listed)
+    assert note == f"[cut: {len(kept)} of {len(listed)} files; use the run tool, for example find]"
+
+
+def test_the_agent_run_tool_keeps_the_exit_code_and_the_output_ends_when_it_cuts(tmp_path: Path) -> None:
+    """Keep the exit code line and the end of each stream when a ``run`` output is over the limit (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    stdout = "s" * (2 * size) + "stdout end"
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Fail with a long stdout.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A failed result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=False, exit_code=3, stdout=stdout, stderr="the error"), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="true"), "tree")
+
+    assert len(text) <= size
+    assert text.startswith("exit code 3\nstdout:\ns")
+    assert "stdout end\nstderr:\nthe error\n" in text
+    kept = text.split("\nstdout:\n", 1)[1].split("\nstderr:\n", 1)[0]
+    assert text.endswith(
+        f"[cut: kept the last {len(kept)} of {len(stdout)} stdout characters and the last 9 of 9 stderr characters]"
+    )
+
+
+def test_the_agent_run_tool_keeps_the_end_of_a_long_stderr_next_to_a_long_stdout(tmp_path: Path) -> None:
+    """Keep the end of both streams, with at least half the room for stderr, when both are long (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    stdout = "s" * (2 * size) + "stdout end"
+    stderr = "e" * (2 * size) + "stderr end"
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Fail with a long stdout and a long stderr.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A failed result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=False, exit_code=1, stdout=stdout, stderr=stderr), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="true"), "tree")
+
+    out_kept, rest = text.split("\nstdout:\n", 1)[1].split("\nstderr:\n", 1)
+    err_kept = rest.rsplit("\n[cut: ", 1)[0]
+    assert len(text) <= size
+    assert out_kept.endswith("stdout end")
+    assert err_kept.endswith("stderr end")
+    assert len(err_kept) >= (len(out_kept) + len(err_kept)) // 2
+
+
+def test_the_agent_run_tool_says_a_command_timed_out_instead_of_an_exit_code(tmp_path: Path) -> None:
+    """Report a timed-out command as timed out, since its exit code is not the command's own (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Time out.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A timed-out result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=True, exit_code=124, stdout="partial", stderr=""), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="sleep 999"), "tree")
+
+    assert text.split("\n", 1)[0] == "timed out"
+    assert "exit code" not in text
+
+
+def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: Path) -> None:
+    """Stop the run, not the mutation, when the loop cannot resolve the box's grants (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def refuse(*args: object) -> None:
+        """Refuse the grants as the loop does.
+
+        Args:
+            args: The command's tree, script and grants.
+
+        Raises:
+            UnknownCapabilityError: Always.
+        """
+        raise UnknownCapabilityError("mcp.test")
+
+    options = _agent_options()
+    ctx = _box_context(
+        options,
+        tmp_path,
+        run_command=refuse,
+        call_model=lambda *a: ModelReply("", Decimal(1), [_call(0, "run", command="true")]),  # type: ignore[list-item]
+    )
+
+    with pytest.raises(UnknownCapabilityError):
+        shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
