@@ -481,7 +481,7 @@ class _VersionRuntime(_SnapshotRuntime):
         return box
 
 
-def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[list[float], list[bool]]:
+def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[list[float | None], list[bool]]:
     """Score two different versions with a repository scorer that runs ``src/run.py`` in its candidate boxes.
 
     The first version adds ``src/one.py``, the second adds ``src/two.py``.
@@ -492,7 +492,7 @@ def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[li
         first: The first version's input; the second version's input is ``ok``.
 
     Returns:
-        The two scores, and the close state of every box after the scores and before the scorer closes.
+        The two scores (``None`` for a failed run), and the close state of every box before the scorer closes.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.py": _RUN})
     versions = [
@@ -501,7 +501,7 @@ def _score_two(tmp_path: Path, runtime: _VersionRuntime, first: str) -> tuple[li
     ]
     scorer = RepoScorer(
         _space(archive, runtime),
-        "def score(repo_path, case, output):\n    return 1.0, 'ran'\n",
+        "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n",
         timeout_seconds=60,
         run_entry="src/run.py:run",
         run_timeout=5.0,
@@ -562,7 +562,7 @@ def test_each_scored_version_runs_in_a_new_candidate_box_from_the_snapshot(tmp_p
 
     scores, closed = _score_two(tmp_path, runtime, first)
 
-    assert scores == [0.0 if first != "ok" else 1.0, 1.0]
+    assert scores == [None if first != "ok" else 1.0, 1.0]
     _assert_own_box_per_version(runtime, closed)
     assert [box.spec.snapshot_id for box in _boxes(runtime, "candidate")] == ["snap-0", "snap-0"]
     assert len(_boxes(runtime, "setup")) == 1
@@ -588,7 +588,7 @@ def test_each_scored_version_gets_a_new_box_from_the_tar_state_when_the_snapshot
 
     scores, closed = _score_two(tmp_path, runtime, "boom")
 
-    assert scores == [0.0, 1.0]
+    assert scores == [None, 1.0]
     _assert_own_box_per_version(runtime, closed)
     candidates = _boxes(runtime, "candidate")
     assert all(box.spec.snapshot_id is None and box.spec.snapshot_archive for box in candidates)
