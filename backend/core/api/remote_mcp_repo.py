@@ -386,7 +386,7 @@ def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[st
         note = "The metric box runs the [metric] entry command, so it does not use the metric code."
         return [], [note] if metric_code.strip() else []
     if metric_code.strip():
-        return scorer_issues(metric_code, bool(spec.get("data")))
+        return scorer_issues(metric_code, bool(spec.get("data")), function=entry.rsplit(":", 1)[1] if entry else None)
     if entry is not None:
         return [
             f"The [metric] entry {entry} names a Python function, so the scorer needs metric code."
@@ -398,7 +398,7 @@ def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[st
     ]
 
 
-def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[str]]:
+def scorer_issues(metric_code: str, has_cases: bool, *, function: str | None = None) -> tuple[list[str], list[str]]:
     """Check scorer code statically: it parses and defines the scorer function.
 
     The code never runs here. The run's setup check runs it in the sandbox.
@@ -406,6 +406,8 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     Args:
         metric_code: The scorer source.
         has_cases: Whether the draft has data, so the scorer can get a case.
+        function: The function that ``[metric] entry`` names. ``None`` and
+            ``score``, the default entry's function, keep the default lookup.
 
     Returns:
         The issues and the notes.
@@ -418,12 +420,16 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         # Very deep nesting makes the parser give up without a SyntaxError.
         return ["Skynet cannot parse the scorer. Make it simpler."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
-    bound, named = _scorer_binding(tree)
+    names = _SCORER_NAMES if function in (None, "score") else (function,)
+    bound, named = _scorer_binding(tree, names)
     if bound and named is None:
         # The runner takes any callable bound to the name, such as an import,
         # an instance or a decorated function, so only the run's setup check
         # can check it.
         return [], ["Skynet cannot check an imported, assigned or decorated scorer before the run's setup check."]
+    if names != _SCORER_NAMES and not bound:
+        # Like the runner, a named entry function has no fallback to the single function.
+        return [f"The scorer must define {function}(...), the function that [metric] entry names."], []
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
         return [
@@ -473,20 +479,23 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     return issues, notes
 
 
-def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.AsyncFunctionDef | None]:
+def _scorer_binding(
+    tree: ast.Module, candidates: tuple[str, ...]
+) -> tuple[bool, ast.FunctionDef | ast.AsyncFunctionDef | None]:
     """Find the top-level binding the runner uses as the scorer.
 
-    Like the runner, ``score`` wins over ``metric``, and the last top-level
+    Like the runner, an earlier name in ``candidates`` wins, and the last top-level
     binding of the name wins.
 
     Args:
         tree: The parsed scorer module.
+        candidates: The scorer names to look for, in order.
 
     Returns:
         Whether a scorer name is bound, and the function when that binding is
         a plain ``def`` without decorators.
     """
-    for name in _SCORER_NAMES:
+    for name in candidates:
         bound = False
         function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
         for node in tree.body:

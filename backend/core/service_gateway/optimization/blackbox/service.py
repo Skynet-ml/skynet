@@ -115,6 +115,7 @@ from .protocol import (
     warn_once_without_feedback,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
+from .repo_constraints import CONSTRAINTS_FILE, ConstraintsError, parse_constraints
 from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime
@@ -439,7 +440,32 @@ def validate_blackbox_payload(
     """
     validate_job(payload, api_bases=api_bases)
     if verify_scorer and payload.scorer.kind == "python" and not payload.scorer.command_metric:
-        validate_scorer_code(str(payload.scorer.metric_code))
+        entry = _draft_metric_entry(payload)
+        # A command entry does not run the metric code, so the run's setup checks the command (SKY-738).
+        if not isinstance(entry, tuple):
+            function = entry.rsplit(":", 1)[1] if entry else None
+            validate_scorer_code(str(payload.scorer.metric_code), entrypoint=function)
+
+
+def _draft_metric_entry(payload: BlackboxRunRequest) -> str | tuple[str, ...] | None:
+    """Read the ``[metric] entry`` of the request's draft ``optimize.toml`` (SKY-738).
+
+    Args:
+        payload: The submitted job.
+
+    Returns:
+        The entry, or ``None`` when the request has no draft ``optimize.toml``
+        or the draft does not parse. The run's staging then checks the
+        repository's entry.
+    """
+    repo = payload.target.repo
+    text = repo.draft_files.get(CONSTRAINTS_FILE) if repo is not None else None
+    if text is None:
+        return None
+    try:
+        return parse_constraints(text.encode("utf-8")).metric.entry
+    except ConstraintsError:
+        return None
 
 
 def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, str | None] | None = None) -> None:

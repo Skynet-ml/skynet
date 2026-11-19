@@ -1598,6 +1598,34 @@ def test_a_python_metric_entry_with_an_empty_scorer_is_an_issue(harness: Any) ->
     ]
 
 
+_GRADE_CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n\n[metric]\nentry = "metric.py:grade"\n'
+_GRADE_ANSWER = "  return {'score': 1.0, 'feedback': 'ok'}\n"
+
+
+@pytest.mark.parametrize(
+    ("code", "issue"),
+    [
+        (f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}", None),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}\nasync def grade(repo_path):\n{_GRADE_ANSWER}", "grade is async"),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}", "must define grade(...)"),
+    ],
+)
+def test_the_draft_scorer_check_reads_the_function_the_metric_entry_names(code: str, issue: str | None) -> None:
+    """Check the function that ``[metric] entry`` names, not ``score`` or the single function (SKY-738).
+
+    Args:
+        code: The scorer source.
+        issue: A part of the one expected issue, or ``None`` for no issue.
+    """
+    issues, _notes = remote_mcp_repo.draft_scorer_issues(code, {"contract": {"optimize_toml": _GRADE_CONTRACT}})
+
+    if issue is None:
+        assert issues == []
+    else:
+        [found] = issues
+        assert issue in found
+
+
 def test_an_empty_scorer_without_a_draft_contract_leaves_the_entry_to_staging() -> None:
     """Without the draft's own optimize.toml, the run's staging checks the repository's entry (SKY-738)."""
     issues, notes = remote_mcp_repo.draft_scorer_issues("", {})

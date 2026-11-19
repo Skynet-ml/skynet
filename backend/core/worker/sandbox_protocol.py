@@ -35,8 +35,9 @@ SANDBOX_PROTOCOL = 19
 # a run with a file proposer.
 # Protocol 19 (SKY-738) added ``scorer.command_metric`` and runs the contract
 # file's ``[metric] entry``. A run with the default entry reads the same on an
-# older image. A command entry sends no metric code, so an older image refuses
-# the request at validation instead of running the wrong metric.
+# older image. A command entry sends no metric code, and an older image refuses
+# that request at validation with an unclear error, so the worker refuses every
+# image before 19 for a run with ``scorer.command_metric``.
 # The worker sends an older image the image's own protocol number.
 READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, 18, SANDBOX_PROTOCOL})
 
@@ -46,3 +47,6 @@ OUTCOME_VERDICT_PROTOCOL = 16
 
 # The first protocol whose image runs the contract file's ``[proposer] entry``.
 FILE_PROPOSER_PROTOCOL = 18
+
+# The first protocol whose image reads ``scorer.command_metric``.
+COMMAND_METRIC_PROTOCOL = 19

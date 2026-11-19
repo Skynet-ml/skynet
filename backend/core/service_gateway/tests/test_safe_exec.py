@@ -112,6 +112,14 @@ class TestValidateScorerCode:
         """The DSPy-style ``metric`` name is accepted as the scorer entrypoint."""
         validate_scorer_code("def metric(candidate, case=None):\n    return 1.0\n")
 
+    def test_the_named_entry_function_is_loaded(self) -> None:
+        """The function that ``[metric] entry`` names loads next to a helper, with no ``score`` (SKY-738)."""
+        code = "def helper(x):\n    return x\n\ndef grade(candidate, case=None):\n    return 1.0\n"
+
+        assert validate_scorer_code(code, entrypoint="grade") is None
+        with pytest.raises(ServiceError, match="defines no function 'grade'"):
+            validate_scorer_code(_VALID_SCORER, entrypoint="grade")
+
     def test_missing_function_is_rejected(self) -> None:
         """Code without a scorer function raises ``ServiceError``."""
         with pytest.raises(ServiceError, match="must define a function named 'score"):

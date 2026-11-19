@@ -344,41 +344,50 @@ def validate_transform_code(
         return introspection
 
 
-def _scorer_worker(scorer_code: str, queue: Any) -> None:
+def _scorer_worker(scorer_code: str, entrypoint: str | None, queue: Any) -> None:
     """Child-side entry point for ``validate_scorer_code``: load the code, report whether it defines a scorer.
 
     Args:
         scorer_code: User-authored scorer source.
+        entrypoint: The function that ``[metric] entry`` names, or ``None`` for the default lookup.
         queue: Multiprocessing queue used to return a result dict.
     """
     try:
         load_scorer_from_code(
-            scorer_code, helpers={LLM_HELPER_NAME: missing_llm, IMAGE_HELPER_NAME: Image, LOG_HELPER_NAME: log}
+            scorer_code,
+            helpers={LLM_HELPER_NAME: missing_llm, IMAGE_HELPER_NAME: Image, LOG_HELPER_NAME: log},
+            entrypoint=entrypoint,
         )
         queue.put({"ok": True})
     except BaseException as exc:  # user code is arbitrary — any failure is reported, not raised
         queue.put(_error_payload(exc))
 
 
-def validate_scorer_code(code: str, *, timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS) -> None:
+def validate_scorer_code(
+    code: str, *, entrypoint: str | None = None, timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS
+) -> None:
     """Load user-authored scorer code in a subprocess to prove it defines a scorer.
 
     Memoized per-process like the signature validator, for the same dogpile reason.
 
     Args:
         code: User-authored scorer source.
+        entrypoint: The function that ``[metric] entry`` names. ``None`` keeps
+            the default lookup: ``score``, then ``metric``, then the single function.
         timeout_seconds: Maximum time to wait for the child to finish.
 
     Raises:
         ServiceError: When the code fails to load, defines no scorer, or the
             child errors out.
     """
-    if _scorer_cache.get(code):
+    # The same code can define the entry function and miss another one, so the key holds both.
+    key = f"{entrypoint or ''}:{code}"
+    if _scorer_cache.get(key):
         return
-    with _dogpile_lock(f"scr:{code}"):
-        if _scorer_cache.get(code):
+    with _dogpile_lock(f"scr:{key}"):
+        if _scorer_cache.get(key):
             return
-        result = _run_in_subprocess(_scorer_worker, (code,), timeout_seconds=timeout_seconds)
+        result = _run_in_subprocess(_scorer_worker, (code, entrypoint), timeout_seconds=timeout_seconds)
         if not result.get("ok"):
             _raise_child_error(result)
-        _bounded_cache_put(_scorer_cache, code, True)
+        _bounded_cache_put(_scorer_cache, key, True)

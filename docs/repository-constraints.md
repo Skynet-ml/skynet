@@ -518,9 +518,10 @@ environment variables:
     It is `null` when nothing ran.
   - `expected` (any JSON value, optional): the case's `expected`, when the
     case has one.
-  - `elapsed_s` (number or `null`, optional): the run time of the `[run]`
-    entry in seconds, measured outside the version's code. See "Run time
-    for the metric" below.
+  - `elapsed_s` (number, optional): the run time of the `[run]` entry in
+    seconds, measured outside the version's code. The object has no
+    `elapsed_s` when the time is not known. See "Run time for the metric"
+    below.
 - `ASCENT_OUTPUT`: the path where the command writes its answer as JSON.
 
 The answer is one object, the same form as a Python metric's answer:

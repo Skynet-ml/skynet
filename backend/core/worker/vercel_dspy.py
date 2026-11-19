@@ -23,7 +23,13 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResu
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
-from .sandbox_protocol import FILE_PROPOSER_PROTOCOL, OUTCOME_VERDICT_PROTOCOL, READABLE_PROTOCOLS, SANDBOX_PROTOCOL
+from .sandbox_protocol import (
+    COMMAND_METRIC_PROTOCOL,
+    FILE_PROPOSER_PROTOCOL,
+    OUTCOME_VERDICT_PROTOCOL,
+    READABLE_PROTOCOLS,
+    SANDBOX_PROTOCOL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,10 @@ OUTCOME_IMAGE_MESSAGE = (
 )
 FILE_PROPOSER_IMAGE_MESSAGE = (
     "The sandbox image is older than [proposer] entry support in optimize.toml; rebuild and re-pin the sandbox image."
+)
+COMMAND_METRIC_IMAGE_MESSAGE = (
+    "The sandbox image is older than command [metric] entry support in optimize.toml; rebuild and re-pin the"
+    " sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
@@ -204,6 +214,25 @@ def _require_file_proposer_support(image_protocol: int, snapshot: Any) -> None:
         raise RuntimeError(FILE_PROPOSER_IMAGE_MESSAGE)
 
 
+def _require_command_metric_support(image_protocol: int, payload: dict[str, Any]) -> None:
+    """Refuse an older image for a run of a command ``[metric] entry``.
+
+    An image before protocol 19 does not know ``scorer.command_metric``, so it
+    refuses the request without metric code at validation, with an error that
+    does not name the cause (SKY-738).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        payload: The guest request.
+
+    Raises:
+        RuntimeError: When the image is older and the run has a command metric.
+    """
+    scorer = payload.get("scorer")
+    if image_protocol < COMMAND_METRIC_PROTOCOL and isinstance(scorer, dict) and scorer.get("command_metric"):
+        raise RuntimeError(COMMAND_METRIC_IMAGE_MESSAGE)
+
+
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
     """Execute the full optimizer in the pinned backend image without provider credentials.
 
@@ -263,6 +292,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         image_protocol = _require_image_protocol(session, lifetime)
         _require_outcome_support(image_protocol, staged)
         _require_file_proposer_support(image_protocol, staged)
+        _require_command_metric_support(image_protocol, guest_payload)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip
