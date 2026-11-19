@@ -20,6 +20,7 @@ import sys
 import textwrap
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1766,25 +1767,32 @@ def test_a_run_where_every_version_fails_finishes_on_the_seed_with_no_score(
 
 
 @pytest.mark.parametrize(
-    ("returncode", "document"),
+    ("seed", "returncode", "document"),
     [
-        (0, {"best_candidate": "bad", "best_score": None}),
-        (1, {"best_candidate": "seed", "best_score": None}),
-        (0, {"best_candidate": "seed", "best_score": None, "error": "upstream broke"}),
+        ("seed", 0, {"best_candidate": "bad", "best_score": None}),
+        ("seed", 1, {"best_candidate": "seed", "best_score": None}),
+        ("seed", 0, {"best_candidate": "seed", "best_score": None, "error": "upstream broke"}),
+        ("seed", 0, {"best_candidate": "seed", "best_score": 0.5}),
+        (None, 0, {"best_score": None}),
     ],
-    ids=["not-the-seed", "child-failed", "child-reported-an-error"],
+    ids=["not-the-seed", "child-failed", "child-reported-an-error", "child-claims-a-score", "task-with-no-seed"],
 )
 def test_a_result_with_no_score_fails_the_run_unless_it_is_a_clean_end_on_the_seed(
-    returncode: int, document: dict[str, object], tmp_path: Path
+    seed: str | None, returncode: int, document: dict[str, object], tmp_path: Path
 ) -> None:
     """Fail the run on a version with no score that is not the seed, or on a child that failed.
 
+    A claimed score for a seed the eval server holds no score for is also a
+    failure, and so is a result that names no version in a task with no seed.
+
     Args:
+        seed: The task's seed.
         returncode: The child's exit code.
         document: The child's result document.
         tmp_path: Pytest's temporary folder.
     """
     requests = _requests(tmp_path, lambda candidate, case: (None, {}))
+    requests.task = replace(requests.task, seed_candidate=seed)
     for candidate in ("seed", "bad"):
         requests._evaluate({"candidate": candidate, "example": {"id": 0}})
     workdir = tmp_path / "child"
