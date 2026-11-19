@@ -24,7 +24,7 @@ from ....models.blackbox import BLACKBOX_HARNESS_CODEX
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from .native_runtime import NativeOptions
-from .protocol import EngineContext, EvalServer, ModelReply
+from .protocol import TOO_DEEP_ARGUMENTS, EngineContext, EvalServer, ModelReply
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
@@ -89,6 +89,10 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
         valid UTF-8.
     """
     value = call.get("arguments")
+    # The engine loop puts this marker in place of arguments past its own depth bound (SKY-817), so the call breaks
+    # the depth bound here too.
+    if value == TOO_DEEP_ARGUMENTS:
+        return None, True
     if isinstance(value, str):
         if len(value) > MAX_ARGUMENT_CHARS or _too_deep_text(value):
             return None, True
