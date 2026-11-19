@@ -40,7 +40,7 @@ from ..constants import (
     PAYLOAD_OVERVIEW_USERNAME,
 )
 from ..models import BlackboxRunResponse, ModelConfig
-from ..storage.models import JobModel, ProgressEventModel
+from ..storage.models import JobModel, ProgressEventModel, progress_event_key
 from ..storage.usage import IMPORTED_FROM_DESKTOP, IMPORTED_FROM_KEY, json_byte_size
 
 SCHEMA_VERSION = "skynet.run-export/v1"
@@ -483,7 +483,17 @@ def import_run(
     message = parsed.job.message[:_MAX_MESSAGE_CHARS] if parsed.job.message else None
     composition = overview.get(PAYLOAD_OVERVIEW_COMPOSITION)
 
-    events = parsed.events[-settings.progress_events_per_job_cap :] if settings.progress_events_per_job_cap else []
+    # The unique key index refuses a second row with the same key (SKY-808), so keep the first.
+    seen_keys: set[str] = set()
+    events: list[_BundleEvent] = []
+    for event in parsed.events:
+        key = progress_event_key(event.metrics)
+        if key is not None:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+        events.append(event)
+    events = events[-settings.progress_events_per_job_cap :] if settings.progress_events_per_job_cap else []
     event_rows = [
         (_parse_time(event.timestamp, default=completed_at) or now, event.event, event.metrics) for event in events
     ]

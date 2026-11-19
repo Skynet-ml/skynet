@@ -118,6 +118,8 @@ SHINKA_IMAGE_PYTHON = "/opt/shinka/venv/bin/python"
 SHINKA_NOVELTY_KEY_ENV = "APP_SHINKA_NOVELTY_KEY"
 SHINKA_EMBED_KEY_ENV = "APP_SHINKA_EMBED_KEY"
 _BRIDGE_FILE = "harness_bridge.py"
+# harness_bridge.install_exec_shim runs the shim from the bridge's own folder (SKY-715).
+_EXEC_SHIM_FILE = "exec_shim.py"
 _ENGINES_FILE = "native_engines.py"
 _REPO_TREE_FILE = "repo_tree.py"
 _REPO_CHUNK_DIR = "repo-tree"
@@ -152,8 +154,10 @@ class NativeOptions:
     sandbox_runtime: SandboxRuntime | None = None
     # A repository run's packed tree: ``chunks`` (files on this machine),
     # ``editable_paths``, ``readonly_paths``, ``constrained`` (a
-    # constraints file governs the run) and ``proposer_hosts`` (what the
-    # proposer box may reach besides the relay).
+    # constraints file governs the run), ``proposer_hosts`` (what the
+    # proposer box may reach besides the relay), ``file_proposer`` (the
+    # proposer runs the file's ``[proposer] entry``) and ``proposer_setup``
+    # (the file's ``[proposer] setup`` argument list).
     repo: dict[str, Any] | None = None
     # ShinkaEvolve's evolution settings, and its optimization models in bandit
     # order: each ``{"model", "url", "token"}`` names one scoped gateway route.
@@ -240,6 +244,19 @@ def _source_archive() -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _bridge_files() -> dict[str, str]:
+    """Return the harness bridge and the exec shim that it installs next to itself.
+
+    Returns:
+        Relative file paths mapped to their text.
+    """
+    bridge = Path(harness_bridge.__file__)
+    return {
+        _BRIDGE_FILE: bridge.read_text(encoding="utf-8"),
+        _EXEC_SHIM_FILE: bridge.with_name(_EXEC_SHIM_FILE).read_text(encoding="utf-8"),
+    }
+
+
 def _runner_files(engine_id: str) -> dict[str, str]:
     """Collect the sandbox-side runner plus the pinned upstream prompts or plugin it drives.
 
@@ -254,11 +271,11 @@ def _runner_files(engine_id: str) -> dict[str, str]:
         return {
             _SHINKA_RUNNER_FILE: runner.read_text(encoding="utf-8"),
             _SHINKA_BUNDLE_FILE: runner.with_name(_SHINKA_BUNDLE_FILE).read_text(encoding="utf-8"),
-            _BRIDGE_FILE: Path(harness_bridge.__file__).read_text(encoding="utf-8"),
+            **_bridge_files(),
             _SHINKA_REQUIREMENTS_FILE: runner.with_name(_SHINKA_REQUIREMENTS_FILE).read_text(encoding="utf-8"),
             _REPO_TREE_FILE: Path(repo_tree.__file__).read_text(encoding="utf-8"),
         }
-    bridge = {_BRIDGE_FILE: Path(harness_bridge.__file__).read_text(encoding="utf-8")}
+    bridge = _bridge_files()
     if engine_id != "autosaddler":
         engines = Path(native_runner.__file__).with_name(_ENGINES_FILE)
         files = {
@@ -309,6 +326,7 @@ def _bootstrap_command(
     harness: str = BLACKBOX_HARNESS_CODEX,
     install_command: str | None = None,
     shinka_agent: bool = False,
+    fallback: tuple[str, str | None] | None = None,
 ) -> str:
     """Build installation and preflight commands with immutable package versions.
 
@@ -320,6 +338,9 @@ def _bootstrap_command(
         install_command: Install step of the proposer harness.
         shinka_agent: ShinkaEvolve writes versions with Pi (its agent editor),
             so Pi and Node are prepared as for a Pi proposer.
+        fallback: The harness and install step of the default agent that
+            answers the sessions outside a checkout of a ``[proposer] entry``
+            run, prepared beside the proposer harness.
 
     Returns:
         Shell command that prepares the isolated source and runtime.
@@ -331,6 +352,9 @@ def _bootstrap_command(
     harness_install, harness_check = (
         ("", "") if harnessless else _harness_setup(harness, install_command, protected=protected)
     )
+    if fallback is not None:
+        fallback_install, fallback_check = _harness_setup(*fallback, protected=protected)
+        harness_install, harness_check = harness_install + fallback_install, harness_check + fallback_check
     floor = AUTOSADDLER_PYTHON_FLOOR if own_venv else PYTHON_FLOOR
     prepare = (
         "set -eu; mkdir -p .claude .cache .local native_vendor rpc; "
@@ -1131,7 +1155,18 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         host_agent_token=(options.budget_route or {}).get(HOST_AGENT_TOKEN_KEY),
         reasoning_effort=options.reasoning_effort,
         mcp_servers=tuple(mcp_route.get("servers") or ()),
+        exact_commands=bool((options.repo or {}).get("file_proposer")),
     )
+    # An AutoSaddler reflect session runs in a plain folder, where the file's
+    # command has no checkout, so the default agent answers it (SKY-753).
+    fallback = None
+    if engine_id == "autosaddler" and (options.repo or {}).get("file_proposer"):
+        fallback = build_launch(
+            BlackboxTarget(kind="agent", harness=BlackboxProposer().harness, model=options.model),
+            GatewayConfig(url=options.gateway.url, api_key=harness_bridge.KEY_TOKEN),
+            protected=options.budget_route is not None,
+            reasoning_effort=options.reasoning_effort,
+        )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
     # limits end them, and only the sandbox's platform lifetime bounds the box.
@@ -1191,6 +1226,13 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             },
             "task": native_task_payload(engine_id, task),
         }
+        if (options.repo or {}).get("file_proposer"):
+            # The guest runs the setup once in the checkout, and gives later sessions a copy of its
+            # output, also in a protected run, where the bootstrap installs nothing.
+            payload["proposer"]["file_command"] = True
+            payload["proposer"]["setup"] = list(options.repo.get("proposer_setup") or ())
+        if fallback is not None:
+            payload["proposer"]["outside_checkout"] = launch_payload(fallback)
         if shinka:
             payload["shinka"] = dict(options.shinka or {})
             payload["shinka_models"] = [
@@ -1242,6 +1284,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 harness=BLACKBOX_HARNESS_PI if editor else proposer.harness,
                 install_command=editor["launches"][0]["install_command"] if editor else launch.install_command,
                 shinka_agent=editor is not None,
+                fallback=None if fallback is None else (BlackboxProposer().harness, fallback.install_command),
             ),
             timeout_seconds=min(_INSTALL_ALLOWANCE, lifetime - 1.0),
         )
@@ -1250,7 +1293,10 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             raise ServiceError(f"Native optimizer runtime setup failed: {detail}")
         # A host_cli proposer runs the host-agent shim, not Codex in this box, so it
         # needs no requirements file (the parent's _starts_codex skips it too).
-        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None:
+        codex_fallback = fallback is not None and BlackboxProposer().harness == BLACKBOX_HARNESS_CODEX
+        if not editor and (
+            (proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None) or codex_fallback
+        ):
             _require_codex_requirements(runtime, session)
         env = {
             "ANTHROPIC_BASE_URL": (relay or options.gateway.url).removesuffix("/v1"),

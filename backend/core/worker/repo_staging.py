@@ -12,13 +12,14 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,18 +61,28 @@ from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
+from ..models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BLACKBOX_HARNESS_CUSTOM,
+    FILE_PROPOSER_REFUSED_ENGINES,
+    HOST_CLI_AUTO_KEY,
+)
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
-from ..service_gateway.optimization.blackbox.protocol import is_metric_error
+from ..service_gateway.optimization.blackbox.protocol import RUN_FAILED_STATUS, STATUS_KEY, is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
+    RepoEnvironment,
     RoleEnvironment,
     ServiceSpec,
     TargetStage,
@@ -421,7 +432,13 @@ def stage_repository(
             constraints,
             approved_editable=repo["editable_paths"],
             approved_setup=result["target"].get("setup_command"),
+            approved_proposer=_names_proposer(result),
         )
+        # A custom command runs without the relay's MCP servers, so it would run without the file's tools.
+        if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
+            raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
+        if environment.proposer_entry is not None:
+            environment = _without_refused_engines(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -497,6 +514,17 @@ def stage_repository(
     repo["editable_paths"] = list(environment.editable_paths)
     repo[ENVIRONMENT_KEY] = record
     result["target"]["setup_command"] = environment.setup_command
+    if environment.proposer_entry is not None:
+        result["proposer"] = {
+            **(result.get("proposer") or {}),
+            "harness": BLACKBOX_HARNESS_CUSTOM,
+            "run_command": shlex.join(environment.proposer_entry),
+            # The guest runs the file's setup in its checkout (``proposer_setup`` below), not in the bootstrap.
+            "install_command": None,
+            # Only a filled-in host CLI reaches here, and it would replace the file's command.
+            "host_cli": None,
+        }
+        result["proposer"].pop(HOST_CLI_AUTO_KEY, None)
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
@@ -514,6 +542,8 @@ def stage_repository(
         # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
         "hidden_hashes": hidden_hashes(hidden),
         "outcome": record["outcome"],
+        "file_proposer": environment.proposer_entry is not None,
+        "proposer_setup": list(environment.proposer_setup or ()),
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -557,6 +587,75 @@ def stage_repository(
         drafts=drafts,
         require_version=require_version,
         record_facts=record_facts,
+    )
+
+
+# The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
+_FILE_PROPOSER_REFUSALS = {
+    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
+}
+
+
+def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
+    """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
+
+    ShinkaEvolve writes versions with its own editor and never runs the file's
+    command. AutoResearch and Meta-Harness call the proposer from their lab
+    folder and read their own protocol files there, so the files the command
+    changes do not become their versions (SKY-753; Gilad, 2026-11-18).
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        strategy: The stored run request's ``strategy``.
+
+    Returns:
+        The environment, with a note for an Auto run.
+
+    Raises:
+        ConstraintsError: When the run is a single run of a refused engine.
+    """
+    if strategy.get("mode", "auto") == "single":
+        engine = strategy.get("engine")
+        if engine in FILE_PROPOSER_REFUSED_ENGINES:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {_FILE_PROPOSER_REFUSALS[engine]} Remove [proposer] entry, or choose another"
+                " engine.",
+                section="proposer",
+                key="entry",
+            )
+        return environment
+    return replace(
+        environment,
+        notes=(
+            *environment.notes,
+            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+            " proposer command in the contract file.",
+        ),
+    )
+
+
+def _names_proposer(payload: Mapping[str, Any]) -> bool:
+    """Tell whether a run request names its own proposer.
+
+    The stored request keeps ``proposer.harness`` only when the client sent
+    it (SKY-753), so a default does not replace ``[proposer] entry``. A host
+    CLI, a run command and an install command are the user's own choice too,
+    but not a host CLI that local mode filled in.
+
+    Args:
+        payload: The stored run request.
+
+    Returns:
+        True when the request sends ``proposer.harness``, a host CLI, a run
+        command or an install command.
+    """
+    proposer = payload.get("proposer")
+    return isinstance(proposer, dict) and (
+        "harness" in proposer
+        or (proposer.get("host_cli") is not None and not proposer.get(HOST_CLI_AUTO_KEY))
+        or bool(proposer.get("run_command") or proposer.get("install_command"))
     )
 
 
@@ -1054,6 +1153,21 @@ def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:
     return scorer_gateway(ModelConfig.model_validate(model), settings)
 
 
+def _has_no_score(side_info: dict[str, Any]) -> bool:
+    """Return whether a version's recorded side info marks it as having no score.
+
+    The repository scorer drops a metric's own ``run_failed`` status, so on a
+    repository run that status always means a failed ``[run]`` entry.
+
+    Args:
+        side_info: The version's recorded side info.
+
+    Returns:
+        ``True`` after a metric error (SKY-350) or a failed ``[run]`` entry (SKY-751).
+    """
+    return is_metric_error(side_info) or side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+
+
 def _version_score(result: dict[str, Any], candidate: str) -> float | None:
     """Return the score the run ranked one version by.
 
@@ -1062,13 +1176,13 @@ def _version_score(result: dict[str, Any], candidate: str) -> float | None:
         candidate: The version's patch.
 
     Returns:
-        Its recorded score, or ``None`` when the run never scored it or the
-        metric crashed on it.
+        Its recorded score, or ``None`` when the run never scored it, the
+        metric crashed on it, or its ``[run]`` entry failed.
     """
     for version in result.get("versions") or []:
         if isinstance(version, dict) and version.get("candidate") == candidate:
-            # SKY-350: a crash has no score, even if an older result stored a number.
-            if is_metric_error(version.get("side_info") or {}):
+            # SKY-350, SKY-751: a crash has no score, even if an older result stored a number.
+            if _has_no_score(version.get("side_info") or {}):
                 return None
             score = version.get("score")
             return float(score) if isinstance(score, int | float) else None
@@ -1089,20 +1203,41 @@ def _ranking_score(result: dict[str, Any], candidate: str) -> float:
     return float("-inf") if score is None else score
 
 
-def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
-    """Return whether the metric or scorer crashed on one version during the run.
+def _version_has_no_score(result: dict[str, Any], candidate: str) -> bool:
+    """Return whether one version has no score in the run's version list.
 
     Args:
         result: Finished black-box result.
         candidate: The version's patch.
 
     Returns:
-        ``True`` when the version's recorded side info has the metric-error status.
+        ``True`` when the metric or scorer crashed on the version, or its
+        ``[run]`` entry failed, on any case.
     """
     return any(
         isinstance(version, dict)
         and version.get("candidate") == candidate
-        and is_metric_error(version.get("side_info") or {})
+        and _has_no_score(version.get("side_info") or {})
+        for version in result.get("versions") or []
+    )
+
+
+def _seed_run_failed(result: dict[str, Any]) -> bool:
+    """Return whether the starting code has no score because its own ``[run]`` entry failed.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the run's version list marks the starting code with the
+        ``run_failed`` status; ``False`` after a metric error or when the run
+        never recorded the starting code.
+    """
+    seed = result.get("seed_candidate") or ""
+    return any(
+        isinstance(version, dict)
+        and version.get("candidate") == seed
+        and (version.get("side_info") or {}).get(STATUS_KEY) == RUN_FAILED_STATUS
         for version in result.get("versions") or []
     )
 
@@ -1146,29 +1281,63 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
                 entry["candidate"] = _scored_candidate(entry["candidate"], hidden_paths)
 
 
+def _final_run_finished(result: dict[str, Any]) -> bool:
+    """Return whether the final run finished for both the starting code and the best version.
+
+    A final run where every version failed a ``[run]`` case leaves both
+    scores empty, so the boolean ``details.baseline_run_failed`` flag marks
+    a finished final run; the service sets it only when both runs finished.
+    A result without the flag finished only when it has both scores.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` when the final run's scores decide, ``False`` when the
+        versions' own scores must stand in.
+    """
+    if isinstance((result.get("details") or {}).get("baseline_run_failed"), bool):
+        return True
+    return result.get("baseline_score") is not None and result.get("best_score") is not None
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
-    The final run's fresh scores decide; a run stopped before its final run
-    compares the versions' own scores instead.
+    The final run's fresh scores decide, also when both are empty; a run
+    stopped before its final run finished for both versions compares the
+    versions' own scores instead. A scored version beats a starting version
+    with no score only when the starting code's own ``[run]`` entry failed
+    in the run that gave that missing score: the final run's
+    ``details.baseline_run_failed`` flag, or the version list for a stopped
+    run (SKY-751).
 
     Args:
         result: Finished black-box result.
 
     Returns:
         The best version's patch, or ``None`` when it is empty, no better,
-        or a version the metric crashed on.
+        or a version with no score.
     """
     best = result.get("best_candidate")
     if not isinstance(best, str) or not best.strip() or result.get("regression_guard_applied"):
         return None
-    if _version_metric_error(result, best):
+    if _version_has_no_score(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    if baseline is None or optimized is None:
+    run_failed_flag = (result.get("details") or {}).get("baseline_run_failed")
+    final_run = _final_run_finished(result)
+    if not final_run:
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, best)
-    if baseline is None or optimized is None:
+    if optimized is None:
         return None
+    if baseline is None:
+        # A metric error on the starting code is the metric's fault, not the
+        # code's, so a scored version proves no improvement over it. The
+        # search may have scored the starting code while its final run
+        # failed, so the final run's own flag decides when there is one.
+        seed_run_failed = run_failed_flag is True if final_run else _seed_run_failed(result)
+        return best if seed_run_failed else None
     return best if optimized > baseline else None
 
 
@@ -1499,15 +1668,20 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
         Markdown body.
     """
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
-    if baseline is None or optimized is None:
+    if not _final_run_finished(result):
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, patch)
+    went = (
+        f"Score went from {baseline:.4g} to {optimized:.4g}."
+        if baseline is not None
+        else f"The starting code has no score: it failed on at least one case. This version scored {optimized:.4g}."
+    )
     files = sorted(set(patch_paths(patch)))
     listed = "\n".join(f"- `{path}`" for path in files[:50])
     more = f"\n- and {len(files) - 50} more" if len(files) > 50 else ""
     return (
         f"{APP_NAME} found this version while optimizing the repository with "
         f"{result.get('engine_used', 'an agent')}.\n\n"
-        f"Score went from {baseline:.4g} to {optimized:.4g}.\n\n"
+        f"{went}\n\n"
         f"Changed files:\n{listed}{more}\n\n"
         f"{_record_block(result)}"
         f"Review the run: {run_url}\n"
@@ -1838,7 +2012,7 @@ def _candidate_versions(
         seen.add(patch)
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
-        if _version_metric_error(result, patch) or patch_violations(
+        if _version_has_no_score(result, patch) or patch_violations(
             patch,
             repo["editable_paths"],
             staged.snapshot.readonly_paths,

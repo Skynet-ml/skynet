@@ -31,6 +31,9 @@ protected = ["bot/eval"]
 
 [proposer]
 illegal = "docs/rules.md"
+
+[run]
+entry = "run.py:main"
 """
 
 # The files the parametrized keys name, so the setup check can read them.
@@ -71,7 +74,7 @@ def test_a_clean_file_passes(tmp_path: Path) -> None:
 
 def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> None:
     """A new run needs version = 1; a started run reads a missing version as 1 (SKY-690)."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[paths]\neditable = ["bot"]\n'})
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[paths]\neditable = ["bot"]\n[run]\nentry = "run.py:main"\n'})
 
     with pytest.raises(ConstraintsError, match="version is missing"):
         check_repository(archive, (), place="local")
@@ -100,7 +103,8 @@ def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
 def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     """A service that needs a secret the run does not have fails with the service and the secret name."""
     raw = (
-        b'version = 1\n[services.maps]\nurl = "https://maps.example.com"\n'
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}", X-Region = "${MAPS_REGION}" }\n'
     )
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
@@ -150,8 +154,8 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
 @pytest.mark.parametrize(
     "raw",
     [
-        b"version = 1\n[outcome.require]\nlatency = 0.5\n",
-        b"version = 1\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n",
+        b'version = 1\n[run]\nentry = "run.py:main"\n[outcome.require]\nlatency = 0.5\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -163,10 +167,10 @@ def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, r
 @pytest.mark.parametrize(
     "raw",
     [
-        b"version = 1\n",
-        b"version = 1\n[outcome]\n",
-        b"version = 1\n[tool.notes]\nowner = 'me'\n",
-        b"version = 1\n[outcome]\ntarget = 0.9\n",
+        b'version = 1\n[run]\nentry = "run.py:main"\n',
+        b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\n',
+        b"version = 1\n[run]\nentry = \"run.py:main\"\n[tool.notes]\nowner = 'me'\n",
+        b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.9\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -178,7 +182,10 @@ def test_a_file_without_outcome_minimums_passes(tmp_path: Path, raw: bytes, plac
 @pytest.mark.parametrize(
     ("raw", "key"),
     [
-        (b'version = 1\n[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
+        (
+            b'version = 1\n[run]\nentry = "run.py:main"\n[services.cache]\nurl = "https://api.example.com"\n',
+            "[services.cache]",
+        ),
         (b'version = 1\n[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
         (b'version = 1\n[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
         (b'version = 1\n[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
@@ -195,10 +202,11 @@ def test_a_file_without_outcome_minimums_passes(tmp_path: Path, raw: bytes, plac
         (b'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
         (b'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
         (
-            b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n',
+            b'version = 1\n[run]\nentry = "run.py:main"\n'
+            b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n',
             "[proposer] services",
         ),
-        (b"version = 1\n[proposer]\nservices = []\n", "[proposer] services"),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nservices = []\n', "[proposer] services"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -212,7 +220,10 @@ def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: str) -> None:
     """The proposer's box reaches its MCP servers and services through the relay (SKY-610, SKY-612)."""
-    raw = b'version = 1\n[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n'
+        b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
+    )
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
@@ -304,7 +315,7 @@ def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> N
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_a_proposer_network_list_passes_the_gate(tmp_path: Path, place: str) -> None:
     """The broker grants the listed hosts to the proposer's box, so the gate lets the run start (SKY-384)."""
-    raw = b'version = 1\n[proposer]\nnetwork = ["docs.python.org"]\n'
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nnetwork = ["docs.python.org"]\n'
 
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
@@ -312,9 +323,26 @@ def test_a_proposer_network_list_passes_the_gate(tmp_path: Path, place: str) -> 
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_an_empty_proposer_network_passes_the_gate(tmp_path: Path, place: str) -> None:
     """``network = []`` keeps the proposer on the relay only, which every place enforces (SKY-384)."""
-    raw = b"version = 1\n[proposer]\nnetwork = []\n"
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nnetwork = []\n'
 
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_proposer_entry_and_setup_pass_the_gate(tmp_path: Path, place: str) -> None:
+    """Staging runs the file's proposer command as the custom proposer, so both keys are enforced (SKY-753).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        place: Where the run's sandboxes run.
+    """
+    raw = (
+        b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nsetup = ["npm", "ci"]\nentry = ["node", "agent.js"]\n'
+    )
+
+    assert {"proposer.entry", "proposer.setup"} <= repo_gate._ENFORCED_EVERYWHERE
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
 
 
 def _mcp_archive(tmp_path: Path, server: str) -> Path:
@@ -363,7 +391,8 @@ def test_the_missing_mcp_secret_message_names_the_server_the_file_and_the_fix() 
 
 
 _MAPS = (
-    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[run]\nentry = "run.py:main"\n'
+    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 
@@ -863,7 +892,10 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
         b'{"mcpServers": {"maps": {"url": "https://mapstools.googleapis.com/mcp",'
         b' "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}}}}'
     )
-    files = {CONSTRAINTS_FILE: b'version = 1\n[proposer]\nmcp = "agent/.mcp.json"\n', "agent/.mcp.json": proposer}
+    files = {
+        CONSTRAINTS_FILE: b'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nmcp = "agent/.mcp.json"\n',
+        "agent/.mcp.json": proposer,
+    }
 
     [failure] = _host_failures(_archive(tmp_path, files), None)
 

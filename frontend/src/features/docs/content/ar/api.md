@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 حقول مهمة:
 
 - الحقل `target.repo.repository` هو مستودع GitHub بالصيغة `owner/name`. اربط GitHub أولًا في **الإعدادات ← الموصّلات**.
 - يسرد الحقل `target.repo.editable_paths` الملفات والمجلدات التي يمكن للمُحسِّن تغييرها. تعني القيمة `"."` المستودع كله.
 - الحقل `target.repo.commit` اختياري. وهو SHA من 40 حرفًا. بدونه، يستخدم Skynet أحدث إيداع في الفرع.
-- الحقل `target.repo.secrets` اختياري. لكل سرّ `name` و`value`. ويصل إلى كودك وإلى مُقيِّمك كمتغير بيئة.
-- يعرّف الحقل `scorer.metric_code` الدالة `score(repo_path, case)`. والحقل `scorer.model` هو النموذج الذي يستطيع كودك ومُقيِّمك استدعاءه عبر بوابة النماذج.
+- الحقل `target.repo.secrets` اختياري. لكل سرّ `name` و`value`. ويصل إلى كودك أو إلى مُقيِّمك فقط عبر ترويسة في `[services.<name>]` أو عبر خادم في ملف `mcp` الخاص بالدور، ولا يصل أبدًا كمتغير بيئة.
+- يعرّف الحقل `scorer.metric_code` الدالة `score(repo_path, case, output=None)`. و`output` هو ما أعاده `entry` في `[run]` للحالة. ويعرض تبويب `optimize.toml` قيمة `entry` في `[run]` لمستودع المثال. والحقل `scorer.model` هو النموذج الذي يستطيع كودك ومُقيِّمك استدعاءه عبر بوابة النماذج.
 - قيمة `strategy.mode` هي `auto` (الافتراضية) أو `single`. مع `single`، اضبط `strategy.engine` على اسم محرّك واحد من `GET /blackbox/engines`.
 - الحقل `max_cost_cents` هو حد الإنفاق لهذا التشغيل، بالسنت الأمريكي.
 - قيمة `is_private` الافتراضية هي `false`. اضبطها على `true` لإبقاء التشغيل خاصًا.

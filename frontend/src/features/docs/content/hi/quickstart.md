@@ -55,26 +55,27 @@ Skynet आपके GitHub खाते में रिपॉज़िटरी
 
 ## 5. मेट्रिक और रन
 
-आखिरी चरण **मेट्रिक और रन** है। असिस्टेंट आपके लिए स्कोरर लिखता है। आप उसे बदल सकते हैं। स्कोरर को रिपॉज़िटरी के एक संस्करण का पाथ और एक केस मिलता है:
+आखिरी चरण **मेट्रिक और रन** है। असिस्टेंट आपके लिए स्कोरर और `optimize.toml` फ़ाइल लिखता है। आप उन्हें बदल सकते हैं। `[run]` की `entry` रिपॉज़िटरी के एक संस्करण को एक केस पर चलाती है। स्कोरर को entry का आउटपुट और केस मिलता है:
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` में एक केस के इनपुट कॉलम होते हैं। `case["expected"]` में आउटपुट कॉलम होता है, उसके कॉलम नाम की कुंजी के साथ। रिपॉज़िटरी में `def serve(input)` वाली एक `serve.py` फ़ाइल है। रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसी फ़ंक्शन का इस्तेमाल करता है।
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-फिर जाँच चलाएँ। जाँच आपके सेटअप और आपके स्कोरर को सैंडबॉक्स में शुरुआती संस्करण पर चलाती है। जाँच पास होने के बाद ही आप रन शुरू कर सकते हैं।
+`case["input"]` में एक केस के इनपुट कॉलम होते हैं। `case["expected"]` में आउटपुट कॉलम होता है, उसके कॉलम नाम की कुंजी के साथ। रिपॉज़िटरी में `def serve(input)` वाली एक `serve.py` फ़ाइल है। `[run]` की `entry` इसे कॉल करती है, और `output` उसका रिटर्न मान है। स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है जिसमें केवल आपकी मेट्रिक फ़ाइलें होती हैं और संस्करण का कोई कोड नहीं होता, इसलिए वह `serve.py` को इम्पोर्ट नहीं कर सकता। रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसी फ़ंक्शन का इस्तेमाल करता है।
+
+फिर जाँच चलाएँ। जाँच आपके सेटअप, `[run]` की `entry` और आपके स्कोरर को सैंडबॉक्स में शुरुआती संस्करण पर चलाती है। जाँच पास होने के बाद ही आप रन शुरू कर सकते हैं।
 
 ## 6. शुरू करें और देखें
 

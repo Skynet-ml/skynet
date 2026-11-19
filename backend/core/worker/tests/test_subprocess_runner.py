@@ -364,9 +364,11 @@ def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
         target_route=None,
         evaluator_route=None,
         repo_snapshot=None,
+        loop=None,
     ):
         """Stand-in for ``run_blackbox_optimization`` that emits one lane event and one run row."""
         assert evaluator_route == relay
+        assert loop is None
         progress_callback("lane_started", {"engine": "gepa", "phase": "single", "budget": 5})
         agent_run_sink({"run_id": 1, "status": "running"})
         fake_result = MagicMock()

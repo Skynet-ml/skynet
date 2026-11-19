@@ -3,7 +3,8 @@
 The guest that hosts the coding agent never sees the secrets or these boxes:
 it posts each version through the parent's evaluator capability, and the
 parent lays it out on a copy of the already set-up tree, then calls the
-user's ``score(repo_path)`` (or ``score(repo_path, case)``).
+user's ``score(repo_path, case, output=None)``. The older ``score(repo_path)``
+and ``score(repo_path, case)`` forms still work.
 
 Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
 the prepared tree with the version laid out, and runs the ``[run]`` entry on
@@ -15,18 +16,17 @@ C runs. M gets the metric files and C's output only after C ended, and runs
 the metric files at their repository paths (E41). A check that needs the
 version's code belongs in the ``[run]`` entry: without one, the metric sees
 no version code at all. A run that times out, raises, returns no JSON, is
-killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
-feedback, and the metric is not called. A nonzero exit of a command entry is
-an output like any other. Neither box gets the run's secrets: only the model
-route reaches the box. Both the ``[run]`` entry and the metric run through
-the tree sandbox session API (SKY-785), and the metric box never gets the
-candidate tree.
+killed by a signal or cannot start has no score (status ``run_failed``,
+SKY-751) with ``Run failed: ...`` as its feedback, and the metric is not
+called. A nonzero exit of a command entry is an output like any other.
+Neither box gets the run's secrets: only the model route reaches the box.
+Both the ``[run]`` entry and the metric run through the tree sandbox session
+API (SKY-785), and the metric box never gets the candidate tree.
 
-A scorer returns a score with its feedback, like any scorer, and may return
-per-case results under ``cases``, a mapping of case name to
-``{"score", "feedback"}``. The run's score stays the top-level number; each
-case becomes a named score that every engine reflects on and keeps on its
-Pareto front.
+A scorer returns one answer object, like any scorer: ``score``, with optional
+``feedback`` and named ``scores`` (SKY-769). The run's score stays the
+top-level number; each named score, such as one per case, is an axis that
+every engine reflects on and keeps on its Pareto front.
 
 A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
 box for each stage for each candidate evaluation, all before the scorer runs
@@ -90,7 +90,7 @@ from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .protocol import STATUS_KEY
+from .protocol import RUN_FAILED_STATUS, STATUS_KEY
 from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
@@ -116,7 +116,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
@@ -203,10 +202,6 @@ _TARGET_ROLE = "target."
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
 RUN_FAILED = "Run failed: "
-# SKY-221: the side info ``status`` of a case whose entry failed. The final run
-# reads it, not the feedback, because pending rule-judge notes go in front of
-# the feedback.
-RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -223,6 +218,11 @@ _FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
+
+
+# Skynet's own text, never the metric's (SKY-353). It ends with the answer
+# form, so the run stops on it before any version has a score (SKY-769).
+_WRONG_FORM = f"The scorer answer does not have the valid form, so the version has no score. {runner.ANSWER_FORM}"
 
 
 class _StageSnapshotError(RepoScoreError):
@@ -260,36 +260,6 @@ def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes])
             if size > _SERVICE_BODY_BYTES:
                 raise _AnswerTooLargeError
             yield chunk
-
-
-def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn the per-case scores a repository scorer returned into named scores.
-
-    Each case becomes a named score, so every engine reflects on it and
-    treats it as its own objective, exactly like ``scores``.
-
-    Args:
-        side_info: Everything the scorer returned besides its score.
-
-    Returns:
-        The side info with ``cases`` folded into ``scores``.
-
-    Raises:
-        RepoScoreError: When ``cases`` is not a mapping of names to a finite
-            score with its feedback.
-    """
-    folded = dict(side_info)
-    cases = folded.pop(CASES_KEY, None)
-    if cases is None:
-        return folded
-    try:
-        named = runner.named_scores(cases)
-    except runner.ScorerError as exc:
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a score and feedback. {exc}") from exc
-    if not all(math.isfinite(entry["score"]) for entry in named.values()):
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a finite score.")
-    folded["scores"] = {**named, **(folded.get("scores") or {})}
-    return folded
 
 
 class RepoScorer:
@@ -466,8 +436,9 @@ class RepoScorer:
                 if ran is not None and ran.get("error"):
                     error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
                     error = error[len(RUN_FAILED) :]
+                    # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
-                        "score": 0.0,
+                        "score": None,
                         "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
                         STATUS_KEY: RUN_FAILED_STATUS,
                     }
@@ -597,6 +568,9 @@ class RepoScorer:
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
+            # The fixed form text lets the run stop before any score (protocol.py); the metric's text stays out.
+            if runner.ANSWER_FORM in str(output["error"]):
+                raise RepoScoreError(_WRONG_FORM)
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
         if output.get("score") is None:
             raise RepoScoreError("The scorer returned no score.")
@@ -605,11 +579,18 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
-        side_info = fold_case_scores(output.get("side_info") or {})
-        # SKY-221: only a crashed [run] entry above sets this status, so the
-        # metric's own ``status`` key cannot mark a scored case as a failure.
-        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
-            del side_info[STATUS_KEY]
+        side_info = output.get("side_info") or {}
+        # The metric's own code can rewrite the runner's output after the runner
+        # checks it, so the parent checks the answer again: only a crashed [run]
+        # entry above adds ``status`` (SKY-221).
+        try:
+            if not isinstance(side_info, dict):
+                raise runner.ScorerError(f"The side info is {type(side_info).__name__}, not an object.")
+            score, side_info = runner.normalize_score({**side_info, "score": score}, own_keys=False)
+        except runner.ScorerError as exc:
+            # The error text can name keys that the metric's code sets (SKY-353).
+            logger.warning("Repository scorer answer refused: %s", exc)
+            raise RepoScoreError(_WRONG_FORM) from None
         return {**side_info, "score": score}
 
     def _run_candidate(

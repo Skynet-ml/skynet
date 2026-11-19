@@ -45,7 +45,7 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
 PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
 _LLM_SCORER = (
     "def score(candidate, case=None):\n"
-    "    return float(llm(candidate, case['input'])), {'asked': candidate, 'feedback': 'judged'}\n"
+    "    return {'score': float(llm(candidate, case['input'])), 'feedback': 'judged ' + candidate}\n"
 )
 _SYSTEM_PYTHON = Path("/usr/bin/python3")
 _INTERPRETERS = [sys.executable] + ([str(_SYSTEM_PYTHON)] if _SYSTEM_PYTHON.is_file() else [])
@@ -71,60 +71,94 @@ class _WithScore:
     feedback = "attr"
 
 
+# One row for each row of the SKY-769 decision table, plus the edges of each rule.
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ((0.5, {"feedback": "ok"}), (0.5, {"feedback": "ok"})),
-        ([0.5, "just text"], (0.5, {"feedback": "just text"})),
-        ({"score": 0.75, "feedback": "f", "note": "n"}, (0.75, {"feedback": "f", "note": "n"})),
+        ({"score": 0.8, "feedback": "Missing the date."}, (0.8, {"feedback": "Missing the date."})),
+        ({"score": 0.8}, (0.8, {"feedback": ""})),
+        ({"score": 0.8, "feedback": ""}, (0.8, {"feedback": ""})),
+        ({"score": 0.8, "feedback": None}, (0.8, {"feedback": ""})),
+        ({"score": 0.8, "feedback": "   "}, (0.8, {"feedback": ""})),
         (
-            {"score": 1, "feedback": "f", "scores": {"a": {"score": 1, "feedback": "x"}, "b": (0, "y")}},
+            {"score": 0.8, "scores": {"format": {"score": 1.0}}},
+            (0.8, {"feedback": "", "scores": {"format": {"score": 1.0, "feedback": ""}}}),
+        ),
+        (
+            {"score": 1, "feedback": "f", "scores": {"a": {"score": 1, "feedback": "x"}, "b": {"score": 0}}},
             (
                 1.0,
                 {
                     "feedback": "f",
-                    "scores": {"a": {"score": 1.0, "feedback": "x"}, "b": {"score": 0.0, "feedback": "y"}},
+                    "scores": {"a": {"score": 1.0, "feedback": "x"}, "b": {"score": 0.0, "feedback": ""}},
                 },
             ),
         ),
-        (_WithScore(), (0.25, {"feedback": "attr"})),
     ],
 )
-def test_normalize_score_accepts_documented_shapes(raw: Any, expected: tuple[float, dict[str, Any]]) -> None:
-    """Every documented return shape normalizes to ``(score, side_info)``.
+def test_normalize_score_accepts_the_answer_object(raw: Any, expected: tuple[float, dict[str, Any]]) -> None:
+    """A valid answer object normalizes to ``(score, side_info)``; no feedback is stored as ``""``.
 
     Args:
-        raw: What the scorer returned.
+        raw: What the metric returned.
         expected: The normalized pair.
     """
     assert normalize_score(raw) == expected
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("raw", "match"),
     [
-        "0.5",
-        None,
-        {"feedback": "no score"},
-        (0.5, {}, "extra"),
-        0.5,
-        True,
-        (0.5, {}),
-        (0.5, "  "),
-        {"score": 0.75, "note": "n"},
-        {"score": 1, "feedback": "f", "scores": {"a": 1.0}},
-        {"score": 1, "feedback": "f", "scores": {"a": {"score": 1}}},
-        {"score": 1, "feedback": "f", "scores": [1]},
+        (0.8, "must be an object, not a bare number"),
+        (True, "must be an object, not a bare number"),
+        ((0.8, "Close."), "must be an object, not a pair"),
+        ((0.8, {"feedback": "Close."}), "must be an object, not a pair"),
+        ([0.8, "Close."], "must be an object, not a pair"),
+        (_WithScore(), "must be an object, not _WithScore"),
+        (None, "must be an object, not NoneType"),
+        ("0.8", "must be an object, not str"),
+        ({"score": 0.8, "scores": {"format": 1.0}}, "A named score is an object.*'format' is a bare number"),
+        ({"score": 0.8, "scores": {"format": [1.0, "ok"]}}, "A named score is an object.*'format' is a pair"),
+        ({"score": 0.8, "scores": [1.0]}, '"scores" must be an object'),
+        ({"score": 0.8, "predicted": 41}, "unknown key `predicted`"),
+        ({"score": 0.8, "cases": {"a": {"score": 1.0}}}, "unknown key `cases`. Use `scores`."),
+        ({"score": 0.8, "feedbak": "OK"}, "unknown key `feedbak`. Did you mean `feedback`?"),
+        ({"score": 0.8, "scroes": {}}, "unknown key `scroes`. Did you mean `scores`?"),
+        ({"score": 0.8, "status": "run_failed"}, "unknown key `status`"),
+        ({"score": "high"}, 'The "score" of the metric answer must be a finite number, not str'),
+        ({"score": None}, "must be a finite number, not NoneType"),
+        ({"score": True}, "must be a finite number, not bool"),
+        ({"score": float("nan")}, "must be a finite number, not nan"),
+        ({"score": float("inf")}, "must be a finite number, not inf"),
+        ({"feedback": "no score"}, 'has no "score"'),
+        ({"score": 0.8, "feedback": ["a"]}, "feedback of the metric answer must be text, not list"),
+        ({"score": 0.8, "scores": {"a": {"score": 1, "feedbak": "x"}}}, "named score 'a' has the unknown key"),
+        ({"score": 0.8, "scores": {"a": {"score": 1, "scores": {}}}}, "named score 'a' has the unknown key `scores`"),
+        ({"score": 0.8, "scores": {"a": {"feedback": "x"}}}, "named score 'a' has no \"score\""),
+        ({"score": 0.8, "scores": {"a": {"score": "high"}}}, "named score 'a' must be a finite number"),
+        ({"score": 0.8, "scores": {"a": {"score": 1, "feedback": 3}}}, "must be text, not int"),
     ],
 )
-def test_normalize_score_rejects_other_shapes(raw: Any) -> None:
-    """Anything else, including any score without feedback, is a scorer contract violation.
+def test_normalize_score_rejects_every_other_answer(raw: Any, match: str) -> None:
+    """Every other answer is an error that names the wrong part and shows the valid form.
 
     Args:
-        raw: An unsupported return value.
+        raw: An answer that does not have the one valid form.
+        match: A part of the expected message.
     """
-    with pytest.raises(ScorerError, match="must return feedback"):
+    with pytest.raises(ScorerError, match=match) as caught:
         normalize_score(raw)
+    assert str(caught.value).endswith(runner.ANSWER_FORM)
+
+
+def test_normalize_score_keeps_skynet_keys_only_when_asked() -> None:
+    """``own_keys`` reads a document Skynet built, which may hold its own keys after the check."""
+    assert normalize_score({"score": 0.5, "status": "x", "error": "e"}, own_keys=True) == (
+        0.5,
+        {"status": "x", "error": "e", "feedback": ""},
+    )
+    with pytest.raises(ScorerError, match="must be an object, not a pair"):
+        normalize_score((0.5, "f"), own_keys=True)
 
 
 def test_load_scorer_prefers_score_then_metric_then_single_function() -> None:
@@ -324,7 +358,7 @@ def test_protected_gateway_translates_reasoning_effort(monkeypatch: pytest.Monke
     monkeypatch.setattr(GatewayClient, "_post", post)
     result = run_call(
         {
-            "code": "def score(c): return float(llm(c, reasoning_effort='high')), {'feedback': 'ok'}",
+            "code": "def score(c): return {'score': float(llm(c, reasoning_effort='high'))}",
             "candidate": "x",
             "gateway": {"url": "http://gateway", "model": "anthropic/x", "protected": True, "gateway_reasoning": True},
         }
@@ -348,9 +382,9 @@ def test_subscription_runner_forwards_explicit_cli_effort() -> None:
                 "reasoning_effort": "low",
             },
         }
-        code = f"def score(c):\n return float(llm(c, model={name!r}, reasoning_effort='high')), {{'feedback': 'ok'}}"
+        code = f"def score(c):\n return {{'score': float(llm(c, model={name!r}, reasoning_effort='high'))}}"
         explicit = run_call({**base, "code": code})
-        default = run_call({**base, "code": "def score(c):\n return float(llm(c)), {'feedback': 'ok'}"})
+        default = run_call({**base, "code": "def score(c):\n return {'score': float(llm(c))}"})
     assert explicit["error"] is None
     assert default["error"] is None
     first, second = [request["body"] for request in gateway.requests]
@@ -417,19 +451,17 @@ def test_gateway_client_reports_unreachable_gateways(monkeypatch: pytest.MonkeyP
 
 
 def test_run_call_scores_and_serializes_side_info() -> None:
-    """The output carries the score, JSON-plain side info (images as data URLs) and an empty usage list."""
+    """The output carries the score, the checked side info and an empty usage list."""
     code = (
         "def score(candidate, case):\n"
-        "    return len(candidate) / 10, {\n"
-        "        'feedback': 'f', 'length': len(candidate), 'render': Image(base64_data='aGk='), 'odd': {1}\n"
-        "    }\n"
+        "    return {'score': len(candidate) / 10, 'feedback': 'f', 'scores': {'length': {'score': len(candidate)}}}\n"
     )
 
     result = run_call({"code": code, "candidate": "hello", "case": {"x": 1}, "gateway": None})
 
     assert result == {
         "score": 0.5,
-        "side_info": {"feedback": "f", "length": 5, "render": "data:image/png;base64,aGk=", "odd": "{1}"},
+        "side_info": {"feedback": "f", "scores": {"length": {"score": 5.0, "feedback": ""}}},
         "error": None,
         "usage": [],
     }
@@ -440,9 +472,9 @@ def test_run_call_passes_case_only_when_the_function_takes_one() -> None:
     scores = [
         run_call({"code": code, "candidate": "abc", "case": {"weight": 2}})["score"]
         for code in (
-            "def score(candidate): return len(candidate), 'f'",
-            "def score(candidate, case): return case['weight'] * len(candidate), 'f'",
-            "def score(*args): return len(args), 'f'",
+            "def score(candidate): return {'score': len(candidate)}",
+            "def score(candidate, case): return {'score': case['weight'] * len(candidate)}",
+            "def score(*args): return {'score': len(args)}",
         )
     ]
 
@@ -454,8 +486,10 @@ def test_run_call_passes_case_only_when_the_function_takes_one() -> None:
     [
         ("def score(c, case=None): raise ValueError('bad candidate')", "ValueError: bad candidate"),
         ("def score(c, case=None): raise SystemExit(3)", "SystemExit: 3"),
-        ("def score(c, case=None): return 'nope'", "must return feedback"),
-        ("def score(c, case=None): return 0.5", "must return feedback"),
+        ("def score(c, case=None): return 'nope'", "must be an object, not str"),
+        ("def score(c, case=None): return 0.5", "must be an object, not a bare number"),
+        ("def score(c, case=None): return 0.5, 'f'", "must be an object, not a pair"),
+        ("def score(c, case=None): return {'score': 0.5, 'feedbak': 'f'}", "Did you mean `feedback`?"),
         ("def !!!", "scorer code has a syntax error"),
         (_LLM_SCORER, "The metric calls llm() but has no model. Add model= to llm() or check the reflection model."),
     ],
@@ -497,7 +531,7 @@ def test_run_call_binds_llm_to_the_gateway_with_the_key_from_the_environment(
 
     assert result == {
         "score": 0.75,
-        "side_info": {"asked": "judge", "feedback": "judged"},
+        "side_info": {"feedback": "judged judge"},
         "error": None,
         "usage": [{"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}],
     }
@@ -543,7 +577,7 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
     call_dir = tmp_path / "calls" / "000001"
     call_dir.mkdir(parents=True)
     payload = {
-        "code": "def score(candidate, case=None):\n    return 0.5, {'feedback': 'f', 'render': Image(base64_data='aGk=')}\n",
+        "code": "def score(candidate, case=None):\n    return {'score': 0.5, 'feedback': 'f'}\n",
         "candidate": "x",
         "case": None,
         "gateway": None,
@@ -563,7 +597,7 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
     assert completed.returncode == 0, completed.stderr
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8")) == {
         "score": 0.5,
-        "side_info": {"feedback": "f", "render": "data:image/png;base64,aGk="},
+        "side_info": {"feedback": "f"},
         "error": None,
         "usage": [],
     }
@@ -588,7 +622,7 @@ def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(t
     (user_site / "plant.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x')\n")
     call_dir = tmp_path / "calls" / "000001"
     call_dir.mkdir(parents=True)
-    payload = {"code": "import userdep\ndef score(candidate, case=None):\n    return userdep.VALUE, 'ok'\n"}
+    payload = {"code": "import userdep\ndef score(candidate, case=None):\n    return {'score': userdep.VALUE}\n"}
     (call_dir / runner.INPUT_FILE).write_text(json.dumps({**payload, "candidate": "x", "case": None}), encoding="utf-8")
 
     completed = subprocess.run(
@@ -642,9 +676,9 @@ def test_log_rejects_a_missing_name_or_an_unknown_level(event: str, level: str) 
 def test_scorer_code_imports_log_from_skynet() -> None:
     """``from skynet import log`` works in the box and in validation alike."""
     fn = load_scorer_from_code(
-        "from skynet import log\ndef score(c, case=None):\n    return 1.0, 'ok'\n", helpers={"log": log}
+        "from skynet import log\ndef score(c, case=None):\n    return {'score': 1.0}\n", helpers={"log": log}
     )
-    assert fn("x") == (1.0, "ok")
+    assert fn("x") == {"score": 1.0}
 
 
 def test_env_value_prefers_the_new_name_and_falls_back_to_the_legacy_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1408,11 +1442,11 @@ def _metric_call(tmp_path: Path, code: str, document: dict[str, Any]) -> dict[st
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
-        ("def score(repo_path, case, output=None, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
-        ("def score(repo_path, case, output=None, *, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
-        ("def score(repo_path, case, output):\n    return output['n'], 'f'\n", 0.5),
-        ("def score(repo_path, case=None):\n    return 0.25, 'f'\n", 0.25),
-        ("def score(*args):\n    return len(args) / 10, 'f'\n", 0.3),
+        ("def score(repo_path, case, output=None, elapsed_s=None):\n    return {'score': elapsed_s}\n", 0.75),
+        ("def score(repo_path, case, output=None, *, elapsed_s=None):\n    return {'score': elapsed_s}\n", 0.75),
+        ("def score(repo_path, case, output):\n    return {'score': output['n']}\n", 0.5),
+        ("def score(repo_path, case=None):\n    return {'score': 0.25}\n", 0.25),
+        ("def score(*args):\n    return {'score': len(args) / 10}\n", 0.3),
     ],
 )
 def test_the_metric_gets_the_run_time_only_when_it_asks(tmp_path: Path, code: str, expected: float) -> None:
@@ -1424,7 +1458,7 @@ def test_the_metric_gets_the_run_time_only_when_it_asks(tmp_path: Path, code: st
 
 def test_a_metric_without_a_run_gets_no_time(tmp_path: Path) -> None:
     """With no ``[run]`` entry, ``elapsed_s`` keeps its default (SKY-642)."""
-    code = "def score(repo_path, case, output=None, elapsed_s=None):\n    return (1.0 if elapsed_s is None else 0.0), 'f'\n"
+    code = "def score(repo_path, case, output=None, elapsed_s=None):\n    return {'score': 1.0 if elapsed_s is None else 0.0}\n"
     assert _metric_call(tmp_path, code, {})["score"] == 1.0
 
 
@@ -1453,7 +1487,7 @@ def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> Non
     """``score(repo_path, case, output)`` receives the run's output and the full case."""
     call_dir = tmp_path / "call"
     call_dir.mkdir()
-    code = "def score(repo_path, case, output):\n    return output['n'] / 10, {'feedback': case['expected']}\n"
+    code = "def score(repo_path, case, output):\n    return {'score': output['n'] / 10, 'feedback': case['expected']}\n"
     case = {"input": 1, "expected": "e"}
     document = {"code": code, "candidate": str(tmp_path), "case": case, "gateway": None, "output": {"n": 4}}
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(document), encoding="utf-8")

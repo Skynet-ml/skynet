@@ -55,26 +55,27 @@ Leggi [Motori](/docs/concepts/engines) per scegliere un motore specifico.
 
 ## 5. Metrica ed esecuzione
 
-L'ultimo passaggio è **Metrica ed esecuzione**. L'assistente scrive lo scorer per te. Puoi modificarlo. Lo scorer riceve il percorso di una versione del repository e un caso:
+L'ultimo passaggio è **Metrica ed esecuzione**. L'assistente scrive lo scorer e il file `optimize.toml` per te. Puoi modificarli. La voce `[run]` esegue una versione del repository su un caso. Lo scorer riceve l'output della voce e il caso:
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="optimize.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` contiene le colonne di input di un caso. `case["expected"]` contiene la colonna di output, con il nome della colonna come chiave. Il repository ha un file `serve.py` con `def serve(input)`. Skynet usa la stessa funzione per servire la versione migliore dopo l'esecuzione.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-Poi esegui il controllo. Il controllo esegue la tua configurazione e il tuo scorer sulla versione iniziale nella sandbox. Puoi avviare l'esecuzione solo dopo che il controllo è superato.
+`case["input"]` contiene le colonne di input di un caso. `case["expected"]` contiene la colonna di output, con il nome della colonna come chiave. Il repository ha un file `serve.py` con `def serve(input)`. La voce `[run]` lo chiama, e `output` è il suo valore restituito. Lo scorer gira in un box della sandbox separato che contiene solo i tuoi file della metrica e nessun codice della versione, quindi non può importare `serve.py`. Skynet usa la stessa funzione per servire la versione migliore dopo l'esecuzione.
+
+Poi esegui il controllo. Il controllo esegue la tua configurazione, la voce `[run]` e il tuo scorer sulla versione iniziale nella sandbox. Puoi avviare l'esecuzione solo dopo che il controllo è superato.
 
 ## 6. Avvio e monitoraggio
 

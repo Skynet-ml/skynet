@@ -57,7 +57,7 @@ Les connecteurs qui importent des enregistrements comprennent les tables de base
 | Profondeur des dossiers                  | 3 dossiers                                                              |
 | Types de fichiers                        | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`scorer.py` contient votre évaluateur. Skynet appelle sa fonction `score(repo_path, case)` pour chaque cas.
+`scorer.py` contient votre évaluateur. Skynet appelle sa fonction `score(repo_path, case, output=None)` pour chaque cas. L'argument `output` contient ce que l'entrée `[run]` a renvoyé pour ce cas.
 
 ## Débits de requêtes
 

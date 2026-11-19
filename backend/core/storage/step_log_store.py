@@ -69,6 +69,19 @@ logger = logging.getLogger(__name__)
 STEP_KINDS = frozenset({"command", "model"})
 PACK_VERSION = 1
 PACK_PREFIX = "packs"
+# The byte_size of the row that the compactor's sweep inserts to claim an old flush pack with no row.
+# An applied pack is never empty: it always holds its manifest.
+CLAIM_BYTE_SIZE = 0
+# A flush pack with no row is deleted only after this age. A flush keeps retrying the apply of its
+# written pack while its pod lives, a job lease is 60 seconds, and a pod that restarts under its name
+# applies its own packs at start. Seven days is far past all of them, so no apply is still in flight.
+# A pod that comes back under a new name never applies its packs, so without this sweep their bytes,
+# also those of a deleted account, would stay forever (SKY-733). An apply refuses a pack of this age
+# itself: the sweep's claim row goes after the grace time, so it cannot keep a later apply out alone.
+UNRECORDED_FLUSH_PACK_AGE_SECONDS = 7 * 24 * 3600.0
+# The apply refuses a pack this much younger than the sweep's age, so clock skew between the applying
+# pod and the compactor cannot let an apply record a pack that the sweep deletes.
+SWEEP_AGE_MARGIN_SECONDS = 24 * 3600.0
 _FOOTER = struct.Struct(">Q")
 RUN_ID_MAX = 36
 AGENT_ID_MAX = 64
@@ -78,6 +91,8 @@ SEQ_MAX = 2**31 - 1
 # Each stale step of a flush adds one verdict for its step and one for its agent, also when the agent stops after it.
 # A verdict is only a key and a step id: the two dicts keep about 0.4 KB for a stale step with a 60-character id.
 FENCE_VERDICT_MAX = 10_000
+# SQLite's default bind-variable limit since 3.32 (SKY-807); PostgreSQL's limit of 65,535 is higher.
+SQL_PARAMS_MAX = 32_766
 OBJECT_ID = re.compile(r"[0-9a-f]{64}")
 _STEP_FIELDS = (
     "step_id",
@@ -104,6 +119,25 @@ class StepFenceError(RuntimeError):
             f"step {step_id} failed the fence: its execution_generation is stale or its run is on another shard"
         )
         self.step_id = step_id
+
+
+class PackClaimedError(RuntimeError):
+    """The compactor's sweep claimed a flush pack, or may delete it, before any store recorded it.
+
+    None of the pack's steps landed.
+    """
+
+    def __init__(self, pack_key: str) -> None:
+        """Name the claimed pack in the error.
+
+        Args:
+            pack_key: The key of the claimed pack.
+        """
+        super().__init__(
+            f"pack {pack_key} was claimed by the sweep, or is past its age, before it was recorded;"
+            " none of its steps landed"
+        )
+        self.pack_key = pack_key
 
 
 def step_id_for(run_id: str, agent_id: str, seq: int) -> str:
@@ -163,6 +197,22 @@ def _run_of(step_id: str) -> str:
     return step_id.split(":", 1)[0]
 
 
+def _past_sweep_age(pack_key: str) -> bool:
+    """Return whether a flush pack's key time is near the sweep's age, within ``SWEEP_AGE_MARGIN_SECONDS``.
+
+    Args:
+        pack_key: The pack key, ``packs/<worker>/<time>-<id>.pack``.
+
+    Returns:
+        ``False`` also for a key with no write time: the sweep never deletes such a pack.
+    """
+    try:
+        written_ns = int(pack_key.rsplit("/", 1)[-1][:20])
+    except ValueError:
+        return False
+    return time.time_ns() - written_ns >= int((UNRECORDED_FLUSH_PACK_AGE_SECONDS - SWEEP_AGE_MARGIN_SECONDS) * 1e9)
+
+
 def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
     """Keep a fence verdict as the newest one and drop the oldest one above ``FENCE_VERDICT_MAX``.
 
@@ -175,6 +225,20 @@ def _keep_verdict(verdicts: dict[Any, str], key: Any, step_id: str) -> None:
     verdicts[key] = step_id
     if len(verdicts) > FENCE_VERDICT_MAX:
         del verdicts[next(iter(verdicts))]
+
+
+def _bind_chunks(rows: list[Any], columns: int) -> list[list[Any]]:
+    """Split rows into chunks whose bind variables stay within ``SQL_PARAMS_MAX``.
+
+    Args:
+        rows: The rows, or the values of an ``IN`` list.
+        columns: The bind variables of one row.
+
+    Returns:
+        The chunks, in order.
+    """
+    size = SQL_PARAMS_MAX // columns
+    return [rows[start : start + size] for start in range(0, len(rows), size)]
 
 
 @dataclass(frozen=True)
@@ -209,6 +273,8 @@ class _Waiter(threading.Event):
     closed: bool = False
     # Set when this pod's map cannot route the step's run: the step is dropped, with no retry.
     error: str | None = None
+    # Set when the compactor's sweep claimed the step's pack before the flush recorded it.
+    lost: bool = False
 
 
 def _encode_body(body: dict[str, Any]) -> bytes:
@@ -507,8 +573,9 @@ class StepLogStore:
             UnroutableRunError: When the store holds nothing for the step and
                 its run records a shard that this pod's map does not have.
             RuntimeError: When the last flush of :meth:`close` failed before
-                the step was durable, or the flush could not route the step's run
-                to a shard on this pod.
+                the step was durable, the flush could not route the step's run
+                to a shard on this pod, or the compactor's sweep deleted the
+                step's pack before a flush recorded it.
         """
         key = (step_id, execution_generation)
         with self._cond:
@@ -521,6 +588,8 @@ class StepLogStore:
                 raise RuntimeError(f"the step log closed before step {step_id} was durable")
             if waiter.error is not None:
                 raise RuntimeError(waiter.error)
+            if waiter.lost:
+                raise RuntimeError(f"the pack of step {step_id} was deleted before it was recorded")
             failure = waiter.failure
         elif failure is None:
             with self._shards.for_run(_run_of(step_id)) as session:
@@ -671,15 +740,35 @@ class StepLogStore:
             kept = self._unapplied.get(shard)
         if kept is not None:
             key, size, manifest, batch = kept
+            lost = False
             try:
                 _, stale = self._apply(shard, key, size, manifest)
+            except PackClaimedError:
+                # A retry near UNRECORDED_FLUSH_PACK_AGE_SECONDS: the sweep deletes the bytes, so the
+                # batch's waiters fail rather than wait for a pack that no retry can record. Its
+                # objects go into the next pack.
+                logger.exception("Flush pack %s was claimed by the sweep before it was recorded", key)
+                lost, stale = True, []
             except Exception:
                 # A new pack of the same batch on each retry makes the PUT bytes grow with each failed window.
                 self._requeue(entries, first_at)
                 raise
             with self._cond:
                 del self._unapplied[shard]
-            self._settle(batch, stale)
+            if lost:
+                # The settle drops the later steps of the lost agents from the buffer, so the shard's new entries
+                # go back there first. This flush then takes back what is left of them and the batch's objects.
+                mine = {id(entry) for entry in batch + entries}
+                self._requeue(entries, first_at)
+                self._settle(batch, stale, lost=True)
+                with self._cond:
+                    entries = [entry for entry in self._pending if id(entry) in mine]
+                    self._pending = [entry for entry in self._pending if id(entry) not in mine]
+                    self._pending_bytes = sum(len(data) for _, data in self._pending)
+                    if not self._pending:
+                        self._first_at = None
+            else:
+                self._settle(batch, stale)
         if not entries:
             return
         try:
@@ -755,14 +844,24 @@ class StepLogStore:
             self._cond.notify_all()
 
     def _settle(
-        self, batch: list[tuple[_Step | _Object, bytes]], stale: list[dict[str, Any]], error: str | None = None
+        self,
+        batch: list[tuple[_Step | _Object, bytes]],
+        stale: list[dict[str, Any]],
+        error: str | None = None,
+        lost: bool = False,
     ) -> None:
         """Drop a recorded batch from the buffer and open its waiters with their fence verdicts.
+
+        When the pack is lost, each agent of the batch gets a verdict, and its pending steps leave the
+        buffer with a fence verdict: a later step can name a tree whose objects were in the lost pack.
+        The batch's objects go back to the front of the buffer, so the next pack records them: a later
+        step of another agent can name them, also after its own ``put_object`` skipped them as buffered.
 
         Args:
             batch: The entries of the recorded pack.
             stale: The manifest entries of the batch's steps that did not land.
             error: The reason when the batch is dropped with no pack; each waiter raises it.
+            lost: Whether the sweep claimed the pack first, so every waiter opens with an error.
         """
         with self._cond:
             # The batch's waiters read their verdict here: the cap of ``_failures`` can remove one of this flush.
@@ -773,9 +872,39 @@ class StepLogStore:
                 _keep_verdict(self._failures, step_key, entry["step_id"])
                 agent_key = (entry["run_id"], entry["agent_id"], entry["execution_generation"])
                 _keep_verdict(self._agent_failures, agent_key, entry["step_id"])
-            for item, _ in batch:
+            dropped: list[tuple[_Step | _Object, bytes]] = []
+            if lost:
+                lost_agents: dict[tuple[str, str, int], str] = {}
+                for item, _ in batch:
+                    if isinstance(item, _Step):
+                        lost_agents.setdefault((item.run_id, item.agent_id, item.execution_generation), item.step_id)
+                for agent_key, step_id in lost_agents.items():
+                    _keep_verdict(self._agent_failures, agent_key, step_id)
+                # Under the same lock as the verdicts, so no later step of a lost agent stays in the buffer.
+                kept = [entry for entry in batch if isinstance(entry[0], _Object)]
+                for entry in self._pending:
+                    item = entry[0]
+                    if (
+                        isinstance(item, _Step)
+                        and (item.run_id, item.agent_id, item.execution_generation) in lost_agents
+                    ):
+                        dropped.append(entry)
+                        step_key = (item.step_id, item.execution_generation)
+                        verdicts[step_key] = item.step_id
+                        _keep_verdict(self._failures, step_key, item.step_id)
+                    else:
+                        kept.append(entry)
+                self._pending = kept
+                self._pending_bytes = sum(len(data) for _, data in kept)
+                if not kept:
+                    self._first_at = None
+                elif self._first_at is None:
+                    self._first_at = time.monotonic()
+            for item, _ in batch + dropped:
                 if isinstance(item, _Object):
-                    self._tree_objects.pop((item.run_id, item.object_id), None)
+                    # A lost batch's objects are in the buffer again, so reads still find them there.
+                    if not lost:
+                        self._tree_objects.pop((item.run_id, item.object_id), None)
                     continue
                 versions = self._steps.get(item.step_id)
                 if versions is not None:
@@ -787,6 +916,7 @@ class StepLogStore:
                 if waiter is not None:
                     waiter.failure = verdicts.get(step_key)
                     waiter.error = error
+                    waiter.lost = lost and step_key not in verdicts
                     waiter.set()
 
     def recover(self) -> int:
@@ -821,7 +951,12 @@ class StepLogStore:
             for key in self._objects.list(f"{PACK_PREFIX}/{self._worker_id}/"):
                 if key in recorded:
                     continue
-                pack = self._objects.get(key)
+                try:
+                    pack = self._objects.get(key)
+                except KeyError:
+                    # The compactor's sweep claimed and deleted the pack after the list. A late apply of
+                    # the pack is refused by its claim row, and after the row goes by the pack's age.
+                    continue
                 manifest = _read_manifest(pack)
                 # A pack from before the shard map has no shard: it was the main database's.
                 shard = manifest.get("shard", MAIN)
@@ -829,6 +964,9 @@ class StepLogStore:
                     continue
                 try:
                     claimed, _ = self._apply(shard, key, len(pack), manifest)
+                except PackClaimedError:
+                    # The sweep claimed the pack after the list; the claim row keeps its steps out.
+                    continue
                 except Exception as error:
                     failed[shard] = error
                     continue
@@ -866,6 +1004,8 @@ class StepLogStore:
 
         The ``storage_packs`` row makes the apply happen once: a second apply
         of the same pack, by recovery or a retry, finds the row and stops.
+        A row that the compactor's sweep inserted to claim the pack is not an
+        apply: none of the pack's entries got a row.
         The fence comes first: a step whose generation is not the job's
         current one fails, also when a row with its id exists. A current step
         whose id has a row is done and not inserted again, so the first
@@ -876,6 +1016,10 @@ class StepLogStore:
         waits for the shard commit. On another shard the main transaction
         only reads, so no two-phase commit is needed. A step whose run records
         another shard fails the fence, so it never lands on this one.
+
+        When an entry gets no row (a stale step, a step or object that
+        already has a row, or an object of a job that is gone), the pack
+        gets ``needs_rewrite``, so the compactor drops the entry's bytes.
 
         Args:
             shard: The shard that records the pack.
@@ -890,6 +1034,12 @@ class StepLogStore:
             fence. When another store applied it first, those are the steps
             with a stale generation and the current steps with no row: the
             other store fenced them.
+
+        Raises:
+            PackClaimedError: When the row is the sweep's claim, so no store
+                applied the pack, or when no store applied the flush pack
+                before it came within ``SWEEP_AGE_MARGIN_SECONDS`` of
+                ``UNRECORDED_FLUSH_PACK_AGE_SECONDS``.
         """
         engine = self._shards.engine(shard)
         steps, objects = manifest["steps"], manifest["objects"]
@@ -933,7 +1083,11 @@ class StepLogStore:
             .on_conflict_do_nothing()
         ).rowcount
         ids = [entry["step_id"] for entry in steps]
-        stored = set(session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(ids))))
+        stored = {
+            step_id
+            for chunk in _bind_chunks(ids, 1)
+            for step_id in session.scalars(select(AgentStepModel.step_id).where(AgentStepModel.step_id.in_(chunk)))
+        }
         current = {(job.optimization_id, job.execution_generation) for job in jobs.values()}
         fresh, stale = [], []
         for entry in steps:
@@ -942,51 +1096,65 @@ class StepLogStore:
             # A current step with a row is a retry of an applied step: it is done.
             elif entry["step_id"] not in stored:
                 fresh.append(entry)
-        if not claimed:
+        # Checked after the insert, so a wait on the job locks cannot make the check stale. The sweep's
+        # claim row goes after the grace time; then only this age keeps an apply of a deleted pack out.
+        if claimed and pack_key.startswith(f"{PACK_PREFIX}/") and _past_sweep_age(pack_key):
             session.rollback()
-            # The store that applied this pack inserted every current step that had no row.
+            raise PackClaimedError(pack_key)
+        if not claimed:
+            row_size = session.scalar(select(StoragePackModel.byte_size).where(StoragePackModel.pack_key == pack_key))
+            session.rollback()
+            if row_size == CLAIM_BYTE_SIZE:
+                raise PackClaimedError(pack_key)
+            # Another store applied this pack and inserted every current step that had no row then,
+            # so a current step with no row now failed its fence.
             return False, stale + fresh
-        if fresh:
-            session.execute(
-                insert(AgentStepModel)
-                .values(
-                    [
-                        {
-                            **{name: entry[name] for name in _STEP_FIELDS},
-                            "pack_key": pack_key,
-                            "pack_offset": entry["offset"],
-                            "pack_length": entry["length"],
-                            "created_at": now,
-                        }
-                        for entry in fresh
-                    ]
-                )
-                .on_conflict_do_nothing()
-            )
+        step_rows = [
+            {
+                **{name: entry[name] for name in _STEP_FIELDS},
+                "pack_key": pack_key,
+                "pack_offset": entry["offset"],
+                "pack_length": entry["length"],
+                "created_at": now,
+            }
+            for entry in fresh
+        ]
+        # One multi-row INSERT of a large batch passes SQLite's bind limit and fails on every retry (SKY-807).
+        # The chunks share the session's one transaction, so the batch still lands whole or not at all.
+        landed_steps = 0
+        if step_rows:
+            for chunk in _bind_chunks(step_rows, len(step_rows[0])):
+                landed_steps += session.execute(insert(AgentStepModel).values(chunk).on_conflict_do_nothing()).rowcount
         owned = {
             (jobs[entry["run_id"]].username or "", entry["object_id"]): entry
             for entry in objects
             if entry["run_id"] in jobs
         }
-        if owned:
-            # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
+        # Flushes of other runs of the account share these keys; sorted rows give each flush one lock order.
+        object_rows = [
+            {
+                "username": username,
+                "object_id": object_id,
+                "byte_size": entry["length"],
+                "pack_key": pack_key,
+                "pack_offset": entry["offset"],
+                "pack_length": entry["length"],
+                "created_at": now,
+            }
+            for (username, object_id), entry in sorted(owned.items())
+        ]
+        landed_objects = 0
+        if object_rows:
+            for chunk in _bind_chunks(object_rows, len(object_rows[0])):
+                landed_objects += session.execute(
+                    insert(TreeObjectModel).values(chunk).on_conflict_do_nothing()
+                ).rowcount
+        if landed_steps < len(steps) or landed_objects < len(objects):
+            # No row points at those bytes. A pack over half the merge target is a candidate only with
+            # the mark, so without it the bytes of a deleted account could stay forever (SKY-733). This
+            # includes a duplicate object: the purge marks only the pack of its first copy's row.
             session.execute(
-                insert(TreeObjectModel)
-                .values(
-                    [
-                        {
-                            "username": username,
-                            "object_id": object_id,
-                            "byte_size": entry["length"],
-                            "pack_key": pack_key,
-                            "pack_offset": entry["offset"],
-                            "pack_length": entry["length"],
-                            "created_at": now,
-                        }
-                        for (username, object_id), entry in sorted(owned.items())
-                    ]
-                )
-                .on_conflict_do_nothing()
+                update(StoragePackModel).where(StoragePackModel.pack_key == pack_key).values(needs_rewrite=True)
             )
         session.commit()
         return True, stale
@@ -1007,7 +1175,14 @@ class StepLogStore:
         return max(0.0, self._first_at + self._window - time.monotonic())
 
     def _run(self) -> None:
-        """Flush each batch when its window ends or it reaches the size cap, until close."""
+        """Flush each batch when its window ends or it reaches the size cap, until close.
+
+        A failed flush tries again after the window. A failure with a new error
+        cause logs the full error; each repeat of the same cause logs one line
+        with only the error type and the count, because the error text can
+        hold row data.
+        """
+        failures, failed_as = 0, None
         while True:
             with self._cond:
                 while not self._closed and not self._due():
@@ -1016,8 +1191,29 @@ class StepLogStore:
                     return
             try:
                 self.flush()
-            except Exception:
-                logger.exception("step log flush failed; it tries again after the window")
+                failures, failed_as = 0, None
+            except Exception as error:
+                # A retry can get past the first cause and fail on a new one, whose trace the log must show.
+                # SQLAlchemy wraps most driver errors in one type, and one driver type covers many failures
+                # ("too many SQL variables" and "database is locked" are both sqlite3.OperationalError).
+                # So the cause also holds the driver error type and code (``orig``); none of them holds row data.
+                orig = getattr(error, "orig", None)
+                code = (
+                    getattr(orig, "sqlite_errorcode", None)
+                    or getattr(orig, "sqlstate", None)
+                    or getattr(orig, "pgcode", None)
+                )
+                cause = (type(error), type(orig), code)
+                if cause != failed_as:
+                    failures, failed_as = 1, cause
+                    logger.exception("step log flush failed; it tries again after the window")
+                else:
+                    failures += 1
+                    logger.warning(
+                        "step log flush failed %d times in a row (%s); it tries again after the window",
+                        failures,
+                        type(error).__name__,
+                    )
                 # A fixed deadline: each commit notifies, and a retry on every commit would PUT the batch again each time.
                 deadline = time.monotonic() + self._window
                 with self._cond:

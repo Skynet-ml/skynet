@@ -17,7 +17,7 @@ from core.api.routers.execution_budgets import ExecutionBudgetResponse
 from core.i18n import request_locale, t_locale
 
 RUN_CODE = "def run(artifact, input):\n    return artifact\n"
-METRIC_CODE = "def score(input, output, expected=None):\n    return 1.0, {'feedback': 'ok'}\n"
+METRIC_CODE = "def score(input, output, expected=None):\n    return {'score': 1.0, 'feedback': 'ok'}\n"
 ERROR = "SyntaxError: invalid syntax"
 TRACE = 'File "metric.py", line 1\n    def score(:\n' + ERROR
 

@@ -29,6 +29,17 @@ illegal = "docs/rules.md"
 # Optional. Extra hosts the proposer's box can reach, on top of the relay and
 # the package registries. [] means the relay only.
 network = ["docs.python.org"]
+# Optional. Your own proposer command. Used only when the run names no
+# proposer of its own. See "Your own proposer" below.
+entry = ["node", "agent/my-agent.js"]
+# Optional. Runs once in the proposer box, before the first session, for
+# example to install the command.
+setup = ["npm", "ci"]
+
+[run]
+# Required, unless a [target.<name>] stage runs the version. The metric scores
+# the output of this entry.
+entry = "bot/run.py:main"
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
@@ -76,6 +87,92 @@ into a file.
 The worker never reads the metric. The metric lives in the repository, and
 the worker gets a copy of the repository without the metric files. Or the
 metric lives with the judge.
+
+## Your own proposer: `[proposer] entry` and `setup`
+
+`entry` names the command that proposes each new version. `setup` names a
+command that prepares the repository for it. Write each one as a list of strings, for
+example `["node", "agent/my-agent.js"]`. A plain string, an empty list, an
+empty part or a part with a control character fails the setup check, and the
+message names the key. Control characters include the C1 controls and the
+bidirectional text controls (U+061C, U+200E, U+200F, U+202A to U+202E and
+U+2066 to U+2069), because they can hide what a command does.
+
+- The run's own proposer wins. When the run request names a proposer, the
+  run ignores `entry` and `setup`, and the run record shows the note "The
+  run's own proposer replaces the one in the contract file."
+- `setup` without `entry` fails the setup check.
+- `setup` runs once in each proposer box, in the repository checkout where
+  the command runs, before the first proposer session, also in a protected
+  run. The run keeps a copy of the files that `setup` adds in the git
+  folder, also the files that `.gitignore` names (such as `node_modules/`).
+  GEPA and Best-of-N reset the checkout before and after each version, and
+  AutoSaddler gives each session a new worktree. Each later session gets the
+  kept copy back, and `setup` does not run again. A file of the version at
+  the same path stays, and the copy does not replace it. The copy keeps
+  symbolic links as links. A file that holds the absolute path of the first
+  checkout (for example a Python virtual environment) can fail in an
+  AutoSaddler worktree, because each worktree has a different path. The copy
+  uses disk space in the box, and each later session spends time to copy it.
+  The files it adds never join a version. It has 30 minutes, but never more
+  than the time that the proposer session has left: the setup time counts
+  inside the session's time limit. If it fails or runs out of time, the run
+  stops, and the message names the command and its output. When `setup`
+  ends, the run stops every process that it left running. When the run stops
+  a proposer session, it also stops a `setup` that runs.
+- `setup` can write only files that git does not track. If it changes,
+  adds to the index or removes a tracked file, the run stops. The message
+  names the command and the changed files, because the change would join
+  every version. Edits that the version made before `setup` ran do not count.
+  The same applies to the new files of the version that git does not track
+  yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
+  If `setup` makes a commit or checks out another commit, the run stops too.
+- A file or folder name that `setup` adds must be UTF-8. It cannot hold a
+  control character (such as a new line) or end in a space. The run cannot
+  keep such a name out of the versions, so the run stops, and the message
+  names the file.
+- The command runs in the proposer's box, under the `[proposer]` rules. Its
+  working directory is the repository checkout. It gets the absolute task file path in
+  `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
+  `APP_MODEL`, the model relay in `APP_GATEWAY_URL` and the relay key in
+  `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
+  other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
+  AutoSaddler, the files it changes are the new version.
+- The command runs only in a repository checkout. AutoSaddler also starts
+  reflect sessions in a plain folder, which edit no repository. The default
+  proposer agent answers those sessions, without `setup`, and the box
+  installs that agent beside your command.
+- The run record names the command in a note: "The run uses the proposer
+  command in the contract file: ...". The run page shows the command as the
+  proposer.
+- AutoResearch, Meta-Harness and ShinkaEvolve cannot use the command.
+  ShinkaEvolve writes versions with its own editor. AutoResearch and
+  Meta-Harness call the proposer from their own lab folder, so the files the
+  command changes are not their versions. A single run of one of these
+  engines with `entry` fails the setup check, and the message names
+  `[proposer] entry` and the engine. Auto leaves out their lanes, and the run
+  record says so in a note.
+- Every repository file or folder that `entry` or `setup` names by its
+  exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
+  `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
+  The run reads each argument as a path relative to the checkout root, after
+  it removes `./` and a final `/`. An absolute path, the root itself (`.`)
+  and a path outside the checkout are never protected. A protected folder
+  protects every file in it. Other files that the command uses are not
+  protected: modules that it imports, a module in `python -m agent.main`, a
+  script in `sh -c "node agent.js"`, or `package.json`. A version can change those
+  files, and so change the proposer of the next versions. To prevent this,
+  put your proposer's folder in `[paths] protected`, for example
+  `protected = ["agent"]`.
+- An `entry` or `setup` argument that names a symbolic link, a path in a
+  linked folder, or a folder that holds a symbolic link at any depth, fails
+  the setup check. Protection matches paths, so a version could change the
+  file that the link points at. Name the real path, and keep links out of a
+  named folder.
+- `entry` and `setup` cannot contain `__APP_API_KEY__` or
+  `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
+- Limits in this version: `[proposer] mcp` with `entry` fails the setup
+  check, and the run's tool-call limit does not apply to your command.
 
 ## Outcome: `[outcome]`
 
@@ -325,9 +422,11 @@ belongs in a `[run]` entry: the entry runs the code in the candidate box, and
 the metric judges the entry's output. Setup warns when a metric file imports
 a repository module that is not a metric file. The warning names the module
 and the fix: move the check into a `[run]` entry. The metric box holds no
-version file, so a `[metric]` needs a `[run]` section or a
-`[target.<name>]` stage whose outputs it scores. A `[metric]` with neither
-fails setup, because it would give each version the same score.
+version file, so every contract needs a `[run]` section or a
+`[target.<name>]` stage whose outputs the metric scores. This rule holds also
+when the file has no `[metric]` section, because the metric code can come
+with the run request. A contract with neither fails setup, because the
+metric would give each version the same score.
 
 The box user can be root. The boxes depend on the microVM boundary between
 boxes, not on file permissions inside a box.
@@ -450,7 +549,43 @@ Residual risk:
 - Where the image has no `/usr/local/bin/python3` (for example a local test
   host), the supervisor falls back to `python3` from `PATH`.
 
-A timeout or other `[run]` failure scores 0, and the metric does not run.
+A timeout, a crash, a function entry that exits before it returns, or other
+`[run]` failure gives the case no score, and the metric does not run. A
+command entry that exits with a non-zero code does not fail: the metric gets
+its `exit_code` and `stdout` as the output. The runner never makes a score.
+Only the metric makes a score. The failure text goes to the proposer as
+feedback. A version with a case that has no score has no score itself:
+
+- It cannot be the best version of the search, and it ranks below every
+  version that has a score.
+- Every engine applies this rule during the search too. The version never
+  replaces a version that has a score and never leads the frontier. It can
+  still be a parent for the next step in two cases. GEPA always starts from
+  the starting version, also when that version failed a case. AutoSaddler
+  keeps every parent when the `[run]` entry of every accepted version failed.
+- A metric error is different during the search. The metric fails, not your
+  program, so the case gets the version's mean over its other cases. A metric
+  that fails one case for every version then still lets the search rank the
+  versions.
+- A metric error in the final run also gives the version no score.
+- A version with a metric error stays in the version tree with no score,
+  so its child versions keep their parent.
+- It reaches no `[outcome] target`, passes no minimum and opens no pull
+  request.
+- The starting version can fail a case. Then a version that passes every
+  case counts as better and opens a pull request. The result shows no
+  starting score and no improvement number.
+- When no version has a score, the run keeps the starting version and says
+  why.
+
+If a failure must count as a number, catch the failure in your program and
+write an output that the metric can score. The metric then gives the number.
+
+Release note (SKY-751): before this change, a failed `[run]` case scored 0.
+A run whose starting code fails some cases, with the goal to fail fewer
+cases, now gets no score for each version that still fails a case. The
+search then loses its step-by-step progress signal. To keep that signal,
+catch the failure in the program, as above, and let the metric score it.
 
 ## What is enforced
 
@@ -459,6 +594,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. AutoResearch, Meta-Harness and ShinkaEvolve refuse it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
@@ -468,12 +604,19 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 
 ## What fails the setup check
 
+- A contract with no `[run]` section and no `[target.<name>]` stage, with or
+  without a `[metric]` section. The message says to add one of them.
 - A `services` list in a `[target.<name>]`, or a `network` host list in a
   `[target.<name>]`. Runs cannot use these settings yet. `network = []` in a
   stage passes, because a stage box is already offline except for the relay.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
+- A `[proposer] entry` or `setup` that is not a list of non-empty strings,
+  or a part with a control character, or that contains `__APP_API_KEY__` or
+  `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
+  `[proposer] mcp`. An `entry` in a single AutoResearch, Meta-Harness or
+  ShinkaEvolve run.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
@@ -510,7 +653,8 @@ The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
 command, the network for setup, for versions (`[run]`) and for the metric, and each role's services
-and MCP servers.
+and MCP servers. When the run uses the file's proposer, it also holds
+`proposer_entry` and `proposer_setup`.
 A resumed run that arrives at different rules fails instead of continuing.
 
 ## Services, MCP files and secrets

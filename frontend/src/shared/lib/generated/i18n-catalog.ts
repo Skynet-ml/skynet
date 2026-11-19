@@ -67,6 +67,7 @@ export const TERMS = {
 } as const;
 
 export const I18N_MESSAGES = {
+  "accounts.deletion_storage_unavailable": "החשבון לא נמחק: לא ניתן היה למחוק כרגע את נתוני הריצות השמורים שלו. נסו שוב בעוד כמה דקות.",
   "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
   "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
   "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",
@@ -341,10 +342,12 @@ export const I18N_MESSAGES = {
   "notifier.title.stuck": "ה{term.optimization} שלך לא משתפרת",
   "optimization.agent_run_not_found": "ריצת הסוכן {run_id} לא נמצאה עבור ה{term.optimization} '{optimization_id}'.",
   "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
+  "optimization.cancel_conflict": "ה{term.optimization} שינתה את מצבה בזמן הביטול. היא כעת במצב '{status}'. אפשר לנסות לבטל אותה שוב.",
   "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
   "optimization.cannot_resubmit_payload": "לא ניתן לשלוח מחדש את ההגדרות השמורות: {error}",
   "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",
   "optimization.dataset_unavailable": "ה{term.dataset} של ה{term.optimization} אינו זמין.",
+  "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
   "optimization.dspy_run_retired": "Skynet מבצע עכשיו אופטימיזציה למאגרי קוד בלבד. כבר אי אפשר להפעיל, להמשיך, לשכפל, להגיש או לתזמן הרצות של תוכניות DSPy. כדי להמשיך, התחילו אופטימיזציה חדשה של מאגר.",
   "optimization.insufficient_role": "רמת ההרשאה שלך ('{role}') לא מספיקה לפעולה הזו — נדרשת הרשאה '{required}' ומעלה.",
   "optimization.no_result_pending": "ל{term.optimization} עדיין אין תוצאה.",
@@ -536,6 +539,7 @@ const terms_ar: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ar: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "لم يُحذف حسابك: تعذّر حذف بيانات التشغيل المخزّنة الخاصة به الآن. حاول مرة أخرى بعد بضع دقائق.",
   "accounts.email_delivery_unavailable": "لم يتم إعداد خدمة إرسال البريد الإلكتروني على هذا الخادم.",
   "accounts.email_not_verified": "يرجى تأكيد بريدك الإلكتروني قبل تسجيل الدخول.",
   "accounts.email_send_failed": "تعذّر إرسال بريد التأكيد الإلكتروني. يُرجى المحاولة مرة أخرى.",
@@ -810,10 +814,12 @@ const i18n_ar: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "التحسين لا يتقدم",
   "optimization.agent_run_not_found": "لم يُعثر على تشغيل الوكيل {run_id} للتحسين '{optimization_id}'.",
   "optimization.already_terminal": "التحسين في حالة نهائية بالفعل '{status}'.",
+  "optimization.cancel_conflict": "تغيّرت حالة التحسين أثناء الإلغاء. هو الآن في الحالة '{status}'. حاول إلغاءه مجددًا.",
   "optimization.cannot_delete": "لا يمكن حذف تحسين في الحالة '{status}'. ألغِه أولاً.",
   "optimization.cannot_resubmit_payload": "تعذّرت إعادة إرسال الحمولة المحفوظة: {error}",
   "optimization.clone_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لاستنساخها.",
   "optimization.dataset_unavailable": "مجموعة بيانات التحسين غير متاحة.",
+  "optimization.deletion_storage_unavailable": "لم يُحذف التحسين: تعذّر حذف بيانات التشغيل المخزّنة الخاصة به الآن. حاول مرة أخرى بعد بضع دقائق.",
   "optimization.dspy_run_retired": "يحسّن Skynet المستودعات فقط الآن. لم يعد بالإمكان بدء تشغيلات برامج DSPy أو استئنافها أو نسخها أو تقديمها أو جدولتها. ابدأ بدلًا من ذلك تحسينًا جديدًا لمستودع.",
   "optimization.insufficient_role": "مستوى وصولك ('{role}') ليس كافيًا لهذا الإجراء — المطلوب '{required}' أو أعلى.",
   "optimization.no_result_pending": "لا يملك التحسين أي نتيجة بعد.",
@@ -999,6 +1005,7 @@ const terms_de: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_de: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Ihr Konto wurde nicht gelöscht: Die gespeicherten Laufdaten konnten gerade nicht entfernt werden. Versuchen Sie es in einigen Minuten erneut.",
   "accounts.email_delivery_unavailable": "Der E-Mail-Versand ist auf diesem Server nicht konfiguriert.",
   "accounts.email_not_verified": "Bitte bestätigen Sie Ihre E-Mail-Adresse vor der Anmeldung.",
   "accounts.email_send_failed": "Die Bestätigungs-E-Mail konnte nicht gesendet werden. Bitte versuchen Sie es erneut.",
@@ -1273,10 +1280,12 @@ const i18n_de: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Ihre Optimierung verbessert sich nicht",
   "optimization.agent_run_not_found": "Agentenlauf {run_id} für Optimierung '{optimization_id}' nicht gefunden.",
   "optimization.already_terminal": "Die Optimierung befindet sich bereits im Endzustand '{status}'.",
+  "optimization.cancel_conflict": "Die Optimierung hat ihren Zustand während des Abbruchs geändert. Sie ist jetzt im Zustand '{status}'. Versuchen Sie erneut, sie abzubrechen.",
   "optimization.cannot_delete": "Eine Optimierung im Zustand '{status}' kann nicht gelöscht werden. Brechen Sie sie zuerst ab.",
   "optimization.cannot_resubmit_payload": "Die gespeicherte Nutzlast kann nicht erneut übermittelt werden: {error}",
   "optimization.clone_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast zum Klonen.",
   "optimization.dataset_unavailable": "Der Datensatz der Optimierung ist nicht verfügbar.",
+  "optimization.deletion_storage_unavailable": "Die Optimierung wurde nicht gelöscht: Die gespeicherten Laufdaten konnten gerade nicht entfernt werden. Versuchen Sie es in einigen Minuten erneut.",
   "optimization.dspy_run_retired": "Skynet optimiert jetzt nur noch Repositorys. DSPy-Programmläufe können nicht mehr gestartet, fortgesetzt, geklont, bereitgestellt oder geplant werden. Starten Sie stattdessen eine neue Repository-Optimierung.",
   "optimization.insufficient_role": "Ihre Zugriffsstufe ('{role}') ist für diese Aktion nicht hoch genug — '{required}' oder höher ist erforderlich.",
   "optimization.no_result_pending": "Die Optimierung hat noch kein Ergebnis.",
@@ -1462,6 +1471,7 @@ export const TERMS_EN: Partial<Record<TermKey, string>> = {
 };
 
 export const I18N_MESSAGES_EN: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Your account was not deleted: its stored run data could not be removed right now. Try again in a few minutes.",
   "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
   "accounts.email_not_verified": "Please verify your email before signing in.",
   "accounts.email_send_failed": "Couldn't send the verification email. Try again.",
@@ -1736,10 +1746,12 @@ export const I18N_MESSAGES_EN: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Your optimization is not improving",
   "optimization.agent_run_not_found": "Agent run {run_id} not found for optimization '{optimization_id}'.",
   "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
+  "optimization.cancel_conflict": "The optimization changed its state during the cancel. It is now in '{status}'. Try to cancel it again.",
   "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",
   "optimization.cannot_resubmit_payload": "Cannot resubmit the saved payload: {error}",
   "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
   "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
+  "optimization.deletion_storage_unavailable": "The optimization was not deleted: its stored run data could not be removed right now. Try again in a few minutes.",
   "optimization.dspy_run_retired": "Skynet now optimizes repositories only. DSPy program runs can no longer be started, resumed, cloned, served or scheduled. Start a new repository optimization instead.",
   "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
   "optimization.no_result_pending": "Optimization has no result yet.",
@@ -1889,9 +1901,11 @@ const i18n_en_GB: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.new": "New optimisation",
   "optimization.agent_run_not_found": "Agent run {run_id} not found for optimisation '{optimization_id}'.",
   "optimization.already_terminal": "Optimisation is already in terminal state '{status}'.",
+  "optimization.cancel_conflict": "The optimisation changed its state during the cancel. It is now in '{status}'. Try to cancel it again.",
   "optimization.cannot_delete": "Cannot delete an optimisation in state '{status}'. Cancel it first.",
   "optimization.clone_no_payload": "Source optimisation has no saved payload to clone.",
   "optimization.dataset_unavailable": "Optimisation's dataset is unavailable.",
+  "optimization.deletion_storage_unavailable": "The optimisation was not deleted: its stored run data could not be removed right now. Try again in a few minutes.",
   "optimization.no_result_pending": "Optimisation has no result yet.",
   "optimization.not_found": "Optimisation not found: '{optimization_id}'.",
   "optimization.not_success_status_for_serve": "Optimisation is in state '{status}' — only successfully completed optimisations can be served.",
@@ -1992,6 +2006,7 @@ const terms_es: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_es: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Tu cuenta no se eliminó: no se pudieron borrar ahora sus datos de ejecución almacenados. Inténtalo de nuevo en unos minutos.",
   "accounts.email_delivery_unavailable": "La entrega de correo electrónico no está configurada en este servidor.",
   "accounts.email_not_verified": "Verifica tu correo electrónico antes de iniciar sesión.",
   "accounts.email_send_failed": "No se pudo enviar el correo electrónico de verificación. Inténtalo de nuevo.",
@@ -2266,10 +2281,12 @@ const i18n_es: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Tu optimización no está mejorando",
   "optimization.agent_run_not_found": "No se encontró la ejecución del agente {run_id} para la optimización '{optimization_id}'.",
   "optimization.already_terminal": "La optimización ya está en el estado terminal '{status}'.",
+  "optimization.cancel_conflict": "La optimización cambió de estado durante la cancelación. Ahora está en '{status}'. Intenta cancelarla de nuevo.",
   "optimization.cannot_delete": "No se puede eliminar una optimización en estado '{status}'. Cancélala primero.",
   "optimization.cannot_resubmit_payload": "No se puede reenviar la carga útil guardada: {error}",
   "optimization.clone_no_payload": "La optimización de origen no tiene ninguna carga útil guardada para clonar.",
   "optimization.dataset_unavailable": "El conjunto de datos de la optimización no está disponible.",
+  "optimization.deletion_storage_unavailable": "La optimización no se eliminó: no se pudieron borrar ahora sus datos de ejecución almacenados. Inténtalo de nuevo en unos minutos.",
   "optimization.dspy_run_retired": "Skynet ahora optimiza solo repositorios. Las ejecuciones de programas DSPy ya no se pueden iniciar, reanudar, clonar, servir ni programar. En su lugar, inicia una nueva optimización de repositorio.",
   "optimization.insufficient_role": "Tu nivel de acceso ('{role}') no es suficiente para esta acción; se requiere '{required}' o superior.",
   "optimization.no_result_pending": "La optimización aún no tiene ningún resultado.",
@@ -2455,6 +2472,7 @@ const terms_fa: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_fa: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "حساب شما حذف نشد: اکنون امکان حذف داده‌های ذخیره‌شدهٔ اجراهای آن نبود. چند دقیقهٔ دیگر دوباره تلاش کنید.",
   "accounts.email_delivery_unavailable": "ارسال ایمیل روی این سرور پیکربندی نشده است.",
   "accounts.email_not_verified": "لطفاً پیش از ورود، ایمیل خود را تأیید کنید.",
   "accounts.email_send_failed": "ارسال ایمیل تأیید ناموفق بود. دوباره تلاش کنید.",
@@ -2729,10 +2747,12 @@ const i18n_fa: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "بهینه‌سازی شما بهتر نمی‌شود",
   "optimization.agent_run_not_found": "اجرای عامل {run_id} برای بهینه‌سازی '{optimization_id}' یافت نشد.",
   "optimization.already_terminal": "بهینه‌سازی هم‌اکنون در وضعیت پایانی '{status}' است.",
+  "optimization.cancel_conflict": "وضعیت بهینه‌سازی هنگام لغو تغییر کرد. اکنون در وضعیت '{status}' است. دوباره برای لغو آن تلاش کنید.",
   "optimization.cannot_delete": "نمی‌توان بهینه‌سازی را در وضعیت '{status}' حذف کرد. ابتدا آن را لغو کنید.",
   "optimization.cannot_resubmit_payload": "نمی‌توان بار ذخیره‌شده را دوباره ارسال کرد: {error}",
   "optimization.clone_no_payload": "بهینه‌سازی مبدأ هیچ بار ذخیره‌شده‌ای برای کلون کردن ندارد.",
   "optimization.dataset_unavailable": "مجموعه‌داده‌ی بهینه‌سازی در دسترس نیست.",
+  "optimization.deletion_storage_unavailable": "بهینه‌سازی حذف نشد: اکنون امکان حذف داده‌های ذخیره‌شدهٔ اجرای آن نبود. چند دقیقهٔ دیگر دوباره تلاش کنید.",
   "optimization.dspy_run_retired": "Skynet اکنون فقط مخزن‌ها را بهینه می‌کند. دیگر نمی‌توان اجراهای برنامه DSPy را شروع، ادامه، شبیه‌سازی، ارائه یا زمان‌بندی کرد. به جای آن یک بهینه‌سازی جدید برای مخزن شروع کنید.",
   "optimization.insufficient_role": "سطح دسترسی شما ('{role}') برای این عمل کافی نیست — به '{required}' یا بالاتر نیاز است.",
   "optimization.no_result_pending": "بهینه‌سازی هنوز هیچ نتیجه‌ای ندارد.",
@@ -2918,6 +2938,7 @@ const terms_fr: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_fr: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Votre compte n'a pas été supprimé : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
   "accounts.email_delivery_unavailable": "L'envoi d'e-mails n'est pas configuré sur ce serveur.",
   "accounts.email_not_verified": "Veuillez vérifier votre adresse e-mail avant de vous connecter.",
   "accounts.email_send_failed": "Impossible d'envoyer l'e-mail de vérification. Réessayez.",
@@ -3192,10 +3213,12 @@ const i18n_fr: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Votre optimisation ne progresse plus",
   "optimization.agent_run_not_found": "Exécution d'agent {run_id} introuvable pour l'optimisation '{optimization_id}'.",
   "optimization.already_terminal": "L'optimisation est déjà dans l'état terminal '{status}'.",
+  "optimization.cancel_conflict": "L'optimisation a changé d'état pendant l'annulation. Elle est maintenant dans l'état '{status}'. Réessayez de l'annuler.",
   "optimization.cannot_delete": "Impossible de supprimer une optimisation dans l'état '{status}'. Annulez-la d'abord.",
   "optimization.cannot_resubmit_payload": "Impossible de resoumettre la charge utile enregistrée : {error}",
   "optimization.clone_no_payload": "L'optimisation source n'a aucune charge utile enregistrée à cloner.",
   "optimization.dataset_unavailable": "Le jeu de données de l'optimisation est indisponible.",
+  "optimization.deletion_storage_unavailable": "L'optimisation n'a pas été supprimée : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
   "optimization.dspy_run_retired": "Skynet optimise désormais uniquement des dépôts. Les exécutions de programmes DSPy ne peuvent plus être lancées, reprises, clonées, servies ni planifiées. Lancez plutôt une nouvelle optimisation de dépôt.",
   "optimization.insufficient_role": "Votre niveau d'accès ('{role}') n'est pas suffisant pour cette action — '{required}' ou supérieur est requis.",
   "optimization.no_result_pending": "L'optimisation n'a pas encore de résultat.",
@@ -3406,6 +3429,7 @@ const terms_hi: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_hi: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "आपका खाता नहीं हटाया गया: इसका सहेजा गया रन डेटा अभी नहीं हटाया जा सका। कुछ मिनट बाद फिर से कोशिश करें।",
   "accounts.email_delivery_unavailable": "इस सर्वर पर ईमेल डिलीवरी कॉन्फ़िगर नहीं है।",
   "accounts.email_not_verified": "कृपया साइन इन करने से पहले अपने ईमेल को सत्यापित करें।",
   "accounts.email_send_failed": "सत्यापन ईमेल नहीं भेजा जा सका। पुनः प्रयास करें।",
@@ -3680,10 +3704,12 @@ const i18n_hi: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "आपके ऑप्टिमाइज़ेशन में सुधार नहीं हो रहा",
   "optimization.agent_run_not_found": "ऑप्टिमाइज़ेशन '{optimization_id}' के लिए एजेंट रन {run_id} नहीं मिला।",
   "optimization.already_terminal": "ऑप्टिमाइज़ेशन पहले से ही टर्मिनल स्थिति '{status}' में है।",
+  "optimization.cancel_conflict": "रद्द करने के दौरान ऑप्टिमाइज़ेशन की स्थिति बदल गई। यह अब '{status}' स्थिति में है। इसे फिर से रद्द करने का प्रयास करें।",
   "optimization.cannot_delete": "'{status}' स्थिति में किसी ऑप्टिमाइज़ेशन को हटाया नहीं जा सकता। पहले इसे रद्द करें।",
   "optimization.cannot_resubmit_payload": "सहेजे गए पेलोड को पुनः सबमिट नहीं किया जा सकता: {error}",
   "optimization.clone_no_payload": "स्रोत ऑप्टिमाइज़ेशन में क्लोन करने के लिए कोई सहेजा गया पेलोड नहीं है।",
   "optimization.dataset_unavailable": "ऑप्टिमाइज़ेशन का डेटासेट अनुपलब्ध है।",
+  "optimization.deletion_storage_unavailable": "ऑप्टिमाइज़ेशन नहीं हटाया गया: इसका सहेजा गया रन डेटा अभी नहीं हटाया जा सका। कुछ मिनट बाद फिर से कोशिश करें।",
   "optimization.dspy_run_retired": "Skynet अब केवल रिपॉज़िटरी को ऑप्टिमाइज़ करता है। DSPy प्रोग्राम रन अब शुरू, फिर से शुरू, क्लोन, सर्व या शेड्यूल नहीं किए जा सकते। इसके बजाय रिपॉज़िटरी का नया ऑप्टिमाइज़ेशन शुरू करें।",
   "optimization.insufficient_role": "आपका एक्सेस स्तर ('{role}') इस कार्रवाई के लिए पर्याप्त नहीं है — '{required}' या उच्चतर आवश्यक है।",
   "optimization.no_result_pending": "ऑप्टिमाइज़ेशन में अभी तक कोई परिणाम नहीं है।",
@@ -3869,6 +3895,7 @@ const terms_it: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_it: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Il tuo account non è stato eliminato: al momento non è stato possibile rimuovere i dati delle esecuzioni salvati. Riprova tra qualche minuto.",
   "accounts.email_delivery_unavailable": "L'invio delle email non è configurato su questo server.",
   "accounts.email_not_verified": "Verifica la tua email prima di accedere.",
   "accounts.email_send_failed": "Impossibile inviare l'email di verifica. Riprova.",
@@ -4143,10 +4170,12 @@ const i18n_it: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "La tua ottimizzazione non sta migliorando",
   "optimization.agent_run_not_found": "Esecuzione dell'agente {run_id} non trovata per l'ottimizzazione '{optimization_id}'.",
   "optimization.already_terminal": "L'ottimizzazione è già nello stato terminale '{status}'.",
+  "optimization.cancel_conflict": "L'ottimizzazione ha cambiato stato durante l'annullamento. Ora è nello stato '{status}'. Riprova ad annullarla.",
   "optimization.cannot_delete": "Impossibile eliminare un'ottimizzazione nello stato '{status}'. Annullala prima.",
   "optimization.cannot_resubmit_payload": "Impossibile reinviare il payload salvato: {error}",
   "optimization.clone_no_payload": "L'ottimizzazione di origine non ha alcun payload salvato da clonare.",
   "optimization.dataset_unavailable": "Il dataset dell'ottimizzazione non è disponibile.",
+  "optimization.deletion_storage_unavailable": "L'ottimizzazione non è stata eliminata: al momento non è stato possibile rimuovere i dati delle esecuzioni salvati. Riprova tra qualche minuto.",
   "optimization.dspy_run_retired": "Skynet ora ottimizza solo repository. Le esecuzioni di programmi DSPy non possono più essere avviate, riprese, clonate, servite o pianificate. Avvia invece una nuova ottimizzazione di un repository.",
   "optimization.insufficient_role": "Il tuo livello di accesso ('{role}') non è sufficiente per questa azione: è richiesto '{required}' o superiore.",
   "optimization.no_result_pending": "L'ottimizzazione non ha ancora alcun risultato.",
@@ -4332,6 +4361,7 @@ const terms_ja: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ja: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "アカウントは削除されませんでした。保存された実行データを今は削除できませんでした。数分後にもう一度お試しください。",
   "accounts.email_delivery_unavailable": "このサーバーではメール送信が設定されていません。",
   "accounts.email_not_verified": "サインインする前にメールアドレスを認証してください。",
   "accounts.email_send_failed": "確認メールを送信できませんでした。もう一度お試しください。",
@@ -4606,10 +4636,12 @@ const i18n_ja: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "最適化が改善していません",
   "optimization.agent_run_not_found": "最適化 '{optimization_id}' のエージェント実行 {run_id} が見つかりません。",
   "optimization.already_terminal": "最適化はすでに終了状態 '{status}' です。",
+  "optimization.cancel_conflict": "キャンセル中に最適化の状態が変わりました。現在の状態は '{status}' です。もう一度キャンセルしてください。",
   "optimization.cannot_delete": "状態 '{status}' の最適化は削除できません。先にキャンセルしてください。",
   "optimization.cannot_resubmit_payload": "保存されたペイロードを再送信できません: {error}",
   "optimization.clone_no_payload": "複製元の最適化に、複製できる保存済みペイロードがありません。",
   "optimization.dataset_unavailable": "最適化のデータセットが利用できません。",
+  "optimization.deletion_storage_unavailable": "最適化は削除されませんでした。保存された実行データを今は削除できませんでした。数分後にもう一度お試しください。",
   "optimization.dspy_run_retired": "Skynet は現在リポジトリのみを最適化します。DSPy プログラムの実行は、開始、再開、複製、提供、スケジュールができなくなりました。代わりにリポジトリの新しい最適化を開始してください。",
   "optimization.insufficient_role": "あなたのアクセスレベル（'{role}'）はこの操作には不十分です。'{required}' 以上が必要です。",
   "optimization.no_result_pending": "最適化にはまだ結果がありません。",
@@ -4795,6 +4827,7 @@ const terms_ko: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ko: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "계정이 삭제되지 않았습니다. 저장된 실행 데이터를 지금 삭제할 수 없습니다. 몇 분 후에 다시 시도하세요.",
   "accounts.email_delivery_unavailable": "이 서버에 이메일 전송이 구성되어 있지 않습니다.",
   "accounts.email_not_verified": "로그인하기 전에 이메일을 인증해 주세요.",
   "accounts.email_send_failed": "인증 이메일을 전송하지 못했습니다. 다시 시도해 주세요.",
@@ -5069,10 +5102,12 @@ const i18n_ko: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "최적화가 개선되지 않고 있습니다",
   "optimization.agent_run_not_found": "최적화 '{optimization_id}'의 에이전트 실행 {run_id}을(를) 찾을 수 없습니다.",
   "optimization.already_terminal": "최적화가 이미 종료 상태 '{status}'입니다.",
+  "optimization.cancel_conflict": "취소하는 동안 최적화의 상태가 바뀌었습니다. 현재 상태는 '{status}'입니다. 다시 취소해 보세요.",
   "optimization.cannot_delete": "'{status}' 상태의 최적화는 삭제할 수 없습니다. 먼저 취소하세요.",
   "optimization.cannot_resubmit_payload": "저장된 페이로드를 다시 제출할 수 없습니다: {error}",
   "optimization.clone_no_payload": "원본 최적화에 복제할 저장된 페이로드가 없습니다.",
   "optimization.dataset_unavailable": "최적화의 데이터셋을 사용할 수 없습니다.",
+  "optimization.deletion_storage_unavailable": "최적화가 삭제되지 않았습니다. 저장된 실행 데이터를 지금 삭제할 수 없습니다. 몇 분 후에 다시 시도하세요.",
   "optimization.dspy_run_retired": "Skynet은 이제 저장소만 최적화합니다. DSPy 프로그램 실행은 더 이상 시작, 재개, 복제, 서빙 또는 예약할 수 없습니다. 대신 새 저장소 최적화를 시작하세요.",
   "optimization.insufficient_role": "회원님의 액세스 수준('{role}')이 이 작업에 필요한 수준에 미치지 못합니다. '{required}' 이상이 필요합니다.",
   "optimization.no_result_pending": "최적화에 아직 결과가 없습니다.",
@@ -5258,6 +5293,7 @@ const terms_pt: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_pt: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "A sua conta não foi eliminada: não foi possível remover agora os dados de execução guardados. Tente novamente dentro de alguns minutos.",
   "accounts.email_delivery_unavailable": "O envio de emails não está configurado neste servidor.",
   "accounts.email_not_verified": "Verifique o seu email antes de iniciar sessão.",
   "accounts.email_send_failed": "Não foi possível enviar o email de verificação. Tente novamente.",
@@ -5532,10 +5568,12 @@ const i18n_pt: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "A sua otimização não está a melhorar",
   "optimization.agent_run_not_found": "Execução do agente {run_id} não encontrada para a otimização '{optimization_id}'.",
   "optimization.already_terminal": "A otimização já está no estado terminal '{status}'.",
+  "optimization.cancel_conflict": "A otimização mudou de estado durante o cancelamento. Está agora no estado '{status}'. Tente cancelá-la novamente.",
   "optimization.cannot_delete": "Não é possível eliminar uma otimização no estado '{status}'. Cancele-a primeiro.",
   "optimization.cannot_resubmit_payload": "Não é possível voltar a submeter o payload guardado: {error}",
   "optimization.clone_no_payload": "A otimização de origem não tem nenhum payload guardado para clonar.",
   "optimization.dataset_unavailable": "O conjunto de dados da otimização está indisponível.",
+  "optimization.deletion_storage_unavailable": "A otimização não foi eliminada: não foi possível remover agora os dados de execução guardados. Tente novamente dentro de alguns minutos.",
   "optimization.dspy_run_retired": "O Skynet agora otimiza apenas repositórios. As execuções de programas DSPy já não podem ser iniciadas, retomadas, clonadas, servidas nem agendadas. Em vez disso, inicie uma nova otimização de repositório.",
   "optimization.insufficient_role": "O seu nível de acesso ('{role}') não é suficiente para esta ação — é necessário '{required}' ou superior.",
   "optimization.no_result_pending": "A otimização ainda não tem resultado.",
@@ -5761,6 +5799,7 @@ const terms_ru: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ru: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Аккаунт не удалён: сейчас не удалось удалить сохранённые данные запусков. Повторите попытку через несколько минут.",
   "accounts.email_delivery_unavailable": "На этом сервере не настроена отправка электронной почты.",
   "accounts.email_not_verified": "Пожалуйста, подтвердите адрес электронной почты перед входом.",
   "accounts.email_send_failed": "Не удалось отправить письмо с подтверждением. Попробуйте еще раз.",
@@ -6035,10 +6074,12 @@ const i18n_ru: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Ваша оптимизация не улучшается",
   "optimization.agent_run_not_found": "Запуск агента {run_id} для оптимизации '{optimization_id}' не найден.",
   "optimization.already_terminal": "Оптимизация уже находится в конечном состоянии '{status}'.",
+  "optimization.cancel_conflict": "Оптимизация изменила состояние во время отмены. Сейчас она в состоянии '{status}'. Попробуйте отменить её снова.",
   "optimization.cannot_delete": "Невозможно удалить оптимизацию в состоянии '{status}'. Сначала отмените её.",
   "optimization.cannot_resubmit_payload": "Невозможно повторно отправить сохранённые данные: {error}",
   "optimization.clone_no_payload": "У исходной оптимизации нет сохранённых данных для клонирования.",
   "optimization.dataset_unavailable": "Набор данных оптимизации недоступен.",
+  "optimization.deletion_storage_unavailable": "Оптимизация не удалена: сейчас не удалось удалить её сохранённые данные запусков. Повторите попытку через несколько минут.",
   "optimization.dspy_run_retired": "Skynet теперь оптимизирует только репозитории. Запуски программ DSPy больше нельзя начать, возобновить, клонировать, обслуживать или планировать. Вместо этого начните новую оптимизацию репозитория.",
   "optimization.insufficient_role": "Ваш уровень доступа («{role}») недостаточен для этого действия — требуется «{required}» или выше.",
   "optimization.no_result_pending": "У оптимизации ещё нет результата.",
@@ -6224,6 +6265,7 @@ const terms_tr: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_tr: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Hesabınız silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
   "accounts.email_delivery_unavailable": "Bu sunucuda e-posta teslimatı yapılandırılmamış.",
   "accounts.email_not_verified": "Lütfen giriş yapmadan önce e-posta adresinizi doğrulayın.",
   "accounts.email_send_failed": "Doğrulama e-postası gönderilemedi. Tekrar deneyin.",
@@ -6498,10 +6540,12 @@ const i18n_tr: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Optimizasyonunuz iyileşmiyor",
   "optimization.agent_run_not_found": "'{optimization_id}' optimizasyonu için {run_id} numaralı ajan çalışması bulunamadı.",
   "optimization.already_terminal": "Optimizasyon zaten '{status}' nihai durumunda.",
+  "optimization.cancel_conflict": "Optimizasyonun durumu iptal sırasında değişti. Şu anda '{status}' durumunda. İptal etmeyi yeniden deneyin.",
   "optimization.cannot_delete": "'{status}' durumundaki bir optimizasyon silinemez. Önce iptal edin.",
   "optimization.cannot_resubmit_payload": "Kaydedilen yük yeniden gönderilemez: {error}",
   "optimization.clone_no_payload": "Kaynak optimizasyonun kopyalanacak kayıtlı bir yükü yok.",
   "optimization.dataset_unavailable": "Optimizasyonun veri kümesi kullanılamıyor.",
+  "optimization.deletion_storage_unavailable": "Optimizasyon silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
   "optimization.dspy_run_retired": "Skynet artık yalnızca depoları optimize eder. DSPy program çalıştırmaları artık başlatılamaz, sürdürülemez, kopyalanamaz, sunulamaz veya zamanlanamaz. Bunun yerine yeni bir depo optimizasyonu başlatın.",
   "optimization.insufficient_role": "Erişim düzeyiniz ('{role}') bu işlem için yeterince yüksek değil — '{required}' veya daha yükseği gereklidir.",
   "optimization.no_result_pending": "Optimizasyonun henüz bir sonucu yok.",
@@ -6687,6 +6731,7 @@ const terms_uk: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_uk: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "Обліковий запис не видалено: зараз не вдалося видалити збережені дані запусків. Спробуйте ще раз за кілька хвилин.",
   "accounts.email_delivery_unavailable": "На цьому сервері не налаштовано доставку електронної пошти.",
   "accounts.email_not_verified": "Будь ласка, підтвердьте свою електронну пошту перед входом.",
   "accounts.email_send_failed": "Не вдалося надіслати електронний лист для підтвердження. Спробуйте знову.",
@@ -6961,10 +7006,12 @@ const i18n_uk: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "Ваша оптимізація не покращується",
   "optimization.agent_run_not_found": "Запуск агента {run_id} для оптимізації '{optimization_id}' не знайдено.",
   "optimization.already_terminal": "Оптимізація вже перебуває у кінцевому стані '{status}'.",
+  "optimization.cancel_conflict": "Оптимізація змінила стан під час скасування. Зараз вона у стані '{status}'. Спробуйте скасувати її ще раз.",
   "optimization.cannot_delete": "Неможливо видалити оптимізацію у стані '{status}'. Спочатку скасуйте її.",
   "optimization.cannot_resubmit_payload": "Неможливо повторно надіслати збережені дані: {error}",
   "optimization.clone_no_payload": "Вихідна оптимізація не має збережених даних для клонування.",
   "optimization.dataset_unavailable": "Набір даних оптимізації недоступний.",
+  "optimization.deletion_storage_unavailable": "Оптимізацію не видалено: зараз не вдалося видалити її збережені дані запусків. Спробуйте ще раз за кілька хвилин.",
   "optimization.dspy_run_retired": "Skynet тепер оптимізує лише репозиторії. Запуски програм DSPy більше не можна почати, відновити, клонувати, обслуговувати чи планувати. Натомість розпочніть нову оптимізацію репозиторію.",
   "optimization.insufficient_role": "Ваш рівень доступу ('{role}') недостатній для цієї дії — потрібен '{required}' або вищий.",
   "optimization.no_result_pending": "Оптимізація ще не має результату.",
@@ -7150,6 +7197,7 @@ const terms_yue: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_yue: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "你嘅帳戶未有刪除：暫時刪除唔到佢儲存咗嘅運行數據。請過幾分鐘再試。",
   "accounts.email_delivery_unavailable": "此伺服器未設定電郵發送功能。",
   "accounts.email_not_verified": "請喺登入前驗證你嘅電郵地址。",
   "accounts.email_send_failed": "發送唔到驗證電郵。請再試一次。",
@@ -7424,10 +7472,12 @@ const i18n_yue: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "你嘅優化冇改善",
   "optimization.agent_run_not_found": "搵唔到優化「{optimization_id}」嘅代理執行 {run_id}。",
   "optimization.already_terminal": "優化已經處於終止狀態「{status}」。",
+  "optimization.cancel_conflict": "取消期間優化嘅狀態改變咗。佢而家處於「{status}」狀態。請再試一次取消。",
   "optimization.cannot_delete": "無法刪除處於「{status}」狀態嘅優化。請先取消佢。",
   "optimization.cannot_resubmit_payload": "無法重新提交已儲存嘅 payload：{error}",
   "optimization.clone_no_payload": "來源優化冇已儲存嘅 payload 可以複製。",
   "optimization.dataset_unavailable": "優化嘅資料集無法使用。",
+  "optimization.deletion_storage_unavailable": "優化未刪除：而家刪除唔到佢儲存咗嘅運行數據。請過幾分鐘再試。",
   "optimization.dspy_run_retired": "Skynet 而家只會優化程式碼庫。DSPy 程式運行已經唔可以再開始、繼續、複製、提供服務或者排程。請改為開始一個新嘅程式碼庫優化。",
   "optimization.insufficient_role": "你嘅權限等級（「{role}」）唔足夠執行呢個操作——需要「{required}」或更高等級。",
   "optimization.no_result_pending": "優化仲未有結果。",
@@ -7613,6 +7663,7 @@ const terms_zh_Hans: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_zh_Hans: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_storage_unavailable": "您的账户未被删除：暂时无法删除其存储的运行数据。请几分钟后重试。",
   "accounts.email_delivery_unavailable": "此服务器未配置电子邮件发送服务。",
   "accounts.email_not_verified": "登录前请先验证您的电子邮件。",
   "accounts.email_send_failed": "无法发送验证邮件。请重试。",
@@ -7887,10 +7938,12 @@ const i18n_zh_Hans: Partial<Record<I18nMessageKey, string>> = {
   "notifier.title.stuck": "你的优化没有改进",
   "optimization.agent_run_not_found": "未找到优化 '{optimization_id}' 的代理运行 {run_id}。",
   "optimization.already_terminal": "优化已处于终止状态 '{status}'。",
+  "optimization.cancel_conflict": "取消期间优化的状态发生了变化。它现在处于 '{status}' 状态。请再次尝试取消。",
   "optimization.cannot_delete": "无法删除处于 '{status}' 状态的优化。请先取消它。",
   "optimization.cannot_resubmit_payload": "无法重新提交已保存的载荷：{error}",
   "optimization.clone_no_payload": "源优化没有可克隆的已保存载荷。",
   "optimization.dataset_unavailable": "该优化的数据集不可用。",
+  "optimization.deletion_storage_unavailable": "优化未删除：目前无法删除其存储的运行数据。请几分钟后重试。",
   "optimization.dspy_run_retired": "Skynet 现在只优化代码仓库。DSPy 程序运行已无法开始、恢复、克隆、提供服务或排程。请改为开始新的代码仓库优化。",
   "optimization.insufficient_role": "您的访问级别（'{role}'）不足以执行此操作——需要 '{required}' 或更高级别。",
   "optimization.no_result_pending": "优化尚无结果。",
@@ -8061,6 +8114,7 @@ export const I18N_MESSAGES_BY_LOCALE: Record<string, Record<string, string>> = {
 };
 
 export const I18N_KEY = {
+  ACCOUNTS_DELETION_STORAGE_UNAVAILABLE: "accounts.deletion_storage_unavailable",
   ACCOUNTS_EMAIL_DELIVERY_UNAVAILABLE: "accounts.email_delivery_unavailable",
   ACCOUNTS_EMAIL_NOT_VERIFIED: "accounts.email_not_verified",
   ACCOUNTS_EMAIL_SEND_FAILED: "accounts.email_send_failed",
@@ -8335,10 +8389,12 @@ export const I18N_KEY = {
   NOTIFIER_TITLE_STUCK: "notifier.title.stuck",
   OPTIMIZATION_AGENT_RUN_NOT_FOUND: "optimization.agent_run_not_found",
   OPTIMIZATION_ALREADY_TERMINAL: "optimization.already_terminal",
+  OPTIMIZATION_CANCEL_CONFLICT: "optimization.cancel_conflict",
   OPTIMIZATION_CANNOT_DELETE: "optimization.cannot_delete",
   OPTIMIZATION_CANNOT_RESUBMIT_PAYLOAD: "optimization.cannot_resubmit_payload",
   OPTIMIZATION_CLONE_NO_PAYLOAD: "optimization.clone_no_payload",
   OPTIMIZATION_DATASET_UNAVAILABLE: "optimization.dataset_unavailable",
+  OPTIMIZATION_DELETION_STORAGE_UNAVAILABLE: "optimization.deletion_storage_unavailable",
   OPTIMIZATION_DSPY_RUN_RETIRED: "optimization.dspy_run_retired",
   OPTIMIZATION_INSUFFICIENT_ROLE: "optimization.insufficient_role",
   OPTIMIZATION_NO_RESULT_PENDING: "optimization.no_result_pending",
