@@ -726,6 +726,20 @@ mcp = "eval/.mcp.json"
   ```
 - Each secret goes to one host only: the host of the `url` that uses it. A
   file that sends the same `${NAME}` to two hosts fails.
+- A `[proposer] mcp` server with `headers` owns its host alone. The edge
+  adds the headers only on the server's url path, but a path such as
+  `/team/../web` can still reach them. So the ShinkaEvolve agent editor
+  refuses to start when:
+  - two servers with `headers` use one host;
+  - a server with no `headers` uses the host of a server with `headers`;
+  - the proposer's network reaches that host: a `[proposer] network` entry,
+    a package registry or the account's saved package index. A suffix entry
+    such as `*.example.com` counts when it matches the host.
+
+  The check ignores case and a trailing dot, so `MCP.example.com.` is
+  `mcp.example.com`. To fix it, give each server with `headers` its own
+  host, or remove its `headers`, or remove the host from `[proposer]
+  network` or the saved package index.
 - The run, not the repository, says where each user secret may go. Each
   secret in `target.repo.secrets` has `allowed_hosts`: up to 20 entries, each
   an exact host (`api.example.com`) or a suffix (`*.example.com`, which

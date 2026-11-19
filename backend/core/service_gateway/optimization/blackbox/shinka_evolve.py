@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import IO, Any
 from urllib.parse import urlsplit
 
+from ....billing.env_connectors import host_allowed
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
 from ....i18n import t
@@ -888,7 +889,7 @@ class _AgentSession:
 
         Raises:
             ServiceError: When the context has no boxes, the options name no address for a server, or a
-                server with headers shares its host with another server or a ``[proposer] network`` host.
+                server with headers shares its host with another server or a host the proposer's network reaches.
         """
         if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files, ctx.file_ids):
             raise ServiceError("The ShinkaEvolve agent editor needs the engine loop's boxes.")
@@ -901,22 +902,23 @@ class _AgentSession:
         if missing:
             raise ServiceError(f"The [proposer] mcp servers have no address in the run's options: {missing}.")
         self.servers = {name: str(known[name]["url"]) for name in sorted(servers)}
-        mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
+        # The grants normalize a host the same way, so 'mcp.test.' and 'MCP.test' are the host 'mcp.test' here too.
+        hosts = {name: (urlsplit(url).hostname or "").rstrip(".").lower() for name, url in self.servers.items()}
+        mcp_hosts = set(hosts.values())
         # A credential grant fails to resolve when the registry holds no headers for its host and path, so a
         # server with no headers gets a plain grant. The path keeps a server's headers off the host's other
         # paths (SKY-833).
         credentials = {
-            (parts.hostname or "", parts.path)
-            for parts in (urlsplit(str(known[name]["url"])) for name in servers if known[name].get("has_headers"))
+            (hosts[name], urlsplit(self.servers[name]).path) for name in self.servers if known[name].get("has_headers")
         }
         credential_hosts = {host for host, _ in credentials}
         # The edge matches the raw path, so '/team/../web' takes the team headers to any server that resolves
         # it, with or without headers. So a server with headers owns its host alone. Other paths of that host,
         # such as '/team/../admin', can still get the headers; only the edge's path handling bounds that.
         by_host: dict[str, list[str]] = {}
-        for name, url in self.servers.items():
-            by_host.setdefault(urlsplit(url).hostname or "", []).append(name)
-        listed = {str(host).lower() for host in repo.get("proposer_hosts") or ()}
+        for name, host in hosts.items():
+            by_host.setdefault(host, []).append(name)
+        listed = {str(host).rstrip(".").lower() for host in repo.get("proposer_hosts") or ()}
         for host in sorted(credential_hosts):
             if len(by_host[host]) > 1:
                 headed = [name for name in by_host[host] if known[name].get("has_headers")]
@@ -924,10 +926,14 @@ class _AgentSession:
                     f"The [proposer] mcp servers {by_host[host]} share the host '{host}', and {headed} send "
                     "headers; give each server with headers a host of its own."
                 )
-            if host in listed:
+            # The run's options merge the [proposer] network list, the default package registries and the
+            # account's saved package index into one host list, so the message names each source.
+            if host_allowed(host, listed):
                 raise ServiceError(
-                    f"The [proposer] mcp server '{by_host[host][0]}' sends headers, and [proposer] network also lists "
-                    f"its host '{host}'; remove the host from [proposer] network."
+                    f"The [proposer] mcp server '{by_host[host][0]}' sends headers, and the proposer's network "
+                    f"also reaches its host '{host}' through [proposer] network, a package registry or the "
+                    "account's saved package index. Give the server a host of its own, remove its headers, or "
+                    "remove that host from [proposer] network or the saved package index."
                 )
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
