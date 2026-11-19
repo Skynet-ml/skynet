@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from core import config
-from core.billing import cli_dispatch
+from core.billing import cli_dispatch, cli_runners
 from core.billing.cli_dispatch import CliDispatcher, local_subscription_route
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.tests.test_cli_runners import (
@@ -242,32 +242,30 @@ def test_fallback_drops_the_capped_cli_thinking(tmp_path: Path, monkeypatch: pyt
 def test_timeout_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer a timed-out call with 502 after one attempt, so a hung CLI holds a slot once."""
     fake_cli(tmp_path, "claude", "time.sleep(30)")
-    real_runner = cli_dispatch.RUNNERS["claude"]
-    attempts: list[str] = []
+    real_start = cli_runners._start
+    starts: list[str] = []
 
-    def counting_runner(*args: Any, **kwargs: Any) -> Any:
-        """Count one attempt, then run the real claude runner.
+    def counting_start(provider: str, *args: Any) -> Any:
+        """Count one CLI process start, then start the process.
 
         Args:
-            *args: The runner's positional arguments.
-            **kwargs: The runner's keyword arguments.
+            provider: The CLI.
+            *args: The other arguments of the real start.
 
         Returns:
-            The real runner's completion.
+            The running process.
         """
-        attempts.append("claude")
-        return real_runner(*args, **kwargs)
+        starts.append(provider)
+        return real_start(provider, *args)
 
     # The fake CLI logs its call only after Python starts; on a loaded machine
-    # the timeout can kill it first, so its log cannot count the attempts.
-    monkeypatch.setitem(cli_dispatch.RUNNERS, "claude", counting_runner)
+    # the timeout can kill it first, so its log cannot count the starts.
+    monkeypatch.setattr(cli_runners, "_start", counting_start)
     settings = local_settings(tmp_path, cli_call_timeout_seconds=0.5)
     result = CliDispatcher(None, "claude", MODEL, "judge", settings).dispatch("/chat/completions", REQUEST)
     assert result.status == 502
     assert _body(result)["error"]["message"] == "claude timed out"
-    assert attempts == ["claude"]
-    # A slow start can only lower this count, so it guards a second CLI launch inside the runner.
-    assert len(calls(tmp_path, "claude")) <= 1
+    assert starts == ["claude"]
 
 
 def test_messages_request_answers_in_the_anthropic_shape(tmp_path: Path) -> None:
