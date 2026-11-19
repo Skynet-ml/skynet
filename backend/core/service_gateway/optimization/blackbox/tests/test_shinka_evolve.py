@@ -3127,6 +3127,64 @@ def test_read_file_marks_a_file_it_cuts_so_the_agent_does_not_write_back_a_part(
     assert short_text == "b" * size
 
 
+def test_list_files_cuts_a_long_list_at_whole_lines_with_a_note(tmp_path: Path) -> None:
+    """Cut a file list over the output limit at a whole line, and say how many files it kept (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    listed = [f"src/file_{index:05d}.py" for index in range(size // 10)]
+    options = _agent_options()
+    ctx = _box_context(options, tmp_path, list_files=lambda tree, path: listed)
+    session = shinka_evolve._AgentSession(ctx, options, [])
+
+    text, _ = session._tool(_call(0, "list_files", path=""), "tree")
+
+    body, note = text.rsplit("\n", 1)
+    kept = body.split("\n")
+    assert len(body) <= size
+    assert kept == listed[: len(kept)]
+    assert len(kept) < len(listed)
+    assert note == f"[cut: {len(kept)} of {len(listed)} files; use the run tool, for example find]"
+
+
+def test_the_agent_run_tool_keeps_the_exit_code_and_the_output_ends_when_it_cuts(tmp_path: Path) -> None:
+    """Keep the exit code line and the end of each stream when a ``run`` output is over the limit (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    stdout = "s" * (2 * size) + "stdout end"
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Fail with a long stdout.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A failed result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=False, exit_code=3, stdout=stdout, stderr="the error"), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="true"), "tree")
+
+    assert len(text) <= size
+    assert text.startswith("exit code 3\nstdout:\ns")
+    assert "stdout end\nstderr:\nthe error\n" in text
+    kept = text.split("\nstdout:\n", 1)[1].split("\nstderr:\n", 1)[0]
+    assert text.endswith(
+        f"[cut: kept the last {len(kept)} of {len(stdout)} stdout characters and the last 9 of 9 stderr characters]"
+    )
+
+
 def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: Path) -> None:
     """Stop the run, not the mutation, when the loop cannot resolve the box's grants (SKY-830).
 

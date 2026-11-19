@@ -88,8 +88,10 @@ _REPO_CHUNK_DIR = "repo-tree"
 _WORKDIR = "shinka_evolve"
 # The proposer box reads the task from this file of the parent's tree. It is never part of a version.
 _TASK_PATH = ".ascent/task.md"
-# The end of a tool's output that the agent editor's model sees, so one call cannot fill its context.
+# The most of a tool's output that the agent editor's model sees, so one call cannot fill its context.
 _TOOL_OUTPUT_CHARS = 16000
+# Room that a cut ``run`` output keeps for its note.
+_RUN_NOTE_CHARS = 200
 _AGENT_SYSTEM = (
     "You edit a program to improve its score. Use the tools to read and change its files. The run tool runs a "
     "shell command in a sandbox over your current files, and keeps the files the command writes. When you are "
@@ -781,6 +783,56 @@ def _command_failure(name: str, result: Any) -> str:
     return f"The {name} {how}." + (f" {detail}" if detail else "")
 
 
+def _listing_output(listed: list[str]) -> str:
+    """Join a folder's file list for the agent editor, cut at whole lines.
+
+    Args:
+        listed: The paths below the folder.
+
+    Returns:
+        The list, one path a line, with a note when it is cut.
+    """
+    if not listed:
+        return "No files."
+    kept: list[str] = []
+    size = 0
+    for line in listed:
+        size += len(line) + 1
+        if size > _TOOL_OUTPUT_CHARS + 1:
+            break
+        kept.append(line)
+    text = "\n".join(kept)
+    if len(kept) < len(listed):
+        text += f"\n[cut: {len(kept)} of {len(listed)} files; use the run tool, for example find]"
+    return text
+
+
+def _run_output(result: Any) -> str:
+    """Describe a ``run`` tool call's result for the agent editor, within ``_TOOL_OUTPUT_CHARS``.
+
+    Args:
+        result: The command's result.
+
+    Returns:
+        The exit status line, then the ends of stdout and stderr, with a note when they are cut.
+    """
+    how = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+    out, err = result.stdout or "", result.stderr or ""
+    output = f"{how}\nstdout:\n{out}\nstderr:\n{err}"
+    if len(output) <= _TOOL_OUTPUT_CHARS:
+        return output
+    # The note's numbers vary, so the room keeps a fixed reserve for it instead of its exact length.
+    room = max(_TOOL_OUTPUT_CHARS - len(how) - len("\nstdout:\n\nstderr:\n\n") - _RUN_NOTE_CHARS, 0)
+    # Errors are usually at the end of each stream, so each keeps its end; stderr gets at least half the room.
+    err_kept = err[len(err) - min(len(err), max(room - len(out), room // 2)) :]
+    out_kept = out[len(out) - min(len(out), room - len(err_kept)) :]
+    note = (
+        f"[cut: kept the last {len(out_kept)} of {len(out)} stdout characters "
+        f"and the last {len(err_kept)} of {len(err)} stderr characters]"
+    )
+    return f"{how}\nstdout:\n{out_kept}\nstderr:\n{err_kept}\n{note}"
+
+
 class _AgentSession:
     """Run ShinkaEvolve's agent editor on the engine loop: one tool session for each new version (SKY-830).
 
@@ -953,7 +1005,7 @@ class _AgentSession:
         try:
             if name == "list_files":
                 listed = self.ctx.list_files(tree, str(value["path"] or ""))
-                return ("No such folder." if listed is None else "\n".join(listed) or "No files."), tree
+                return ("No such folder." if listed is None else _listing_output(listed)), tree
             if name == "read_file" and isinstance(value["path"], str):
                 data = self.ctx.read_file(tree, value["path"])
                 if data is None:
@@ -969,9 +1021,7 @@ class _AgentSession:
                 if self.ctx.check_budget is not None:
                     self.ctx.check_budget()
                 result, after = self.ctx.run_command(tree, value["command"], self.grants)
-                how = "timed out" if result.timed_out else f"exit code {result.exit_code}"
-                output = f"{how}\nstdout:\n{result.stdout or ''}\nstderr:\n{result.stderr or ''}"
-                return output[-_TOOL_OUTPUT_CHARS:], after
+                return _run_output(result), after
         except GrantError:
             # A grant the registry cannot resolve fails every session the same way, so it stops the run.
             raise
