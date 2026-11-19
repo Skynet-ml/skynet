@@ -25,8 +25,10 @@ from pydantic import (
     Field,
     ModelWrapValidatorHandler,
     PrivateAttr,
+    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -70,6 +72,9 @@ BLACKBOX_HARNESS_HERMES = "hermes"
 BLACKBOX_HARNESS_EVE = "eve"
 BLACKBOX_HARNESS_CODE_PUPPY = "code_puppy"
 BLACKBOX_HARNESS_CUSTOM = "custom"
+# Stored next to a ``host_cli`` that local mode filled in, not one the client
+# picked, so the stored request still lets ``[proposer] entry`` apply (SKY-753).
+HOST_CLI_AUTO_KEY = "host_cli_auto"
 BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_PI,
     BLACKBOX_HARNESS_CODEX,
@@ -111,6 +116,12 @@ BLACKBOX_REPO_ENGINES = frozenset(
         BLACKBOX_ENGINE_AUTOSADDLER,
         BLACKBOX_ENGINE_SHINKA_EVOLVE,
     }
+)
+# Engines that cannot use the contract file's [proposer] entry: ShinkaEvolve
+# never runs it, and AutoResearch and Meta-Harness call the proposer from their
+# lab folder, so its changed files are not their versions (SKY-753; Gilad, 2026-11-18).
+FILE_PROPOSER_REFUSED_ENGINES = frozenset(
+    {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
 )
 # Single-mode engines that honor an explicit iteration cap.
 BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
@@ -530,8 +541,36 @@ class BlackboxProposer(BaseModel):
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
     host_cli: Literal["codex", "claude"] | None = None
     host_permission: Literal["workspace_only", "full_access"] = "workspace_only"
+    # Input only: the serializer below writes the mark from ``model_fields_set``.
+    host_cli_auto: bool = Field(
+        default=False,
+        exclude=True,
+        description=(
+            "Local mode only. True says that host_cli is the CLI that the server filled in, for example the "
+            "proposer_host_cli of a wizard check, not one the client picked. A filled-in CLI lets the repository's "
+            "[proposer] entry apply, and a picked CLI replaces it. Send it back with that CLI so a check on a "
+            "request that names no harness, run_command or install_command stays current."
+        ),
+    )
 
     _refuse_removed_cli = field_validator("host_cli", mode="before")(refuse_removed_cli)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_host_cli_auto(cls, data: Any, handler: ModelWrapValidatorHandler[BlackboxProposer]) -> BlackboxProposer:
+        """Keep a filled-in ``host_cli`` out of the client's choices when a stored request is read again.
+
+        Args:
+            data: The raw proposer before field validation.
+            handler: The standard validation of the proposer fields.
+
+        Returns:
+            The validated proposer.
+        """
+        proposer = handler(data)
+        if proposer.host_cli_auto:
+            proposer.model_fields_set.discard("host_cli")
+        return proposer
 
     @model_validator(mode="after")
     def _ensure_launchable(self) -> BlackboxProposer:
@@ -553,6 +592,30 @@ class BlackboxProposer(BaseModel):
         if self.harness == BLACKBOX_HARNESS_CUSTOM and not (self.run_command or "").strip():
             raise ValueError("A custom proposer harness needs a run_command.")
         return self
+
+    # No return annotation: with one, openapi.json would lose the model's own schema.
+    @model_serializer(mode="wrap")
+    def _keep_harness_choice(self, handler: SerializerFunctionWrapHandler):
+        """Leave ``harness`` out of the dump when the client did not send it.
+
+        A repository run then uses the ``[proposer] entry`` of its contract
+        file, and the stored request still tells that apart from a chosen
+        Codex (SKY-753). Validating the dump gives the same default again.
+        A ``host_cli`` that local mode filled in gets :data:`HOST_CLI_AUTO_KEY`
+        for the same reason.
+
+        Args:
+            handler: Pydantic's default serializer.
+
+        Returns:
+            The serialized proposer.
+        """
+        data = handler(self)
+        if "harness" not in self.model_fields_set and isinstance(data, dict):
+            data.pop("harness", None)
+        if self.host_cli is not None and "host_cli" not in self.model_fields_set and isinstance(data, dict):
+            data[HOST_CLI_AUTO_KEY] = True
+        return data
 
 
 # ShinkaEvolve's evolution knobs (island model, parent selection, mutation

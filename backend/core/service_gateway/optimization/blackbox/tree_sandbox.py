@@ -7,6 +7,14 @@ metric tree, so no candidate code reaches it. Each call commits one step to
 the step log and returns only once that step is durable behind the run's
 fence. :class:`RuntimeBoxSource` is the fresh-box-per-call source:
 it opens a new box for each acquire and closes it at release.
+
+:meth:`TreeSandbox.open_session` is the session API (SKY-785). It acquires
+one box from a :class:`BoxSource`, starts it from a state, and gives the
+caller a :class:`BoxSession`: commands with their own ``env``, ``on_output``,
+``sudo`` and timeout, the box itself for checks, and one release. It needs no
+tree store and commits no step, so a caller such as ``RepoScorer`` that keeps
+its own records uses the same box path as :meth:`TreeSandbox.run` and
+:meth:`TreeSandbox.score`.
 """
 
 from __future__ import annotations
@@ -17,8 +25,10 @@ import logging
 import math
 import shlex
 import tarfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, TypeVar
 
 from ....billing.budgets import BudgetError
@@ -42,7 +52,7 @@ from ....sandbox.trees import (
 from ....storage.step_log_store import StepFenceError, StepLogStore, step_id_for
 from ....storage.tree_store import TreeStore
 from .repo_tree import ARCHIVE_CHUNK_BYTES
-from .sandbox_contract import CommandResult, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +137,111 @@ class StepCommittedError(TreeSandboxError):
     """Signal a step that committed, then failed in its durable wait: the next step must take the next seq."""
 
 
+class BoxSession:
+    """Hold one box from a source for the caller's commands and checks, and give it back once."""
+
+    def __init__(self, source: BoxSource[SandboxSession], box: SandboxSession) -> None:
+        """Bind an acquired box to the source that takes it back.
+
+        Args:
+            source: The source that gave the box.
+            box: The open box; the caller may also run its own checks on it.
+        """
+        self.source = source
+        self.box = box
+        self._released = False
+        self._lock = threading.Lock()
+
+    def run(
+        self,
+        command: str,
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+        on_output: OutputSink | None = None,
+        sudo: bool = False,
+    ) -> CommandResult:
+        """Run one command in the box with this call's own timeout.
+
+        Args:
+            command: The shell command line.
+            timeout_seconds: The limit of this command.
+            env: Extra environment for this command only.
+            on_output: Receives each piece of output while the command runs.
+            sudo: Run as root; only the control plane may ask for it.
+
+        Returns:
+            The command's exit code, output and whether the timeout fired.
+        """
+        options: dict[str, Any] = {}
+        # Only the options the caller set reach the box, so a box gets the same call as before the session API.
+        if env is not None:
+            options["env"] = env
+        if on_output is not None:
+            options["on_output"] = on_output
+        if sudo:
+            options["sudo"] = True
+        return self.box.run(command, timeout_seconds=timeout_seconds, **options)
+
+    def release(self, healthy: bool) -> None:
+        """Give the box back to its source; a second call does nothing.
+
+        Args:
+            healthy: False when the box failed, so no later step may use it.
+
+        Raises:
+            Exception: The source's release error, raw, including the budget errors.
+        """
+        with self._lock:
+            if self._released:
+                return
+            # Marked first: a release that raises must not release the box again.
+            self._released = True
+        self.source.release(self.box, healthy)
+
+    def release_failed(self, what: str) -> None:
+        """Give a failed box back as unhealthy, and log only a release failure's type.
+
+        Args:
+            what: Names the box in the log line.
+
+        Raises:
+            BudgetReached: And the other budget errors of the release, in place of the box's own failure.
+        """
+        try:
+            self.release(healthy=False)
+        except _BUDGET_ERRORS:
+            # A budget stop must not be lost, so it replaces the box's own failure.
+            raise
+        except Exception as release_error:
+            # Only the type: settlement and ledger texts can name the provider. The caller raises or
+            # returns the box's own failure.
+            logger.warning("%s did not close cleanly (%s)", what, type(release_error).__name__)
+
+    def __enter__(self) -> BoxSession:
+        """Return this session for a ``with`` block that releases the box at its end.
+
+        Returns:
+            This session.
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Release the box, as healthy only when the block raised nothing.
+
+        Args:
+            exc_type: The type of the block's exception, if any.
+            exc: The block's exception, if any.
+            traceback: The block's traceback, if any.
+        """
+        self.release(healthy=exc is None)
+
+
 @dataclass(frozen=True)
 class StepRef:
     """Name one step in the step log: the run, the agent, its place and its generation."""
@@ -178,6 +293,47 @@ class TreeSandbox:
             # The layer records the grant list that it resolves, so a box must open with the same registry.
             if isinstance(source, RuntimeBoxSource) and source.registry != self._registry:
                 raise ValueError("A runtime box source must use the same capability registry as the tree sandbox.")
+
+    @staticmethod
+    def open_session(
+        source: BoxSource[SandboxSession],
+        agent_id: str,
+        grants: Sequence[Grant],
+        *,
+        start: Callable[[SandboxSession], None] | None = None,
+        what: str = "A tree sandbox box",
+    ) -> BoxSession:
+        """Acquire one box from a source and start it from a state.
+
+        The session commits no step; a caller that keeps a step log commits
+        its own steps. The caller releases the session in a ``finally`` block
+        or uses it as a ``with`` block.
+
+        Args:
+            source: Gives the box.
+            agent_id: The agent or role that uses the box.
+            grants: The box's network grants; empty means no network.
+            start: Brings the new box to its starting state, for example by
+                unpacking a saved state; ``None`` keeps the box as it opened.
+            what: Names the box in the log line of a failed release.
+
+        Returns:
+            The session that holds the started box.
+
+        Raises:
+            Exception: The source's acquire error or the start's error, raw.
+            BudgetReached: And the other budget errors of the release after
+                a failed start, in place of the start's own error.
+        """
+        session = BoxSession(source, source.acquire(agent_id, grants))
+        if start is None:
+            return session
+        try:
+            start(session.box)
+        except BaseException:
+            session.release_failed(what)
+            raise
+        return session
 
     def run(
         self,
@@ -356,7 +512,7 @@ class TreeSandbox:
             BudgetReached: And the other budget errors, from the work or the release.
         """
         try:
-            box = source.acquire(step.agent_id, grants)
+            session = self.open_session(source, step.agent_id, grants)
         except _BUDGET_ERRORS:
             raise
         except GrantError as error:
@@ -365,7 +521,7 @@ class TreeSandbox:
             raise BoxFailureError(step.step_id, f"The box did not open ({type(error).__name__}).") from error
         healthy = False
         try:
-            outcome = work(box)
+            outcome = work(session.box)
             healthy = True
         except _BUDGET_ERRORS:
             raise
@@ -376,7 +532,7 @@ class TreeSandbox:
         finally:
             # Also on a BaseException such as a cancel, so the box always goes back.
             try:
-                source.release(box, healthy)
+                session.release(healthy)
             except _BUDGET_ERRORS:
                 # A budget stop wins over the step's own error, so the run stops.
                 raise

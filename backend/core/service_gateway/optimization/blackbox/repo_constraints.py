@@ -55,6 +55,7 @@ import json
 import math
 import posixpath
 import re
+import shlex
 import socket
 import tarfile
 import tomllib
@@ -88,6 +89,14 @@ _MAX_NAME_CHARS = 100
 _MAX_HOSTS = 100
 _MAX_TABLES = 20
 _MAX_COMMAND_PARTS = 50
+# harness_bridge's gateway key tokens. A launch command with one gets the
+# proposer's relay key in its text, so the file's own commands cannot name them.
+_KEY_TOKENS = ("__APP_API_KEY__", "__SKYNET_API_KEY__")
+# Popen raises ValueError on a NUL byte, outside the setup check's clear error, and
+# other control characters only hide what the command does. That covers the C1
+# controls and the bidi embeddings, overrides, isolates and marks, which reorder the
+# shown text. Other format characters stay legal: a ZWJ or ZWNJ is part of real names.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
@@ -96,7 +105,8 @@ _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
     "setup": frozenset({"command"}),
-    "proposer": _ROLE_KEYS,
+    # entry and setup name the user's own proposer command (SKY-753).
+    "proposer": _ROLE_KEYS | {"entry", "setup"},
     "metric": frozenset({"files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus"}),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
@@ -303,6 +313,12 @@ class RepoConstraints:
     intent: str | None = None
     rules: tuple[str, ...] = ()
     proposer: RoleEnvironment = RoleEnvironment()
+    # None keeps the runner's own agent; a run that names its own proposer replaces both (SKY-753).
+    proposer_entry: tuple[str, ...] | None = None
+    proposer_setup: tuple[str, ...] | None = None
+    # The repository files and folders that entry and setup name; read_constraints fills them,
+    # and the file proposer protects them.
+    proposer_command_files: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
@@ -363,6 +379,9 @@ class RepoEnvironment:
     setup_command: str | None
     constraints: RepoConstraints | None = None
     notes: tuple[str, ...] = ()
+    # The file's proposer command when the run names no proposer of its own; else None (SKY-753).
+    proposer_entry: tuple[str, ...] | None = None
+    proposer_setup: tuple[str, ...] | None = None
 
     @property
     def rules(self) -> tuple[str, ...]:
@@ -410,6 +429,9 @@ class RepoEnvironment:
                 "target": file.outcome_target if file else None,
                 "require": dict(file.outcome_minimums) if file else {},
             },
+            # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
+            **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
+            **({"proposer_setup": list(self.proposer_setup)} if self.proposer_setup is not None else {}),
         }
 
 
@@ -717,6 +739,49 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
         or not all(isinstance(part, str) and part.strip() and len(part) <= _MAX_COMMAND_CHARS for part in value)
     ):
         raise problem
+    return tuple(value)
+
+
+def _command(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...] | None:
+    """Read an optional command list, such as ``[proposer] entry``.
+
+    Args:
+        section: The parsed table.
+        key: The setting, such as ``entry`` or ``setup``.
+        label: The table as the file names it, used in errors.
+
+    Returns:
+        The command as a tuple, or ``None`` when the key is absent.
+
+    Raises:
+        ConstraintsError: When the value is not a non-empty list of non-empty
+            strings without control characters, or names a gateway key token.
+    """
+    if key not in section:
+        return None
+    value = section[key]
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= _MAX_COMMAND_PARTS
+        or not all(
+            isinstance(part, str)
+            and part.strip()
+            and len(part) <= _MAX_COMMAND_CHARS
+            and not _CONTROL_CHARS.search(part)
+            for part in value
+        )
+    ):
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: {label} {key} must be a command list such as ["node", "my-agent.js"].',
+            **_at(f"{label} {key}"),
+        )
+    token = next((token for token in _KEY_TOKENS if any(token in part for part in value)), None)
+    if token is not None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} {key} cannot contain {token}. The command reads the model key"
+            " from the APP_API_KEY environment variable.",
+            **_at(f"{label} {key}"),
+        )
     return tuple(value)
 
 
@@ -1465,7 +1530,17 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         )
     services = {name: _service(table, name) for name, table in _named_tables(document, "services").items()}
     targets = {name: _target(table, name, services) for name, table in _named_tables(document, "target").items()}
-    proposer = _role(document.get("proposer", {}), "[proposer]", services)
+    proposer_section = document.get("proposer", {})
+    proposer = _role(proposer_section, "[proposer]", services)
+    proposer_entry = _command(proposer_section, "entry", "[proposer]")
+    proposer_setup = _command(proposer_section, "setup", "[proposer]")
+    if proposer_setup is not None and proposer_entry is None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [proposer] setup needs [proposer] entry. setup prepares your own proposer"
+            " command; add entry, or remove setup to use the runner's own agent.",
+            section="proposer",
+            key="setup",
+        )
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
     run_role = _role(run_section, "[run]", services)
@@ -1523,6 +1598,8 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         metric_vcpus=metric_vcpus,
         instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
+        proposer_entry=proposer_entry,
+        proposer_setup=proposer_setup,
         targets=targets,
         services=services,
         metric=metric,
@@ -1551,14 +1628,76 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
             a list of top-level bullets, or when the ``[data] cases`` file is
             missing, too large, empty, or has a line that is not one case,
             or when the ``[sandbox] compose`` file is missing or not a
-            compose file the box can run.
+            compose file the box can run, or when a ``[proposer] entry`` or
+            ``setup`` argument names a symbolic link, a path inside one, or a
+            folder that holds one.
     """
     raw = read_constraints_file(archive)
     if raw is None:
         return None
     constraints = _load_mcp_files(parse_constraints(raw, require_version=require_version), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
-    return _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
+    constraints = _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
+    return _load_command_files(constraints, archive)
+
+
+def _load_command_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Find the repository files and folders that ``[proposer] entry`` and ``setup`` name.
+
+    An argument names a path when, normalized, it is relative and equals a
+    file or a symbolic link of the snapshot, such as ``agent/run.js``, or a
+    folder that holds one, such as ``agent`` in ``npm ci --prefix agent``.
+    The checkout root (``.``) is never one, and a protected folder covers all
+    its files.
+
+    Args:
+        constraints: The parsed proposal.
+        archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
+
+    Returns:
+        The proposal with ``proposer_command_files`` filled, unchanged without an entry.
+
+    Raises:
+        ConstraintsError: When an argument names a symbolic link of the
+            snapshot, a path inside a linked folder, or a folder that holds a
+            symbolic link at any depth.
+    """
+    if constraints.proposer_entry is None:
+        return constraints
+    with tarfile.open(archive, "r:gz") as packed:
+        members = [member for member in packed.getmembers() if member.isfile() or member.issym()]
+    files = {PurePosixPath(member.name) for member in members}
+    links = {str(PurePosixPath(member.name)) for member in members if member.issym()}
+    paths = {str(path) for file in files for path in (file, *file.parents)} - {"."}
+    named: list[str] = []
+    for key, command in (("entry", constraints.proposer_entry), ("setup", constraints.proposer_setup or ())):
+        for part in command:
+            if part.startswith("/"):
+                continue
+            path = posixpath.normpath(part)
+            # Protection matches paths, so a link would leave the code it
+            # points at open to a version; refuse it, as for hidden paths.
+            link = next((str(p) for p in (PurePosixPath(path), *PurePosixPath(path).parents) if str(p) in links), None)
+            if link is not None:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: [proposer] {key} names '{part}', which goes through the symbolic"
+                    f" link '{link}'. Name the real path, so that no version can change the proposer.",
+                    section="proposer",
+                    key=key,
+                )
+            # A named folder protects its paths, not the files that its links
+            # point at, so a link anywhere inside it is refused too.
+            inner = next((name for name in sorted(links) if name.startswith(f"{path}/")), None)
+            if inner is not None:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: [proposer] {key} names the folder '{part}', which holds the symbolic"
+                    f" link '{inner}'. Remove the link from the folder, so that no version can change the proposer.",
+                    section="proposer",
+                    key=key,
+                )
+            if path in paths:
+                named.append(path)
+    return replace(constraints, proposer_command_files=tuple(dict.fromkeys(named)))
 
 
 def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
@@ -2069,6 +2208,7 @@ def effective_environment(
     *,
     approved_editable: Sequence[str],
     approved_setup: str | None,
+    approved_proposer: bool = False,
 ) -> RepoEnvironment:
     """Combine the customer's approved settings with what the repository proposes.
 
@@ -2079,6 +2219,8 @@ def effective_environment(
         constraints: The repository's proposal, or ``None`` when it has none.
         approved_editable: Editable paths from the submitted run.
         approved_setup: Setup command from the submitted run, if any.
+        approved_proposer: Whether the submitted run names its own proposer,
+            which then replaces ``[proposer] entry`` and ``setup``.
 
     Returns:
         The rules the run is held to.
@@ -2110,12 +2252,33 @@ def effective_environment(
                 key="editable",
             )
         editable = constraints.editable_paths
+    use_file_proposer = constraints.proposer_entry is not None and not approved_proposer
+    # A version must not rewrite the proposer command, or the setup it runs, that writes the next versions.
+    # Only exact argv paths are known here; the docs tell users to protect the files the command imports.
+    command_files = constraints.proposer_command_files if use_file_proposer else ()
     protected = tuple(
-        dict.fromkeys((CONSTRAINTS_FILE, *constraints.rule_files, *constraints.mcp_files, *constraints.protected_paths))
+        dict.fromkeys(
+            (
+                CONSTRAINTS_FILE,
+                *constraints.rule_files,
+                *constraints.mcp_files,
+                *constraints.protected_paths,
+                *command_files,
+            )
+        )
     )
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.
     if all(_inside(path, protected) for path in editable):
+        without_commands = tuple(path for path in protected if path not in command_files)
+        if command_files and not all(_inside(path, without_commands) for path in editable):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), because the run protects"
+                f" the files that [proposer] entry and setup name ({', '.join(command_files)}), so no version"
+                " could change anything. Make a path outside those files editable.",
+                section="proposer",
+                key="entry",
+            )
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), so no version could"
             " change anything. Protect less, or make a path outside [paths] protected editable.",
@@ -2139,12 +2302,20 @@ def effective_environment(
             notes.append(f"The run's own setup command replaces the one in {CONSTRAINTS_FILE}.")
     else:
         setup = constraints.setup_command
+    if constraints.proposer_entry is not None and approved_proposer:
+        notes.append("The run's own proposer replaces the one in the contract file.")
+    elif use_file_proposer:
+        notes.append(
+            f"The run uses the proposer command in the contract file: {shlex.join(constraints.proposer_entry)}"
+        )
     return RepoEnvironment(
         editable_paths=editable,
         protected_paths=protected,
         setup_command=setup,
         constraints=constraints,
         notes=tuple(notes),
+        proposer_entry=constraints.proposer_entry if use_file_proposer else None,
+        proposer_setup=constraints.proposer_setup if use_file_proposer else None,
     )
 
 

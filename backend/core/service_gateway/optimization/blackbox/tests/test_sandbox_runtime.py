@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from core.sandbox.snapshots import refuse_secrets
+
 from .. import sandbox, sandbox_runtime
 
 _MOVED_NAMES = (
@@ -120,3 +122,10 @@ def test_sandbox_runtime_has_no_direct_legacy_imports() -> None:
         if name == banned or name.startswith(f"{banned}.")
     }
     assert clashes == set()
+
+
+def test_async_spec_adds_no_env_so_a_box_can_become_a_snapshot() -> None:
+    """``_async_spec`` adds no env, so ``refuse_secrets`` accepts a box with none (SKY-812)."""
+    spec = sandbox_runtime._async_spec(sandbox_runtime.SandboxSpec(lifetime_seconds=60))
+    assert spec.env == {}
+    refuse_secrets(spec)
