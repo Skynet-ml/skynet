@@ -284,6 +284,22 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
+# A line that names an intent or rules file, for a current file that is not TOML at all.
+_RULE_LINE = re.compile(r"""^\s*(?:instructions|illegal)\s*=\s*["']([^"'\n]+)["']""", re.MULTILINE)
+
+
+def _clean_rule_path(path: str) -> str:
+    """Write a raw rules-file path the way the run's parser does, so both forms compare equal.
+
+    Args:
+        path: The path as the file holds it.
+
+    Returns:
+        The path with ``/`` separators and no surrounding spaces or slashes.
+    """
+    return path.strip().replace("\\", "/").strip("/")
+
+
 def _rule_settings(text: str) -> dict[str, str] | None:
     """Read each setting that names an intent or rules file, with the path it names.
 
@@ -317,7 +333,19 @@ def _rule_settings(text: str) -> dict[str, str] | None:
         tables |= {f"[target.{name}] illegal": stage for name, stage in targets.items()}
     raw = {"instructions": document.get("instructions")}
     raw |= {setting: table.get("illegal") for setting, table in tables.items() if isinstance(table, dict)}
-    return {setting: value.strip() for setting, value in raw.items() if isinstance(value, str)}
+    return {setting: _clean_rule_path(value) for setting, value in raw.items() if isinstance(value, str)}
+
+
+def _rule_line_paths(text: str) -> list[str]:
+    """Find the paths of the ``instructions`` and ``illegal`` lines of a text that is not TOML.
+
+    Args:
+        text: The raw file text.
+
+    Returns:
+        The distinct cleaned paths, in file order.
+    """
+    return list(dict.fromkeys(_clean_rule_path(path) for path in _RULE_LINE.findall(text)))
 
 
 def dropped_rule_files(current: str, text: str) -> str | None:
@@ -335,16 +363,21 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         nothing is dropped or the current text names no rules file.
     """
     before = _rule_settings(current)
-    if not before:
-        return None
     after = _rule_settings(text)
-    named = [f"{setting} = {path!r}" for setting, path in before.items()]
-    if after is None:
+    if before is None:
+        # The current text is not TOML, so only its paths are known: each must stay in the new text.
+        kept = set(after.values()) if after is not None else set(_rule_line_paths(text))
+        dropped = [f"{path!r}" for path in _rule_line_paths(current) if path not in kept]
+    elif not before:
+        return None
+    elif after is None:
+        named = [f"{setting} = {path!r}" for setting, path in before.items()]
         return (
             f"The new optimize.toml is not valid TOML, so it cannot keep {', '.join(named)}. "
             "Send a valid file that keeps these settings."
         )
-    dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
+    else:
+        dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
     if not dropped:
         return None
     return (
@@ -381,6 +414,8 @@ def workspace_tools(
     opened: list[tuple[RepoBrowser | None, str]] = []
     # Pi may run tool calls at the same time; one lock keeps one repository open and the read count exact.
     lock = asyncio.Lock()
+    # The repository's optimize.toml, read once a turn for the rules-file guard.
+    repo_toml: list[str] = []
 
     async def browse(read: Callable[[RepoBrowser], RepoRead]) -> RepoRead:
         """Open the repository once, then run one read off the event loop.
@@ -523,11 +558,60 @@ def workspace_tools(
             return {"error": "Empty file: send the whole file text."}
         clean, field = found
         if field == "optimize_toml":
-            current = await current_text(clean, field)
-            # No current file (none in the repository, or it cannot be read) leaves nothing to drop.
-            if isinstance(current, str) and (refusal := dropped_rule_files(current, text)):
+            current = await current_toml()
+            if isinstance(current, dict):
+                return dict(current)
+            if refusal := dropped_rule_files(current, text):
                 return {"error": refusal}
         return save(clean, field, text)
+
+    def read_repo_toml(browser: RepoBrowser) -> RepoRead:
+        """Read the repository's ``optimize.toml`` for the guard, outside the agent's read limit.
+
+        The guard's read is not the agent's: counted, it would stop at the
+        limit and let an unchecked write through, or use up the agent's reads.
+
+        Args:
+            browser: The opened repository.
+
+        Returns:
+            The text, ``""`` when the tree has no ``optimize.toml``, or
+            ``{"error": ...}`` when the file cannot be read whole.
+        """
+        if "optimize.toml" not in browser._files:
+            return ""
+        try:
+            text, truncated = browser._read_text("optimize.toml", DRAFT_FILE_BYTES)
+        except Exception as exc:  # a failed host read refuses the write, not the turn
+            logger.info("Setup agent cannot read optimize.toml of %s: %s", browser.repository, type(exc).__name__)
+            return {"error": "the host refused the read."}
+        if truncated:
+            return {"error": f"the file is larger than {DRAFT_FILE_BYTES} bytes."}
+        return text
+
+    async def current_toml() -> str | dict[str, str]:
+        """Return the ``optimize.toml`` text a write is checked against: the draft's, else the repository's.
+
+        Returns:
+            The current text (``""`` when there is none), or ``{"error": ...}``
+            when the repository's file cannot be checked.
+        """
+        text = str({**state, **turn.wizard_patch}.get("optimize_toml") or "")
+        if text:
+            return text
+        if not str(state.get("repository") or "").strip():
+            return ""
+        if not repo_toml:
+            read = await browse(read_repo_toml)
+            if isinstance(read, dict):
+                reason = read.get("error", "")
+                return {
+                    "error": f"optimize.toml cannot be checked against the repository's file: {reason} "
+                    "Try again, or ask the user."
+                }
+            # A refusal leaves the draft empty, so a retry must not read (and count) again.
+            repo_toml.append(read)
+        return repo_toml[0]
 
     async def current_text(path: str, field: str | None) -> RepoRead:
         """Return the text an edit starts from: the draft's, else the repository's.

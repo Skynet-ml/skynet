@@ -249,7 +249,7 @@ async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatc
             wizard_state=WizardState(**_REPO_METRIC, metric_code=_SCORER),
         )
 
-    tools = _tools({**_REPO_METRIC, "metric_code": _SCORER}, _TurnAuthoringFlag())
+    tools = _tools({**_REPO_METRIC, "metric_code": _SCORER}, _TurnAuthoringFlag(), token=lambda: "gh-token")
     # The gate replaces the tool's func in place, so each tool is wrapped once.
     write = wrap(tools[WRITE_FILE_TOOL])
     await write.func._async_body(path="run.py", text=_SCORER)
@@ -744,24 +744,37 @@ async def test_write_keeps_an_optimize_toml_that_still_names_the_intent_and_rule
     assert first == {"wizard_state": {"optimize_toml": _NO_RULES_TOML}}
 
 
+def _fake_repo_with_toml(monkeypatch: pytest.MonkeyPatch, reads: list[str]) -> None:
+    """Stand in for a GitHub repository whose optimize.toml is the guide's example.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        reads: Collects every file path read from the host.
+    """
+    paths = ["optimize.toml", "src/app.py"]
+    monkeypatch.setattr(
+        workspace_tools.github,
+        "tree_entries",
+        lambda token, full_name, branch: {
+            "entries": [{"path": path, "type": "file", "size": 10} for path in paths],
+            "truncated": False,
+        },
+    )
+
+    def read_text_file(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Return the example for optimize.toml and a stub for any other file."""
+        reads.append(path)
+        return (OPTIMIZE_TOML_EXAMPLE if path == "optimize.toml" else "x = 1\n"), False
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", read_text_file)
+
+
 @pytest.mark.asyncio
 async def test_write_refuses_dropping_the_rules_file_that_the_repository_optimize_toml_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no draft optimize.toml yet, the write is checked against the repository's file."""
-    monkeypatch.setattr(
-        workspace_tools.github,
-        "tree_entries",
-        lambda token, full_name, branch: {
-            "entries": [{"path": "optimize.toml", "type": "file", "size": 10}],
-            "truncated": False,
-        },
-    )
-    monkeypatch.setattr(
-        repo_browser.github,
-        "read_text_file",
-        lambda token, full_name, branch, path, max_bytes: (OPTIMIZE_TOML_EXAMPLE, False),
-    )
+    _fake_repo_with_toml(monkeypatch, [])
     turn = _TurnAuthoringFlag()
 
     result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
@@ -771,6 +784,87 @@ async def test_write_refuses_dropping_the_rules_file_that_the_repository_optimiz
     assert list(result) == ["error"]
     assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
     assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_the_guard_checks_the_repository_file_after_the_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard's read of the repository's optimize.toml works after the agent used every read of its turn."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
+    for _ in range(repo_browser.READS_PER_TURN):
+        await tools[READ_REPO_TOOL].acall(path="src/app.py")
+    assert "Read limit" in (await tools[READ_REPO_TOOL].acall(path="src/app.py"))["error"]
+
+    refused = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=_NO_RULES_TOML)
+    kept = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
+
+    assert "drops instructions = 'docs/intent.md'" in refused["error"]
+    assert kept["wizard_state"]["optimize_toml"] == OPTIMIZE_TOML_EXAMPLE
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_refusal_is_refused_again_without_a_new_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal leaves the draft empty; each retry checks the same repository text and reads it only once."""
+    reads: list[str] = []
+    _fake_repo_with_toml(monkeypatch, reads)
+    turn = _TurnAuthoringFlag()
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
+
+    results = [
+        await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=_NO_RULES_TOML)
+        for _ in range(repo_browser.READS_PER_TURN + 2)
+    ]
+
+    assert all("drops instructions = 'docs/intent.md'" in result["error"] for result in results)
+    assert reads.count("optimize.toml") == 1
+    assert turn.wizard_patch == {}
+    assert "error" not in str(await tools[READ_REPO_TOOL].acall(path="src/app.py"))
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_an_optimize_toml_when_the_repository_cannot_open() -> None:
+    """With no draft, a repository that cannot open leaves the write unchecked, so it is refused with the reason."""
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "repo_provider": "gitlab"}, turn)[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_VALID_TOML
+    )
+
+    assert result["error"].startswith("optimize.toml cannot be checked against the repository's file")
+    assert "GitLab is not linked" in result["error"]
+    assert "Try again, or ask the user" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> None:
+    """A current text that is not TOML keeps the paths of its instructions and illegal lines."""
+    current = 'instructions = "docs/intent.md"\n[proposer\nillegal = "docs/rules.md"\n'
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "optimize_toml": current}, turn)
+
+    refused = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=_VALID_TOML)
+    kept = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
+
+    assert "drops 'docs/intent.md', 'docs/rules.md'" in refused["error"]
+    assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
+
+
+@pytest.mark.asyncio
+async def test_the_raw_fallback_cleans_paths_the_way_the_parser_does() -> None:
+    """A raw path with a backslash, spaces or slashes compares equal to the parser's clean path."""
+    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["pytest", "-q"]\n', "").replace(
+        'illegal = "docs/rules.md"', 'illegal = " docs\\\\rules.md/ "'
+    )
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "optimize_toml": current}, turn)[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=OPTIMIZE_TOML_EXAMPLE
+    )
+
+    assert "docs\\\\rules.md" in current
+    assert result == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
 
 
 class _Spec:
