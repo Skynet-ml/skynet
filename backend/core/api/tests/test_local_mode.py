@@ -662,7 +662,7 @@ def test_hosted_wizard_check_refuses_local_only_work(monkeypatch: pytest.MonkeyP
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {**payload, "scorer": _VALID_SCORER},
+                "payload": {**payload, "scorer": _VALID_SCORER, "target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },

@@ -58,6 +58,8 @@ TREE = "c" * 64
 AGENT = "agent"
 RUN = "run-1"
 OWNER = AuthenticatedUser(username="owner", role="user", groups=())
+# Resume and restart refuse a stored text or agent run, and a row with no target is a text run (SKY-834).
+_REPO_TARGET = {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}
 
 
 class StepJobStore(RemoteDBJobStore):
@@ -192,7 +194,7 @@ def _funded_run(store: StepJobStore, run_id: str = RUN) -> None:
     store.update_job(
         run_id,
         username="owner",
-        payload={"execution_budget_id": budget.id, "execution_budget_generation": 0},
+        payload={"target": _REPO_TARGET, "execution_budget_id": budget.id, "execution_budget_generation": 0},
         execution_budget_id=budget.id,
         execution_budget_generation=0,
         code_version=None,
@@ -823,6 +825,7 @@ def _save_checkpoint(store: StepJobStore, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(remote_mod.settings, "vercel_sandbox_max_lifetime_seconds", 60.0)
     job = store.get_job(RUN)
     payload = {
+        "target": _REPO_TARGET,
         "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",

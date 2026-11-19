@@ -19,7 +19,6 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from .. import repo_tree
-from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, pinned_harness_check
 from ..harness_bridge import parse_pi_output, workspace_files
 from ..harnesses import REGISTRY
@@ -408,8 +407,7 @@ def test_runner_puts_the_candidate_instructions_in_the_turn_message(tmp_path: Pa
         candidate: The text version the optimizer writes to the instructions file.
         sent: The candidate text the turn message must hold.
     """
-    files = candidate_files(candidate, build_launch(_target(), _GATEWAY).instructions_file)
-    completed, _, record = _run_fake_runner(tmp_path, instructions=files[INSTRUCTIONS_FILE])
+    completed, _, record = _run_fake_runner(tmp_path, instructions=candidate)
     assert completed.returncode == 0, completed.stderr
     message = json.loads(record.read_text())["message"]
     # Only the runner's closing tag ends the block, so a ``Task:`` line in the

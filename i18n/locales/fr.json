@@ -274,6 +274,8 @@
     "optimization.resume_budget_projected": "L'exécution se dirige vers un coût d'environ {projected}, au-delà de son plafond de {limit}. Relevez le plafond de dépenses au-dessus de {projected} pour continuer.",
     "optimization.resume_exhausted": "Cette optimisation a atteint son nombre maximal de tentatives ({attempts}) — relancez-la plutôt.",
     "optimization.resume_not_resumable": "Cette optimisation n'a aucun point de reprise enregistré — relancez-la plutôt.",
+    "optimization.resume_target_retired": "Chaque exécution optimise désormais un dépôt. Cette exécution de texte ou d'agent reste dans votre historique, mais elle ne peut pas reprendre.",
+    "optimization.restart_target_retired": "Chaque exécution optimise désormais un dépôt. Cette exécution de texte ou d'agent reste dans votre historique, mais elle ne peut pas redémarrer.",
     "optimization.resume_wrong_status": "Seules les optimisations interrompues en cours d'exécution peuvent être reprises — celle-ci est dans l'état '{status}'.",
     "sandbox.docker_unavailable": "Docker ne fonctionne pas sur cet ordinateur. Lancez Docker Desktop ou OrbStack, puis réessayez.",
     "sandbox.docker_image_missing": "L’image du bac à sable local n’est pas encore créée. Redémarrez l’application pour la créer.",

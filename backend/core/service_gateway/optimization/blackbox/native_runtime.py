@@ -1208,7 +1208,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             "sandbox": False,
             "max_token_cost": options.max_token_cost,
             "max_evals": server.remaining,
-            "max_concurrency": ctx.concurrency,
+            "max_concurrency": 1,
             "max_iterations": ctx.max_iterations,
             "stop_at_score": ctx.stop_at_score,
             "timeout_seconds": lifetime,

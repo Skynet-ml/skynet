@@ -153,13 +153,20 @@ def test_repo_run_without_a_setup_chat_binds_nothing(
     assert binds == []
 
 
-def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore]) -> None:
-    """Text targets submit to ``/optimize``; this route turns them away."""
+@pytest.mark.parametrize("target", [{"kind": "text"}, {"kind": "agent", "model": "m"}])
+def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore], target: dict[str, str]) -> None:
+    """Refuse a text or agent target with a 422 that says every run optimizes a repository (SKY-834).
+
+    Args:
+        client_and_store: The API client and its job store.
+        target: The retired target that the request names.
+    """
     client, store = client_and_store
 
-    resp = client.post("/blackbox/run", json=repo_payload(target={"kind": "text"}))
+    resp = client.post("/blackbox/run", json=repo_payload(target=target))
 
-    assert resp.status_code == 400
+    assert resp.status_code == 422
+    assert "Every run optimizes a repository" in resp.text
     assert store._jobs == {}
 
 

@@ -803,6 +803,7 @@ _BLACKBOX_PAYLOAD: dict = {
     "objective": "more vowels",
     "scorer": {"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
     "reflection_model_config": {"name": "gpt-4o"},
+    "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
 }
 
 _BLACKBOX_OVERVIEW: dict = {
@@ -812,6 +813,26 @@ _BLACKBOX_OVERVIEW: dict = {
     "model_name": "gpt-4o",
     "token_source": "managed",
 }
+
+
+@pytest.mark.parametrize(
+    "target", [{"kind": "text"}, {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run"}]
+)
+def test_a_stored_text_or_agent_run_never_runs_again(
+    worker: BackgroundWorker, store: FakeJobStore, target: dict[str, str]
+) -> None:
+    """A stored text or agent run fails before any setup, because every run optimizes a repository (SKY-834)."""
+    payload = {**_BLACKBOX_PAYLOAD, "target": target}
+    store.seed_job("retired", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
+    worker.enqueue_job("retired")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.ModelGateway") as gateway,
+    ):
+        worker._process_job("retired", 0)
+    assert store._jobs["retired"]["status"] == "failed"
+    assert "Every run optimizes a repository" in store._jobs["retired"]["message"]
+    gateway.assert_not_called()
 
 
 def test_protected_blackbox_novelty_failure_has_plain_detail(worker: BackgroundWorker, store: FakeJobStore) -> None:

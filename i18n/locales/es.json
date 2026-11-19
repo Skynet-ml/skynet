@@ -274,6 +274,8 @@
     "optimization.resume_budget_projected": "La ejecución va camino de costar unos {projected}, por encima de su límite de {limit}. Sube el límite de gasto por encima de {projected} para continuar.",
     "optimization.resume_exhausted": "Esta optimización alcanzó su número máximo de intentos ({attempts}); ejecútala de nuevo en su lugar.",
     "optimization.resume_not_resumable": "Esta optimización no tiene ningún punto de reanudación guardado; ejecútala de nuevo en su lugar.",
+    "optimization.resume_target_retired": "Ahora cada ejecución optimiza un repositorio. Esta ejecución de texto o agente sigue en tu historial, pero no se puede reanudar.",
+    "optimization.restart_target_retired": "Ahora cada ejecución optimiza un repositorio. Esta ejecución de texto o agente sigue en tu historial, pero no se puede reiniciar.",
     "optimization.resume_wrong_status": "Solo se pueden reanudar las optimizaciones que se detuvieron a mitad de ejecución; esta está en '{status}'.",
     "sandbox.docker_unavailable": "Docker no se está ejecutando en este equipo. Inicia Docker Desktop u OrbStack e inténtalo de nuevo.",
     "sandbox.docker_image_missing": "La imagen del sandbox local aún no está creada. Reinicia la aplicación para crearla.",

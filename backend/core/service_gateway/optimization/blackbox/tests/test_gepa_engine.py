@@ -1,4 +1,4 @@
-"""Tests for GEPA: parallel batch scoring (SKY-429), and repository runs on the worker engine loop (SKY-720).
+"""Tests for GEPA: batch scoring (SKY-429), and repository runs on the worker engine loop (SKY-720).
 
 The engine-loop tests use a SQLite file, the local-filesystem object store,
 local subprocess boxes and a fake model: no network and no paid call.
@@ -23,8 +23,6 @@ from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetService
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
-from core.sandbox.errors import SandboxInfraError
 from core.sandbox.trees import BoxFailureError, GrantDeniedError, TreeRejectedError
 from core.storage.models import AgentStepModel, Base, BillingCustomerModel, JobModel
 from core.storage.object_store import LocalObjectStore
@@ -42,7 +40,6 @@ from core.worker.engine_loop import (
 
 from ...budget_stop import BudgetReached
 from .. import gepa_engine as gepa_mod
-from ..agent_eval import SandboxAgentScorer
 from ..gepa_engine import GepaEngine
 from ..harness import GatewayConfig
 from ..harness_bridge import hidden_hashes
@@ -51,36 +48,10 @@ from ..protocol import BudgetExhaustedError, EvalServer, ModelReply, RepoSeed, R
 from ..sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_contract import SandboxSession
 from ..tree_sandbox import RuntimeBoxSource
-from .mocks import FakeSandboxRuntime, FakeSandboxSession, make_ctx, vowel_scorer
+from .mocks import make_ctx
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
-_ATTEMPT_ONE_KEY = re.compile(r"^agent-run:[0-9a-f]{32}:attempt-1$")
 _CALLER_TAG: contextvars.ContextVar[str | None] = contextvars.ContextVar("caller_tag", default=None)
-
-
-def _agent_target() -> BlackboxTarget:
-    """Build a custom agent target that runs ``run-agent``.
-
-    Returns:
-        The target.
-    """
-    return BlackboxTarget(
-        kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_CUSTOM, model="m", run_command="run-agent"
-    )
-
-
-def _agent_scorer(runtime: FakeSandboxRuntime, scorer: Any = None) -> SandboxAgentScorer:
-    """Wrap ``scorer`` in a sandbox agent scorer over ``runtime`` with the default no-retry policy.
-
-    Args:
-        runtime: The fake sandbox runtime.
-        scorer: The user's scorer; a constant one when unset.
-
-    Returns:
-        The agent scorer.
-    """
-    scorer = scorer or (lambda candidate, case: (0.5, {"feedback": "ok"}))
-    return SandboxAgentScorer(scorer, runtime=runtime, target=_agent_target(), gateway=_GATEWAY, job_id="job-1")
 
 
 def _pairs(count: int) -> list[tuple[str, dict[str, int]]]:
@@ -109,7 +80,7 @@ def _run_batch(
         tmp_path: Run directory.
         server: The budgeted scorer.
         pairs: The batch to send through ``batch_evaluator``.
-        **ctx_overrides: Extra ``EngineContext`` fields, such as ``concurrency``.
+        **ctx_overrides: Extra ``EngineContext`` fields, such as ``check_budget``.
 
     Returns:
         The batch results and the engine's result.
@@ -178,42 +149,8 @@ class _InFlightScorer:
         return float(case["i"]), {"feedback": f"case {case['i']}"}
 
 
-def test_batch_calls_overlap_up_to_the_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A batch of agent cases runs ``ctx.concurrency`` calls at the same time.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-    scorer = _InFlightScorer(limit=3)
-    server = EvalServer(scorer, max_evals=16)
-
-    _run_batch(monkeypatch, tmp_path, server, _pairs(3), concurrency=3)
-
-    assert scorer.max_in_flight == 3
-    assert scorer.calls == 3
-    assert server.used == 3
-
-
-def test_a_batch_larger_than_the_limit_never_goes_over_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Six cases at concurrency two overlap two at a time and never three.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-    scorer = _InFlightScorer(limit=3, wait_seconds=0.05)
-    server = EvalServer(scorer, max_evals=16)
-
-    results, _ = _run_batch(monkeypatch, tmp_path, server, _pairs(6), concurrency=2)
-
-    assert scorer.max_in_flight == 2
-    assert scorer.calls == 6
-    assert [score for score, _ in results] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
-
-
-def test_concurrency_one_keeps_the_serial_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The default concurrency scores every case on the caller thread, one at a time.
+def test_a_batch_scores_on_the_caller_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A batch scores every case on the caller thread, one at a time.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -228,164 +165,27 @@ def test_concurrency_one_keeps_the_serial_loop(monkeypatch: pytest.MonkeyPatch, 
     assert scorer.threads == {threading.get_ident()}
 
 
-def test_parallel_results_keep_the_pair_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Calls that finish out of order still return their results in pair order, as the serial loop does.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-    finished: list[int] = []
-    lock = threading.Lock()
-
-    def slow_first(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Make earlier cases finish later, then score the case by its index.
-
-        Args:
-            candidate: The version.
-            case: The case.
-
-        Returns:
-            The case index as a score, and side information.
-        """
-        time.sleep(0.02 * (4 - case["i"]))
-        with lock:
-            finished.append(case["i"])
-        return float(case["i"]), {"feedback": f"case {case['i']}"}
-
-    serial, _ = _run_batch(monkeypatch, tmp_path / "serial", EvalServer(slow_first, max_evals=16), _pairs(4))
-    finished.clear()
-    parallel, _ = _run_batch(
-        monkeypatch, tmp_path / "parallel", EvalServer(slow_first, max_evals=16), _pairs(4), concurrency=4
-    )
-
-    assert finished != sorted(finished)
-    assert parallel == serial
-    assert [score for score, _ in parallel] == [0.0, 1.0, 2.0, 3.0]
-
-
-def test_parallel_gepa_run_matches_the_serial_run(tmp_path: Path) -> None:
-    """A real GEPA run picks the same version, score and tree at concurrency one and three.
-
-    Args:
-        tmp_path: Run directory.
-    """
-    cases = [{"i": 0}, {"i": 1}, {"i": 2}]
-    results = []
-    for concurrency in (1, 3):
-        server = EvalServer(vowel_scorer, max_evals=16)
-        task = Task(seed_candidate="hello world", objective="more vowels", cases=cases)
-        ctx = make_ctx(str(tmp_path / str(concurrency)), concurrency=concurrency)
-        results.append((GepaEngine().run(task, server, ctx), server.used))
-
-    (serial, serial_used), (parallel, parallel_used) = results
-    assert parallel.best_candidate == serial.best_candidate
-    assert parallel.best_score == serial.best_score
-    assert parallel.metadata["candidate_tree"] == serial.metadata["candidate_tree"]
-    assert parallel_used == serial_used
-
-
-def test_worker_threads_see_the_callers_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A context value the caller sets reaches every parallel call.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-    seen: list[str | None] = []
-
-    def tagged(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Record the caller's context value.
-
-        Args:
-            candidate: The version.
-            case: The case.
-
-        Returns:
-            A constant score and side information.
-        """
-        seen.append(_CALLER_TAG.get())
-        return 0.5, {"feedback": "ok"}
-
-    _run_batch(monkeypatch, tmp_path, EvalServer(tagged, max_evals=16), _pairs(4), concurrency=2)
-
-    assert seen == ["caller"] * 4
-
-
-def test_each_parallel_call_has_its_own_attempt_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Every agent case opens one box under its own ``agent-run:<uuid>:attempt-1`` reservation key.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-    runtime = FakeSandboxRuntime()
-    server = EvalServer(_agent_scorer(runtime), max_evals=16)
-
-    results, _ = _run_batch(monkeypatch, tmp_path, server, _pairs(4), concurrency=2)
-
-    keys = [spec.operation_key for spec in runtime.specs]
-    assert len(keys) == 4
-    assert len(set(keys)) == 4
-    assert all(_ATTEMPT_ONE_KEY.match(key) for key in keys)
-    assert all(session.closed for session in runtime.sessions)
-    assert [score for score, _ in results] == [0.5] * 4
-
-
-def test_a_failed_parallel_call_is_not_retried(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A box that dies is a metric error after one attempt, and its box is closed.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Run directory.
-    """
-
-    def dying(command: str) -> CommandResult:
-        """Kill the agent command; other commands succeed.
-
-        Args:
-            command: The shell command line.
-
-        Returns:
-            A clean exit for every command but the agent.
-
-        Raises:
-            SandboxInfraError: For the agent command.
-        """
-        if command == "run-agent":
-            raise SandboxInfraError("host recycled")
-        return CommandResult(exit_code=0)
-
-    runtime = FakeSandboxRuntime(session_factory=lambda: FakeSandboxSession(script=dying))
-    server = EvalServer(_agent_scorer(runtime), max_evals=16)
-
-    results, _ = _run_batch(monkeypatch, tmp_path, server, _pairs(3), concurrency=3)
-
-    assert len(runtime.sessions) == 3
-    assert all(_ATTEMPT_ONE_KEY.match(spec.operation_key) for spec in runtime.specs)
-    assert all(session.closed for session in runtime.sessions)
-    assert all(info.get("status") == "metric_error" for _, info in results)
-
-
-def test_a_budget_stop_starts_no_queued_call_and_leaks_no_box(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A budget stop in one call ends the batch: queued cases never open a box, open boxes close.
+def test_a_budget_stop_starts_no_queued_call(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A budget stop in one call ends the batch: queued cases are never scored.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Run directory.
     """
     stop = threading.Event()
+    calls: list[Any] = []
 
     def stopping(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
         """Ask for a stop once the first case is scored.
 
         Args:
             candidate: The version.
-            case: The agent's record.
+            case: The case.
 
         Returns:
             A constant score and side information.
         """
+        calls.append(case)
         stop.set()
         return 0.5, {"feedback": "ok"}
 
@@ -398,25 +198,37 @@ def test_a_budget_stop_starts_no_queued_call_and_leaks_no_box(monkeypatch: pytes
         if stop.is_set():
             raise BudgetReached
 
-    runtime = FakeSandboxRuntime()
-    server = EvalServer(_agent_scorer(runtime, stopping), max_evals=16)
+    server = EvalServer(stopping, max_evals=16)
 
     with pytest.raises(BudgetReached):
-        _run_batch(monkeypatch, tmp_path, server, _pairs(6), concurrency=2, check_budget=check_budget)
+        _run_batch(monkeypatch, tmp_path, server, _pairs(6), check_budget=check_budget)
 
-    assert 1 <= len(runtime.sessions) <= 2
-    assert all(session.closed for session in runtime.sessions)
+    assert 1 <= len(calls) <= 2
 
 
-def test_an_exhausted_server_ends_the_parallel_batch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """When the scorer-run budget runs out mid-batch, the run returns the seed and no box leaks.
+def test_an_exhausted_server_ends_the_batch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """When the scorer-run budget runs out mid-batch, the run returns the seed after the budgeted calls.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Run directory.
     """
-    runtime = FakeSandboxRuntime()
-    server = EvalServer(_agent_scorer(runtime), max_evals=2)
+    calls: list[Any] = []
+
+    def counting(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score every case the same and count the calls.
+
+        Args:
+            candidate: The version.
+            case: The case.
+
+        Returns:
+            A constant score and side information.
+        """
+        calls.append(case)
+        return 0.5, {"feedback": "ok"}
+
+    server = EvalServer(counting, max_evals=2)
     captured: dict[str, Any] = {}
 
     def fake_optimize_anything(**kwargs: Any) -> None:
@@ -430,13 +242,12 @@ def test_an_exhausted_server_ends_the_parallel_batch(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(gepa_mod, "optimize_anything", fake_optimize_anything)
     task = Task(seed_candidate="hello world", objective="more vowels", cases=[case for _, case in _pairs(6)])
 
-    result = GepaEngine().run(task, server, make_ctx(str(tmp_path), concurrency=2))
+    result = GepaEngine().run(task, server, make_ctx(str(tmp_path)))
 
     assert "results" not in captured
     assert result.best_candidate == "hello world"
     assert server.used == 2
-    assert len(runtime.sessions) == 2
-    assert all(session.closed for session in runtime.sessions)
+    assert len(calls) == 2
 
 
 _RUN_ID = "run-1"

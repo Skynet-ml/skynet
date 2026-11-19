@@ -37,6 +37,7 @@ from ...models import (
 from ...models.results import result_scores
 from ...service_gateway.language_models import usage_by_model_from_history
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
+from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, is_admin
 from ..converters import (
     compute_elapsed,
@@ -649,17 +650,20 @@ def is_resumable(job_store: Any, job_data: dict) -> bool:
     orphan sweep stopped as interrupted needs no checkpoint: it starts again
     from the beginning. The cheap, indexed checkpoint lookup is gated behind
     the status/attempts checks so list pages query only the few candidate rows,
-    never the whole page.
+    never the whole page. A stored text or agent run never offers Resume (SKY-834).
 
     Args:
-        job_store: The job store used to test for a saved checkpoint.
+        job_store: The job store used to read the payload target of a row
+            without its payload, which finds a retired run, and to test for a
+            saved checkpoint.
         job_data: Raw job row from the store.
 
     Returns:
         ``True`` when the run should offer Resume rather than Restart.
     """
     optimization_id = _resume_candidate_id(job_data)
-    if not optimization_id:
+    # The detail page loads the row without the payload, so the target check reads it here (SKY-834).
+    if not optimization_id or optimization_id in _retired_list_ids(job_store, [job_data]):
         return False
     return _has_resumable_state(job_store, optimization_id) or _restarts_from_beginning(job_store, job_data)
 
@@ -713,6 +717,29 @@ def _restarts_from_beginning(job_store: Any, job_data: dict) -> bool:
     return callable(has_checkpoint) and not has_checkpoint(job_data["optimization_id"])
 
 
+def has_retired_target(job_data: dict) -> bool:
+    """Return whether a stored run names a text or agent target.
+
+    Every run optimizes a repository (SKY-834). A stored text or agent run stays
+    in history, but it never runs again. Judge sessions and tagging jobs are not
+    black-box runs, so the rule skips them.
+
+    Args:
+        job_data: Raw job row from the store.
+
+    Returns:
+        ``True`` when the stored payload names a target other than a repository.
+    """
+    payload = job_data.get("payload")
+    optimization_type = (parse_overview(job_data) or {}).get(
+        PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_BLACKBOX
+    )
+    if not isinstance(payload, dict) or "judge" in payload or optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
+        return False
+    # A payload with no target is a text run, because the target kind defaults to text.
+    return not is_repo_payload(payload)
+
+
 def _resume_candidate_id(job_data: dict) -> str | None:
     """Apply the cheap (no-query) resume gates and return the job id when they pass.
 
@@ -753,23 +780,49 @@ def is_budget_stop(status: OptimizationStatus, job_data: dict) -> bool:
     return status == OptimizationStatus.stopped and job_data.get("stop_reason") == "budget_reached"
 
 
-def resumable_id_flags(job_store: Any, rows: list[dict]) -> set[str]:
-    """Return the ids in ``rows`` whose runs can offer Resume, in one batch.
+def _retired_list_ids(job_store: Any, rows: list[dict]) -> set[str]:
+    """Return the ids of rows that name a text or agent target.
 
-    The batched counterpart of :func:`is_resumable` for list pages: the cheap
-    gates run in Python, then a single ``IN (...)`` existence query covers all
-    candidates instead of one probe per row (up to page-size round trips).
-    Stores without the batch method fall back to the per-row probe with
-    identical results.
+    List and detail rows load without the payload, so :func:`has_retired_target` cannot judge them alone (SKY-834).
+    One query reads only the ``target`` and ``judge`` members of the payloads that the rows do not hold.
 
     Args:
-        job_store: The job store used to test for saved checkpoints.
+        job_store: The job store that holds the payloads.
+        rows: Raw job rows from a list query.
+
+    Returns:
+        The ids whose stored payload names a target other than a repository.
+    """
+    missing = [row["optimization_id"] for row in rows if row.get("payload") is None]
+    targets = job_store.payload_targets(missing) if missing else {}
+    return {
+        row["optimization_id"]
+        for row in rows
+        if has_retired_target(
+            row if row.get("payload") is not None else {**row, "payload": targets.get(row["optimization_id"])}
+        )
+    }
+
+
+def resumable_id_flags(job_store: Any, rows: list[dict]) -> set[str]:
+    """Return the ids in ``rows`` whose runs can offer Resume, in batches.
+
+    The batched counterpart of :func:`is_resumable` for list pages. The cheap
+    gates run in Python. Then one query reads the target of the candidates
+    that came without a payload, and the checkpoint check covers all
+    candidates together. Stores without the checkpoint batch method fall
+    back to the per-row probe with identical results.
+
+    Args:
+        job_store: The job store used to read targets and test for saved checkpoints.
         rows: Raw job rows from the store.
 
     Returns:
         The set of resumable optimization ids.
     """
-    candidates = [oid for row in rows if (oid := _resume_candidate_id(row))]
+    passing = [row for row in rows if _resume_candidate_id(row)]
+    retired = _retired_list_ids(job_store, passing)
+    candidates = [row["optimization_id"] for row in passing if row["optimization_id"] not in retired]
     if not candidates:
         return set()
     restarts = {

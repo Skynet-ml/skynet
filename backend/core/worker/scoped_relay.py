@@ -791,7 +791,6 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
                 if route.get(HOST_AGENT_TOKEN_KEY):
                     # Only a host proposer's own token reaches the host agent, and only there.
                     register({**route, "token": route[HOST_AGENT_TOKEN_KEY]}, frozenset({HOST_AGENT_PATH}))
-    register(payload.get("_skynet_target_route"), model_paths)
     register(payload.get("_skynet_tools_route"), frozenset({"/v1/_mcp", "/v1/_budget/state"}))
     connector_routes = payload.get(CONNECTOR_ROUTES_KEY)
     if isinstance(connector_routes, dict):

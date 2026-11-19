@@ -15,10 +15,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ...constants import OPTIMIZATION_TYPE_BLACKBOX
+from ...constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_TAGGING
+from ..routers._helpers import has_retired_target
 from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
+
+# Restart and resume refuse a stored text or agent run (SKY-834), so the default row is a repository run.
+_REPO_PAYLOAD = {"target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}}
 
 
 class _RepoJobStore(_BaseFakeJobStore):
@@ -35,6 +39,7 @@ class _RepoJobStore(_BaseFakeJobStore):
             The stored job row.
         """
         fields.setdefault("payload_overview", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+        fields.setdefault("payload", _REPO_PAYLOAD)
         return super().seed_job(optimization_id, **fields)
 
 
@@ -122,3 +127,73 @@ def test_restart_of_a_stored_dspy_row_is_404(
     resp = client.post("/optimizations/d1/restart")
     assert resp.status_code == 404
     assert store.get_job("d1")["status"] == "failed"
+
+
+# A stored text run from before SKY-834 may hold no target: the target kind defaults to text.
+_TARGETLESS_TEXT_PAYLOAD = {
+    "candidate": "Answer briefly.",
+    "scorer": {"metric_code": "def score(candidate, case):\n    return 1.0\n"},
+    "reflection_model_config": {"name": "openai/gpt-4o-mini"},
+}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"target": {"kind": "text"}},
+        {"target": {"kind": "agent"}},
+        _TARGETLESS_TEXT_PAYLOAD,
+        # A row with no target that no longer validates is still not a repository run.
+        {"candidate": "x", "scorer": {"metric_code": "x"}},
+    ],
+    ids=["text", "agent", "no_target", "no_target_invalid"],
+)
+def test_restart_of_a_stored_text_or_agent_run_is_refused_and_keeps_its_history(
+    client: TestClient, store: _BaseFakeJobStore, payload: dict[str, Any]
+) -> None:
+    """Restart refuses a text or agent run, so its result, logs and checkpoint stay (SKY-834).
+
+    Args:
+        client: Test client over the optimizations router.
+        store: Fake job store.
+        payload: A stored text, agent or target-less payload.
+    """
+    store.seed_job("t1", status="failed", result={"score": 0.9}, username="alice", payload=payload)
+    store._logs["t1"] = [{"level": "INFO", "message": "iteration 1"}]
+    store.save_gepa_checkpoint("t1", b"GEPA-STATE", iteration=7)
+    resp = client.post("/optimizations/t1/restart")
+    assert resp.status_code == 409
+    assert "it cannot restart" in resp.json()["detail"]
+    job = store.get_job("t1")
+    assert job["status"] == "failed"
+    assert job["result"] == {"score": 0.9}
+    assert store.get_log_count("t1") == 1
+    assert store.has_gepa_checkpoint("t1") is True
+
+
+def test_restart_still_requeues_a_judge_session_payload(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A judge payload is not a black-box run, so the retired-target rule skips it."""
+    store.seed_job("j1", status="failed", username="alice", payload={"judge": {"opening": False}})
+    resp = client.post("/optimizations/j1/restart")
+    assert resp.status_code == 202, resp.text
+
+
+def test_restart_skips_the_retired_target_rule_for_a_tagging_job(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A tagging job with no repository target is not a retired run, and restart answers 404, never 409 (SKY-834).
+
+    The route hides every job that is not a black-box run, so the retired-target rule must skip such a job.
+
+    Args:
+        client: Test client over the optimizations router.
+        store: Fake job store.
+    """
+    store.seed_job(
+        "tag1",
+        status="failed",
+        username="alice",
+        payload={"rows": [{"text": "hello"}]},
+        payload_overview={"optimization_type": OPTIMIZATION_TYPE_TAGGING},
+    )
+    assert not has_retired_target(store.get_job("tag1"))
+    resp = client.post("/optimizations/tag1/restart")
+    assert resp.status_code == 404, resp.text

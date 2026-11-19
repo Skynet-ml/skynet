@@ -264,6 +264,8 @@
     "optimization.resume_budget_projected": "照咁落去，運行大約會用到 {projected}，超過 {limit} 嘅上限。要繼續嘅話，請將支出上限提高到 {projected} 以上。",
     "optimization.resume_exhausted": "呢項優化已經達到嘗試次數上限（{attempts}）——請改為重新執行。",
     "optimization.resume_not_resumable": "呢項優化冇已儲存嘅復原點——請改為重新執行。",
+    "optimization.resume_target_retired": "而家每次執行都會優化一個儲存庫。呢個文字或代理執行會留喺你嘅紀錄度，但係唔可以復原。",
+    "optimization.restart_target_retired": "而家每次執行都會優化一個儲存庫。呢個文字或代理執行會留喺你嘅紀錄度，但係唔可以重新開始。",
     "optimization.resume_wrong_status": "只有中途停止嘅優化先可以繼續——目前處於「{status}」。",
     "sandbox.docker_unavailable": "呢部電腦冇運行緊 Docker。請開啟 Docker Desktop 或者 OrbStack，然後再試。",
     "sandbox.docker_image_missing": "本機沙盒映像仲未建立。重新開啟應用程式就會建立。",

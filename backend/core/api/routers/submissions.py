@@ -1018,7 +1018,7 @@ def create_submissions_router(*, job_store) -> APIRouter:
             The relevant options, with what Auto resolves to.
         """
         del current_user
-        catalog = engine_catalog(BLACKBOX_TARGET_REPO)
+        catalog = engine_catalog()
         options = [_optimizer_option(option, catalog) for option in optimizers_for(data_mode)]
         auto_resolves_to = ["auto"] if any(option.id == "auto" for option in options) else []
         return OptimizerCatalogResponse(
@@ -1039,20 +1039,21 @@ def create_submissions_router(*, job_store) -> APIRouter:
     )
     def blackbox_engines(
         current_user: AuthenticatedUserDep,
-        target: Literal["text", "agent", "repo"] = "text",
+        target: Literal["repo"] = "repo",
     ) -> BlackboxEngineCatalogResponse:
         """Describe every engine so the wizard can show why one cannot run here.
 
-        Availability depends on the deployment (agent sandboxes) and on the
-        job's target kind, so the caller names the target it is building.
+        Every run optimizes a repository (SKY-834), so ``target`` accepts only
+        ``repo``; an old client that names text or agent gets a 422.
 
         Args:
             current_user: Authenticated caller resolved from the bearer token.
             target: The target kind the job will use.
+
         Returns:
             The catalog in registry order.
         """
-        del current_user
-        return engine_catalog(target)
+        del current_user, target
+        return engine_catalog()
 
     return router

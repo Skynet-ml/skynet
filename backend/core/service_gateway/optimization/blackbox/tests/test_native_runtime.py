@@ -369,7 +369,6 @@ def _context(tmp_path: Path, runtime: FakeRuntime, kind: str = "vercel") -> Simp
             kind, "claude-test", GatewayConfig("https://gateway.example/v1", "secret"), 1.0, sandbox_runtime=runtime
         ),
         run_dir=str(tmp_path),
-        concurrency=2,
         max_iterations=1,
         stop_at_score=None,
         # A real EngineContext outside the engine loop has no loop calls; GEPA reads them to pick its proposer.
