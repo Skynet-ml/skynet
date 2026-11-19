@@ -62,6 +62,15 @@ function compareJobValues(av: unknown, bv: unknown): number {
   return String(av).localeCompare(String(bv), getActiveIntlLocale(), { numeric: true });
 }
 
+/** Ids that bulk Stop cancels: active runs and paused runs, which the cancel route also ends (SKY-800). */
+export function stoppableJobIds(
+  jobs: Array<Pick<OptimizationSummaryResponse, "optimization_id" | "status">>,
+): string[] {
+  return jobs
+    .filter((job) => ACTIVE_STATUSES.has(job.status) || job.status === "paused")
+    .map((job) => job.optimization_id);
+}
+
 export function DashboardView() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -179,11 +188,7 @@ export function DashboardView() {
         (job) => job.role == null || job.role === "owner" || job.role === "editor",
       ));
   const canManageSelectedShare = !!selectedJob && (isAdmin || selectedJob.role == null);
-  const activeSelectedIds = canEditSelection
-    ? selectedJobs
-        .filter((job) => ACTIVE_STATUSES.has(job.status))
-        .map((job) => job.optimization_id)
-    : [];
+  const stoppableSelectedIds = canEditSelection ? stoppableJobIds(selectedJobs) : [];
   const pausableSelectedIds =
     canEditSelection && selectedJobs.every((job) => job.pausable)
       ? selectedJobs.map((job) => job.optimization_id)
@@ -235,10 +240,10 @@ export function DashboardView() {
   };
 
   const handleStopSelected = async () => {
-    if (activeSelectedIds.length === 0 || selectionAction) return;
+    if (stoppableSelectedIds.length === 0 || selectionAction) return;
     setSelectionAction("stop");
     try {
-      const result = await bulkCancelJobs(activeSelectedIds);
+      const result = await bulkCancelJobs(stoppableSelectedIds);
       if (result.cancelled.length > 0) {
         toast.success(
           result.cancelled.length === 1
@@ -553,7 +558,7 @@ export function DashboardView() {
           canPause={pausableSelectedIds.length > 0}
           canResume={resumableSelectedIds.length > 0}
           canClone
-          canStop={activeSelectedIds.length > 0}
+          canStop={stoppableSelectedIds.length > 0}
           canTogglePin={canEditSelection}
           selectedJobId={selectedJob?.optimization_id ?? null}
           selectedCount={selectedIds.size}
