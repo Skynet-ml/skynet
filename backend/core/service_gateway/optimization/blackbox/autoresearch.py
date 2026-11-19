@@ -34,7 +34,7 @@ import math
 import os
 import posixpath
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -642,7 +642,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
             tree = ctx.put_files(files, None, executables=executables)
         else:
-            parent = self._repo_parent(server, directive)
+            parent = self._repo_parent(server)
             if parent is None:
                 return native_engines.ProposerOutcome(
                     session_id=f"round{self.round}",
@@ -910,29 +910,39 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 local.write_bytes(content)
                 local.chmod(0o755 if path in executables else 0o644)
 
-    def _repo_parent(self, server: Any, directive: str) -> str | None:
-        """Pick the tree that a repository round starts from: the leader, or the seed before any full score.
+    def _record(self, server: Any) -> Callable[[], None]:
+        """Wrap the scoring entry points as the native engine does, then sweep the seed of a repository run.
 
-        The first round first gives the seed a full evaluation, so the round's ``STATE.md`` has the baseline.
+        The seed's score must be in the evidence before round one reads the leader's score: else a round one whose
+        version fails would count as a raise of the leader, and round two would get the ``exploit`` directive.
+
+        Args:
+            server: The upstream server adapter.
+
+        Returns:
+            A function that removes the wrappers.
+        """
+        restore = super()._record(server)
+        if self._repo is not None:
+            # A seed sweep that the budget refused leaves less budget than a sweep, so ``_repo_parent`` stops round one.
+            self._sweep(server, self._repo.tree_id)
+        return restore
+
+    def _repo_parent(self, server: Any) -> str | None:
+        """Pick the tree that a repository round starts from: the best frontier version, or the seed.
 
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
-            directive: This round's directive, for the refreshed ``STATE.md``.
 
         Returns:
             The parent's tree id, or ``None`` when the budget cannot score the round's version.
         """
         assert self._repo is not None
-        seed = self._repo.tree_id
-        if seed not in self._swept:
-            if not self._sweep(server, seed):
-                return None
-            self._write_state(server, directive)
         # A session that the budget cannot score would pay for a version that never counts.
         if server.budget.remaining < max(1, len(self.example_ids)):
             return None
         front = native_engines.pareto_front(self._table(), self._ranking())
-        return front[0] if front else seed
+        return front[0] if front else self._repo.tree_id
 
     def _sweep(self, server: Any, tree: str) -> bool:
         """Give a repository version a full evaluation, as a full ``evaluate`` call does in a text run.
@@ -949,8 +959,11 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         self._swept.add(tree)
         try:
             if not server.task.has_dataset:
-                # The engine's wrapper logs a checkpoint for each whole-version score.
-                server.evaluate(tree)
+                # The engine's wrapper logs a checkpoint only for a finite score, so a metric-error version still
+                # shows here, with no score.
+                score, _ = server.evaluate(tree)
+                if not math.isfinite(score):
+                    server.log_progress(score, candidate=tree)
             else:
                 average, _ = server.evaluate_examples(tree, example_ids=list(self.example_ids))
                 server.log_progress(average, candidate=tree)

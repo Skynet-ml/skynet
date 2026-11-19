@@ -618,6 +618,68 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
     assert (logs / "reports" / "iter1.md").read_text() == "report 1"
 
 
+def test_a_repository_iteration_starts_from_the_best_frontier_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Iteration one's version beats the seed, so iteration two edits iteration one's tree (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    scored: list[bytes | None] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the scored ``a.py``, and score it by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: Not used.
+
+        Returns:
+            The length and no side information.
+        """
+        del case
+        text = loop.read_file(candidate, "a.py")
+        scored.append(text)
+        return float(len(text or b"")), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _repo_reply, generation=1)
+
+    result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    # Iteration two appends ``xx`` to iteration one's ``ax``, not to the seed's ``a``.
+    assert scored == [b"a", b"a", b"ax", b"ax", b"axxx", b"axxx"]
+    assert loop.read_file(result.best_candidate, "a.py") == b"axxx"
+
+
+def test_a_repository_session_tree_has_no_agents_folder(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The local ``agents/`` files hold tree ids, so the session's workspace leaves them out.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    call = {"id": "call", "name": "bash", "arguments": {"command": "ls -a .meta-harness"}}
+    model = _Proposer(call=call)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    listings = [message["content"] for prompt in model.calls for message in prompt if message["role"] == "tool"]
+    assert listings
+    assert all("task.md" in listing and "agents" not in listing for listing in listings)
+
+
 def test_a_repository_session_that_changes_nothing_gives_no_candidate(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

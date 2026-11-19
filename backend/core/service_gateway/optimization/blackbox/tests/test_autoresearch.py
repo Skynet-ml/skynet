@@ -54,6 +54,7 @@ from core.worker.tests.test_engine_loop import (
     _CountingSource,
     _new_generation,
     _steps,
+    _store,
     _tree,
     _WorkerDiedError,
 )
@@ -194,6 +195,21 @@ def _score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, d
     """
     del loop, case
     return float(len(str(candidate))), {}
+
+
+def _score_a_py(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+    """Score a version tree by the length of its ``a.py``.
+
+    Args:
+        loop: The engine loop.
+        candidate: The version's tree id.
+        case: Not used.
+
+    Returns:
+        The length and no side information.
+    """
+    del case
+    return float(len(loop.read_file(candidate, "a.py") or b"")), {}
 
 
 def _loop(
@@ -934,14 +950,199 @@ def test_a_repository_run_scores_each_tree_and_keeps_a_metric_error_out_of_the_l
     assert "## Round 1" in notebook
     assert "## Round 2" in notebook
     assert model.tools[0] == [ar_mod.REPO_BASH_TOOL]
+    # The seed's score is the baseline of round one, so its failed version is no raise of the leader.
+    assert result.metadata["directives"] == ["survey", "explore"]
 
 
-def test_a_repository_with_a_file_at_the_lab_path_is_refused(
+def test_a_repository_round_starts_from_the_best_frontier_version(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The engine removes ``.autoresearch`` from each version, so a repository file there would be lost.
+    """Round one's version beats the seed, so round two edits round one's tree (SKY-825).
 
     Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    scored: list[bytes | None] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the scored ``a.py``, and score it by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The length and no side information.
+        """
+        scored.append(loop.read_file(candidate, "a.py"))
+        return _score_a_py(loop, candidate, case)
+
+    model = _Researcher([_bash("printf %s {x} >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, stop_at_score=4.0, score=score, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    assert scored == [b"a", b"a", b"ax", b"ax", b"axxx", b"axxx"]
+    assert loop.read_file(result.best_candidate, "a.py") == b"axxx"
+    assert result.metadata["directives"] == ["survey", "exploit"]
+
+
+def test_a_repository_metric_error_with_no_cases_shows_as_a_candidate_with_no_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no cases, round one's version is a metric error: it still shows, with no score (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Give an ``a.py`` of length two a metric error, and score any other by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score, or ``None`` for the metric error, and no side information.
+        """
+        value, info = _score_a_py(loop, candidate, case)
+        return (None if value == 2.0 else value), info
+
+    model = _Researcher([_bash("printf %s {x} >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(
+        loop,
+        events=events,
+        cases=[],
+        stop_at_score=3.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+    )
+
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [1.0, None, 3.0]
+    assert loop.read_file(result.best_candidate, "a.py") == b"axx"
+
+
+def test_a_repository_round_that_leaves_a_scored_version_spends_no_budget_and_ends_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A round that changes only the notebook leaves the seed's tree, which has its score: the run stops.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf n >> .autoresearch/notebook.md")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
+
+
+def test_a_repository_session_has_no_no_evaluation_watchdog(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A repository session cannot evaluate, so turns with no budget change do not stop it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf x >> a.py"), _bash("printf y >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(
+        loop,
+        stop_at_score=3.0,
+        score=_score_a_py,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+        native_options=_options(max_no_eval_seconds=30),
+    )
+
+    assert loop.read_file(result.best_candidate, "a.py") == b"axy"
+
+
+def test_a_repository_budget_that_cannot_score_a_version_stops_before_the_session(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """After the seed's sweep, one evaluation is left for two cases, so no session starts.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf x >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, max_evals=3, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert model.calls == []
+    assert (result.best_candidate, result.total_evals) == (seed, 2)
+
+
+def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one writes the notebook and round two deletes it, so the local lab has no notebook after the run.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    command = (
+        "printf %s {x} >> a.py && if [ {n} = 1 ]; then printf n > .autoresearch/notebook.md; "
+        "else rm .autoresearch/notebook.md; fi"
+    )
+    model = _Researcher([_bash(command)])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, stop_at_score=4.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    assert result.metadata["rounds"] == 2
+    assert list(tmp_path.rglob("lab/notebook.md")) == []
+
+
+@pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])
+def test_a_repository_with_an_entry_at_the_lab_path_is_refused(
+    links: dict[str, str],
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """The engine removes ``.autoresearch`` from each version, so a repository file or symlink there would be lost.
+
+    Args:
+        links: A symlink at the lab path, to a file or to a missing path; a file there when empty.
         owner: Alice and her budget generation.
         engine: The database.
         step_log: The step log.
@@ -951,8 +1152,10 @@ def test_a_repository_with_a_file_at_the_lab_path_is_refused(
     model = _Researcher()
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
+    seed = _store(trees, {"a.py": b"a"} if links else {".autoresearch": b"a"}, links)
+
     with pytest.raises(ServiceError, match="lab"):
-        _run(loop, repo_seed=RepoSeed(tree_id=_tree(trees, ".autoresearch", "a")))
+        _run(loop, repo_seed=RepoSeed(tree_id=seed))
     assert model.calls == []
 
 

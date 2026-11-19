@@ -24,7 +24,7 @@ from ....models.blackbox import BLACKBOX_HARNESS_CODEX
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from .native_runtime import NativeOptions
-from .protocol import EngineContext, EvalServer, FileTooLargeError, ModelReply
+from .protocol import EngineContext, EvalServer, ModelReply
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
@@ -450,11 +450,12 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str) -> None:
 def repo_seed_tree(ctx: EngineContext, lab: str, engine: str) -> str:
     """Return the visible seed tree of a repository run, when the engine's lab folder is free in it.
 
-    The engine removes the lab folder from each session's tree to get the version, so a repository file there would
-    be lost from every version.
+    The engine removes the lab folder from each session's tree to get the version, so a repository entry there would
+    be lost from every version. The tree reads skip a symlink and a folder of hidden paths, so one box command checks
+    for an entry of any type.
 
     Args:
-        ctx: The engine context, with its ``repo_seed`` and tree reads.
+        ctx: The engine context, with its ``repo_seed`` and its command call.
         lab: The lab folder, relative to the repository root.
         engine: The engine's display name, for the message.
 
@@ -462,18 +463,14 @@ def repo_seed_tree(ctx: EngineContext, lab: str, engine: str) -> str:
         The seed tree id.
 
     Raises:
-        ServiceError: When the seed tree holds a file or folder at the lab path.
+        ServiceError: When the seed tree holds an entry of any type at the lab path.
     """
     assert ctx.repo_seed is not None
-    assert ctx.list_files is not None
-    assert ctx.read_file is not None
+    assert ctx.run_command is not None
     seed = ctx.repo_seed.tree_id
-    try:
-        # A cap of 0 bytes loads no file content: a file there raises or gives its empty bytes.
-        taken = ctx.list_files(seed, lab) is not None or ctx.read_file(seed, lab, 0) is not None
-    except FileTooLargeError:
-        taken = True
-    if taken:
+    # ``test -e`` follows a link, so a link to a missing target needs ``test -L``.
+    result, _ = ctx.run_command(seed, f"test ! -e {lab} && test ! -L {lab}", ())
+    if result.exit_code != 0:
         raise ServiceError(f"{engine} keeps its lab in `{lab}/`, so the repository must not have that path.")
     return seed
 
