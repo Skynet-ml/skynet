@@ -287,8 +287,8 @@ class EvaluatorMailbox:
         """Send one request to the worker and wait for its reply.
 
         Args:
-            kind: ``evaluate`` or ``model``. Only the stdin transport carries it,
-                because the sandbox runtime answers evaluations only.
+            kind: ``evaluate``, ``model`` or ``propose``. Only the stdin transport carries
+                it, because the sandbox runtime answers evaluations only.
             fields: The request fields; the mailbox adds the id.
 
         Returns:
