@@ -637,7 +637,9 @@ class FileProposer:
             if full is None:
                 # Without the setup's output every later session from this version would fail with no report. The
                 # box is a committed step, so a resume raises the same error.
-                raise ServiceError(f"The check of the {self._setup_name} could not run in a box. Start a new run.")
+                raise ServiceError(
+                    "The removal of the lab folder for the next session could not run in a box. Start a new run."
+                )
             self._full[parent] = full
         return self._full.get(parent, parent)
 

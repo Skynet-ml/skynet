@@ -997,6 +997,32 @@ def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
     assert boxes.opened == 0
 
 
+def test_a_files_proposer_with_no_repository_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no repository the file's command would edit nothing, so its settings fail the run before any call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command="printf x >> a.py")
+    options.gateway = SimpleNamespace(url="")
+    options.repo = {"file_proposer": True, "proposer_setup": [], "proposer_hosts": []}
+    model = _Proposer()
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(
+        ServiceError, match=r"^Meta-Harness in the worker engine loop runs only its built-in proposer, .*run_command"
+    ):
+        _run(loop, native_options=options)
+    assert model.calls == []
+    assert boxes.opened == 0
+
+
 def test_the_default_proposer_settings_are_not_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

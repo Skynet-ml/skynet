@@ -402,11 +402,29 @@ def test_a_failed_lab_removal_for_a_parent_stops_the_run_and_caches_nothing(
     commands.outcomes[f"rm -rf {_LAB}"] = outcome
 
     with pytest.raises(
-        ServiceError, match=r"check of the \[proposer\] setup .* could not run in a box\. Start a new run"
+        ServiceError,
+        match=r"^The removal of the lab folder for the next session could not run in a box\. Start a new run",
     ):
         proposer.base(version)  # type: ignore[arg-type]
 
     assert version not in proposer._full
+
+
+def test_a_second_session_from_a_parent_reuses_its_lab_removal() -> None:
+    """``base`` caches the parent's tree without the lab, so a second session from it starts no second box."""
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+    proposer.base("seed")
+    version = proposer.version("start", "last", "seed")
+    assert version is not None
+    del commands.calls[:]
+
+    first = proposer.base(version)
+    second = proposer.base(version)
+
+    assert first == second
+    assert [command for command, _ in commands.calls] == [f"rm -rf {_LAB}"]
 
 
 def test_a_command_failure_keeps_the_end_of_a_long_output() -> None:

@@ -1463,6 +1463,13 @@ def test_a_command_with_a_long_limit_gets_a_box_that_outlives_it(
     assert loop_host.command_box_seconds(1800) <= 2700
 
 
+def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider refuses a longer box, so the configured sandbox lifetime caps a command box."""
+    monkeypatch.setattr(loop_host.settings, "vercel_sandbox_max_lifetime_seconds", 1000)
+
+    assert loop_host.command_box_seconds(1800) == 1000
+
+
 def test_the_host_checks_that_the_run_replayed_every_step(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
