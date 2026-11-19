@@ -641,7 +641,8 @@ def _refuse_engine_loop_settings(environment: RepoEnvironment, payload: Mapping[
             section="proposer",
             key="services",
         )
-    effort = ((payload.get("reflection_model_settings") or {}).get("extra") or {}).get("reasoning_effort")
+    # The stored payload is saved by alias, so the model settings are under ``reflection_model_config``.
+    effort = ((payload.get("reflection_model_config") or {}).get("extra") or {}).get("reasoning_effort")
     if effort:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give the reasoning_effort setting to the"

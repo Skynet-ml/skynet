@@ -4554,7 +4554,7 @@ _ENTRY_WITH_SERVICES = {
         '[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\nservices = ["judge"]\n'
     )
 }
-_EFFORT = {"reflection_model_settings": {"name": "m", "extra": {"reasoning_effort": "high"}}}
+_EFFORT = {"reflection_model_config": {"name": "m", "extra": {"reasoning_effort": "high"}}}
 
 
 @pytest.mark.parametrize("engine", [BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS])
