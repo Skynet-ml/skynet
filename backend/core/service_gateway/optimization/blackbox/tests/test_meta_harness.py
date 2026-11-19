@@ -1872,6 +1872,29 @@ def test_an_argument_at_the_depth_bound_still_runs(
     assert "error" in json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": deeper})[0])
 
 
+def test_an_unknown_tool_with_too_deep_arguments_gets_the_misuse_error(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A call to an unknown tool gets the misuse error before the bash bound error, as in AutoResearch.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files({"a.txt": b"a"})
+    deeper = _nested(loop_tools.MAX_ARGUMENT_DEPTH + 8)
+
+    output, after = worker._exec(tree, {"id": "c", "name": "x", "arguments": deeper})
+
+    assert json.loads(output) == {"error": "Call the bash tool with a command string."}
+    assert after == tree
+
+
 def test_a_pending_file_over_its_cap_gives_no_candidate(
     monkeypatch: pytest.MonkeyPatch,
     owner: tuple[User, int],

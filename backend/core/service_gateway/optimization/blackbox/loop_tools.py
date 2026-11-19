@@ -373,10 +373,10 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     command = parsed.get("command") if isinstance(parsed, dict) else None
     if not isinstance(command, str):
         return json.dumps({"error": misuse}, ensure_ascii=False), tree
-    return run_command(ctx, tree, command)
+    return _run_command(ctx, tree, command)
 
 
-def run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
+def _run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
     """Run one command over the tree, inside the command bound, and cut its outputs for the prompt.
 
     Args:

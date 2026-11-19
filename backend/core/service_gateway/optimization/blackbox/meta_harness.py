@@ -415,17 +415,9 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         Returns:
             The tool result as JSON text, and the tree after the command.
         """
-        refused = loop_tools.refused_arguments(call, BASH_TOOL["name"])
-        if refused is not None:
-            return refused, tree
-        arguments = loop_tools.arguments(call)
-        command = arguments.get("command") if isinstance(arguments, dict) else None
-        if call.get("name") != BASH_TOOL["name"] or not isinstance(command, str):
-            # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop.
-            return json.dumps(
-                {"error": f"Call the {BASH_TOOL['name']} tool with a command string."}, ensure_ascii=False
-            ), tree
-        return loop_tools.run_command(self._ctx, tree, command)
+        return loop_tools.run_bash(
+            self._ctx, tree, call, misuse=f"Call the {BASH_TOOL['name']} tool with a command string."
+        )
 
     def _pull(self, tree: str) -> None:
         """Copy ``pending_eval.json`` and the candidate files that it lists from the tree into the work folder.
