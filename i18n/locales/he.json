@@ -122,6 +122,7 @@
     "optimization.not_success_status_for_serve": "ה{term.optimization} במצב '{status}' — רק {term.optimizationPlural} שהושלמו בהצלחה אפשר להגיש.",
     "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
+    "optimization.cancel_conflict": "ה{term.optimization} שינתה את מצבה בזמן הביטול. היא כעת במצב '{status}'. אפשר לנסות לבטל אותה שוב.",
     "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
     "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
     "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",

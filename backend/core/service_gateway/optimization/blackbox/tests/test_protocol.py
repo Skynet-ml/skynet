@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from .. import protocol
 from ..protocol import (
     METRIC_ERROR,
     NO_FEEDBACK_WARNING,
     RUN_FAILED_STATUS,
     STATUS_KEY,
+    TOO_DEEP_ARGUMENTS,
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
@@ -621,6 +624,167 @@ def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, ex
     }
 
     assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
+
+
+def _deep_list(levels: int) -> list[Any]:
+    """Build a list nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested lists.
+
+    Returns:
+        ``[[...[]...]]``, ``levels`` lists deep.
+    """
+    value: list[Any] = []
+    for _ in range(levels - 1):
+        value = [value]
+    return value
+
+
+def _deep_dict(levels: int) -> dict[str, Any]:
+    """Build an object nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested objects, the outer one included.
+
+    Returns:
+        ``{"a": {"a": ... {}}}``, ``levels`` objects deep.
+    """
+    value: dict[str, Any] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+# 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack can raise. 5000
+# levels raises at any stack.
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "[" * 900 + "]" * 900,
+        '{"a": ' * 900 + "1" + "}" * 900,
+        "[" * 900,
+        _deep_list(900),
+        _deep_dict(900),
+        "[" * 5000 + "]" * 5000,
+        _deep_list(5000),
+    ],
+    ids=["array-text", "object-text", "bad-text", "list-value", "dict-value", "text-past-limit", "value-past-limit"],
+)
+def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any) -> None:
+    """Arguments past the fixed depth bound give ``TOO_DEEP_ARGUMENTS``, whatever the stack and the JSON shape.
+
+    Deep text must not reach the transcript, because a later call would read it again and raise.
+
+    Args:
+        arguments: The deep arguments, as text to read or as a value to write as JSON text.
+    """
+    message = {
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+        ]
+    }
+
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_y", "name": "bash", "arguments": {"command": "ls"}},
+    ]
+
+
+def test_tool_calls_from_openai_gives_too_deep_arguments_when_parsing_overflows_the_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text under the depth bound that still overflows the caller's stack fails only its own call.
+
+    Args:
+        monkeypatch: Replaces the JSON reader with one that overflows, as a deep caller stack does.
+    """
+
+    def overflow(value: Any, **_: Any) -> Any:
+        """Raise as ``json.loads`` and ``json.dumps`` do when the caller's stack is already deep.
+
+        Args:
+            value: The arguments text or value.
+
+        Raises:
+            RecursionError: Always.
+        """
+        raise RecursionError(str(value)[:10])
+
+    monkeypatch.setattr(protocol, "json", SimpleNamespace(loads=overflow, dumps=overflow))
+    message = {
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": [["ls"]]}},
+            {"id": "call_z", "type": "function", "function": {"name": "bash", "arguments": {"command": "pwd"}}},
+        ]
+    }
+
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_y", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_z", "name": "bash", "arguments": {"command": "pwd"}},
+    ]
+
+
+def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
+    """Arguments that nest exactly 97 levels stay; one level more gives ``TOO_DEEP_ARGUMENTS``."""
+    # A literal, not the constant, so a change to the bound fails this test.
+    bound = 97
+    at_bound = "[" * bound + "]" * bound
+    message = {
+        "tool_calls": [
+            {"id": "call_a", "type": "function", "function": {"name": "bash", "arguments": at_bound}},
+            {"id": "call_b", "type": "function", "function": {"name": "bash", "arguments": f"[{at_bound}]"}},
+            {"id": "call_c", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound)}},
+            {"id": "call_d", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound + 1)}},
+            {"id": "call_e", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound)}},
+            {"id": "call_f", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound + 1)}},
+        ]
+    }
+
+    assert [call["arguments"] for call in tool_calls_from_openai(message)] == [
+        at_bound,
+        TOO_DEEP_ARGUMENTS,
+        json.dumps(_deep_list(bound)),
+        TOO_DEEP_ARGUMENTS,
+        _deep_dict(bound),
+        TOO_DEEP_ARGUMENTS,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "deeper"),
+    [
+        ('{"a": "' + "[" * 200 + '"}', False),
+        ('{"a": "\\\\", "b": [[1]]}', True),
+        ('{"a": "\\"[[["}', False),
+        ("[[1]]", False),
+        ("[[[1]]]", True),
+        ("[[1], [2]]", False),
+        ("]]][[[", True),
+        ('{"a":1}}}}[[[', True),
+    ],
+    ids=[
+        "brackets-in-string",
+        "escaped-backslash",
+        "escaped-quote",
+        "at-bound",
+        "past-bound",
+        "siblings",
+        "stray-closers-first",
+        "stray-closers-after-a-value",
+    ],
+)
+def test_text_nests_deeper_counts_only_brackets_outside_strings(text: str, deeper: bool) -> None:
+    """Brackets inside JSON strings, quotes that a backslash escapes, and stray closers do not lower the bound.
+
+    Args:
+        text: The JSON text.
+        deeper: Whether it opens more than two levels at one time.
+    """
+    assert protocol.text_nests_deeper(text, 2) is deeper
 
 
 def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:

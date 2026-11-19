@@ -541,9 +541,8 @@ class BackgroundWorker:
         The worker ``worker_id`` must be processing the run now. Its later
         ``_mark_job_done`` for the run then does nothing.
 
-        The API treats ``paused`` as a terminal status, so today a user cannot
-        cancel a waiting run. Before an engine calls this method, the cancel
-        path must accept a ``paused`` run whose recovery phase is ``waiting``.
+        A user can cancel a waiting run. The cancel clears ``wake_at`` and
+        frees the run's unstarted budget holds (SKY-800).
 
         Args:
             worker_id: The worker thread that processes the run.

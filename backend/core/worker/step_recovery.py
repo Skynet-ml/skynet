@@ -96,9 +96,8 @@ def park_run(engine: Engine, optimization_id: str, *, expected_generation: int, 
     finished leg's duration goes into ``accumulated_runtime_seconds``, so the
     wait does not count as run time.
 
-    The API treats ``paused`` as a terminal status, so today a user cannot
-    cancel a waiting run. Before an engine calls this function, the cancel
-    path must accept a ``paused`` run whose recovery phase is ``waiting``.
+    A user can cancel a waiting run. The cancel clears ``wake_at`` and frees
+    the run's unstarted budget holds (SKY-800).
 
     Args:
         engine: Engine with the jobs table.
