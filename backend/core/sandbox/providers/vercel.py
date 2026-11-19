@@ -386,8 +386,8 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
 # One path segment below a credential prefix: no '%' and no ';', and after any leading dots a character that is
 # not ',' or '='. So a '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never
 # matches, and neither does a path parameter such as '..;' or '..=x', which Tomcat and Jetty read as '..'.
-# Single characters in classes only, because the edge's regex dialect is not known to support escapes or
-# lookarounds.
+# The regex uses only character classes, plain groups, '*', '?' and anchors, because the edge's regex dialect is
+# not known to support escapes, non-capturing groups or lookarounds.
 _CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+:@-][A-Za-z0-9._~!$&'()+,=:@-]*"
 
 
@@ -401,7 +401,7 @@ def _path_regex(path: str) -> str:
         An anchored regex that matches ``path``, ``path/`` and clean segments below it.
     """
     literal = "".join(char if char.isalnum() or char == "/" else f"[{char}]" for char in path.rstrip("/"))
-    return f"^{literal}(?:{_CLEAN_SEGMENT})*/?$"
+    return f"^{literal}({_CLEAN_SEGMENT})*/?$"
 
 
 def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
