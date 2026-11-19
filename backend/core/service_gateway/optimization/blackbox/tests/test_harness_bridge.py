@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1479,6 +1479,49 @@ _CHAT_HARNESSES = [
 ]
 
 
+@pytest.fixture(scope="session")
+def prime_kernel_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """Build one warm Prime Agent kernel for the whole test run, and name it in the environment.
+
+    Args:
+        tmp_path_factory: Gives the run's temp folder, which all xdist workers share.
+
+    Returns:
+        The environment that points Prime Agent and uv at the shared kernel.
+    """
+    # Prime Agent waits only 5 s for its kernel to bind its ports (SKY-839). A kernel venv in the
+    # test's own HOME is new each time, and macOS checks each new binary at its first load, so that
+    # first start took about 5 s on an idle machine and more under load. One venv per run, started
+    # once here, keeps each test's kernel start well inside that limit.
+    root = tmp_path_factory.getbasetemp()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        root = root.parent
+    shared = root / "prime-agent-kernel"
+    env = {
+        "PRIME_AGENT_KERNEL_VENV": str(shared / "kernel-venv"),
+        "UV_CACHE_DIR": str(shared / "uv-cache"),
+        "UV_PYTHON_INSTALL_DIR": str(shared / "uv-python"),
+    }
+    executable = shutil.which("prime-agent")
+    if executable is None or _NODE is None:
+        return env
+    bootstrap = Path(executable).resolve().parents[1] / "core" / "kernel" / "bootstrap-cli.js"
+    home = shared / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    warm_env = {**os.environ, **env, "HOME": str(home), "PRIME_AGENT_INSTALL_UV": "1"}
+    # Prime Agent locks the venv while it builds it, so parallel workers build it once.
+    subprocess.run([_NODE, str(bootstrap)], env=warm_env, check=True, capture_output=True, timeout=900)
+    warm = (
+        "from jupyter_client.manager import start_new_kernel\n"
+        "manager, client = start_new_kernel(startup_timeout=600)\n"
+        "client.execute_interactive('import rlm', timeout=600)\n"
+        "manager.shutdown_kernel(now=True)\n"
+    )
+    python = shared / "kernel-venv" / "bin" / "python"
+    subprocess.run([str(python), "-c", warm], env=warm_env, check=True, capture_output=True, timeout=900)
+    return env
+
+
 @pytest.fixture
 def harness_tmp() -> Iterator[Path]:
     """Give one harness run its own temp folder, and stop the daemon that the run leaves there.
@@ -1514,12 +1557,20 @@ def harness_tmp() -> Iterator[Path]:
 @pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
 @pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
 def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
-    tmp_path: Path, harness_tmp: Path, binary: str, launch: Any, tool: str, key: str, target: str
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    harness_tmp: Path,
+    binary: str,
+    launch: Any,
+    tool: str,
+    key: str,
+    target: str,
 ) -> None:
     """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
     executable = shutil.which(binary)
     if executable is None:
         pytest.skip(f"{binary} is not installed")
+    kernel_env = request.getfixturevalue("prime_kernel_env") if binary == "prime-agent" else {}
     value = f'print(open("{target}").read())' if key == "code" else target
     _FakeChat.tool = (tool, {key: value})
     _FakeChat.tool_outputs = []
@@ -1544,7 +1595,7 @@ def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
             model="fake-model",
             session_dir=tmp_path / "session",
             timeout_seconds=120,
-            extra_env={"PATH": path, "HOME": str(tmp_path / "home"), "TMPDIR": str(harness_tmp)},
+            extra_env={"PATH": path, "HOME": str(tmp_path / "home"), "TMPDIR": str(harness_tmp), **kernel_env},
             api_key="k",
         )
     finally:
@@ -1586,8 +1637,9 @@ def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_throu
     }
     session = tmp_path / "session"
 
+    # The limit only stops a hung shim; on a loaded machine the shim's Python starts can take seconds (SKY-839).
     outcome = run_session(
-        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=10
+        proposer, workspace=tmp_path / "work", prompt="x", model="m", session_dir=session, timeout_seconds=60
     )
 
     assert outcome.returncode == 0
@@ -1733,10 +1785,11 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
     process = subprocess.Popen(
         ["slow"], env=_shim_env(tmp_path, ["slow"], tmp_path / "exec.jsonl"), stdout=subprocess.PIPE
     )
-    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging.
-    timer = threading.Timer(5.0, flag.touch)
+    # Ends the command if the shim holds the output, so the assertion below fails instead of hanging. The
+    # wide times leave room for the shim's start on a loaded machine (SKY-839).
+    timer = threading.Timer(30.0, flag.touch)
     # Ends a shim that never runs the command, so readline returns and the test fails.
-    killer = threading.Timer(10.0, process.kill)
+    killer = threading.Timer(60.0, process.kill)
     timer.start()
     killer.start()
     try:
@@ -2647,44 +2700,48 @@ def test_a_setup_that_points_a_link_of_the_version_at_a_new_target_stops(
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
 
 
-def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path) -> None:
+def test_the_setup_counts_inside_the_session_time_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A setup cannot run past the session's limit, and the harness gets only the time the setup left (SKY-753).
 
     Args:
         tmp_path: The checkouts and the session folders.
+        monkeypatch: Gives the second session a setup that takes a fixed time.
     """
     slow = {**_PLAIN, "setup": [sys.executable, "-c", "import time; time.sleep(30)"]}
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match=r"did not finish within (1|0\.\d+) seconds"):
+    # The git reads and the copy before the setup count inside the limit too, so a loaded machine needs
+    # more than 1 s for them (SKY-839). The 30 s setup still shows that the limit stops it.
+    with pytest.raises(RuntimeError, match=r"did not finish within (5|[0-4](\.\d+)?) seconds"):
         run_session(
             slow,
             workspace=_git_checkout(tmp_path / "slow"),
             prompt="x",
             model="m",
             session_dir=tmp_path / "s1",
-            timeout_seconds=1.0,
+            timeout_seconds=5.0,
             api_key="k",
         )
     assert time.monotonic() - started < 20
 
-    proposer = {
-        **_PLAIN,
-        "run_command": "sleep 10",
-        "setup": [sys.executable, "-c", "import time; time.sleep(2)"],
-    }
-    started = time.monotonic()
+    # A real setup process can take far longer than its sleep to start under load (SKY-839), and then
+    # it uses up the whole limit. A setup of a fixed length keeps the test on the harness's share.
+    limit, setup = 8.0, 6.0
+    monkeypatch.setattr(harness_bridge, "ensure_setup", lambda command, checkout, seconds, env: time.sleep(setup))
+    proposer = {**_PLAIN, "run_command": "sleep 30", "setup": ["true"]}
     outcome = run_session(
         proposer,
         workspace=_git_checkout(tmp_path / "checkout"),
         prompt="x",
         model="m",
         session_dir=tmp_path / "s2",
-        timeout_seconds=3.0,
+        timeout_seconds=limit,
         api_key="k",
     )
 
     assert outcome.timed_out
-    assert time.monotonic() - started < 4.5
+    # The duration counts only the harness. With the full limit it would run near 8 s; the 2 s the
+    # setup left stops it near 2 s, and the bound leaves 3 s each way for a loaded machine.
+    assert outcome.duration_seconds < limit - setup + 3
 
 
 def test_a_setup_that_uses_up_the_session_time_stops_before_the_harness_starts(
@@ -2931,43 +2988,83 @@ def test_a_session_waits_for_another_sessions_setup_only_up_to_its_time_limit(tm
     assert time.monotonic() - started < 10
 
 
-def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(tmp_path: Path) -> None:
+def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wait for a setup that then fails counts inside the waiter's limit, so it never runs a full limit more.
 
     Args:
-        tmp_path: The checkout and the holder's start marker.
+        tmp_path: The checkout and the holder's start and release markers.
+        monkeypatch: Spies on the limit and the run time of each ``run_setup``.
     """
     checkout = _git_checkout(tmp_path / "checkout")
     marker = tmp_path / "holder-started"
+    release = tmp_path / "holder-release"
+    limit = 6.0
+    # The test, not a sleep in the holder, ends the holder's setup, so load can only make the wait longer.
+    # The holder's exit and its undo can take seconds under load; the limit leaves them that room.
+    held = 2.0
     holder_command = [
         sys.executable,
         "-c",
-        f"import time; open({str(marker)!r}, 'w'); time.sleep(2); raise SystemExit(1)",
+        f"import os, time; open({str(marker)!r}, 'w')\n"
+        f"while not os.path.exists({str(release)!r}): time.sleep(0.02)\n"
+        "raise SystemExit(1)",
     ]
+    real_run_setup = harness_bridge.run_setup
+    runs: list[tuple[list[str], float, float]] = []
+
+    def timed_run_setup(command: list[str], path: Path, timeout: float, env: Mapping[str, str] | None) -> None:
+        """Run the real setup, and keep its limit and how long it ran.
+
+        Args:
+            command: The setup command.
+            path: The checkout.
+            timeout: The limit that ``ensure_setup`` gave the setup.
+            env: The setup's environment.
+        """
+        begun = time.monotonic()
+        try:
+            real_run_setup(command, path, timeout, env)
+        finally:
+            runs.append((command, timeout, time.monotonic() - begun))
+
+    monkeypatch.setattr(harness_bridge, "run_setup", timed_run_setup)
     holder = threading.Thread(
         target=lambda: _run_and_keep_error(lambda: harness_bridge.ensure_setup(holder_command, checkout), []),
         daemon=True,
     )
     holder.start()
-    for _ in range(200):
-        if marker.exists():
-            break
-        time.sleep(0.05)
-    assert marker.exists()
-
-    started = time.monotonic()
-    error = _finish_in_thread(
-        lambda: harness_bridge.ensure_setup(
-            [sys.executable, "-c", "import time; time.sleep(30)"], checkout, timeout_seconds=3.0
+    waiter_command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists():
+            assert time.monotonic() < deadline, "the holder's setup did not start"
+            time.sleep(0.05)
+        errors: list[BaseException] = []
+        waiter = threading.Thread(
+            target=_run_and_keep_error,
+            args=(lambda: harness_bridge.ensure_setup(waiter_command, checkout, timeout_seconds=limit), errors),
+            daemon=True,
         )
-    )
-    elapsed = time.monotonic() - started
+        waiter.start()
+        # The waiter waits for the lock at least this long, whatever the load.
+        time.sleep(held)
+    finally:
+        release.touch()
+    waiter.join(timeout=30)
     holder.join(timeout=10)
 
+    assert not waiter.is_alive()
     assert not holder.is_alive()
+    assert len(errors) == 1
+    error = errors[0]
     assert isinstance(error, RuntimeError)
-    assert re.search(r"did not finish within 0\.\d+ seconds", str(error))
-    assert elapsed < 3.0 + 1.5
+    [(_, given, ran)] = [run for run in runs if run[0] == waiter_command]
+    assert 0 < given <= limit - held
+    assert f"did not finish within {given:g} seconds" in str(error)
+    # A full limit would run the 30 s setup for 6 s; the time left stops it by about 4 s.
+    assert ran < limit
 
 
 def test_a_setup_with_no_time_left_after_the_lock_never_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
