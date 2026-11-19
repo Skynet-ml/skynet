@@ -901,11 +901,14 @@ class _AgentSession:
             raise ServiceError(f"The [proposer] mcp servers have no address in the run's options: {missing}.")
         self.servers = {name: str(known[name]["url"]) for name in sorted(servers)}
         mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
-        # A credential grant fails to resolve when the registry holds no headers for its host, so a server
-        # with no headers gets a plain grant.
-        credential_hosts = {
-            urlsplit(str(known[name]["url"])).hostname or "" for name in servers if known[name].get("has_headers")
+        # A credential grant fails to resolve when the registry holds no headers for its host and path, so a
+        # server with no headers gets a plain grant. The path keeps a server's headers off the host's other
+        # paths, such as another server on the same host (SKY-833).
+        credentials = {
+            (parts.hostname or "", parts.path)
+            for parts in (urlsplit(str(known[name]["url"])) for name in servers if known[name].get("has_headers"))
         }
+        credential_hosts = {host for host, _ in credentials}
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
         plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}
@@ -913,7 +916,7 @@ class _AgentSession:
         # provider edge to add the server's headers, so its secrets never enter the box (SKY-714).
         self.grants = (
             *(Grant(host) for host in sorted(plain_hosts | (mcp_hosts - credential_hosts))),
-            *(Grant(host, credential=True) for host in sorted(credential_hosts)),
+            *(Grant(host, credential=True, path=path) for host, path in sorted(credentials)),
         )
         self.seed = ctx.repo_seed.tree_id if ctx.repo_seed is not None else None
         self.seed_ids = ctx.file_ids(self.seed) if self.seed is not None and ctx.file_ids is not None else {}

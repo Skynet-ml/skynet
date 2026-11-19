@@ -764,7 +764,7 @@ def test_sandbox_scorer_leaves_the_key_to_the_network_edge_when_the_runtime_inje
     scorer.close()
 
     [spec] = runtime.specs
-    assert spec.inject_headers == {"gw.example": {"Authorization": "Bearer k"}}
+    assert spec.inject_headers == {"gw.example": {"/": {"Authorization": "Bearer k"}}}
     [box] = runtime.sessions
     assert box.envs == [None]
     assert "api_key" not in box.payloads[0]["gateway"]

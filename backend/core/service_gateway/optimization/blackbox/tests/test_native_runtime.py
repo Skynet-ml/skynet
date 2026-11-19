@@ -389,7 +389,7 @@ def test_native_transport_preserves_engine_choice_and_scores_once(
     assert "test_set" not in json.loads(session.files["native_input.json"])["task"]
     assert "secret" not in session.files["native_input.json"]
     assert session.calls[1][1]["env"]["ANTHROPIC_AUTH_TOKEN"] == "app-managed"
-    assert runtime.spec.inject_headers == {"gateway.example": {"Authorization": "Bearer secret"}}
+    assert runtime.spec.inject_headers == {"gateway.example": {"/": {"Authorization": "Bearer secret"}}}
     assert ctx.native_options.usage_by_model["claude-test"]["total_tokens"] == 13
     assert progress[0]["score"] == 0.75
     assert progress[0]["parent_id"] is None

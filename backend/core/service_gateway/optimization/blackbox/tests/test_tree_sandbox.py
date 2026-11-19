@@ -195,7 +195,9 @@ class _Runtime:
 class _Source(RuntimeBoxSource):
     """A fresh-box source that records each release and the files of the box at release."""
 
-    def __init__(self, runtime: _Runtime, registry: Mapping[str, Mapping[str, str]] | None = None) -> None:
+    def __init__(
+        self, runtime: _Runtime, registry: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None
+    ) -> None:
         """Bind the source to the recording runtime.
 
         Args:
@@ -897,7 +899,7 @@ def test_a_stale_file_in_a_used_box_does_not_join_the_new_tree(trees: TreeStore,
 
 def test_a_runtime_box_source_with_another_registry_is_refused(trees: TreeStore, step_log: StepLogStore) -> None:
     """The layer and its runtime sources resolve grants against one registry, so a mismatch fails at build."""
-    registry = {"api.example.com": {"Authorization": "Bearer test"}}
+    registry = {"api.example.com": {"/": {"Authorization": "Bearer test"}}}
     runtime = _Runtime()
 
     with pytest.raises(ValueError, match="same capability registry"):

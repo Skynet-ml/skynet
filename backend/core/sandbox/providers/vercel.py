@@ -88,6 +88,8 @@ try:
         NetworkPolicy as SdkNetworkPolicy,
     )
     from vercel.sandbox import (
+        NetworkPolicyMatcher,
+        NetworkPolicyRequestMatcher,
         NetworkPolicyRule,
         NetworkPolicyTransform,
         SandboxApiError,
@@ -105,6 +107,8 @@ try:
 except ImportError:
     httpx2 = None
     SdkNetworkPolicy = None
+    NetworkPolicyMatcher = None
+    NetworkPolicyRequestMatcher = None
     NetworkPolicyRule = None
     NetworkPolicyTransform = None
     SandboxApiError = None
@@ -377,6 +381,26 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
         return f"skynet-{uuid.uuid4().hex}"
     parts = [budget.budget_id, budget.generation, operation_key] if budget is not None else [operation_key]
     return "skynet-" + json_fingerprint(parts)[:48]
+
+
+def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
+    """Build the SDK rules that add headers to a host's requests under one path prefix.
+
+    Args:
+        path: The normalized path prefix; ``/`` covers the whole host.
+        headers: The headers to add.
+
+    Returns:
+        One rule for the root, else one rule for the prefix itself and one for the paths below it.
+    """
+    transform = (NetworkPolicyTransform(headers=dict(headers)),)
+    if path == "/":
+        return (NetworkPolicyRule(transform=transform),)
+    # A bare starts_with("/mcp") also matches "/mcp-admin", another server's path on the same host (SKY-833).
+    return tuple(
+        NetworkPolicyRule(transform=transform, match=NetworkPolicyRequestMatcher(path=matcher))
+        for matcher in (NetworkPolicyMatcher.exact(path), NetworkPolicyMatcher.starts_with(path + "/"))
+    )
 
 
 def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:
@@ -656,8 +680,8 @@ class VercelEnvironment(SandboxEnvironment):
             The SDK policy, or ``None`` for the create default of open egress.
         """
         rules = {
-            host: (NetworkPolicyRule(transform=(NetworkPolicyTransform(headers=dict(headers)),)),)
-            for host, headers in self.spec.inject_headers.items()
+            host: tuple(rule for path, headers in prefixes.items() for rule in _header_rules(path, headers))
+            for host, prefixes in self.spec.inject_headers.items()
         }
         if policy.disabled:
             return SdkNetworkPolicy.deny_all()

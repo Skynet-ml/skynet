@@ -124,7 +124,13 @@ class RemoteSandboxRuntime:
 
         Returns:
             A guest handle containing only an opaque broker identity.
+
+        Raises:
+            ServiceError: When the spec asks for injected headers, which the parent's box never takes.
         """
+        # Refuse here, so a credential grant's headers never cross the relay to the parent.
+        if spec.inject_headers:
+            raise ServiceError("The protected sandbox cannot add egress headers; it reaches models through the parent.")
         request_id = spec.operation_key or uuid.uuid4().hex
         value = self._request(
             "open",
@@ -135,7 +141,7 @@ class RemoteSandboxRuntime:
                     "env": dict(spec.env),
                     "image": spec.image,
                     "vcpus": spec.vcpus,
-                    "inject_headers": dict(spec.inject_headers),
+                    "inject_headers": {},
                     "allowed_hosts": list(spec.allowed_hosts),
                 },
             },

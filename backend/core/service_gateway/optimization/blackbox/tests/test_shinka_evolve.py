@@ -3381,7 +3381,7 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
 
     session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["docs"])
 
-    assert session.grants == (Grant("pypi.org"), Grant("mcp.test", credential=True))
+    assert session.grants == (Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))
     assert "- docs: https://mcp.test/mcp" in session._system()
     assert "unused" not in session._system()
     with pytest.raises(ServiceError, match="no address"):
@@ -3420,7 +3420,7 @@ def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) 
     _, tree = session._tool(_call(0, "run", command="true"), "tree")
 
     assert tree == "after"
-    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True))]
+    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))]
 
 
 def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(tmp_path: Path) -> None:
@@ -3439,7 +3439,31 @@ def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(t
 
     session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["public", "docs"])
 
-    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True))
+    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))
+
+
+def test_two_mcp_servers_on_one_host_get_one_credential_grant_for_each_path(tmp_path: Path) -> None:
+    """Grant each server on a shared host its own path, so the edge adds each server's headers only there (SKY-833).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "web", "url": "https://mcp.test/web", "has_headers": True},
+            {"name": "root", "url": "https://root.test", "has_headers": True},
+        ],
+    )
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web", "root"])
+
+    assert session.grants == (
+        Grant("mcp.test", credential=True, path="/team/mcp"),
+        Grant("mcp.test", credential=True, path="/web"),
+        Grant("root.test", credential=True, path=""),
+    )
 
 
 def test_read_file_marks_a_file_it_cuts_so_the_agent_does_not_write_back_a_part(tmp_path: Path) -> None:
