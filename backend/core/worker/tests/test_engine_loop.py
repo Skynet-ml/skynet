@@ -1255,7 +1255,29 @@ class _FailingLaneEngine:
         raise RuntimeError("the lane cannot score its seed")
 
 
-@pytest.mark.parametrize("failing", [None, "meta_harness"], ids=["all-lanes", "one-lane-fails"])
+class _BelowZeroLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but reports a score below 0."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and report a score of -1.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            The reply with a score of -1.
+        """
+        result = super().run(task, server, ctx)
+        return Result(result.best_candidate, -1.0, result.total_evals)
+
+
+@pytest.mark.parametrize(
+    ("failing", "lane"),
+    [(None, _LaneEngine), ("meta_harness", _LaneEngine), ("meta_harness", _BelowZeroLaneEngine)],
+    ids=["all-lanes", "one-lane-fails", "one-lane-fails-and-the-others-score-below-zero"],
+)
 def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_call(
     owner: tuple[User, int],
     engine: Engine,
@@ -1264,21 +1286,22 @@ def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_c
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failing: str | None,
+    lane: type[_LaneEngine],
 ) -> None:
     """The Auto parent commits its plan and lane results; a resume replays every agent with no model call or box.
 
-    A lane that fails loses at -inf, and the run goes on (SKY-832).
+    A lane that fails loses at -inf, also to lanes that score below 0, and the run goes on. The resume gets a
+    larger allowance, so only the committed plan keeps its lane and continuation allowances (SKY-832).
     """
-    monkeypatch.setattr(
-        auto, "get_engine", lambda name, caps: _FailingLaneEngine() if name == failing else _LaneEngine(name)
-    )
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: _FailingLaneEngine() if name == failing else lane(name))
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
-    def run(loop: EngineLoop) -> tuple[Result, list[auto.LaneOutcome]]:
+    def run(loop: EngineLoop, max_evals: int) -> tuple[Result, list[auto.LaneOutcome]]:
         """Run Auto on the loop and check that every committed step replayed.
 
         Args:
             loop: The engine loop.
+            max_evals: The run's evaluation allowance.
 
         Returns:
             The Auto result and its lanes.
@@ -1286,7 +1309,7 @@ def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_c
         outcome = auto.run_strategy(
             BlackboxStrategy(),
             Task("seed"),
-            loop.server(scorer, max_evals=2 * (len(AUTO_ENGINES) + 1)),
+            loop.server(scorer, max_evals=max_evals),
             loop.context(),
             caps=EngineCapabilities(proposer_available=True),
         )
@@ -1294,22 +1317,96 @@ def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_c
         return outcome
 
     first, first_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
-    result, lanes = run(first)
+    result, lanes = run(first, 2 * (len(AUTO_ENGINES) + 1))
 
     # The root agent holds only the parent's plan and its lane results.
     assert len(_steps(engine)) == 2
     statuses = {lane.engine: lane.status for lane in lanes if lane.phase == "explore"}
     assert statuses == {name: "failed" if name == failing else "completed" for name in AUTO_ENGINES}
     assert len(first_model.prompts) == len(AUTO_ENGINES) + 1 - (failing is not None)
+    assert result.metadata["explore_engine"] != failing
+    runs = {(lane.phase, lane.engine): lane.scorer_runs for lane in lanes}
+    assert runs[("continue", "gepa")] == 2
+    assert {runs[("explore", name)] for name in AUTO_ENGINES if name != failing} == {2}
 
     _new_generation(engine)
     loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
-    resumed, _ = run(loop)
+    resumed, resumed_lanes = run(loop, 5 * (len(AUTO_ENGINES) + 1))
 
     assert (resumed.best_candidate, resumed.best_score) == (result.best_candidate, result.best_score)
     assert resumed.metadata["explore_engine"] == result.metadata["explore_engine"]
+    assert {(lane.phase, lane.engine): lane.scorer_runs for lane in resumed_lanes} == runs
     assert model.prompts == []
     assert boxes.opened == 0
+
+
+class _OtherCandidateLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but hands off another version."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and change its best version.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            Another version with the lane's score.
+        """
+        result = super().run(task, server, ctx)
+        return Result(f"{result.best_candidate} changed", result.best_score, result.total_evals)
+
+
+@pytest.mark.parametrize(("change", "message"), [("lane-candidate", "lane results"), ("plan-engines", "lane plan")])
+def test_an_auto_resume_that_gives_other_lanes_or_another_plan_stops_as_diverged(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    message: str,
+) -> None:
+    """A resume whose lane hands off another version, or that explores other engines, stops (SKY-832)."""
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: _LaneEngine(name))
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    def run(loop: EngineLoop) -> tuple[Result, list[auto.LaneOutcome]]:
+        """Run Auto on the loop.
+
+        Args:
+            loop: The engine loop.
+
+        Returns:
+            The Auto result and its lanes.
+        """
+        return auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            loop.server(scorer, max_evals=2 * (len(AUTO_ENGINES) + 1)),
+            loop.context(),
+            caps=EngineCapabilities(proposer_available=True),
+        )
+
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    run(first)
+    first.finish()
+
+    if change == "lane-candidate":
+        changed = AUTO_ENGINES[0]
+        monkeypatch.setattr(
+            auto,
+            "get_engine",
+            lambda name, caps: _OtherCandidateLaneEngine(name) if name == changed else _LaneEngine(name),
+        )
+    else:
+        monkeypatch.setattr(auto, "AUTO_ENGINES", AUTO_ENGINES[:-1])
+    _new_generation(engine)
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(StepDivergedError, match=f"committed {message}"):
+        run(loop)
 
 
 def test_a_settle_failure_after_the_commit_stops_the_loop_and_the_resume_replays_the_reply(

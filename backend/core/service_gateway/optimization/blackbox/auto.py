@@ -21,6 +21,7 @@ from ....billing.usage_tags import LANE_KEY, usage_scope
 from ....constants import PROGRESS_LANE_COMPLETED, PROGRESS_LANE_HANDOFF, PROGRESS_LANE_STARTED
 from ....exceptions import ServiceError
 from ....models.blackbox import FILE_PROPOSER_REFUSED_ENGINES, BlackboxStrategy
+from ....worker.engine_loop import StepDivergedError
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
 from .protocol import (
@@ -323,6 +324,8 @@ def run_strategy(
 
     Raises:
         ServiceError: If the exact recipe cannot run; never substitutes an engine.
+        StepDivergedError: If an Auto replay on the engine loop gives another lane plan or other lane results
+            than the committed ones.
     """
     lanes: list[LaneOutcome] = []
     lane_ids = itertools.count()
@@ -430,6 +433,8 @@ def run_strategy(
     plan["continuation"] = server.remaining - lane_count * plan["per_lane"]
     if ctx.record_step is not None:
         plan = ctx.record_step({"auto": "plan"}, lambda: plan)
+        if plan["engines"] != list(engines):
+            raise StepDivergedError("The replayed Auto run explores other engines than its committed lane plan.")
     per_lane, continuation_allowance = plan["per_lane"], plan["continuation"]
     try:
         winner = optimize_best_of(
@@ -454,25 +459,19 @@ def run_strategy(
         exc.evidence["selection_scope"] = "validation" if exc.result is not None else "unpublished_composition"
         raise
     if ctx.record_step is not None:
-        results = winner.metadata["all_results"]
-        # On the engine loop each lane replays from its own log; the parent commits the lane results and picks
-        # the winner from the committed list, so a resume hands off to the same lane.
-        committed = ctx.record_step(
-            {"auto": "lanes"},
-            lambda: {
-                "lanes": [
-                    {
-                        "engine": result.metadata.get("engine"),
-                        "score": _stored_score(result.best_score),
-                        "candidate": result.best_candidate,
-                    }
-                    for result in results
-                ]
-            },
-        )
-        scores = [-math.inf if lane["score"] is None else lane["score"] for lane in committed["lanes"]]
-        winner = results[scores.index(max(scores))]
-        winner.metadata["all_results"] = results
+        # On the engine loop each lane replays from its own log. The parent commits the lane results, and a
+        # replay that gives other results stops, so a resume hands off to the same lane with the same version.
+        lanes_now = [
+            {
+                "engine": result.metadata.get("engine"),
+                "score": _stored_score(result.best_score),
+                "candidate": result.best_candidate,
+            }
+            for result in winner.metadata["all_results"]
+        ]
+        committed = ctx.record_step({"auto": "lanes"}, lambda: {"lanes": lanes_now})
+        if committed["lanes"] != lanes_now:
+            raise StepDivergedError("The replayed Auto lanes give other results than the committed lane results.")
     if winner.metadata.get("failed"):
         errors = "; ".join(f"{lane.engine}: {lane.error}" for lane in lanes if lane.error)
         raise ServiceError(f"Every Auto exploration lane failed ({errors}).")
