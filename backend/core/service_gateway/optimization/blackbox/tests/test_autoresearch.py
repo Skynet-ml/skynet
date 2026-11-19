@@ -35,7 +35,6 @@ from core.service_gateway.optimization.blackbox import loop_tools, native_engine
 from core.service_gateway.optimization.blackbox.autoresearch import BASH_TOOL, EVALUATE_TOOL, AutoResearchEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
-    BudgetExhaustedError,
     EngineContext,
     EvalServer,
     FileTooLargeError,
@@ -1107,7 +1106,7 @@ def test_a_repository_budget_that_cannot_score_a_version_stops_before_the_sessio
     assert (result.best_candidate, result.total_evals) == (seed, 2)
 
 
-def test_a_repository_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_budget(
+def test_a_repository_budget_that_cannot_score_the_seed_fails_the_run_before_any_session(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """One evaluation is left for two cases, so the seed gets no sweep: the run ends with no session (SKY-825).
@@ -1124,8 +1123,10 @@ def test_a_repository_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_b
     model = _Researcher([_bash("printf x >> a.py")])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
 
-    with pytest.raises(BudgetExhaustedError, match="needs 2 evaluation units to score the seed"):
+    with pytest.raises(RuntimeError, match="needs 2 evaluation units to score the seed") as raised:
         _run(loop, max_evals=1, score=_score_a_py, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+    # A BudgetExhaustedError would end a whole Auto run, not only this engine's lane.
+    assert type(raised.value) is RuntimeError
     assert model.calls == []
 
 
