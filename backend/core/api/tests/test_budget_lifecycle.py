@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,14 +21,31 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     store.update_job("protected-cancel", execution_budget_id="budget")
     store.engine = object()
     calls = []
+    releases = []
 
     class Budgets:
         """Capture the trusted admission closure without creating any paid work."""
 
         def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
-            """Require the budget to close while the run is still active."""
-            assert store.get_job("protected-cancel")["status"] == "running"
-            calls.append((identity, username, reason))
+            """Record each close with the run's status, so the test can require the first one before the write."""
+            calls.append((identity, username, reason, store.get_job("protected-cancel")["status"]))
+
+        def close_for_cancelled_job(
+            self, identity: str, username: str, *, job_id: str, expected_generation: int
+        ) -> bool:
+            """Record the close that stops admission again and frees the cancelled run's unstarted holds.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                job_id: The cancelled run.
+                expected_generation: The budget generation the cancel read after its write.
+
+            Returns:
+                Always ``True``.
+            """
+            releases.append((identity, username, job_id, expected_generation, store.get_job(job_id)["status"]))
+            return True
 
     monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
     app = FastAPI()
@@ -34,8 +53,139 @@ def test_cancel_closes_paid_admission_before_status_mutation(monkeypatch: pytest
     bypass_auth(app)
     response = TestClient(app).post("/optimizations/protected-cancel/cancel")
     assert response.status_code == 200
-    assert calls == [("budget", "alice", "user_cancelled")]
+    assert calls == [("budget", "alice", "user_cancelled", "running")]
+    # The close after the write stops admission that a resume reopened before the write.
+    assert releases == [("budget", "alice", "protected-cancel", 0, "cancelled")]
     assert store.get_job("protected-cancel")["status"] == "cancelled"
+
+
+def test_cancel_leaves_the_budget_to_a_resume_after_its_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a resume moves the run on after the cancel's write, the cancel does not close the resumed budget."""
+    store = _BaseFakeJobStore()
+    store.seed_job("resumed-run", status="running", username="alice")
+    store.update_job("resumed-run", execution_budget_id="budget")
+    store.engine = object()
+    write = store.update_job
+    closes = []
+
+    def resume_after_cancel(optimization_id: str, **fields: object) -> None:
+        """Apply the write, then let a resume move a cancelled run back to pending.
+
+        Args:
+            optimization_id: The run.
+            **fields: The columns to write.
+        """
+        write(optimization_id, **fields)
+        if fields.get("status") == "cancelled":
+            write(optimization_id, status="pending", completed_at=None)
+
+    class Budgets:
+        """Accept the first stop and record any close after the write."""
+
+        def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
+            """Accept the stop before the write.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                reason: Why the budget closes.
+            """
+
+        def close_for_cancelled_job(
+            self, identity: str, username: str, *, job_id: str, expected_generation: int
+        ) -> bool:
+            """Record the close, which must not happen.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                job_id: The run.
+                expected_generation: The budget generation the cancel read.
+
+            Returns:
+                Always ``True``.
+            """
+            closes.append(job_id)
+            return True
+
+    monkeypatch.setattr(store, "update_job", resume_after_cancel)
+    monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+
+    response = TestClient(app).post("/optimizations/resumed-run/cancel")
+
+    assert response.status_code == 200
+    assert closes == []
+    assert store.get_job("resumed-run")["status"] == "pending"
+
+
+def test_cancel_succeeds_when_the_budget_release_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed release of the unstarted holds does not turn a cancelled run into a route error, and logs one error."""
+    store = _BaseFakeJobStore()
+    budgets = {"single-run": "budget-a", "bulk-run": "budget-b"}
+    for run_id, budget_id in budgets.items():
+        store.seed_job(run_id, status="running", username="alice")
+        store.update_job(run_id, execution_budget_id=budget_id)
+    store.engine = object()
+
+    class Budgets:
+        """Close admission, then fail the release of the holds."""
+
+        def stop_admission(self, identity: str, username: str, *, reason: str) -> None:
+            """Accept the admission close.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                reason: Why the budget closes.
+            """
+
+        def close_for_cancelled_job(
+            self, identity: str, username: str, *, job_id: str, expected_generation: int
+        ) -> bool:
+            """Fail as a lost database connection would.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                job_id: The cancelled run.
+                expected_generation: The budget generation the cancel read.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app)
+    client = TestClient(app)
+    caplog.set_level(logging.ERROR, logger=lifecycle.__name__)
+
+    single = client.post("/optimizations/single-run/cancel")
+    bulk = client.post("/optimizations/bulk-cancel", json={"optimization_ids": ["bulk-run"]})
+
+    assert single.status_code == 200
+    assert single.json()["status"] == "cancelled"
+    assert bulk.status_code == 200
+    assert bulk.json()["cancelled"] == ["bulk-run"]
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "core.api.routers.optimizations.lifecycle" and record.levelno == logging.ERROR
+    ]
+    assert len(errors) == 2
+    for message, (run_id, budget_id) in zip(errors, budgets.items(), strict=True):
+        assert run_id in message
+        assert budget_id in message
+    assert bulk.json()["skipped"] == []
+    assert store.get_job("single-run")["status"] == "cancelled"
+    assert store.get_job("bulk-run")["status"] == "cancelled"
 
 
 @pytest.mark.parametrize("action", ["retry", "restart", "clone"])
@@ -99,6 +249,7 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     store.update_job("normal-run", execution_budget_id="run-budget")
     store.engine = object()
     stops = []
+    releases = []
     ends = []
 
     class Budgets:
@@ -114,6 +265,23 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
             """
             stops.append((identity, reason))
 
+        def close_for_cancelled_job(
+            self, identity: str, username: str, *, job_id: str, expected_generation: int
+        ) -> bool:
+            """Record the close of the cancelled run's budget.
+
+            Args:
+                identity: The budget.
+                username: The owner.
+                job_id: The cancelled run.
+                expected_generation: The budget generation the cancel read.
+
+            Returns:
+                Always ``True``.
+            """
+            releases.append(identity)
+            return True
+
     monkeypatch.setattr(lifecycle, "BudgetService", lambda **kwargs: Budgets())
     monkeypatch.setattr(lifecycle.repo_judge, "end_session", lambda *args, **kwargs: ends.append(args))
     app = FastAPI()
@@ -128,6 +296,7 @@ def test_bulk_cancel_skips_a_judge_session_and_cancels_a_normal_run(monkeypatch:
     assert [entry["optimization_id"] for entry in body["skipped"]] == ["judge-session"]
     assert "stop_run" in body["skipped"][0]["reason"]
     assert stops == [("run-budget", "user_cancelled")]
+    assert releases == ["run-budget"]
     assert ends == []
     assert store.get_job("judge-session")["status"] == "running"
     assert store.get_job("normal-run")["status"] == "cancelled"

@@ -2,26 +2,29 @@ Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적
 
 ## 공통 계약
 
-모든 실행에는 리포지토리와 채점기가 있습니다. 채점기는 Python 함수입니다. 채점기는 리포지토리의 한 버전 경로와 케이스 하나를 받습니다.
+모든 실행에는 리포지토리, `[run]` 엔트리 또는 `[target.<name>]` 스테이지가 있는 `optimize.toml` 파일, 채점기가 있습니다. `[run]` 엔트리는 리포지토리의 한 버전을 케이스 하나에 대해 실행합니다. 채점기는 Python 함수입니다. 채점기는 엔트리의 출력과 케이스를 받습니다.
+
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
+def score(repo_path, case, output=None):
     ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `repo_path`는 설정 명령이 실행된 후의 리포지토리 한 버전의 폴더입니다.
+- `output`은 `[run]` 엔트리가 케이스에 대해 반환한 값입니다.
 - `case`는 dict입니다. `case["input"]`는 케이스 하나의 입력 필드를 담습니다. `case["expected"]`는 기댓값을 담으며, 케이스에 기댓값이 없으면 `None`입니다.
+- `repo_path`는 지표 파일만 담은 폴더입니다.
 - `score`는 쌍을 반환합니다. 숫자 하나와 `"feedback"` 문자열이 있는 dict 하나입니다.
 
-리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. 채점기는 이 함수를 호출할 수 있습니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
+리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리는 자체 샌드박스에서 이 함수를 호출합니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
+
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있고 버전 코드는 없으므로 채점기는 `serve.py`를 가져올 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. `[run]` 엔트리도 `[target.<name>]` 스테이지도 없으면 Skynet은 `optimize.toml` 파일을 거부합니다.
 
 > [!NOTE]
 > 버전을 작성하는 코딩 에이전트는 채점기 소스, 기댓값, 실행 시크릿을 볼 수 없습니다.
@@ -58,7 +61,7 @@ def label(message):
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다.
 - 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 갑니다. Skynet은 모델 요금을 청구하지 않습니다.
 - 게이트웨이는 다른 모델에 대한 요청을 거부합니다.
-- 실행 시크릿은 환경 변수로 코드와 채점기에 전달됩니다. 변수 이름은 시크릿 이름입니다. Skynet은 출력에서 시크릿 값을 숨깁니다.
+- 코드와 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 역할이 `[run] services` 또는 `[metric] services`에 나열한 `[services.<name>]` 테이블이나 역할의 `mcp` 파일에 있는 서버를 통해서만 그 역할에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. Skynet은 샌드박스 밖에서 시크릿을 추가하고, 출력에서 시크릿 값을 숨깁니다.
 
 샌드박스에는 다른 네트워크 접근이 없습니다.
 

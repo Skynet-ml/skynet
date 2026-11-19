@@ -57,7 +57,7 @@ Pro 갱신이 실패하면 계정은 7일 동안 Pro 제한을 유지합니다. 
 | 폴더 깊이                    | 폴더 3단계                                                              |
 | 파일 형식                    | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`scorer.py`에는 채점기가 있습니다. Skynet은 케이스마다 그 `score(repo_path, case)` 함수를 호출합니다.
+`scorer.py`에는 채점기가 있습니다. Skynet은 케이스마다 그 `score(repo_path, case, output=None)` 함수를 호출합니다. `output` 인수에는 `[run]` 엔트리가 그 케이스에 반환한 값이 들어 있습니다.
 
 ## 요청 속도
 

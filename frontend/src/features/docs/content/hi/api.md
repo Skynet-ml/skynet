@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="optimize.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 महत्वपूर्ण फ़ील्ड:
 
 - `target.repo.repository`, `owner/name` रूप में GitHub रिपॉज़िटरी है। पहले **सेटिंग्स → कनेक्टर** में GitHub जोड़ें।
 - `target.repo.editable_paths` उन फ़ाइलों और फ़ोल्डरों की सूची है जिन्हें ऑप्टिमाइज़र बदल सकता है। `"."` का मतलब पूरी रिपॉज़िटरी है।
 - `target.repo.commit` वैकल्पिक है। यह 40 अक्षरों का SHA है। इसके बिना Skynet ब्रांच का नवीनतम कमिट इस्तेमाल करता है।
-- `target.repo.secrets` वैकल्पिक है। हर सीक्रेट में `name` और `value` होता है। यह आपके कोड और आपके स्कोरर तक एनवायरनमेंट वेरिएबल के रूप में पहुँचता है।
-- `scorer.metric_code`, `score(repo_path, case)` को परिभाषित करता है। `scorer.model` वह मॉडल है जिसे आपका कोड और आपका स्कोरर मॉडल गेटवे से कॉल कर सकते हैं।
+- `target.repo.secrets` वैकल्पिक है। हर सीक्रेट में `name` और `value` होता है। यह आपके कोड या आपके स्कोरर तक सिर्फ़ `[services.<name>]` के हेडर से या भूमिका की `mcp` फ़ाइल के किसी सर्वर से पहुँचता है, कभी एनवायरनमेंट वेरिएबल के रूप में नहीं।
+- `scorer.metric_code`, `score(repo_path, case, output=None)` को परिभाषित करता है। `output` वह है जो `[run]` entry ने केस के लिए लौटाया। `optimize.toml` टैब उदाहरण रिपॉज़िटरी की `[run]` entry दिखाता है। `scorer.model` वह मॉडल है जिसे आपका कोड और आपका स्कोरर मॉडल गेटवे से कॉल कर सकते हैं।
 - `strategy.mode` का मान `auto` (डिफ़ॉल्ट) या `single` होता है। `single` के साथ, `strategy.engine` में `GET /blackbox/engines` से एक इंजन का नाम दें।
 - `max_cost_cents` इस रन की खर्च सीमा है, अमेरिकी सेंट में।
 - `is_private` डिफ़ॉल्ट रूप से `false` होता है। रन को निजी रखने के लिए इसे `true` पर सेट करें।

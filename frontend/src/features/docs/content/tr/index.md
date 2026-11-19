@@ -11,7 +11,7 @@ Her çalıştırma bir depoyu optimize eder. İki şekilde başlayabilirsiniz:
 
 Depodaki kod herhangi bir şey olabilir: bir uygulama, bir hizmet, bir betik veya bir kütüphane. Herhangi bir kütüphaneyi kullanabilir.
 
-Her çalıştırma aynı sözleşmeyi kullanır. Puanlayıcınız `score(repo_path, case)` fonksiyonunu tanımlar. Bir puan ve yazılı geri bildirim döndürür. Optimize edici, bir sonraki sürümü daha iyi yapmak için bu geri bildirimi okur.
+Her çalıştırma aynı sözleşmeyi kullanır. Puanlayıcınız `score(repo_path, case, output=None)` fonksiyonunu tanımlar. Puanlayıcı `output` değerini, yani `[run]` giriş noktasının o durum için döndürdüğü değeri okur. Puanlayıcı sürümün klasöründe çalışmaz ve depodan kod içe aktarmaz. Bir puan ve yazılı geri bildirim döndürür. Optimize edici, bir sonraki sürümü daha iyi yapmak için bu geri bildirimi okur.
 
 > [!NOTE]
 > Her sürüm bir sandbox içinde çalışır. Sürümleri yazan kodlama ajanı, puanlayıcının kaynak kodunu veya beklenen değerleri göremez.

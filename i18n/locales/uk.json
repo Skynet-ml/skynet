@@ -251,6 +251,7 @@
     "notifier.title.failed": "Оптимізація завершилася невдало",
     "notifier.title.new": "Нова оптимізація",
     "optimization.already_terminal": "Оптимізація вже перебуває у кінцевому стані '{status}'.",
+    "optimization.cancel_conflict": "Оптимізація змінила стан під час скасування. Зараз вона у стані '{status}'. Спробуйте скасувати її ще раз.",
     "optimization.cannot_delete": "Неможливо видалити оптимізацію у стані '{status}'. Спочатку скасуйте її.",
     "optimization.deletion_storage_unavailable": "Оптимізацію не видалено: зараз не вдалося видалити її збережені дані запусків. Спробуйте ще раз за кілька хвилин.",
     "optimization.cannot_resubmit_payload": "Неможливо повторно надіслати збережені дані: {error}",

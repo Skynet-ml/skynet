@@ -90,13 +90,13 @@ Skynet 會將每個候選版本推去佢自己嘅分支。`skynet/best` 分支�
 
 ### 評分器
 
-寫 `scorer.py`。佢定義 `score(repo_path, case)`，並回傳一個分數同回饋。助手可以幫你寫。睇 [指標同評分器](/docs/concepts/scorers)。
+寫 `scorer.py`。佢定義 `score(repo_path, case, output=None)`，並回傳一個分數同回饋。評分器會讀 `output`，即係 `[run]` 入口為嗰個案例回傳嘅嘢。評分器唔會喺版本嘅資料夾入面運行，亦唔會由儲存庫匯入程式碼。助手可以幫你寫。睇 [指標同評分器](/docs/concepts/scorers)。
 
 個倉庫可以有一個 `serve.py` 檔案，入面有 `def serve(input)`。運行完之後，Skynet 會用佢嚟提供最佳版本。睇 [睇結果](/docs/guides/results)。
 
 ### 密鑰
 
-加入密鑰，例如你嘅程式碼需要嘅 API 金鑰。每個密鑰都會以同名嘅環境變數去到你嘅程式碼同評分器。編程代理睇唔到佢哋。Skynet 會喺記錄入面隱藏佢哋嘅值。
+加入密鑰，例如你嘅程式碼需要嘅 API 金鑰。你嘅程式碼同評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經角色喺 `[run] services` 或者 `[metric] services` 列出嘅 `[services.<name>]` 表，或者角色個 `mcp` 檔案入面嘅伺服器，去到嗰個角色。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。編程代理睇唔到佢哋。Skynet 會喺記錄入面隱藏佢哋嘅值。
 
 ### 檢查
 
