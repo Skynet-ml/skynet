@@ -283,6 +283,35 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
+def dropped_rule_files(current: str, text: str) -> str | None:
+    """Refuse an ``optimize.toml`` text that stops naming an intent or rules file the current text names.
+
+    The rules files hold the illegal actions that stop reward hacking, so a
+    whole-file rewrite must not lose them silently (SKY-794).
+
+    Args:
+        current: The ``optimize.toml`` text the draft or the repository holds now.
+        text: The new text.
+
+    Returns:
+        The refusal that names the dropped paths, or ``None`` when nothing is
+        dropped or either text does not parse.
+    """
+    try:
+        before = parse_constraints(current.encode("utf-8", "surrogatepass")).rule_files
+        after = parse_constraints(text.encode("utf-8", "surrogatepass")).rule_files
+    except ConstraintsError:
+        return None
+    dropped = [path for path in before if path not in after]
+    if not dropped:
+        return None
+    return (
+        f"The new optimize.toml drops {', '.join(dropped)}, which the current optimize.toml names as its "
+        "instructions or illegal rules file. Keep these references. If the user wants one removed, ask them "
+        "to remove it in the editor."
+    )
+
+
 def workspace_tools(
     state: WizardState,
     turn: _TurnAuthoringFlag,
@@ -442,15 +471,21 @@ def workspace_tools(
             text: The whole file text.
 
         Returns:
-            The :func:`save` result, or ``{"error": ...}`` for a refused path or
-            an empty text.
+            The :func:`save` result, or ``{"error": ...}`` for a refused path,
+            an empty text, or an ``optimize.toml`` that drops an intent or rules file.
         """
         found = target(path)
         if isinstance(found, str):
             return {"error": found}
         if not text.strip():
             return {"error": "Empty file: send the whole file text."}
-        return save(*found, text)
+        clean, field = found
+        if field == "optimize_toml":
+            current = await current_text(clean, field)
+            # No current file (none in the repository, or it cannot be read) leaves nothing to drop.
+            if isinstance(current, str) and (refusal := dropped_rule_files(current, text)):
+                return {"error": refusal}
+        return save(clean, field, text)
 
     async def current_text(path: str, field: str | None) -> RepoRead:
         """Return the text an edit starts from: the draft's, else the repository's.
@@ -487,8 +522,8 @@ def workspace_tools(
         Returns:
             The :func:`save` result, or ``{"error": ...}`` for a refused path, a
             file that cannot be read, an empty ``old_text``, an ``old_text`` that
-            is not in the file or is in it more than once, or an edit that leaves
-            the file empty.
+            is not in the file or is in it more than once, an edit that leaves
+            the file empty, or an ``optimize.toml`` edit that drops an intent or rules file.
         """
         found = target(path)
         if isinstance(found, str):
@@ -506,6 +541,8 @@ def workspace_tools(
         edited = current.replace(old_text, new_text, 1)
         if not edited.strip():
             return {"error": "The edit leaves the file empty: send the whole file text instead."}
+        if field == "optimize_toml" and (refusal := dropped_rule_files(current, edited)):
+            return {"error": refusal}
         return save(clean, field, edited)
 
     file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example optimize.toml."

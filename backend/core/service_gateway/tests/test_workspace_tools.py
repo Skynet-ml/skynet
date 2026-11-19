@@ -582,28 +582,39 @@ async def test_read_tools_return_why_the_repository_cannot_be_read() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_puts_the_file_into_the_turn_and_the_editor() -> None:
-    """A write lands in the turn's patch and comes back as a wizard_state patch for the editor."""
+async def test_write_puts_the_file_into_the_turn_and_the_editor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write lands in the turn's patch and comes back as a wizard_state patch for the editor.
+
+    The first optimize.toml write reads the repository for a current file, so it records that commit.
+    """
+    _fake_github(monkeypatch, [])
     turn = _TurnAuthoringFlag()
-    tools = _tools(_REPO_METRIC, turn)
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
 
     result = await tools[WRITE_FILE_TOOL].acall(path="metric.py", text=_SCORER)
     toml_result = await tools[WRITE_FILE_TOOL].acall(path="/optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
 
     assert result == {"wizard_state": {"metric_code": _SCORER}}
-    assert toml_result == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
-    assert turn.wizard_patch == {"metric_code": _SCORER, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}
+    assert toml_result == {"wizard_state": {"workspace_base": _HEAD, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
+    assert turn.wizard_patch == {
+        "metric_code": _SCORER,
+        "workspace_base": _HEAD,
+        "optimize_toml": OPTIMIZE_TOML_EXAMPLE,
+    }
 
 
 @pytest.mark.asyncio
-async def test_write_reports_the_parser_error_of_optimize_toml() -> None:
+async def test_write_reports_the_parser_error_of_optimize_toml(monkeypatch: pytest.MonkeyPatch) -> None:
     """A file the parser refuses still reaches the draft, with the error and its place for the agent."""
+    _fake_github(monkeypatch, [])
     turn = _TurnAuthoringFlag()
     toml_text = "version = 1\n[run]\ntimeout = 30\n"
 
-    result = await _tools(_REPO_METRIC, turn)[WRITE_FILE_TOOL].acall(path="optimize.toml", text=toml_text)
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=toml_text
+    )
 
-    assert result["wizard_state"] == {"optimize_toml": toml_text}
+    assert result["wizard_state"] == {"workspace_base": _HEAD, "optimize_toml": toml_text}
     error = result["optimize_toml_error"]
     assert (error["section"], error["key"]) == ("run", "entry")
     assert "[run] entry is missing" in error["message"]
@@ -657,6 +668,77 @@ async def test_edit_replaces_one_exact_part_of_the_current_file() -> None:
     assert no_old["error"].startswith("Empty old_text")
     assert blank["error"].startswith("The edit leaves the file empty")
     assert turn.wizard_patch == {"metric_code": edited}
+
+
+_NO_RULES_TOML = OPTIMIZE_TOML_EXAMPLE.replace('instructions = "docs/intent.md"\n', "").replace(
+    'illegal = "docs/rules.md"\n', ""
+)
+
+
+@pytest.mark.asyncio
+async def test_write_and_edit_refuse_an_optimize_toml_that_drops_the_intent_or_rules_file() -> None:
+    """A write or edit that stops naming the intent or rules file is refused by name, and the draft keeps it (SKY-794)."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}, turn)
+
+    written = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=_NO_RULES_TOML)
+    edited = await tools[EDIT_FILE_TOOL].acall(
+        path="optimize.toml", old_text='illegal = "docs/rules.md"\n', new_text=""
+    )
+
+    assert list(written) == ["error"]
+    assert "drops docs/intent.md, docs/rules.md" in written["error"]
+    assert list(edited) == ["error"]
+    assert "drops docs/rules.md," in edited["error"]
+    assert "docs/intent.md" not in edited["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_write_keeps_an_optimize_toml_that_still_names_the_intent_and_rules_file() -> None:
+    """A rewrite that keeps both references lands; a first optimize.toml with no references lands too."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}, turn)
+    kept = OPTIMIZE_TOML_EXAMPLE.replace("timeout = 300", "timeout = 120")
+
+    result = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=kept)
+    edited = await tools[EDIT_FILE_TOOL].acall(path="optimize.toml", old_text="target = 0.9", new_text="target = 0.8")
+    first = await _tools({**_REPO_METRIC, "optimize_toml": _VALID_TOML}, _TurnAuthoringFlag())[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_NO_RULES_TOML
+    )
+
+    assert result == {"wizard_state": {"optimize_toml": kept}}
+    assert edited == {"wizard_state": {"optimize_toml": kept.replace("target = 0.9", "target = 0.8")}}
+    assert first == {"wizard_state": {"optimize_toml": _NO_RULES_TOML}}
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_dropping_the_rules_file_that_the_repository_optimize_toml_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no draft optimize.toml yet, the write is checked against the repository's file."""
+    monkeypatch.setattr(
+        workspace_tools.github,
+        "tree_entries",
+        lambda token, full_name, branch: {
+            "entries": [{"path": "optimize.toml", "type": "file", "size": 10}],
+            "truncated": False,
+        },
+    )
+    monkeypatch.setattr(
+        repo_browser.github,
+        "read_text_file",
+        lambda token, full_name, branch, path, max_bytes: (OPTIMIZE_TOML_EXAMPLE, False),
+    )
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops docs/intent.md, docs/rules.md" in result["error"]
+    assert turn.wizard_patch == {}
 
 
 class _Spec:
