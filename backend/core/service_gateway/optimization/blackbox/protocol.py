@@ -13,7 +13,7 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -634,12 +634,16 @@ class RunCommand(Protocol):
 class PutFiles(Protocol):
     """Write files over a tree with no box."""
 
-    def __call__(self, files: Mapping[str, bytes], base_tree_id: str | None = None) -> str:
+    def __call__(
+        self, files: Mapping[str, bytes], base_tree_id: str | None = None, *, executables: Collection[str] = ()
+    ) -> str:
         """Write files over a base tree.
 
         Args:
             files: The file bytes by ``/``-separated path.
             base_tree_id: The tree to start from; ``None`` starts from an empty tree.
+            executables: The written paths to make executable; another written file keeps an existing
+                executable mode.
 
         Returns:
             The new tree id.
@@ -671,12 +675,13 @@ class ReadFile(Protocol):
 class ListFiles(Protocol):
     """List the files under one folder of a tree with no box."""
 
-    def __call__(self, tree_id: str, path: str = "") -> list[str] | None:
+    def __call__(self, tree_id: str, path: str = "", *, executable: bool = False) -> list[str] | None:
         """List the files below a folder.
 
         Args:
             tree_id: The tree.
             path: The ``/``-separated folder; ``""`` is the tree's root.
+            executable: List only the executables.
 
         Returns:
             The sorted file paths, or ``None`` when the folder is missing or hidden.
