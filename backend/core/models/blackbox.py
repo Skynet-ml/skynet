@@ -113,12 +113,6 @@ BLACKBOX_REPO_ENGINES = frozenset(
         BLACKBOX_ENGINE_SHINKA_EVOLVE,
     }
 )
-# Engines that cannot use the contract file's [proposer] entry: ShinkaEvolve
-# never runs it (SKY-753). AutoResearch and Meta-Harness run it only on the
-# worker's engine loop (SKY-816), which takes single runs with a LOOP_ROUTES row.
-FILE_PROPOSER_REFUSED_ENGINES = frozenset(
-    {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
-)
 # Single-mode engines that honor an explicit iteration cap.
 BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
     {BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}

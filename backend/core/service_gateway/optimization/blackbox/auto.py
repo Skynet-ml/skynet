@@ -20,7 +20,7 @@ from gepa.oa.task import Task as UpstreamTask
 from ....billing.usage_tags import LANE_KEY, usage_scope
 from ....constants import PROGRESS_LANE_COMPLETED, PROGRESS_LANE_HANDOFF, PROGRESS_LANE_STARTED
 from ....exceptions import ServiceError
-from ....models.blackbox import FILE_PROPOSER_REFUSED_ENGINES, BlackboxStrategy
+from ....models.blackbox import BlackboxStrategy
 from ....worker.engine_loop import StepDivergedError
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
@@ -368,11 +368,8 @@ def run_strategy(
 
     if not task.str_mode:
         raise ServiceError("The upstream Auto recipe requires a text starting point; use GEPA for named parts.")
-    # A run that uses the repository's [proposer] entry leaves out the lanes
-    # of the engines that cannot use that command here. Auto never runs on the
-    # engine loop, where AutoResearch and Meta-Harness run it (SKY-753, SKY-816).
-    file_proposer = bool(ctx.native_options is not None and (ctx.native_options.repo or {}).get("file_proposer"))
-    engines = tuple(name for name in AUTO_ENGINES if not (file_proposer and name in FILE_PROPOSER_REFUSED_ENGINES))
+    # Repository staging refuses an Auto run with the file's [proposer] entry (SKY-728), so every lane runs.
+    engines = AUTO_ENGINES
     for name in engines:
         get_engine(name, caps)
     lane_count = len(engines)
