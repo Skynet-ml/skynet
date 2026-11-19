@@ -58,7 +58,13 @@ from ..service_gateway.optimization.blackbox.protocol import (
     tool_calls_from_openai,
 )
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
-from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, unpack_tree, version_patch
+from ..service_gateway.optimization.blackbox.repo_tree import (
+    BASE_REF,
+    REPO_SNAPSHOT_KEY,
+    _git,
+    unpack_tree,
+    version_patch,
+)
 from ..service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS, side_info_json_default
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime, SandboxSpec
 from ..service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
@@ -324,6 +330,10 @@ def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: st
                 entry.unlink()
         with tarfile.open(fileobj=BytesIO(tree_to_tar(trees, run_id, candidate_tree))) as archive:
             archive.extractall(checkout, filter="data")
+        # Both tars carry the same mtime, and Linux reuses the freed inode, so a
+        # same-size edit keeps the stat that git cached and ``git add`` skips it
+        # (SKY-843). An index read from the tree has no stat, so git hashes each file.
+        _git(["read-tree", BASE_REF], checkout)
         return version_patch(checkout)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
