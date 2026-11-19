@@ -175,6 +175,12 @@ _PLANNED_ROUNDS = 6
 NAMED_PREFIX = "score:"
 # Once a round spends its allowance the agent still gets time to write up the notebook.
 _WRITE_UP_GRACE_SECONDS = 90
+# The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
+# is refused before it is read. A pending list of a few candidates is far smaller than its cap.
+MAX_PENDING_BYTES = 1024 * 1024
+MAX_CANDIDATE_BYTES = repo_tree.MAX_PATCH_BYTES
+CANDIDATE_MISSING = "candidate file must exist under agents/"
+CANDIDATE_TOO_LARGE = "candidate file is larger than a version may be"
 
 # With no example ids the call is a full evaluation over the whole visible pool,
 # which is what the server logs as progress; with ids it is a probe. HTTP 429
@@ -969,7 +975,15 @@ def pareto_front(table: dict[str, dict[str, float]], ranking: dict[str, float]) 
     """
 
     def dominates(a: dict[str, float], b: dict[str, float]) -> bool:
-        """Tell whether ``a`` is at least as good as ``b`` everywhere and better somewhere."""
+        """Tell whether ``a`` is at least as good as ``b`` everywhere and better somewhere.
+
+        Args:
+            a: The first candidate's score columns.
+            b: The second candidate's score columns.
+
+        Returns:
+            ``True`` when ``a`` dominates ``b``.
+        """
         return all(a.get(k, 0.0) >= b[k] for k in b) and any(a.get(k, 0.0) > b[k] for k in b)
 
     front = [c for c, row in table.items() if not any(dominates(other, row) for d, other in table.items() if d != c)]
@@ -1166,7 +1180,16 @@ class AutoResearchEngine:
             original = server.evaluate_examples
 
             def evaluate_examples(candidate: str, example_ids: Any = None, split: Any = None) -> Any:
-                """Score through the server, then log the per-example answer."""
+                """Score through the server, then log the per-example answer.
+
+                Args:
+                    candidate: The candidate text.
+                    example_ids: The examples to score; all of them when ``None``.
+                    split: The dataset split.
+
+                Returns:
+                    The server's score and side information.
+                """
                 self._refuse_blocked(candidate)
                 score, info = original(candidate, example_ids=example_ids, split=split)
                 scores = {str(k): float(v) for k, v in (info.get("scores") or {}).items()}
@@ -1188,7 +1211,16 @@ class AutoResearchEngine:
         original_single = server.evaluate
 
         def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> Any:
-            """Score through the server, then log the whole-candidate answer."""
+            """Score through the server, then log the whole-candidate answer.
+
+            Args:
+                candidate: The candidate text.
+                example: The example to score.
+                **kwargs: Other server arguments.
+
+            Returns:
+                The server's score and side information.
+            """
             self._refuse_blocked(candidate)
             score, info = original_single(candidate, example, **kwargs)
             # Upstream checkpoints only dataset sweeps; without one the run
@@ -1677,7 +1709,11 @@ class AutoResearchEngine:
         spent_at: float | None = None
 
         def should_kill() -> bool:
-            """End a session that stalled or overran its allowance by more than the write-up grace."""
+            """End a session that stalled or overran its allowance by more than the write-up grace.
+
+            Returns:
+                ``True`` when the session must end.
+            """
             nonlocal last_used, last_progress, spent_at
             now = time.monotonic()
             if server.budget.used != last_used:
@@ -1775,6 +1811,9 @@ class MetaHarnessEngine:
     """
 
     name = "meta_harness"
+    # The worker host (SKY-722) turns this off: its workspace is a tree, and a
+    # clock value in it would change the tree ids that a resume replays.
+    record_timing = True
 
     def __init__(self, config: OptimizeAnythingConfig) -> None:
         """Pop the engine knobs from the shared config.
@@ -2125,19 +2164,8 @@ class MetaHarnessEngine:
             frontier=best[1] if best else None,
         )
         pending = self.logs_dir / "pending_eval.json"
-        pending.unlink(missing_ok=True)
         started = time.monotonic()
-        outcome = run_proposer(
-            self._task_prompt(iteration),
-            work_dir=self.work_dir,
-            log_dir=self.logs_dir / "claude_sessions",
-            name=f"iter{iteration}",
-            model=self.model,
-            session_id=str(uuid.uuid4()),
-            max_budget_usd=remaining_cost,
-            tools=META_HARNESS_TOOLS,
-            append_system_prompt=self.skill(),
-        )
+        outcome = self._propose(iteration, remaining_cost)
         propose_seconds = time.monotonic() - started
         self.cost_usd += outcome.cost_usd
         self.session_ids.append(outcome.session_id)
@@ -2183,11 +2211,12 @@ class MetaHarnessEngine:
             if "components" in spec:
                 row["components"] = spec["components"]
             rows.append(row)
-        rows[0]["timing_s"] = {
-            "propose": round(propose_seconds, 1),
-            "bench": round(time.monotonic() - bench_started, 1),
-            "wall": round(time.monotonic() - started, 1),
-        }
+        if self.record_timing:
+            rows[0]["timing_s"] = {
+                "propose": round(propose_seconds, 1),
+                "bench": round(time.monotonic() - bench_started, 1),
+                "wall": round(time.monotonic() - started, 1),
+            }
         with (self.logs_dir / "evolution_summary.jsonl").open("a", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
@@ -2203,6 +2232,32 @@ class MetaHarnessEngine:
             candidates=len(rows),
             improved=improved,
             best=new_best[1] if new_best else None,
+        )
+
+    def _propose(self, iteration: int, remaining_cost: float | None) -> ProposerOutcome:
+        """Run one proposer session over the work folder, which leaves ``pending_eval.json`` behind.
+
+        The worker host (SKY-722) replaces this session with its own tool loop;
+        the rest of the iteration stays the same.
+
+        Args:
+            iteration: One-based iteration number.
+            remaining_cost: Proposer spend still allowed, or ``None``.
+
+        Returns:
+            The session's outcome.
+        """
+        (self.logs_dir / "pending_eval.json").unlink(missing_ok=True)
+        return run_proposer(
+            self._task_prompt(iteration),
+            work_dir=self.work_dir,
+            log_dir=self.logs_dir / "claude_sessions",
+            name=f"iter{iteration}",
+            model=self.model,
+            session_id=str(uuid.uuid4()),
+            max_budget_usd=remaining_cost,
+            tools=META_HARNESS_TOOLS,
+            append_system_prompt=self.skill(),
         )
 
     def _log_save_blocks(self) -> None:
@@ -2229,8 +2284,11 @@ class MetaHarnessEngine:
             At most ``candidates_per_iter`` candidate specs; empty when absent or malformed.
         """
         try:
+            if pending.stat().st_size > MAX_PENDING_BYTES:
+                return []
             document = json.loads(pending.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Deeply nested JSON makes the parser raise RecursionError, which would end the run.
+        except (OSError, ValueError, RecursionError):
             return []
         candidates = document.get("candidates") if isinstance(document, dict) else None
         if not isinstance(candidates, list):
@@ -2254,10 +2312,20 @@ class MetaHarnessEngine:
         file = spec.get("file")
         if not isinstance(file, str):
             return "missing file"
-        path = (self.work_dir / file).resolve()
+        # ``resolve`` raises ValueError on a null byte, which would end the run.
+        if "\0" in file:
+            return "invalid candidate file"
         agents = (self.work_dir / "agents").resolve()
-        if not path.is_relative_to(agents) or not path.is_file():
-            return "candidate file must exist under agents/"
+        # An over-long name makes ``is_file`` raise "File name too long", and before Python 3.13 a symlink loop
+        # makes ``resolve`` raise RuntimeError. Either would end the run.
+        try:
+            path = (self.work_dir / file).resolve()
+            if not path.is_relative_to(agents) or not path.is_file():
+                return CANDIDATE_MISSING
+            if path.stat().st_size > MAX_CANDIDATE_BYTES:
+                return CANDIDATE_TOO_LARGE
+        except (OSError, RuntimeError):
+            return CANDIDATE_MISSING
         if self.repo and path.suffix != self.suffix:
             return "candidate file must be a patch saved by save.sh"
         try:
@@ -2267,8 +2335,6 @@ class MetaHarnessEngine:
         if not text.strip():
             return "candidate file is empty"
         if self.repo:
-            if len(text.encode("utf-8")) > repo_tree.MAX_PATCH_BYTES:
-                return "patch is larger than a version may be"
             refusal = blocked_patch(self.repo, text)
             if refusal:
                 return refusal
@@ -2541,7 +2607,15 @@ class GepaRepoEngine:
         )
 
         def evaluate(candidate: Any, example: Any = None) -> tuple[float, Any]:
-            """Score through the server, named scores reshaped for GEPA's objective frontier."""
+            """Score through the server, named scores reshaped for GEPA's objective frontier.
+
+            Args:
+                candidate: The candidate.
+                example: The example to score.
+
+            Returns:
+                The score and the reshaped side information.
+            """
             score, info = server.evaluate(candidate, example)
             return score, gepa_named_scores(info)
 
