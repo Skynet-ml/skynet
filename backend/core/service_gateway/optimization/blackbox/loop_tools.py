@@ -4,6 +4,10 @@ Meta-Harness (SKY-722) and AutoResearch (SKY-725) run their proposer sessions as
 tool loops on the engine context. Both use the budget view, the proposer
 refusal, the command run, the model retry, the output cut and the prompt byte
 measure here. Both bound the prompt in UTF-8 bytes, as SKY-722 decided.
+
+In a repository run (SKY-825), a version is a tree. A session starts on the
+parent version's tree with the engine's lab folder over it, and the tree it
+leaves, without the lab folder, is the new version. The lab helpers are here.
 """
 
 from __future__ import annotations
@@ -441,3 +445,76 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str) -> None:
             f"{engine} in the worker engine loop runs only its built-in proposer, so it cannot apply these "
             f"settings: {', '.join(refused)}. Remove them, or choose another engine."
         )
+
+
+def repo_seed_tree(ctx: EngineContext, lab: str, engine: str) -> str:
+    """Return the visible seed tree of a repository run, when the engine's lab folder is free in it.
+
+    The engine removes the lab folder from each session's tree to get the version, so a repository entry there would
+    be lost from every version. The tree reads skip a symlink and a folder of hidden paths, so one box command checks
+    for an entry of any type.
+
+    Args:
+        ctx: The engine context, with its ``repo_seed`` and its command call.
+        lab: The lab folder, relative to the repository root.
+        engine: The engine's display name, for the message.
+
+    Returns:
+        The seed tree id.
+
+    Raises:
+        ServiceError: When the seed tree holds an entry of any type at the lab path, or the check timed out.
+    """
+    assert ctx.repo_seed is not None
+    assert ctx.run_command is not None
+    seed = ctx.repo_seed.tree_id
+    # ``test -e`` follows a link, so a link to a missing target needs ``test -L``.
+    result, _ = ctx.run_command(seed, f"test ! -e {lab} && test ! -L {lab}", ())
+    # A timed-out check says nothing about the repository, so it must not blame the repository's files.
+    if result.timed_out:
+        raise ServiceError(f"{engine} could not check the repository for a `{lab}/` path: the check timed out.")
+    if result.exit_code != 0:
+        raise ServiceError(f"{engine} keeps its lab in `{lab}/`, so the repository must not have that path.")
+    return seed
+
+
+def put_lab(ctx: EngineContext, parent: str, lab: str, files: Mapping[str, bytes]) -> str:
+    """Write the engine's lab files under the lab folder over a version's tree, for one proposer session.
+
+    Args:
+        ctx: The engine context, with its tree write.
+        parent: The tree of the version that the session starts from.
+        lab: The lab folder, relative to the repository root.
+        files: The lab file bytes, keyed by path inside the lab folder.
+
+    Returns:
+        The session's first tree.
+    """
+    assert ctx.put_files is not None
+    return ctx.put_files({f"{lab}/{path}": data for path, data in files.items()}, parent)
+
+
+def drop_lab(ctx: EngineContext, start: str, tree: str, parent: str, lab: str) -> str | None:
+    """Return the version that a proposer session left: its last tree without the lab folder.
+
+    A tree write cannot delete a file, so one ``rm`` command in a box removes the folder. A session that ran no
+    command left the parent unchanged, so it needs no box.
+
+    Args:
+        ctx: The engine context, with its command call.
+        start: The session's first tree, the parent with the lab.
+        tree: The session's last tree.
+        parent: The tree of the version that the session started from.
+        lab: The lab folder, relative to the repository root.
+
+    Returns:
+        The version's tree id, or ``None`` when the box could not remove the lab, so the session left no version.
+    """
+    assert ctx.run_command is not None
+    if tree == start:
+        return parent
+    try:
+        result, version = ctx.run_command(tree, f"rm -rf {lab}", ())
+    except (TreeRejectedError, BoxFailureError):
+        return None
+    return version if result.exit_code == 0 and not result.timed_out else None

@@ -13,6 +13,12 @@ upstream HTTP handler does. The lab is a tree that the engine builds again from
 its local files before each round, so the frontier can lose a file. After a
 round, only the agent's ``work/`` and ``notebook.md`` come back from the tree.
 
+In a repository run (SKY-825), a version is a tree. Each round's session works
+on the leader's tree, or the seed's in the first round, with the lab under
+``.autoresearch/``. The tree that the session leaves, without the lab, is the
+round's version, and the engine gives it a full evaluation. The agent has only
+the bash tool, since the engine scores the version.
+
 The session watchdogs count model turns and tool calls, not seconds, so a
 resume stops a session at the same place. A run outside the worker engine loop
 still uses the native box runtime until the SKY-728 cutover; the loop path
@@ -28,7 +34,7 @@ import math
 import os
 import posixpath
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -69,6 +75,17 @@ BASH_TOOL = {
         "properties": {"command": {"type": "string", "description": "The shell command."}},
         "required": ["command"],
     },
+}
+
+REPO_BASH_TOOL = {
+    "name": "bash",
+    "description": (
+        "Run one shell command in the repository, with no network. Each command starts in the repository root, in a "
+        "fresh box: files persist between commands, but the shell state and /tmp do not. The repository files you "
+        "leave are this round's version; only `.autoresearch/notebook.md` of the lab carries over to the next "
+        "round. Returns the exit code, stdout, stderr and whether the command timed out."
+    ),
+    "input_schema": BASH_TOOL["input_schema"],
 }
 
 EVALUATE_TOOL = {
@@ -117,6 +134,10 @@ _MAX_CARRY_NAME_BYTES = 255
 _ECHO_CHARS = 200
 # The marker file that stands for an empty lab folder in the tree.
 _KEEP = ".keep"
+# The lab folder of a repository run, relative to the repository root.
+_REPO_LAB = ".autoresearch"
+# The lab files that a repository run's session gets: the archive and the frontier hold tree ids, not code.
+_REPO_LAB_FILES = ("TASK.md", "BRIEF.md", "STATE.md", "notebook.md")
 
 logger = logging.getLogger(__name__)
 
@@ -329,7 +350,8 @@ class _UpstreamServer:
         if candidate is not None:
             entry["candidate_id"] = self._register(candidate)
         self._progress_log.append(entry)
-        if isinstance(candidate, str) and math.isfinite(val_score):
+        # A version with a metric error on every case has no finite mean, but it still shows, with no score.
+        if isinstance(candidate, str) and (math.isfinite(val_score) or self.crashed(candidate)):
             sweep = self._sweeps.pop(candidate_key(candidate), [])
             # A version with a crashed case shows no score (SKY-350, SKY-367).
             shown = None if self.crashed(candidate) else val_score
@@ -402,9 +424,13 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             if self.max_no_eval_seconds is None
             else max(1, math.ceil(self.max_no_eval_seconds / _SECONDS_PER_TURN))
         )
+        # The native ``repo`` mode needs a git checkout and ``eval.sh``, so a repository run keeps it off and works
+        # on trees. Its versions are tree ids: the seed's, then the tree that each session leaves.
+        self._repo = ctx.repo_seed
+        self._swept: set[str] = set()
 
     def _layout(self, task: UpstreamTask, server: Any) -> None:
-        """Create the native lab, without ``eval.sh``: the ``evaluate`` tool takes its place.
+        """Create the native lab, without ``eval.sh``: the ``evaluate`` tool or the engine scores each version.
 
         Args:
             task: The upstream task.
@@ -412,13 +438,21 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         """
         super()._layout(task, server)
         (self.work_dir / "eval.sh").unlink()
+        if self._repo is not None:
+            rules = native_engines.repo_rules(
+                {"editable_paths": self._repo.editable_paths or (".",), "readonly_paths": self._repo.readonly_paths}
+            )
+            with (self.work_dir / "TASK.md").open("a", encoding="utf-8") as brief:
+                brief.write(rules)
 
     def _brief(self) -> str:
-        """Return the native brief, with the ``evaluate`` tool in place of ``eval.sh``.
+        """Return the native brief, with the ``evaluate`` tool in place of ``eval.sh``, or the repository brief.
 
         Returns:
             The ``BRIEF.md`` text.
         """
+        if self._repo is not None:
+            return self._tree_brief()
         edits: list[tuple[str, ...]] = [
             ("`STATE.md`, `eval.sh`, `frontier/`", "`STATE.md`, `frontier/`"),
             (
@@ -457,6 +491,143 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             )
         return native_engines.adapt(super()._brief(), edits)
 
+    def _tree_brief(self) -> str:
+        """Write the standing research method of a repository run, where the engine scores each round's version.
+
+        Returns:
+            The ``BRIEF.md`` text.
+        """
+        full = (
+            "one unit per visible example (see `TASK.md`)"
+            if self.example_ids
+            else "one unit, since the evaluator scores the repository as a whole"
+        )
+        return (
+            "# Research brief\n\n"
+            "You are running one round of a multi-round research effort to improve a code repository against a "
+            "fixed evaluator. `TASK.md` says what the change is for, how it is judged and which paths you may "
+            "edit. Higher scores are better.\n\n"
+            "## Files\n\n"
+            "- The working directory is the repository at the version this round starts from: the leader of the "
+            "leaderboard, or the starting version in the first round. Edit its files in place.\n"
+            f"- `{_REPO_LAB}/` is the lab. `TASK.md`, `BRIEF.md` and `STATE.md` there are maintained by the engine. "
+            "Read them; never edit them.\n"
+            "- `STATE.md` is rewritten before every round: the leaderboard, the failure dossier, this round's "
+            "**directive** and the evaluations left.\n"
+            f"- `{_REPO_LAB}/notebook.md` is yours and is the only memory that survives between rounds. Later "
+            "rounds, possibly a different session of you, depend on it.\n\n"
+            "## Evaluating\n\n"
+            f"- You cannot run the evaluator. When the session ends, the engine removes `{_REPO_LAB}/` and gives "
+            f"the repository files you leave a full evaluation, which costs {full}. They are this round's "
+            "version.\n"
+            "- A round that leaves the repository as it started gets no evaluation, and the run stops.\n"
+            "- The evaluator runs the repository's setup and then the scorer in another sandbox. This sandbox is "
+            "offline, so local builds and tests may lack dependencies.\n"
+            "- Change only the editable paths in `TASK.md`.\n\n"
+            "## Method for a round\n\n"
+            "1. **Orient.** Read `STATE.md`, then `notebook.md`. Do not rerun a hypothesis the notebook already "
+            "refuted unless you have a new reason, and say what the reason is.\n"
+            "2. **Diagnose.** Study the failure dossier and the evaluator feedback, and read the code it points "
+            "to. Name concrete failure modes, each tied to the examples that show it.\n"
+            "3. **Hypothesize.** Under a `## Round N` heading in `notebook.md`, write two to four falsifiable "
+            "hypotheses. For each: the change, why it should help, and which examples it should move.\n"
+            "4. **Change.** Make the change of the most promising hypothesis in the repository, and check it as "
+            "far as this sandbox allows.\n"
+            "5. **Record.** Write in `notebook.md` what you changed and what you expect it to move. The next "
+            "round's `STATE.md` has the result.\n\n"
+            "## Standards\n\n"
+            "- Follow the round's directive in `STATE.md`; it is chosen from the evidence of earlier rounds.\n"
+            "- Keep the repository working. The final result is measured afresh, so a change that only helps "
+            "because it special-cases an example, or weakens the checks that judge it, is not an improvement.\n"
+            "- Between two versions with the same score, the smaller diff is better. A change that deletes code "
+            "and keeps the score is a win.\n"
+            "- There is no human to ask. End the session when the change is ready; the engine starts the next "
+            "round with fresh evidence.\n"
+        )
+
+    def _partner(self) -> tuple[str, list[str]] | None:
+        """Find the frontier version that most complements the leader, in a text run only.
+
+        A repository session sees only the leader's tree, so it cannot graft another version into it: a repository
+        run never gets the ``combine`` directive.
+
+        Returns:
+            ``(candidate, examples it beats the leader on)``, or ``None``.
+        """
+        return None if self._repo is not None else super()._partner()
+
+    def _directive_text(self, directive: str, table: dict[str, dict[str, float]], front: list[str]) -> str:
+        """Spell out what this round should do, for a session that changes the leader's tree once.
+
+        Args:
+            directive: The chosen directive.
+            table: Per-example scores of fully evaluated versions.
+            front: Current frontier, leader first.
+
+        Returns:
+            Markdown for the directive section.
+        """
+        if self._repo is None:
+            return super()._directive_text(directive, table, front)
+        leader = f"`{self._ids[front[0]]}`" if front else "the starting version"
+        if directive == "survey":
+            return (
+                "**Survey.** The engine gave the starting version a full evaluation as the baseline. Map the failure "
+                "modes across examples and make the most promising change."
+            )
+        if directive == "exploit":
+            return (
+                f"**Exploit.** The last round raised the leader to {leader}, which this round starts from. Push "
+                "further along the direction that worked."
+            )
+        if directive == "pivot":
+            return (
+                f"**Pivot.** The last rounds did not beat {leader}: small edits have stalled. Take a different "
+                "approach in the code. Keep what the notebook confirmed and drop what it refuted."
+            )
+        return (
+            f"**Explore.** The last round did not beat {leader}, which this round starts from again. Aim a new "
+            "hypothesis at the hard examples in the failure dossier, which no version handles well yet."
+        )
+
+    def _write_state(self, server: Any, directive: str) -> None:
+        """Refresh ``STATE.md`` and ``frontier/``, with the budget line of a repository run where the engine scores.
+
+        A repository session cannot run the evaluator, so a round quota of evaluation units would mislead it.
+
+        Args:
+            server: Evaluation server with the budget state.
+            directive: This round's directive.
+        """
+        super()._write_state(server, directive)
+        remaining = server.budget.remaining
+        if self._repo is None or remaining is None:
+            return
+        state = self.work_dir / "STATE.md"
+        line = f"- The engine gives this round's version one full evaluation, of the {remaining} evaluation units left."
+        lines = [
+            line if text.startswith("- This round may spend ") else text
+            for text in state.read_text(encoding="utf-8").split("\n")
+        ]
+        state.write_text("\n".join(lines), encoding="utf-8")
+
+    def _round_prompt(self, directive: str) -> str:
+        """Write the prompt that starts one round's session, with the lab paths of a repository run.
+
+        Args:
+            directive: This round's directive.
+
+        Returns:
+            The prompt text.
+        """
+        if self._repo is None:
+            return super()._round_prompt(directive)
+        return (
+            f"This is round {self.round} ({directive}). The working directory is the repository. Read "
+            f"`{_REPO_LAB}/BRIEF.md`, then `{_REPO_LAB}/STATE.md`, then `{_REPO_LAB}/notebook.md`, and carry out "
+            f"the round as the brief describes. Record everything in `{_REPO_LAB}/notebook.md`."
+        )
+
     def _session(self, server: Any, directive: str, *, max_budget_usd: float | None) -> native_engines.ProposerOutcome:
         """Run one round's session as a tool loop: one step per model reply and per command.
 
@@ -466,6 +637,9 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         goes on to the native stop rules. Billed failed model calls that reach the cost cap end the session as out
         of budget. A model call that fails on every attempt after the session made a tool call ends only the
         session, as the prompt cap does; one before any tool call cannot come from tool output, so it is an error.
+
+        A repository session has only the bash tool and makes no evaluation, so the write-up grace and the
+        no-evaluation watchdog do not apply. The engine scores the version that the session leaves.
 
         Args:
             server: The upstream server adapter, with the engine's recording wrappers.
@@ -479,12 +653,35 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         assert ctx.put_files is not None
         assert ctx.call_model is not None
         start_used = server.budget.used
-        quota = self._round_quota(server)
-        files = self._lab_files()
-        # The local mode carries an agent's executable in ``work/`` to the next round, as the native lab does.
-        executables = [name for name in files if os.access(self.work_dir / name, os.X_OK)]
-        # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
-        tree = ctx.put_files(files, None, executables=executables)
+        if self._repo is None:
+            quota = self._round_quota(server)
+            tools = [BASH_TOOL, EVALUATE_TOOL]
+            misuse = "Call the bash tool with a command string, or the evaluate tool."
+            files = self._lab_files()
+            # The local mode carries an agent's executable in ``work/`` to the next round, as the native lab does.
+            executables = [name for name in files if os.access(self.work_dir / name, os.X_OK)]
+            # A tree write cannot delete a file, so each round starts from a new tree: the frontier can shrink.
+            tree = ctx.put_files(files, None, executables=executables)
+        else:
+            parent = self._repo_parent(server)
+            if parent is None:
+                return native_engines.ProposerOutcome(
+                    session_id=f"round{self.round}",
+                    cost_usd=0.0,
+                    is_error=False,
+                    text="",
+                    budget_exhausted=True,
+                    killed=False,
+                )
+            quota = None
+            tools = [REPO_BASH_TOOL]
+            misuse = "Call the bash tool with a command string."
+            files = {
+                name: (self.work_dir / name).read_bytes()
+                for name in _REPO_LAB_FILES
+                if (self.work_dir / name).is_file()
+            }
+            tree = start = loop_tools.put_lab(ctx, parent, _REPO_LAB, files)
         messages: list[dict[str, Any]] = [{"role": "user", "content": self._round_prompt(directive)}]
         spent = Decimal(0)
         text = ""
@@ -506,7 +703,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             if server.budget.used != last_used:
                 last_used = server.budget.used
                 idle_turns = 0
-            if self._no_eval_turns is not None and idle_turns >= self._no_eval_turns:
+            if self._repo is None and self._no_eval_turns is not None and idle_turns >= self._no_eval_turns:
                 killed = True
                 break
             if quota is not None and server.budget.used - start_used >= quota:
@@ -519,9 +716,7 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             if loop_tools.messages_bytes(messages) > loop_tools.MAX_PROMPT_BYTES:
                 killed = True
                 break
-            reply, failed_cents = loop_tools.call_model(
-                ctx, messages, [BASH_TOOL, EVALUATE_TOOL], spent, max_budget_usd
-            )
+            reply, failed_cents = loop_tools.call_model(ctx, messages, tools, spent, max_budget_usd)
             spent += failed_cents
             if reply is None:
                 exhausted = True
@@ -554,16 +749,21 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 if tool_calls > self._max_tool_calls:
                     killed = True
                     break
-                if call.get("name") == EVALUATE_TOOL["name"]:
+                if self._repo is None and call.get("name") == EVALUATE_TOOL["name"]:
                     output = loop_tools.clip(self._evaluate(server, tree, call))
                 else:
-                    output, tree = loop_tools.run_bash(
-                        ctx, tree, call, misuse="Call the bash tool with a command string, or the evaluate tool."
-                    )
+                    output, tree = loop_tools.run_bash(ctx, tree, call, misuse=misuse)
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": output})
             if killed:
                 break
-        self._pull(tree)
+        if self._repo is None:
+            self._pull(tree)
+        else:
+            self._pull_notebook(tree)
+            version = loop_tools.drop_lab(ctx, start, tree, parent, _REPO_LAB)
+            # A version that was scored before gets no second sweep, so the round spends nothing and the run stops.
+            if version is not None and version not in self._swept:
+                exhausted = not self._sweep(server, version) or exhausted
         return native_engines.ProposerOutcome(
             session_id=f"round{self.round}",
             cost_usd=float(spent) / 100,
@@ -660,6 +860,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         try:
             if not server.task.has_dataset:
                 score, info = server.evaluate(candidate)
+                # The engine's wrapper logs a checkpoint only for a finite score, so a metric-error candidate still
+                # shows here, with no score, as a repository version does in ``_sweep``.
+                if not math.isfinite(score):
+                    server.log_progress(score, candidate=candidate)
                 body: dict[str, Any] = {"score": score, "info": info}
             else:
                 visible = set(self.example_ids)
@@ -731,6 +935,85 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
                 local.write_bytes(content)
                 local.chmod(0o755 if path in executables else 0o644)
 
+    def _record(self, server: Any) -> Callable[[], None]:
+        """Wrap the scoring entry points as the native engine does, then sweep the seed of a repository run.
+
+        The seed's score must be in the evidence before round one reads the leader's score: else a round one whose
+        version fails would count as a raise of the leader, and round two would get the ``exploit`` directive.
+
+        Args:
+            server: The upstream server adapter.
+
+        Returns:
+            A function that removes the wrappers.
+        """
+        restore = super()._record(server)
+        if self._repo is not None:
+            # A seed sweep that the budget refused leaves less budget than a sweep, so ``_repo_parent`` stops round one.
+            self._sweep(server, self._repo.tree_id)
+        return restore
+
+    def _repo_parent(self, server: Any) -> str | None:
+        """Pick the tree that a repository round starts from: the best frontier version, or the seed.
+
+        Args:
+            server: The upstream server adapter, with the engine's recording wrappers.
+
+        Returns:
+            The parent's tree id, or ``None`` when the budget cannot score the round's version.
+        """
+        assert self._repo is not None
+        # A session that the budget cannot score would pay for a version that never counts.
+        if server.budget.remaining < max(1, len(self.example_ids)):
+            return None
+        front = native_engines.pareto_front(self._table(), self._ranking())
+        return front[0] if front else self._repo.tree_id
+
+    def _sweep(self, server: Any, tree: str) -> bool:
+        """Give a repository version a full evaluation, as a full ``evaluate`` call does in a text run.
+
+        A version is swept once, also when its sweep fails, so a round that leaves it again spends nothing.
+
+        Args:
+            server: The upstream server adapter, with the engine's recording wrappers.
+            tree: The version's tree id.
+
+        Returns:
+            ``False`` when the budget could not score the version.
+        """
+        self._swept.add(tree)
+        try:
+            if not server.task.has_dataset:
+                # The engine's wrapper logs a checkpoint only for a finite score, so a metric-error version still
+                # shows here, with no score.
+                score, _ = server.evaluate(tree)
+                if not math.isfinite(score):
+                    server.log_progress(score, candidate=tree)
+            else:
+                average, _ = server.evaluate_examples(tree, example_ids=list(self.example_ids))
+                server.log_progress(average, candidate=tree)
+        except BudgetExhausted:
+            return False
+        return True
+
+    def _pull_notebook(self, tree: str) -> None:
+        """Copy the agent's notebook of a repository session into the local lab.
+
+        Args:
+            tree: The tree after the session.
+        """
+        assert self._ctx.read_file is not None
+        try:
+            content = self._ctx.read_file(tree, f"{_REPO_LAB}/notebook.md", native_engines.MAX_CANDIDATE_BYTES)
+        except FileTooLargeError:
+            content = None
+        notebook = self.work_dir / "notebook.md"
+        if content is None:
+            # A deleted or oversize notebook must not come back from an earlier round.
+            notebook.unlink(missing_ok=True)
+        else:
+            notebook.write_bytes(content)
+
 
 class AutoResearchEngine:
     """Run the round-based AutoResearch loop in the worker engine loop."""
@@ -750,25 +1033,36 @@ class AutoResearchEngine:
             The best server-verified candidate and the loop's evidence.
 
         Raises:
-            ServiceError: When a worker-loop run is on a repository, has a proposer setting that the tool loop does
-                not run, would expose the metric source, or the candidate is not one text.
-            BudgetExhaustedError: When no scorer call is left.
+            ServiceError: When a worker-loop run has a proposer setting that the tool loop does not run, would
+                expose the metric source, or the candidate is not one text; or when a repository has a file at the
+                lab path.
+            BudgetExhaustedError: When no scorer call is left, or a repository run cannot score its seed.
         """
         if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files):
             # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
             return run_native_engine(self.name, task, server, ctx)
-        if ctx.repo_seed is not None:
-            raise ServiceError("AutoResearch cannot run on a repository in the worker engine loop yet.")
         options = ctx.native_options
         if options is not None:
             # Until SKY-816, the tool loop is the only proposer, so a setting that it would drop fails the run.
             loop_tools.refuse_unsupported_proposer(options, "AutoResearch")
-        if not task.str_mode:
+        # A repository run's candidate is a tree id, so its seed is the visible seed tree.
+        seed_tree = None if ctx.repo_seed is None else loop_tools.repo_seed_tree(ctx, _REPO_LAB, "AutoResearch")
+        if seed_tree is None and not task.str_mode:
             raise ServiceError("Native agent engines require a single text candidate.")
+        payload = native_task_payload(self.name, task)
         # The native runtime checks the same document before it writes it into the box.
-        assert_metric_absent(json.dumps(native_task_payload(self.name, task), default=side_info_json_default), task)
+        assert_metric_absent(json.dumps(payload, default=side_info_json_default), task)
+        if seed_tree is not None:
+            payload["seed_candidate"] = seed_tree
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
+        # A repository session has no ``evaluate`` tool, so a seed that the budget cannot sweep leaves no score.
+        sweep = max(1, len(task.cases))
+        if seed_tree is not None and server.remaining < sweep:
+            raise BudgetExhaustedError(
+                f"A repository run needs {sweep} evaluation units to score the seed, "
+                f"but only {server.remaining} are left."
+            )
         proposer = options.proposer if options is not None else BlackboxProposer()
         engine_config: dict[str, Any] = {
             "model": options.model if options else "",
@@ -787,7 +1081,7 @@ class AutoResearchEngine:
         )
         adapter = _UpstreamServer(server, task, ctx)
         upstream = _WorkerAutoResearch(config, ctx, max_tool_calls=proposer.max_tool_calls).run(
-            UpstreamTask(**native_task_payload(self.name, task)), adapter
+            UpstreamTask(**payload), adapter
         )
         # The incumbent always has a finite mean: the adapter keeps no non-finite best, and the ranking skips one.
         # A best version with a crashed case still has no score (SKY-350, SKY-367).
