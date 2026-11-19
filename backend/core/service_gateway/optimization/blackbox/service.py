@@ -594,9 +594,9 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
     Returns:
         Each name's mean score; its feedback verbatim with one case, else one
         ``Case n: ...`` line per case that has feedback, capped like any
-        feedback text. A case
-        that failed (its side info is an ``error``) counts as 0 on every name,
-        as it does in the total, so a failure never vanishes from the parts.
+        feedback text. A case that failed (its side info is an ``error``)
+        counts as 0 on every name, as it does in the total, so a failure never
+        vanishes from the parts.
     """
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for position, side_info in enumerate(side_infos, start=1):

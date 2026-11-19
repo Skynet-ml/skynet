@@ -498,8 +498,8 @@ def _returns_pair(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 def _gives_no_feedback(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Tell whether every ``return`` of ``function`` is a dict literal with no ``feedback`` key.
 
-    Any other return value, or a ``**`` unpacking, can hold feedback, so it
-    gives no note. Nested functions are not checked.
+    Any other return value, a ``**`` unpacking, or a key that is not a literal
+    can hold feedback, so it gives no note. Nested functions are not checked.
 
     Args:
         function: The scorer function node.
@@ -508,9 +508,11 @@ def _gives_no_feedback(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
         True when the function returns only dict literals and none names ``feedback``.
     """
     values = [node.value for node in _own_nodes(function) if isinstance(node, ast.Return)]
-    if not values or not all(isinstance(value, ast.Dict) and None not in value.keys for value in values):
+    if not values or not all(
+        isinstance(value, ast.Dict) and all(isinstance(key, ast.Constant) for key in value.keys) for value in values
+    ):
         return False
-    return not any(isinstance(key, ast.Constant) and key.value == "feedback" for value in values for key in value.keys)
+    return not any(key.value == "feedback" for value in values for key in value.keys)
 
 
 def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:

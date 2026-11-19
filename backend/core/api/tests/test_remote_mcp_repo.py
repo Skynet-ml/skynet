@@ -908,6 +908,7 @@ def test_an_object_without_feedback_is_a_note() -> None:
         ["{'score': 0.0}", "{'score': 1.0, 'feedback': 'ok'}"],
         ["{'score': 1.0, **extra}"],
         ["{'score': 0.0}", "result"],
+        ["{'score': 1.0, FEEDBACK: 'ok'}"],
     ],
 )
 def test_a_return_that_can_hold_feedback_gives_no_note(returns: list[str]) -> None:
