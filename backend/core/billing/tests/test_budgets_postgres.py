@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
@@ -18,7 +18,7 @@ from sqlalchemy import Engine, create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import CENT_SCALE, wallet_reserved_cents
-from core.billing.budgets import BudgetConflictError, BudgetInFlightError, BudgetService
+from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetConflictError, BudgetInFlightError, BudgetService
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
@@ -432,6 +432,99 @@ def test_crashed_lease_returns_its_untaken_slices_on_fence(database: Engine) -> 
             select(ExecutionOperationModel.state).order_by(ExecutionOperationModel.operation_key)
         ).all()
         assert states == ["settled", "released", "released", "released"]
+
+
+def _agent_lease(service: BudgetService, budget_id: str) -> str:
+    """Reserve and dispatch one run-phase agent lease slice of 10 cents, as a worker's agent does."""
+    (operation,) = service.reserve_lease(
+        budget_id,
+        "alice",
+        lease_key="agent",
+        slices=1,
+        generation=0,
+        phase="run",
+        cost_kind=AGENT_LEASE_COST_KIND,
+        request_fingerprint="agent",
+        price_snapshot={"version": "agent-lease-v1"},
+        max_cents=10,
+    )
+    service.mark_dispatched(operation.id, "alice")
+    return operation.id
+
+
+def test_fence_settles_a_dead_workers_lease_slice_on_postgres(database: Engine) -> None:
+    """End an open lease slice at its last settle and release the rest of its coverage (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=3, evidence={"step": 1}, final=False)
+    assert _budget_units(database, budget.id) == (7 * CENT_SCALE, 3 * CENT_SCALE)
+
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    assert _budget_units(database, budget.id) == (0, 3 * CENT_SCALE)
+    with Session(database) as session:
+        assert session.get(ExecutionOperationModel, lease).state == "settled"
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 47
+
+
+@pytest.mark.parametrize(
+    "zone", [UTC, timezone(timedelta(hours=-8))], ids=["checkpoint-in-utc", "checkpoint-in-another-zone"]
+)
+def test_lease_waiver_keeps_the_usage_that_settled_before_the_checkpoint_on_postgres(
+    database: Engine, zone: timezone
+) -> None:
+    """Credit only a lease's usage after the checkpoint, with aware times in any zone (SKY-829).
+
+    The session time zone is neither UTC nor the machine's zone, so a naive time on either side of the
+    ``created_at <= settled_after`` compare moves by hours and keeps the wrong record.
+    """
+    database.dispose()
+
+    @event.listens_for(database, "connect")
+    def set_zone(connection, record) -> None:
+        """Give every new session a zone that differs from UTC and from this machine's zone."""
+        with connection.cursor() as cursor:
+            cursor.execute("SET TIME ZONE 'Asia/Kolkata'")
+
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 40, idempotency_key="restart")
+    service.attach_to_job(budget.id, "alice", "restart-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="kept", actual_cents=2, evidence={"step": "kept"}, final=False)
+    checkpoint = datetime.now(UTC).astimezone(zone)
+    service.settle(lease, "alice", evidence_key="lost", actual_cents=5, evidence={"step": "lost"}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    waived = service.waive_interrupted_work(budget.id, "alice", generation=0, settled_after=checkpoint)
+
+    assert waived.billed_cents == 2
+    assert _budget_units(database, budget.id) == (0, 2 * CENT_SCALE)
+    with Session(database) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 48
+
+
+def test_a_fenced_lease_late_settle_keeps_evidence_and_bills_nothing_on_postgres(database: Engine) -> None:
+    """A fenced worker's late call is repeated by the resume, so its settle charges nothing (SKY-829)."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    service.attach_to_job(budget.id, "alice", "run-job", expected_revision=budget.revision)
+    lease = _agent_lease(service, budget.id)
+    service.settle(lease, "alice", evidence_key="step-1", actual_cents=2, evidence={"step": 1}, final=False)
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+
+    late = service.settle(lease, "alice", evidence_key="late", actual_cents=4, evidence={"step": 2}, final=True)
+
+    assert late.budget.billed_cents == 2
+    assert _budget_units(database, budget.id) == (0, 2 * CENT_SCALE)
+    with Session(database) as session:
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late")
+        ).one()
+        assert (evidence.actual_units, evidence.billed_cents, evidence.issue) == (4 * CENT_SCALE, 0, None)
+        assert session.get(ExecutionOperationModel, lease).actual_units == 2 * CENT_SCALE
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 48
 
 
 def test_parallel_duplicate_lease_reserves_once(database: Engine) -> None:
