@@ -31,7 +31,6 @@ class FakeJobStore:
         self._notified: set[str] = set()
         self.append_log_calls: list[dict[str, Any]] = []
         self.record_progress_calls: list[tuple[str, str | None, dict[str, Any]]] = []
-        self.agent_run_calls: list[tuple[str, str, Any]] = []
         self.requeue_calls: list[dict[str, Any]] = []
 
     def claim_completion_notification(self, optimization_id: str) -> bool:
@@ -212,22 +211,3 @@ class FakeJobStore:
         """
         self._progress.setdefault(optimization_id, []).append((message, metrics))
         self.record_progress_calls.append((optimization_id, message, metrics))
-
-    def save_agent_run(self, optimization_id: str, run: dict[str, Any]) -> None:
-        """Record a full agent run row for assertions.
-
-        Args:
-            optimization_id: ID of the job the run belongs to.
-            run: The run record.
-        """
-        self.agent_run_calls.append((optimization_id, "save", run))
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Record a transcript delta for assertions.
-
-        Args:
-            optimization_id: ID of the job the run belongs to.
-            run_id: The run's ordinal.
-            text: The transcript piece.
-        """
-        self.agent_run_calls.append((optimization_id, "append", (run_id, text)))

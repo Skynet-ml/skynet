@@ -470,3 +470,20 @@ def test_a_stored_text_or_agent_run_never_resumes(client: TestClient, store: _Ba
     resp = client.post(f"/optimizations/{oid}/resume")
     assert resp.status_code == 409
     assert "Every run now optimizes a repository" in resp.json()["detail"]
+
+
+def test_a_stored_run_with_no_target_reads_as_a_text_run_and_never_resumes(
+    client: TestClient, store: _BaseFakeJobStore
+) -> None:
+    """A stored payload with no target loads as text, so Resume refuses it (SKY-834)."""
+    payload = {
+        "candidate": "Answer briefly.",
+        "scorer": {"metric_code": "def score(candidate, case):\n    return 1.0\n"},
+        "reflection_model_config": {"name": "openai/gpt-4o-mini"},
+    }
+    store.seed_job("old_targetless", status="failed", username="alice", payload=payload)
+    store.save_gepa_checkpoint("old_targetless", b"GEPA-STATE", iteration=7)
+    assert not is_resumable(store, store.get_job("old_targetless"))
+    resp = client.post("/optimizations/old_targetless/resume")
+    assert resp.status_code == 409
+    assert "Every run now optimizes a repository" in resp.json()["detail"]

@@ -100,10 +100,6 @@ BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_CODE_PUPPY,
     BLACKBOX_HARNESS_CUSTOM,
 )
-# Engines that accept a multi-part (named files) starting point.
-BLACKBOX_MULTI_PART_ENGINES = frozenset(
-    {BLACKBOX_ENGINE_GEPA, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}
-)
 # Engines that can optimize a repository: each writes versions against a real
 # checkout (a coding agent's edits, or ShinkaEvolve's per-file bundles) and the
 # parent scores the resulting patch.
@@ -493,19 +489,27 @@ class BlackboxTarget(BaseModel):
     repo: BlackboxRepoSource | None = None
 
     @model_validator(mode="after")
-    def _ensure_agent_fields(self) -> BlackboxTarget:
+    def _ensure_agent_fields(self, info: ValidationInfo) -> BlackboxTarget:
         """Require what an agent or repository target needs to launch.
+
+        Args:
+            info: Validation info; its context marks a stored run's payload.
 
         Returns:
             The validated target instance.
 
         Raises:
             ValueError: When an agent target names no model or an unknown or
-                retired harness, a custom harness has no run command, or the
-                repository and target kind disagree.
+                retired harness, a custom harness has no run command, the
+                repository and target kind disagree, or a new repository
+                target names a model.
         """
         if (self.kind == BLACKBOX_TARGET_REPO) != (self.repo is not None):
             raise ValueError("A repository target needs a repo, and only a repository target takes one.")
+        # Only an agent target routed ``model`` (SKY-834); a stored row keeps whatever it saved.
+        stored = (info.context or {}).get(STORED_PAYLOAD_KEY)
+        if self.kind == BLACKBOX_TARGET_REPO and self.model is not None and not stored:
+            raise ValueError("A repository target takes no model. The proposer names the model it runs.")
         if self.kind != BLACKBOX_TARGET_AGENT:
             return self
         if not (self.model or "").strip():
@@ -1099,7 +1103,6 @@ class BlackboxEngineInfo(BaseModel):
     description: str
     available: bool
     unavailable_reason: str | None = None
-    supports_parts: bool = False
     checkpoint_recovery_supported: bool = False
     checkpoint_recovery_reason: str | None = None
 

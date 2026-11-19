@@ -16,6 +16,7 @@ from collections.abc import AsyncIterable, AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -34,6 +35,7 @@ from ...models import (
     OptimizationStatus,
     OptimizationSummaryResponse,
 )
+from ...models.blackbox import BLACKBOX_TARGET_REPO, STORED_PAYLOAD_CONTEXT, BlackboxRunRequest
 from ...models.results import result_scores
 from ...service_gateway.language_models import usage_by_model_from_history
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
@@ -718,7 +720,8 @@ def has_retired_target(job_data: dict) -> bool:
     """Return whether a stored run names a text or agent target.
 
     Every run optimizes a repository (SKY-834). A stored text or agent run stays
-    in history, but it never runs again.
+    in history, but it never runs again. Judge sessions and tagging jobs are not
+    black-box runs, so the rule skips them.
 
     Args:
         job_data: Raw job row from the store.
@@ -727,8 +730,19 @@ def has_retired_target(job_data: dict) -> bool:
         ``True`` when the stored payload names a target other than a repository.
     """
     payload = job_data.get("payload")
-    target = payload.get("target") if isinstance(payload, dict) else None
-    return isinstance(target, dict) and not is_repo_payload(payload)
+    optimization_type = (parse_overview(job_data) or {}).get(
+        PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_BLACKBOX
+    )
+    if not isinstance(payload, dict) or "judge" in payload or optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
+        return False
+    if isinstance(payload.get("target"), dict):
+        return not is_repo_payload(payload)
+    # The worker reads a payload with no target as a text run, because the target kind defaults to text.
+    try:
+        request = BlackboxRunRequest.model_validate(payload, context=STORED_PAYLOAD_CONTEXT)
+    except ValidationError:
+        return False
+    return request.target.kind != BLACKBOX_TARGET_REPO
 
 
 def _resume_candidate_id(job_data: dict) -> str | None:

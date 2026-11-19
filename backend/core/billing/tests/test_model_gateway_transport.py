@@ -915,15 +915,12 @@ def test_guest_controls_and_dataset_routes_cannot_replace_parent_authority(gatew
         {
             "model_config": {"name": "fixture/text", "extra": {ROUTE_KEY: forged}},
             "dataset": [{ROUTE_KEY: forged}],
-            "_skynet_target_route": forged,
             "_skynet_tools_route": forged,
             "_budget_gateway_descriptor": forged,
         },
         managed_key="provider-secret",
     )
-    assert not any(
-        key in protected for key in ("_skynet_target_route", "_skynet_tools_route", "_budget_gateway_descriptor")
-    )
+    assert not any(key in protected for key in ("_skynet_tools_route", "_budget_gateway_descriptor"))
     [route] = gateway.model_routes()
     assert route["token"] != "forged"
     assert protected["model_config"]["extra"][ROUTE_KEY] == route
@@ -1032,30 +1029,6 @@ def test_interaction_payload_never_batches_a_managed_economy_model(gateway: Mode
         assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
         assert "economy_mode" not in config["extra"]
         assert "timeout" not in config["extra"]
-
-
-def test_byok_agent_task_uses_its_scoped_route(gateway: ModelGateway) -> None:
-    """Route the evaluated agent through its own key with the BYOK policy."""
-    protected = gateway.protect_payload(
-        {
-            "token_source": "byok",
-            "target": {"kind": "agent", "model": "openrouter/fixture/text"},
-            "task_model_config": {
-                "name": "openrouter/fixture/text",
-                "token_source": "byok",
-                "byok_provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1",
-                "extra": {"api_key": "account-owned-key"},
-            },
-        },
-        managed_key="",
-    )
-
-    route = protected["_skynet_target_route"]
-    assert protected["task_model_config"]["extra"][ROUTE_KEY] == route
-    assert "account-owned-key" not in json.dumps(protected)
-    dispatcher = gateway._routes[route["token"]]
-    assert dispatcher.policy.kind == "byok_model"
 
 
 def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(

@@ -107,7 +107,6 @@ from .checkpoint_compat import (
     validate_checkpoint,
 )
 from .constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_HEARTBEAT,
     EVENT_LOG,
@@ -2206,11 +2205,10 @@ class BackgroundWorker:
 
         Handles the event types emitted by ``run_vercel_dspy``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
-        ``job_store.append_log``; ``EVENT_AGENT_RUN`` → ``job_store.save_agent_run``
-        or ``append_agent_run_transcript`` (on stores that keep agent runs);
-        ``EVENT_RESULT`` → captured as the return value; ``EVENT_ERROR`` →
-        captured as the error return value.  Store errors are swallowed so a DB
-        hiccup cannot abort an otherwise-healthy optimization.
+        ``job_store.append_log``; ``EVENT_RESULT`` → captured as the return
+        value; ``EVENT_ERROR`` → captured as the error return value.  Store
+        errors are swallowed so a DB hiccup cannot abort an otherwise-healthy
+        optimization.
 
         Args:
             optimization_id: ID the events are persisted under.
@@ -2307,8 +2305,6 @@ class BackgroundWorker:
                         **run_log.normalize(event),
                     }
                 )
-            elif event_type == EVENT_AGENT_RUN:
-                self._persist_agent_run_event(optimization_id, event.get("run"))
             elif event_type == EVENT_RESULT:
                 payload = event.get("result")
                 if isinstance(payload, dict):
@@ -2334,28 +2330,6 @@ class BackgroundWorker:
                     "Optimization %s: failed to persist %d subprocess log entries", optimization_id, len(log_batch)
                 )
         return result_payload, error_payload, drained_count
-
-    def _persist_agent_run_event(self, optimization_id: str, run: Any) -> None:
-        """Store one agent run record or transcript delta, on stores that keep agent runs.
-
-        Args:
-            optimization_id: The job the run belongs to.
-            run: The event's ``run`` payload.
-        """
-        if not isinstance(run, dict) or not isinstance(run.get("run_id"), int):
-            return
-        save_run = getattr(self._job_store, "save_agent_run", None)
-        append_transcript = getattr(self._job_store, "append_agent_run_transcript", None)
-        if save_run is None or append_transcript is None:
-            return
-        try:
-            delta = run.get("transcript_delta")
-            if isinstance(delta, str):
-                append_transcript(optimization_id, run["run_id"], delta)
-            else:
-                save_run(optimization_id, run)
-        except Exception:
-            logger.exception("Optimization %s: failed to persist agent run %s", optimization_id, run.get("run_id"))
 
     def _checkpoints_enabled(self, optimization_type: str) -> bool:
         """Return whether this job is a GEPA run on a checkpoint-capable store.

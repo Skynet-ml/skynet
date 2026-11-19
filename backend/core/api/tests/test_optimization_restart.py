@@ -122,3 +122,46 @@ def test_restart_of_a_stored_dspy_row_is_404(
     resp = client.post("/optimizations/d1/restart")
     assert resp.status_code == 404
     assert store.get_job("d1")["status"] == "failed"
+
+
+# A stored text run from before SKY-834 may hold no target: the target kind defaults to text.
+_TARGETLESS_TEXT_PAYLOAD = {
+    "candidate": "Answer briefly.",
+    "scorer": {"metric_code": "def score(candidate, case):\n    return 1.0\n"},
+    "reflection_model_config": {"name": "openai/gpt-4o-mini"},
+}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"target": {"kind": "text"}}, {"target": {"kind": "agent"}}, _TARGETLESS_TEXT_PAYLOAD],
+    ids=["text", "agent", "no_target"],
+)
+def test_restart_of_a_stored_text_or_agent_run_is_refused_and_keeps_its_history(
+    client: TestClient, store: _BaseFakeJobStore, payload: dict[str, Any]
+) -> None:
+    """Restart refuses a text or agent run, so its result, logs and checkpoint stay (SKY-834).
+
+    Args:
+        client: Test client over the optimizations router.
+        store: Fake job store.
+        payload: A stored text, agent or target-less payload.
+    """
+    store.seed_job("t1", status="failed", result={"score": 0.9}, username="alice", payload=payload)
+    store._logs["t1"] = [{"level": "INFO", "message": "iteration 1"}]
+    store.save_gepa_checkpoint("t1", b"GEPA-STATE", iteration=7)
+    resp = client.post("/optimizations/t1/restart")
+    assert resp.status_code == 409
+    assert "Every run now optimizes a repository" in resp.json()["detail"]
+    job = store.get_job("t1")
+    assert job["status"] == "failed"
+    assert job["result"] == {"score": 0.9}
+    assert store.get_log_count("t1") == 1
+    assert store.has_gepa_checkpoint("t1") is True
+
+
+def test_restart_still_requeues_a_judge_session_payload(client: TestClient, store: _BaseFakeJobStore) -> None:
+    """A judge payload is not a black-box run, so the retired-target rule skips it."""
+    store.seed_job("j1", status="failed", username="alice", payload={"judge": {"opening": False}})
+    resp = client.post("/optimizations/j1/restart")
+    assert resp.status_code == 202, resp.text

@@ -114,16 +114,6 @@ def test_registry_native_algorithms_do_not_depend_on_candidate_target(sandbox: b
     assert isinstance(get_engine(BLACKBOX_ENGINE_AUTORESEARCH, caps), AutoResearchEngine)
 
 
-def test_registry_filters_multi_part_engines() -> None:
-    """Expose named-component inputs only for engines whose pinned adapter supports them."""
-    assert available_engine_ids(parts=True) == [BLACKBOX_ENGINE_GEPA]
-    assert available_engine_ids(_NATIVE_CAPS, parts=True) == [
-        BLACKBOX_ENGINE_GEPA,
-        BLACKBOX_ENGINE_AUTOSADDLER,
-        BLACKBOX_ENGINE_SHINKA_EVOLVE,
-    ]
-
-
 def test_registry_rejects_unknown_engine() -> None:
     """Name only algorithms runnable with the supplied execution capabilities."""
     with pytest.raises(ServiceError, match=r"Unknown engine 'nope'\. Available engines: gepa, best_of_n\."):

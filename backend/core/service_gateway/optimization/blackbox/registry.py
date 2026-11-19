@@ -16,7 +16,6 @@ from ....models.blackbox import (
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
-    BLACKBOX_MULTI_PART_ENGINES,
 )
 from .autoresearch import AutoResearchEngine
 from .autosaddler import AutoSaddlerEngine
@@ -58,18 +57,6 @@ class EngineSpec:
     requires_sandbox: bool = False
     requires_proposer: bool = False
     checkpoint_recovery_supported: bool = False
-
-    @property
-    def supports_parts(self) -> bool:
-        """Return whether the engine accepts a multi-part starting point.
-
-        Derived from ``BLACKBOX_MULTI_PART_ENGINES`` so the catalog the UI reads
-        can never advertise parts the submit validator rejects.
-
-        Returns:
-            ``True`` when the engine is in the validator's multi-part set.
-        """
-        return self.id in BLACKBOX_MULTI_PART_ENGINES
 
     def unavailable_reason_for(self, caps: EngineCapabilities) -> str | None:
         """Explain why the engine cannot run for ``caps``, or return ``None`` when it can.
@@ -148,17 +135,16 @@ ENGINES: dict[str, EngineSpec] = {
 }
 
 
-def available_engine_ids(caps: EngineCapabilities = NO_CAPABILITIES, *, parts: bool = False) -> list[str]:
+def available_engine_ids(caps: EngineCapabilities = NO_CAPABILITIES) -> list[str]:
     """Return the ids of engines that can run for ``caps``, in catalog order.
 
     Args:
         caps: What the deployment and the job offer.
-        parts: When True, keep only engines that take a multi-part starting point.
 
     Returns:
         Runnable engine ids.
     """
-    return [spec.id for spec in ENGINES.values() if spec.available_for(caps) and (spec.supports_parts or not parts)]
+    return [spec.id for spec in ENGINES.values() if spec.available_for(caps)]
 
 
 def get_engine(engine_id: str, caps: EngineCapabilities = NO_CAPABILITIES) -> Engine:

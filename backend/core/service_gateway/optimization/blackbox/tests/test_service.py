@@ -893,9 +893,20 @@ def test_unavailable_native_recipe_fails_before_building_a_scorer(
         pytest.fail("Scorer was constructed before native execution was validated")
 
     monkeypatch.setattr(scorer_mod, "build_scorer", unexpected_scorer)
+    monkeypatch.setattr(service_mod, "RemoteScorer", unexpected_scorer)
+    payload = _payload(
+        strategy=strategy,
+        max_cost_cents=100,
+        target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
+    )
 
     with pytest.raises(ServiceError, match="missing runtime"):
-        _run(_payload(strategy=strategy, max_cost_cents=100), artifact_id="invalid-native")
+        run_blackbox_optimization(
+            payload,
+            artifact_id="invalid-native",
+            evaluator_route={"token": "route"},
+            repo_snapshot={"chunks": ["chunk"]},
+        )
 
 
 @pytest.mark.parametrize(

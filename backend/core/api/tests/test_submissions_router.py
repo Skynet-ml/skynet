@@ -495,7 +495,6 @@ def test_blackbox_engine_catalog_resolves_availability_for_a_repository(monkeypa
     by_id = {engine["id"]: engine for engine in text.json()["engines"]}
     assert list(by_id) == ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
     assert by_id["gepa"]["available"] is True
-    assert by_id["gepa"]["supports_parts"] is True
     assert by_id["gepa"]["checkpoint_recovery_supported"] is True
     assert by_id["gepa"]["checkpoint_recovery_reason"] is None
     assert by_id["autoresearch"]["available"] is True
@@ -503,11 +502,6 @@ def test_blackbox_engine_catalog_resolves_availability_for_a_repository(monkeypa
     assert by_id["autoresearch"]["checkpoint_recovery_supported"] is False
     assert "does not expose" in by_id["autoresearch"]["checkpoint_recovery_reason"]
     assert by_id["meta_harness"]["available"] is True
-    assert {key for key, engine in by_id.items() if engine["supports_parts"]} == {
-        "gepa",
-        "autosaddler",
-        "shinka_evolve",
-    }
     assert text.json()["auto_engines"] == ["gepa", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
     assert text.json()["auto_available"] is True
     assert text.json()["auto_unavailable_reason"] is None

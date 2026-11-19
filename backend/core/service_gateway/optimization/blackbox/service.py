@@ -93,7 +93,7 @@ from ..timing import STAGE_BASELINE, STAGE_EVALUATION, STAGE_TRAINING
 from ..trajectory import MINIBATCH_FEEDBACK_CHAR_CAP
 from ..unified.split import CaseSplits, report_cases, selection_cases, split_cases
 from .agent_eval import agent_target_unavailable_reason, gateway_from_settings
-from .agent_runs import PHASE_BASELINE, PHASE_FINAL, run_scope
+from .agent_runs import PHASE_BASELINE, PHASE_FINAL
 from .auto import LaneOutcome, run_strategy
 from .feedback import FEEDBACK_KEY, named_scores, without_images
 from .harness import GatewayConfig
@@ -205,7 +205,6 @@ def engine_catalog() -> BlackboxEngineCatalogResponse:
                     spec.unavailable_reason_for(caps)
                     or (_REPO_ENGINE_REASON if spec.id not in BLACKBOX_REPO_ENGINES else None)
                 ),
-                supports_parts=spec.supports_parts,
                 checkpoint_recovery_supported=spec.checkpoint_recovery_supported,
                 checkpoint_recovery_reason=(
                     None
@@ -633,9 +632,9 @@ def _final_run(
         candidate: The version to score.
         cases: The run's cases; empty to score the version on its own.
         label: What the candidate is, for logs and the error message.
-        phase: Which pass this is, for the agent run records: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
+        phase: Which pass this is: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
         concurrency: How many cases to score at once.
-        case_offset: Added to each case's index in the run records, so the
+        case_offset: Added to each case's index in the usage records, so the
             held-out pass does not overwrite the selection pass's records.
         repo_scorer: Whether ``scorer`` is the repository scorer, the only
             scorer whose ``run_failed`` feedback holds the failure text.
@@ -666,7 +665,7 @@ def _final_run(
         stage = STAGE_BASELINE if phase == PHASE_BASELINE else STAGE_EVALUATION
         index = str(case_offset + position - 1)
         observation: dict[str, Any] | None = None
-        with run_scope(phase, index), usage_scope(stage=stage, case=index if cases else None):
+        with usage_scope(stage=stage, case=index if cases else None):
             if callable(observed):
                 score, side_info, observation = observed(candidate, case)
             else:

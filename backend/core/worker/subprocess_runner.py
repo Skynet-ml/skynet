@@ -205,8 +205,6 @@ def run_service_in_subprocess(
         payload_dict = dict(payload_dict)
         optimization_type = payload_dict.pop("_optimization_type", OPTIMIZATION_TYPE_BLACKBOX)
         gepa_log_dir_path = payload_dict.pop("_gepa_log_dir", None)
-        # Only a retired agent target used this route (SKY-834); drop it so the request still validates.
-        payload_dict.pop("_skynet_target_route", None)
         evaluator_route = payload_dict.pop("_skynet_evaluator_route", None)
         repo_snapshot = payload_dict.pop(REPO_SNAPSHOT_KEY, None)
         budget_gateway_descriptor = payload_dict.pop("_budget_gateway_descriptor", None)

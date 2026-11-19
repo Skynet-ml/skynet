@@ -136,14 +136,6 @@ def test_protect_payload_refuses_a_stored_run_that_names_droid(gateway: ModelGat
 
 
 @pytest.mark.usefixtures("local")
-def test_subscription_agent_target_needs_its_model_config(gateway: ModelGateway) -> None:
-    """Refuse a subscription agent target that has no model config to route."""
-    payload = {"target": {"model": MODEL}, "token_source": "subscription"}
-    with pytest.raises(UnpricedOperationError):
-        gateway.protect_payload(payload, managed_key="managed")
-
-
-@pytest.mark.usefixtures("local")
 def test_bound_capability_needs_a_route_token(gateway: ModelGateway) -> None:
     """Serve a bound path to route holders only, over HTTP and the sandbox mailbox."""
     received: list[tuple[bytes, dict[str, str]]] = []
