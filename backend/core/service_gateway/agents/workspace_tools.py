@@ -165,7 +165,8 @@ How to write the run's files:
     or at least one ``[target.<name>]`` stage.
   - ``[metric]``: ``entry`` (``"path.py:function"``, default ``"metric.py:score"``, or a command list),
     ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
-    ``.optimize/exploits``), ``reference`` (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
+    ``.optimize/exploits``), ``reference`` (one path), ``direction`` (``"maximize"``, the default, or
+    ``"minimize"`` when a lower score is better), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
     besides the relay, default none) and ``vcpus`` (SKY-398).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
