@@ -147,6 +147,8 @@ def own_database(db_url: str, label: str) -> Iterator[str]:
 
     A test that wipes ``public`` or changes the migrated tables uses this database. So it never
     deletes the tables that other xdist workers use at the same time in ``APP_TEST_DB_URL`` (SKY-831).
+    It skips the test on a server that is not local, so a stray URL never creates or wipes a database
+    on a managed Postgres.
 
     Args:
         db_url: SQLAlchemy URL of the live Postgres test target. The new database is on its server.
@@ -156,7 +158,10 @@ def own_database(db_url: str, label: str) -> Iterator[str]:
         The SQLAlchemy URL of the new database.
     """
     url = make_url(db_url)
-    name = f"{url.database}_{label}_{uuid.uuid4().hex[:8]}"
+    if url.host not in ("localhost", "127.0.0.1"):
+        pytest.skip(f"refusing to create a test database on a non-local server (host={url.host!r})")
+    # Postgres cuts names at 63 bytes, so the unique part comes first and a long base name is cut instead.
+    name = f"{uuid.uuid4().hex[:8]}_{label}_{url.database}".encode()[:63].decode(errors="ignore")
     admin = create_engine(url, isolation_level="AUTOCOMMIT")
     try:
         with admin.connect() as conn:
@@ -379,11 +384,12 @@ def test_claim_records_owner_and_lease(store: RemoteDBJobStore, seeded_jobs: lis
 def test_a_progress_writer_never_waits_for_the_open_write_of_another_job(store: RemoteDBJobStore) -> None:
     """Progress writers for distinct jobs avoid parent-row lock serialization.
 
-    One job's progress write stays open, and the writes of another job must finish before it ends.
+    A real ``record_progress`` of one job stops before each of its two commits: the event row
+    and the latest metrics. While each one is open, a batch of writes of another job must finish.
     A shared lock (a parent row, a table or an advisory lock) makes them wait for the open write.
     The test had a 2-second limit on two parallel writers before; under xdist load that limit
-    measured the machine, not the locks (SKY-831). A blocked writer waits until the rollback,
-    so the 60-second limit only stops the test, and a slow but free writer still passes.
+    measured the machine, not the locks (SKY-831). A blocked writer waits until the open write
+    ends, so the 60-second limit only stops the test, and a slow but free writer still passes.
     """
     prefix = f"progress-test-{uuid.uuid4().hex[:8]}"
     held, free = f"{prefix}-a", f"{prefix}-b"
@@ -395,23 +401,43 @@ def test_a_progress_writer_never_waits_for_the_open_write_of_another_job(store: 
         for i in range(100):
             store.record_progress(optimization_id, "optimizer_progress", {"i": i})
 
-    pool = ThreadPoolExecutor(max_workers=1)
-    session = store._get_session()
-    try:
-        # The same two writes as record_progress, left open: the event row and the job's latest metrics.
-        remote_mod._add_progress_event(session, held, "optimizer_progress", {"i": -1}, datetime.now(UTC))
+    # One (reached, go) pair for each commit of the held record_progress: the event row, then the metrics.
+    open_writes = [(threading.Event(), threading.Event()) for _ in range(2)]
+    pending = list(open_writes)
+    holder = threading.Thread(target=store.record_progress, args=(held, "optimizer_progress", {"i": -1}))
+
+    def hold_open(session: Session) -> None:
+        """Keep the held job's transaction open, with its writes sent, until the test lets it commit.
+
+        Args:
+            session: The session that commits.
+        """
+        if threading.current_thread() is not holder or not pending:
+            return
+        reached, go = pending.pop(0)
+        # before_commit runs before the commit flush, so the flush sends the event row now.
         session.flush()
-        session.execute(
-            text("UPDATE jobs SET latest_metrics = CAST(:metrics AS jsonb) WHERE optimization_id = :id"),
-            {"metrics": '{"i": -1}', "id": held},
-        )
+        reached.set()
+        go.wait(60)
 
-        pool.submit(write_events, free).result(timeout=60)
+    pool = ThreadPoolExecutor(max_workers=1)
+    event.listen(store._session_factory, "before_commit", hold_open)
+    try:
+        holder.start()
+        for reached, go in open_writes:
+            assert reached.wait(60), "the held record_progress did not reach its commit"
+            pool.submit(write_events, free).result(timeout=60)
+            go.set()
+        holder.join(60)
 
-        assert store.get_progress_count(free) == 100
+        assert store.get_progress_count(free) == 200
+        assert store.get_progress_count(held) == 1
     finally:
-        session.rollback()
-        session.close()
+        for _, go in open_writes:
+            go.set()
+        if holder.ident is not None:
+            holder.join(60)
+        event.remove(store._session_factory, "before_commit", hold_open)
         pool.shutdown(wait=True)
         store.delete_jobs([held, free])
 

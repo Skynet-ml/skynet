@@ -27,7 +27,6 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine, inspect, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
@@ -129,16 +128,13 @@ def migrate_db_url() -> Iterator[str]:
     The cases wipe ``public``. In ``APP_TEST_DB_URL`` itself, that deleted the tables
     of the modules that other xdist workers ran at the same time (SKY-831).
 
-    Guards against catastrophe: the cases ``DROP SCHEMA public CASCADE``, so this
-    refuses any non-local host — a stray ``APP_TEST_DB_URL`` pointing at a managed
-    Postgres (e.g. a proxy domain) skips instead of touching its server.
+    Guards against catastrophe: the cases ``DROP SCHEMA public CASCADE``, and
+    ``own_database`` refuses any non-local host — a stray ``APP_TEST_DB_URL`` pointing
+    at a managed Postgres (e.g. a proxy domain) skips instead of touching its server.
 
     Yields:
         The SQLAlchemy URL of the new database.
     """
-    host = make_url(TEST_DB_URL or "").host
-    if host not in ("localhost", "127.0.0.1"):
-        pytest.skip(f"refusing to wipe a non-local database (host={host!r})")
     with own_database(TEST_DB_URL or "", "migrate") as url:
         yield url
 
