@@ -371,6 +371,13 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                     "is what gets evaluated.\n\n"
                     f"Do not edit `{_REPO_LAB}/task.md`, and change only the paths that it allows.",
                 ),
+                (
+                    "**Combining candidates is valid.** Take the structure from candidate A and the strategy from "
+                    "candidate B,",
+                    "**You see only the leader's code.** The session gets the leader's files and no other "
+                    "candidate's code. Reuse an idea from another candidate only through its hypothesis in "
+                    "`evolution_summary.jsonl` and its feedback in `results/<candidate>/val.json`,",
+                ),
                 ('      "file": "agents/<name>.txt",\n', ""),
                 (
                     "- Each candidate is a plain text file under `agents/`; its whole content is submitted to the "

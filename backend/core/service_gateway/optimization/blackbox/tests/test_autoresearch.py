@@ -35,6 +35,7 @@ from core.service_gateway.optimization.blackbox import loop_tools, native_engine
 from core.service_gateway.optimization.blackbox.autoresearch import BASH_TOOL, EVALUATE_TOOL, AutoResearchEngine
 from core.service_gateway.optimization.blackbox.native_engines import ProposerFailedError
 from core.service_gateway.optimization.blackbox.protocol import (
+    BudgetExhaustedError,
     EngineContext,
     EvalServer,
     FileTooLargeError,
@@ -1103,6 +1104,51 @@ def test_a_repository_budget_that_cannot_score_a_version_stops_before_the_sessio
 
     assert model.calls == []
     assert (result.best_candidate, result.total_evals) == (seed, 2)
+
+
+def test_a_repository_budget_that_cannot_score_the_seed_ends_the_run_as_out_of_budget(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """One evaluation is left for two cases, so the seed gets no sweep: the run ends with no session (SKY-825).
+
+    A repository session has no ``evaluate`` tool, so it could never score a version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf x >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(BudgetExhaustedError, match="needs 2 evaluation units to score the seed"):
+        _run(loop, max_evals=1, score=_score_a_py, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+    assert model.calls == []
+
+
+def test_a_repository_session_reads_the_task_brief_and_state_in_the_lab(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The engine writes ``TASK.md``, ``BRIEF.md`` and ``STATE.md`` over the parent's tree, under ``.autoresearch/``.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    lab = ar_mod._REPO_LAB
+    model = _Researcher([_bash(f"test -s {lab}/TASK.md && test -s {lab}/BRIEF.md && cat {lab}/STATE.md")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    output = _tool_result(model, 1)
+    assert output["exit_code"] == 0
+    assert "The engine gives this round's version one full evaluation" in output["stdout"]
 
 
 def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
@@ -3025,6 +3071,45 @@ def test_a_lab_removal_that_times_out_leaves_no_version_and_ends_the_run(
     result = _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
 
     assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
+
+
+def test_a_lab_path_check_that_times_out_fails_without_blaming_the_repository(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed's lab-path check times out with exit code 1, so the error names the timeout, not a repository file.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    run = loop.run
+
+    def time_out_check(tree_id: str, command: str, grants: tuple[Any, ...]) -> Any:
+        """Run the command, and mark the lab-path check as timed out with exit code 1.
+
+        Args:
+            tree_id: The tree to run in.
+            command: The shell command.
+            grants: The command's grants.
+
+        Returns:
+            The command result and the tree it left.
+        """
+        result, tree = run(tree_id, command, grants)
+        if command.startswith("test ! -e "):
+            result = dataclasses.replace(result, exit_code=1, timed_out=True)
+        return result, tree
+
+    loop.run = time_out_check  # type: ignore[method-assign]
+
+    with pytest.raises(ServiceError, match="the check timed out"):
+        _run(loop, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+    assert model.calls == []
 
 
 def test_a_repository_session_with_no_tool_call_opens_no_box_to_remove_the_lab(

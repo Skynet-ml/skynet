@@ -738,6 +738,12 @@ def test_the_repository_skill_and_prompt_point_into_the_workspace_folder(tmp_pat
     assert worker.candidates_per_iter == 1
     assert "agents/<name>.txt" not in skill
     assert "scratch file under `.meta-harness/scratch/`" in skill
+    # The session gets only the leader's tree, so it cannot take code from candidate A and candidate B.
+    assert "Combining candidates is valid" not in skill
+    assert (
+        "Reuse an idea from another candidate only through its hypothesis in `evolution_summary.jsonl` and its "
+        "feedback in `results/<candidate>/val.json`"
+    ) in skill
     assert "`.meta-harness/logs/run/pending_eval.json`" in prompt
     assert "`.meta-harness/.claude/skills/meta-harness/SKILL.md`" in prompt
 
