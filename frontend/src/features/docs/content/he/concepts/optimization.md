@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` הוא מה שה-`entry` של `[run]` החזיר עבור המקרה.
 - `case` הוא dict. ‏`case["input"]` מכיל את שדות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את הערך הצפוי, או `None` כשאין למקרה ערך כזה.
 - `repo_path` היא תיקייה שמכילה רק את קובצי המדד שלך.
-- `score` מחזיר זוג: מספר, ו-dict עם מחרוזת `"feedback"`.
+- הפונקציה `score` מחזירה אובייקט אחד: מספר תחת `"score"`, ומחרוזת `"feedback"` אופציונלית.
 
 בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו בתיבת sandbox משלו.‏ Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
 

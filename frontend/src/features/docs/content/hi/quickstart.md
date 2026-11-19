@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` में एक केस के इनपुट कॉलम होते हैं। `case["expected"]` में आउटपुट कॉलम होता है, उसके कॉलम नाम की कुंजी के साथ। रिपॉज़िटरी में `def serve(input)` वाली एक `serve.py` फ़ाइल है। `[run]` की `entry` इसे कॉल करती है, और `output` उसका रिटर्न मान है। स्कोरर एक अलग सैंडबॉक्स बॉक्स में चलता है जिसमें केवल आपकी मेट्रिक फ़ाइलें होती हैं और संस्करण का कोई कोड नहीं होता, इसलिए वह `serve.py` को इम्पोर्ट नहीं कर सकता। रन के बाद Skynet सबसे अच्छे संस्करण को सर्व करने के लिए इसी फ़ंक्शन का इस्तेमाल करता है।

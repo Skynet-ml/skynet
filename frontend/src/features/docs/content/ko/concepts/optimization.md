@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output`은 `[run]` 엔트리가 케이스에 대해 반환한 값입니다.
 - `case`는 dict입니다. `case["input"]`는 케이스 하나의 입력 필드를 담습니다. `case["expected"]`는 기댓값을 담으며, 케이스에 기댓값이 없으면 `None`입니다.
 - `repo_path`는 지표 파일만 담은 폴더입니다.
-- `score`는 쌍을 반환합니다. 숫자 하나와 `"feedback"` 문자열이 있는 dict 하나입니다.
+- `score`는 객체 하나를 반환합니다. `"score"`에 숫자 하나와, 선택 사항인 `"feedback"` 문자열입니다.
 
 리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리는 자체 샌드박스에서 이 함수를 호출합니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
 

@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | ארגומנט     | מה הוא מכיל                                                                         |
@@ -23,28 +23,35 @@ def score(repo_path, case, output=None):
 
 ## ערך ההחזרה
 
-`score` חייב להחזיר ציון עם משוב. המבנים האלה תקינים:
+`score` מחזיר אובייקט אחד:
 
-1. זוג: מספר, ומחרוזת משוב או dict עם מפתח `"feedback"`.
-2. dict עם מספר תחת `"score"` ומחרוזת תחת `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-המשוב חייב להיות מחרוזת שאינה ריקה.
+- המפתח `"score"` הוא חובה. הוא מספר סופי. רק הציון הזה קובע את הדירוג של הגרסאות.
+- המפתח `"feedback"` הוא טקסט אופציונלי. מומלץ לתת אותו, כי GEPA ו-Auto לומדים ממנו. בלי משוב, המנועים רואים רק את הציונים, ויומן הריצה מציין זאת פעם אחת.
+- המפתח `"scores"` הוא אופציונלי. הוא ממפה שמות לציונים בעלי שם. כל ציון בעל שם הוא אובייקט עם `"score"` משלו ועם `"feedback"` אופציונלי. כל מנוע משתמש בכל ציון בעל שם כיעד נפרד.
 
-המידע הנלווה יכול לכלול גם מפתח `"scores"`. הוא ממפה שמות לציונים בעלי שם. לכל ציון בעל שם יש ציון ומשוב משלו, למשל `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+כל מבנה או מפתח אחר הוא שגיאה. הבדיקה מציגה את החלק השגוי ואת המבנה התקין.
 
-המידע הנלווה יכול לכלול גם מפתח `"cases"` עם אותו מבנה. כל רשומה היא התוצאה של מקרה אחד. כל מנוע משתמש בכל מקרה כיעד נפרד.
-
-אם לערך ההחזרה יש מבנה אחר, הבדיקה נכשלת ומציגה את הסיבה.
-
-| ערך החזרה                                                                       | תקין                                   |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | כן                                     |
-| `(0.8, "Close. Missing the date.")`                                             | כן                                     |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | כן                          |
-| `0.8`                                                                           | לא. אין משוב.                          |
-| `(0.8, {})`                                                                     | לא. אין מחרוזת משוב.                   |
-| `("0.8", {"feedback": "OK"})`                                                   | לא. הציון הוא מחרוזת.                  |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | לא. ציון בעל שם אינו מספר.            |
+| ערך החזרה | תקין |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | כן |
+| `{"score": 0.8}` | כן. אין משוב. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | כן |
+| `0.8` | לא. הערך אינו אובייקט. |
+| `(0.8, "Close. Missing the date.")` | לא. הערך אינו אובייקט. |
+| `{"score": "0.8"}` | לא. הציון הוא מחרוזת. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | לא. ציון בעל שם חייב להיות אובייקט. |
+| `{"score": 0.8, "feedbak": "OK"}` | לא. המפתח `feedbak` לא מוכר. |
 
 ## כתיבת משוב מועיל
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` הוא dict שהמפתח שלו הוא שם עמודת הפלט שלך. קרא/י את [דאטאסטים וחלוקה](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 כשה-`entry` של `[run]` נכשל במקרה בדיקה, למקרה הזה אין ציון. אם ה-`entry` לא מתחיל, חורג מהזמן הקצוב או שאות עוצר אותו, או אם `entry` מסוג פונקציה זורק חריגה או יוצא לפני שהוא מחזיר ערך, המשוב הוא `Run failed: …`, ו-Skynet לא קורא לפונקציית הניקוד. קוד יציאה שונה מאפס של `entry` מסוג פקודה אינו כישלון: פונקציית הניקוד מקבלת אותו ב-`output`. לגרסה עם מקרה כזה אין ציון. היא לא יכולה להיות הגרסה הטובה ביותר, לא מגיעה לאף `[outcome] target` ולא פותחת pull request. אם כישלון חייב להיחשב כמספר, תפוס/י את הכישלון בתוכנית שלך, כתוב/כתבי פלט ותן/תני לפונקציית הניקוד לתת לו ציון. קרא/י את [כללי המאגר](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 פונקציית הניקוד יכולה גם להשתמש בכל לקוח שתואם ל-OpenAI עם משתני הסביבה `OPENAI_BASE_URL`,‏ `APP_API_KEY` ו-`APP_MODEL`. השער מקבל רק את מודל הניקוד של הריצה.

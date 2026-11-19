@@ -55,6 +55,7 @@ from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
 from ..protocol import (
     METRIC_ERROR,
+    NO_FEEDBACK_WARNING,
     RUN_FAILED_STATUS,
     UNSCORED,
     Candidate,
@@ -286,6 +287,55 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert optimizer_events
     assert optimizer_events[-1][TQDM_TOTAL_KEY] == 12
     assert optimizer_events[-1][TQDM_N_KEY] == response.total_scorer_runs
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        {"mode": "auto"},
+        {"mode": "single", "engine": "gepa"},
+        {"mode": "single", "engine": "best_of_n"},
+        {"mode": "single", "engine": "autoresearch"},
+        {"mode": "single", "engine": "meta_harness"},
+        {"mode": "single", "engine": "autosaddler"},
+        {"mode": "single", "engine": "shinka_evolve"},
+    ],
+)
+@pytest.mark.parametrize(
+    "answer",
+    ['{"score": 0.8}', '{"score": 0.8, "scores": {"a": {"score": 0.5}}}'],
+)
+def test_a_metric_without_feedback_completes_and_warns_once(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+    strategy: dict[str, str],
+    answer: str,
+) -> None:
+    """A metric with no feedback finishes the run on every engine, and the run log warns one time (SKY-769).
+
+    Args:
+        fake_lm: Metered model fake used by the in-process engines.
+        tmp_path: Per-test artifact directory.
+        caplog: Pytest log capture.
+        fake_native_proposers: Native engines without paid model calls.
+        strategy: The engine or recipe that runs.
+        answer: The metric answer, with no feedback, with or without named scores.
+    """
+    payload = _payload(
+        strategy=strategy,
+        budget={"max_scorer_runs": 24},
+        max_cost_cents=100,
+        scorer={"kind": "python", "metric_code": f"def score(candidate, case=None):\n    return {answer}\n"},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):
+        response = run_blackbox_optimization(payload, artifact_id="job-1", gepa_log_dir_path=str(tmp_path))
+
+    assert response.best_score == pytest.approx(0.8)
+    assert response.total_scorer_runs > 1
+    assert [record.getMessage() for record in caplog.records].count(NO_FEEDBACK_WARNING) == 1
 
 
 def test_auto_run_hands_off_between_engines(
@@ -628,10 +678,10 @@ def score(candidate, case=None):
 """
 
 
-def test_a_judge_key_in_side_info_never_changes_the_winner(
+def test_a_judge_key_in_the_metric_answer_is_an_error(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No judge prunes the final selection: an ``illegal_approach`` key is plain side info (SKY-349)."""
+    """A metric's own ``illegal_approach`` key is an error, so it never prunes the final selection (SKY-349, SKY-769)."""
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -641,16 +691,12 @@ def test_a_judge_key_in_side_info_never_changes_the_winner(
         ),
     )
 
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _OLD_JUDGE_KEY_CODE}),
-        artifact_id="job-3b",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
-    assert response.regression_guard_applied is False
-    assert response.best_candidate == "xyz"
-    assert response.best_score == pytest.approx(0.0)
-    assert response.baseline_score == pytest.approx(-3.2)
+    with pytest.raises(ServiceError, match="unknown key `illegal_approach`"):
+        run_blackbox_optimization(
+            _payload(scorer={"kind": "python", "metric_code": _OLD_JUDGE_KEY_CODE}),
+            artifact_id="job-3b",
+            gepa_log_dir_path=str(tmp_path),
+        )
 
 
 _ALWAYS_CRASHING_CASE_CODE = """
@@ -826,7 +872,7 @@ def test_agent_target_runs_every_scorer_call_in_its_own_sandbox(
     assert target_meta["concurrency"] == 2
 
 
-_JUDGE_SCORER_CODE = "def score(candidate, case=None):\n    return float(llm(candidate, case['target'])), {'feedback': 'judged', 'judge': 'fake'}\n"
+_JUDGE_SCORER_CODE = "def score(candidate, case=None):\n    return {'score': float(llm(candidate, case['target'])), 'feedback': 'judged'}\n"
 
 
 @pytest.mark.parametrize(
@@ -1173,7 +1219,7 @@ def test_run_persists_every_version_it_scored(fake_lm: FakeReflectionLM, tmp_pat
         version.first_run for version in response.versions
     )
     assert all(version.evals >= 1 and version.score is not None for version in response.versions)
-    assert response.versions[0].side_info == {"feedback": "5 vowel(s)", "vowels": 5}
+    assert response.versions[0].side_info == {"feedback": "5 vowel(s)"}
     assert max(response.versions, key=lambda version: version.score or 0.0).candidate == "aeiou"
 
 
@@ -1371,6 +1417,20 @@ def test_final_run_averages_named_scores_over_cases() -> None:
 
     assert run.named["accuracy"].score == pytest.approx(0.75)
     assert run.named["accuracy"].feedback == "Case 1: case 1 acc\nCase 2: case 2 acc"
+
+
+def test_final_run_named_feedback_skips_a_case_with_no_feedback() -> None:
+    """A case whose named score has no feedback adds no empty ``Case n:`` line."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float, dict[str, Any]]:
+        """Score each case with one named score, with feedback only on the second case."""
+        return 0.5, {"scores": {"accuracy": {"score": 0.5, "feedback": case["feedback"]}}}
+
+    run = service_mod._final_run(
+        scorer, "v", [{"feedback": ""}, {"feedback": "x"}], label="optimized version", phase=PHASE_FINAL
+    )
+
+    assert run.named["accuracy"].feedback == "Case 2: x"
 
 
 def test_a_failed_case_counts_as_zero_in_every_named_score() -> None:
@@ -1907,11 +1967,11 @@ def test_a_run_fails_when_the_metric_crashes_on_the_winner_and_the_seed(
 _RUN_FAILS_CODE = """
 def score(candidate, case=None):
     if candidate in FAILING and (case is None or case["i"] % FAILED_EVERY == 0):
-        return 0.0, {
+        return {
+            "score": 0.0,
             "feedback": "Run failed: Traceback (most recent call last):\\nConnectionError: egress blocked",
-            "status": "run_failed",
         }
-    return VALID_SCORE, {"feedback": "ok"}
+    return {"score": VALID_SCORE, "feedback": "ok"}
 """
 
 # Enough cases that every split, fixed by the seed, has odd and even cases.
@@ -1976,7 +2036,10 @@ def _failure_counts(caplog: pytest.LogCaptureFixture, label: str) -> list[tuple[
 
 
 class _AsRepositoryScorer:
-    """Give a python scorer's ``run_failed`` case no score, as the repository scorer does (SKY-751)."""
+    """Give a python scorer's "Run failed:" case no score and the ``run_failed`` status, as the repository scorer does.
+
+    A metric may not set ``status`` itself (SKY-769), so the stand-in adds it (SKY-751).
+    """
 
     def __init__(self, scorer: Any) -> None:
         """Wrap ``scorer``.
@@ -1998,7 +2061,7 @@ class _AsRepositoryScorer:
         return getattr(self._scorer, name)
 
     def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
-        """Score one case; a ``run_failed`` case loses its score.
+        """Score one case; a case whose feedback starts with "Run failed:" loses its score.
 
         Args:
             candidate: The version to score.
@@ -2008,7 +2071,9 @@ class _AsRepositoryScorer:
             The score, or None for a failed run, and the side info.
         """
         score, side_info = self._scorer(candidate, case)
-        return (None if side_info.get("status") == "run_failed" else score), side_info
+        if str(side_info.get("feedback", "")).startswith("Run failed:"):
+            return None, {**side_info, "status": "run_failed"}
+        return score, side_info
 
 
 def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
@@ -2309,9 +2374,10 @@ def test_a_repository_run_keeps_the_starting_point_when_the_winner_fails_on_ever
 def test_a_user_scorer_status_never_fails_a_run(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A user's own scorer that returns ``status: run_failed`` keeps its valid scores (SKY-221).
+    """A user's own scorer with "Run failed:" feedback keeps its valid scores (SKY-221).
 
-    Only the repository scorer sets that status, so a user's key cannot fail the run.
+    Only the repository scorer sets the ``run_failed`` status. A metric's own
+    ``status`` key is an error (SKY-769), so a user cannot fail the run.
     """
     calls = _winner_strategy(monkeypatch)
 
@@ -2327,30 +2393,24 @@ def test_a_user_scorer_status_never_fails_a_run(
     assert response.details["failed_cases"] == 0
 
 
-def test_a_repository_metric_status_never_marks_a_failed_run(tmp_path: Path) -> None:
-    """The repository scorer drops a metric's own ``status: run_failed``, so the case keeps its score (SKY-221)."""
+def test_a_repository_metric_status_never_marks_a_failed_run(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A metric's own ``status: run_failed`` is an unknown key, so it never marks a failed run (SKY-221, SKY-769).
+
+    Args:
+        tmp_path: Scratch folder.
+        caplog: The test's log capture.
+    """
     code = "def score(repo_path, case=None):\n    return {'score': 0.5, 'feedback': 'ok', 'status': 'run_failed'}\n"
     scorer = _probed(tmp_path, None, code=code)
-
-    def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
-        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
-
     try:
         scorer.prepare()
-        run = service_mod._final_run(
-            relayed,
-            "",
-            [{"input": 1}, {"input": 2}],
-            label="starting point",
-            phase=PHASE_BASELINE,
-            repo_scorer=True,
-        )
+        reply = scorer.dispatch({"candidate": "", "case": {"input": 1}})
     finally:
         scorer.close()
 
-    assert run.score == 0.5
-    assert run.failures == []
+    assert reply.status == 422
+    assert "run_failed" not in reply.body.decode()
+    assert "unknown key `status`" in caplog.text
 
 
 class _PendingNote:
@@ -2387,7 +2447,9 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
 
     def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
         """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
-        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
+        return scorer_mod.normalize_score(
+            json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body), own_keys=True
+        )
 
     try:
         scorer.prepare()
@@ -2409,6 +2471,58 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
         ServiceError, match=r"starting point failed on every case \(2 of 2\).*RuntimeError: candidate broke"
     ):
         service_mod._raise_if_every_run_failed(run, "starting point")
+
+
+class _FailedRunRelay:
+    """Stand in for the parent relay: the repository scorer reports a failed ``[run]`` entry on every case."""
+
+    def __init__(self, route: dict[str, str], *, timeout_seconds: float, label: str) -> None:
+        """Accept the relay's arguments.
+
+        Args:
+            route: The parent-issued capability.
+            timeout_seconds: The request timeout.
+            label: Names the scorer in failure messages.
+        """
+
+    def __call__(self, candidate: Candidate, case: Any = None) -> dict[str, Any]:
+        """Return the repository scorer's reply for a failed run.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            A reply with no score and the ``run_failed`` status.
+        """
+        return {"score": None, "feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_a_repository_run_trusts_the_failed_run_status_of_its_scorer(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository run reads its own scorer's ``run_failed`` reply as a failed run, not a wrong answer (SKY-769).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Sets the relay, the engine path and the winner strategy.
+    """
+    _winner_strategy(monkeypatch)
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
+    payload = _payload(
+        max_cost_cents=100, target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}}
+    )
+
+    with pytest.raises(ServiceError, match=r"starting point failed on every case \(1 of 1\).*\(1 of 1\): x$"):
+        run_blackbox_optimization(
+            payload,
+            artifact_id="job-trusted-reply",
+            gepa_log_dir_path=str(tmp_path),
+            evaluator_route={"token": "route"},
+            repo_snapshot={"chunks": ["chunk"]},
+        )
 
 
 def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:
@@ -2508,7 +2622,7 @@ def test_stored_result_with_removed_keys_still_loads() -> None:
 _OUTCOME_CODE = """
 def score(candidate, case=None):
     value = 0.1 if candidate == "hello world" else (0.6 if case is None else case["s"])
-    return value, {"feedback": "ok", "scores": {"accuracy": {"score": value, "feedback": "ok"}}}
+    return {"score": value, "feedback": "ok", "scores": {"accuracy": {"score": value, "feedback": "ok"}}}
 """
 
 _OUTCOME_CASES = [{"s": 0.2 + i / 50} for i in range(20)]

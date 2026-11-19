@@ -5,7 +5,7 @@ The scorer tells Skynet how good one version of your repository is. It is a Pyth
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argument    | What it holds                                                                    |
@@ -23,28 +23,35 @@ The scorer runs in a separate sandbox box. That box holds only your metric files
 
 ## The return value
 
-`score` must return a score with feedback. These shapes are valid:
+`score` returns one object:
 
-1. A pair: a number, and a feedback string or a dict with a `"feedback"` key.
-2. A dict with a number under `"score"` and a string under `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-The feedback must be a string that is not empty.
+- `"score"` is required. It is a finite number. Only this score ranks the versions.
+- `"feedback"` is optional text. It is recommended, because GEPA and Auto learn from it. Without feedback, the engines see only the scores, and the run log says so one time.
+- `"scores"` is optional. It maps names to named scores. Each named score is an object with its own `"score"` and an optional `"feedback"`. Every engine uses each named score as its own objective.
 
-The side info can also have a `"scores"` key. It maps names to named scores. Each named score has its own score and feedback, for example `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Any other form or key is an error. The check shows the wrong part and the valid form.
 
-The side info can also have a `"cases"` key with the same shape. Each entry is the result of one case. Every engine uses each case as its own objective.
-
-If the return value has a different shape, the check fails and shows the reason.
-
-| Return value                                                                    | Valid                                  |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Yes                                    |
-| `(0.8, "Close. Missing the date.")`                                             | Yes                                    |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Yes                         |
-| `0.8`                                                                           | No. There is no feedback.              |
-| `(0.8, {})`                                                                     | No. There is no feedback string.       |
-| `("0.8", {"feedback": "OK"})`                                                   | No. The score is a string.             |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | No. A named score is not a number.    |
+| Return value | Valid |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Yes |
+| `{"score": 0.8}` | Yes. There is no feedback. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Yes |
+| `0.8` | No. The value is not an object. |
+| `(0.8, "Close. Missing the date.")` | No. The value is not an object. |
+| `{"score": "0.8"}` | No. The score is a string. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | No. A named score must be an object. |
+| `{"score": 0.8, "feedbak": "OK"}` | No. The key `feedbak` is unknown. |
 
 ## Write useful feedback
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` is a dict keyed by the name of your Output column. Read [Datasets and splits](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 When the `[run]` entry fails on a case, that case has no score. If the entry cannot start, times out or a signal stops it, or if a function entry raises or exits before it returns, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code of a command entry is not a failure: the scorer gets it in `output`. A version with such a case has no score. It cannot be the best version, reaches no `[outcome] target` and opens no pull request. If a failure must count as a number, catch the failure in your program, write an output, and let the scorer score it. Read the [repository rules](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`, `APP_API_KEY` and `APP_MODEL` environment variables. The gateway accepts only the scorer model of the run.

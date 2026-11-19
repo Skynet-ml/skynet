@@ -12,7 +12,9 @@ import pytest
 from .. import protocol
 from ..protocol import (
     METRIC_ERROR,
+    NO_FEEDBACK_WARNING,
     RUN_FAILED_STATUS,
+    STATUS_KEY,
     TOO_DEEP_ARGUMENTS,
     UNSCORED,
     BudgetExhaustedError,
@@ -25,8 +27,10 @@ from ..protocol import (
     openai_tools,
     score_batch,
     tool_calls_from_openai,
+    warn_once_without_feedback,
 )
 from ..runner import normalize_score
+from ..scorer import normalize_score as scorer_normalize_score
 from .mocks import vowel_scorer
 
 
@@ -273,25 +277,91 @@ def test_scorer_abort_is_not_floored() -> None:
         server.evaluate("anything")
 
 
-def test_a_scorer_without_feedback_stops_the_run() -> None:
-    """Missing feedback is a scorer error that ends the run with the contract message, not a silent zero."""
+def _wrong_form_after_good(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Score "good" with a valid answer; read every other version's bare number as a wrong answer form.
 
-    def bare(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Return a bare number the way a scorer without feedback would.
+    Args:
+        candidate: The version.
+        case: Ignored.
 
-        Args:
-            candidate: Ignored.
-            case: Ignored.
+    Returns:
+        The checked answer.
 
-        Returns:
-            Never; the contract check raises.
-        """
-        return normalize_score(0.5)
+    Raises:
+        ServiceError: For every version other than "good".
+    """
+    return scorer_normalize_score({"score": 1.0} if candidate == "good" else 0.5)
 
-    server = EvalServer(bare, max_evals=5)
 
-    with pytest.raises(ScorerAbortError, match="The scorer must return feedback"):
-        server.evaluate("anything")
+def test_a_wrong_answer_form_before_any_score_stops_the_run() -> None:
+    """The first answer has a wrong form, so the run stops instead of spending its budget on errors (SKY-769)."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    with pytest.raises(ScorerAbortError, match=r"bare number\. Return one object"):
+        server.evaluate("bad")
+
+    assert server.used == 1
+
+
+def test_a_wrong_answer_form_after_a_score_is_one_versions_metric_error() -> None:
+    """After a version has a score, a wrong answer form gives that version a metric error, and the run goes on."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    good = server.lane(2).evaluate("good")
+    score, side_info = server.evaluate("bad")
+
+    assert good[0] == 1.0
+    assert score is None
+    assert side_info[STATUS_KEY] == METRIC_ERROR
+    assert "bare number" in side_info["error"]
+    assert server.used == 2
+
+
+def _scores_without_feedback(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Score like a metric whose answer has no feedback, only a named score without feedback.
+
+    Args:
+        candidate: The version; its length is the score.
+        case: Ignored.
+
+    Returns:
+        The checked answer.
+    """
+    return normalize_score({"score": len(candidate) / 10, "scores": {"format": {"score": 1.0}}})
+
+
+def test_a_metric_without_feedback_runs_and_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    """A metric with no feedback scores every version, and the run log says so one time (SKY-769)."""
+    server = EvalServer(warn_once_without_feedback(_scores_without_feedback), max_evals=5)
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):
+        results = [server.evaluate("ab"), server.evaluate("abc"), server.lane(2).evaluate("abcd")]
+
+    assert [score for score, _ in results] == [pytest.approx(0.2), pytest.approx(0.3), pytest.approx(0.4)]
+    assert results[0][1]["feedback"] == ""
+    assert [record.getMessage() for record in caplog.records] == [NO_FEEDBACK_WARNING]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"score": 0.5, "feedback": "Close.", "scores": {"format": {"score": 1.0}}},
+        {"score": None, "feedback": "", "status": RUN_FAILED_STATUS},
+    ],
+)
+def test_no_warning_for_feedback_or_a_failed_run(caplog: pytest.LogCaptureFixture, answer: dict[str, Any]) -> None:
+    """Feedback on the main score, even with a named score that has none, or a run with no score gives no line.
+
+    Args:
+        caplog: Pytest fixture.
+        answer: What the scorer returns.
+    """
+    scorer = warn_once_without_feedback(lambda candidate, case=None: (answer["score"], dict(answer)))
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):
+        scorer("x")
+
+    assert NO_FEEDBACK_WARNING not in [record.getMessage() for record in caplog.records]
 
 
 def test_on_eval_fires_only_at_the_root() -> None:

@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` bir vakanın Girdi sütunlarını tutar. `case["expected"]` Çıktı sütununu, sütun adıyla anahtarlanmış olarak tutar. Depoda `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu çağırır ve `output` onun döndürdüğü değerdir. Puanlayıcı, yalnızca metrik dosyalarınızı tutan ve sürüm kodu olmayan ayrı bir sandbox içinde çalışır, bu yüzden `serve.py` dosyasını içe aktaramaz. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için aynı fonksiyonu kullanır.

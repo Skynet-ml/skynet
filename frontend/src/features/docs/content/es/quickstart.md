@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` contiene las columnas de entrada de un caso. `case["expected"]` contiene la columna de salida, con su nombre de columna como clave. El repositorio tiene un archivo `serve.py` con `def serve(input)`. La entrada `[run]` lo llama, y `output` es su valor devuelto. El evaluador se ejecuta en una caja de sandbox separada con solo tus archivos de métrica y sin código de la versión, así que no puede importar `serve.py`. Skynet usa la misma función para servir la mejor versión después de la ejecución.

@@ -21,6 +21,7 @@ from ...notifications.catalog import DEFAULT_GRID, MACOS
 from ...notifications.dispatch import notify
 from ...notifications.preferences import clean_held_channels, configure_notification_preferences, lock_preferences
 from ...storage.models import Base, NotificationModel, NotificationPreferenceModel
+from ...storage.tests.test_remote_jobstore_postgres import migrate_test_db
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..routers.local_notifications import create_local_notifications_router
 from ..routers.notification_preferences import create_notification_preferences_router
@@ -249,12 +250,15 @@ def shared_store(request: pytest.FixtureRequest, tmp_path, local_mode: None):
     """
     if request.param == "sqlite":
         engine = create_engine(f"sqlite:///{tmp_path / 'preferences.db'}")
+        NotificationPreferenceModel.__table__.create(engine)
     else:
         url = app_env("APP_TEST_DB_URL")
         if not url or not url.startswith("postgresql"):
             pytest.skip("APP_TEST_DB_URL not set to a postgresql:// URL")
+        # A table made outside the shared migration raced the migration of other xdist workers, and
+        # its lone table without ``alembic_version`` made their setup drop ``public`` (SKY-831).
+        migrate_test_db(url)
         engine = create_engine(url)
-    NotificationPreferenceModel.__table__.create(engine, checkfirst=True)
     username = f"race-{uuid.uuid4().hex[:8]}@skynet.test"
     store = SimpleNamespace(engine=engine)
     app = FastAPI()

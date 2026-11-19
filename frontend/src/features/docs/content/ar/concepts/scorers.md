@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | الوسيطة     | ما تحتويه                                                                       |
@@ -23,28 +23,35 @@ def score(repo_path, case, output=None):
 
 ## قيمة الإرجاع
 
-يجب أن تُرجع `score` درجة مع ملاحظات. هذه الأشكال صالحة:
+تُرجع `score` كائنًا واحدًا:
 
-1. زوج: رقم، ونص ملاحظات أو dict فيه المفتاح `"feedback"`.
-2. dict فيه رقم تحت `"score"` ونص تحت `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-يجب أن تكون الملاحظات نصًا غير فارغ.
+- المفتاح `"score"` إلزامي. وهو رقم منتهٍ. هذه الدرجة وحدها ترتّب النسخ.
+- المفتاح `"feedback"` نص اختياري. يُنصح به، لأن GEPA وAuto يتعلّمان منه. بدون ملاحظات، ترى المحرّكات الدرجات فقط، ويذكر سجل التشغيل ذلك مرة واحدة.
+- المفتاح `"scores"` اختياري. وهو يربط أسماءً بدرجات مسمّاة. كل درجة مسمّاة كائن له `"score"` خاص به و`"feedback"` اختياري. يستخدم كل محرّك كل درجة مسمّاة كهدف مستقل.
 
-يمكن أن تحتوي المعلومات الجانبية أيضًا على المفتاح `"scores"`. وهو يربط أسماءً بدرجات مسمّاة. لكل درجة مسمّاة درجتها وملاحظاتها الخاصة، مثل `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+أي شكل أو مفتاح آخر خطأ. يعرض الفحص الجزء الخاطئ والشكل الصالح.
 
-يمكن أن تحتوي المعلومات الجانبية أيضًا على المفتاح `"cases"` بالشكل نفسه. كل عنصر فيه هو نتيجة حالة واحدة. يستخدم كل محرّك كل حالة كهدف مستقل.
-
-إذا كان لقيمة الإرجاع شكل مختلف، يفشل الفحص ويعرض السبب.
-
-| قيمة الإرجاع                                                                    | صالحة                                    |
-| ------------------------------------------------------------------------------- | ---------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | نعم                                      |
-| `(0.8, "Close. Missing the date.")`                                             | نعم                                      |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | نعم                           |
-| `0.8`                                                                           | لا. لا توجد ملاحظات.                     |
-| `(0.8, {})`                                                                     | لا. لا يوجد نص ملاحظات.                  |
-| `("0.8", {"feedback": "OK"})`                                                   | لا. الدرجة نص.                           |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | لا. إحدى الدرجات المسمّاة ليست رقمًا.   |
+| قيمة الإرجاع | صالحة |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | نعم |
+| `{"score": 0.8}` | نعم. لا توجد ملاحظات. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | نعم |
+| `0.8` | لا. القيمة ليست كائنًا. |
+| `(0.8, "Close. Missing the date.")` | لا. القيمة ليست كائنًا. |
+| `{"score": "0.8"}` | لا. الدرجة نص. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | لا. يجب أن تكون الدرجة المسمّاة كائنًا. |
+| `{"score": 0.8, "feedbak": "OK"}` | لا. المفتاح `feedbak` غير معروف. |
 
 ## اكتب ملاحظات مفيدة
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` هو dict مفتاحه اسم عمود المخرج لديك. اقرأ [مجموعات البيانات والتقسيمات](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 عندما يفشل `entry` في `[run]` على حالة، لا تحصل تلك الحالة على درجة. إذا لم يبدأ `entry`، أو تجاوز المهلة، أو أوقفته إشارة، أو إذا رفع `entry` من نوع الدالة استثناءً أو خرج قبل أن يُرجع قيمة، تكون الملاحظات `Run failed: …`، ولا يستدعي Skynet المُقيِّم. رمز الخروج غير الصفري لـ `entry` من نوع الأمر ليس فشلًا: يتلقاه المُقيِّم في `output`. النسخة التي فيها حالة كهذه لا تحصل على درجة. لا يمكن أن تكون أفضل نسخة، ولا تصل إلى أي `[outcome] target`، ولا تفتح أي pull request. إذا كان يجب أن يُحسب الفشل رقمًا، فالتقط الفشل في برنامجك، واكتب مخرجًا، ودع المُقيِّم يعطيه درجة. اقرأ [قواعد المستودع](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 يمكن للمُقيِّم أيضًا استخدام أي عميل متوافق مع OpenAI مع متغيرات البيئة `OPENAI_BASE_URL` و`APP_API_KEY` و`APP_MODEL`. تقبل البوابة نموذج المُقيِّم في التشغيل فقط.

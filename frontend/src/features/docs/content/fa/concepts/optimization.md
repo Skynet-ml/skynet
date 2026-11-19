@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` همان چیزی است که `entry` بخش `[run]` برای این مورد برگرداند.
 - `case` یک dict است. `case["input"]` فیلدهای ورودی یک مورد را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا وقتی مورد مقداری ندارد `None` است.
 - `repo_path` پوشه‌ای است که فقط فایل‌های معیار شما را نگه می‌دارد.
-- `score` یک جفت برمی‌گرداند: یک عدد، و یک dict با یک رشتهٔ `"feedback"`.
+- `score` یک شیء برمی‌گرداند: یک عدد زیر `"score"`، و یک رشتهٔ `"feedback"` اختیاری.
 
 مخزن در ریشهٔ خود یک فایل `serve.py` با `def serve(input)` دارد. `entry` بخش `[run]` آن را در جعبهٔ ایزولهٔ خودش فراخوانی می‌کند. Skynet پس از اجرا با آن بهترین نسخه را سرویس می‌دهد.
 

@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | 引数        | 保持する内容                                                                     |
@@ -23,28 +23,35 @@ def score(repo_path, case, output=None):
 
 ## 戻り値
 
-`score` は、フィードバック付きのスコアを返す必要があります。次の形が有効です。
+`score` は 1 つのオブジェクトを返します。
 
-1. ペア: 数値と、フィードバックの文字列または `"feedback"` キーを持つ dict。
-2. `"score"` の下に数値、`"feedback"` の下に文字列を持つ dict。
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-フィードバックは空でない文字列である必要があります。
+- `"score"` は必須です。有限の数値です。バージョンの順位を決めるのはこのスコアだけです。
+- `"feedback"` は任意のテキストです。GEPA と Auto はこれから学ぶので、付けることをお勧めします。フィードバックがないと、エンジンはスコアだけを見ます。実行ログはそのことを 1 回だけ伝えます。
+- `"scores"` は任意です。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自の `"score"` と任意の `"feedback"` を持つオブジェクトです。すべてのエンジンは、各名前付きスコアをそれぞれ独自の目的として使います。
 
-付加情報には `"scores"` キーを含めることもできます。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自のスコアとフィードバックを持ちます。例: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
+ほかの形やキーはすべてエラーです。チェックは、誤った部分と有効な形を表示します。
 
-付加情報には、同じ形の `"cases"` キーを含めることもできます。各エントリは 1 つのケースの結果です。すべてのエンジンは、各ケースをそれぞれ独自の目的として使います。
-
-戻り値の形が異なる場合、チェックは失敗し、その理由を表示します。
-
-| 戻り値                                                                          | 有効か                                       |
-| ------------------------------------------------------------------------------- | -------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | はい                                         |
-| `(0.8, "Close. Missing the date.")`                                             | はい                                         |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | はい                              |
-| `0.8`                                                                           | いいえ。フィードバックがありません。         |
-| `(0.8, {})`                                                                     | いいえ。フィードバックの文字列がありません。 |
-| `("0.8", {"feedback": "OK"})`                                                   | いいえ。スコアが文字列です。                 |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | いいえ。名前付きスコアが数値ではありません。 |
+| 戻り値 | 有効か |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | はい |
+| `{"score": 0.8}` | はい。フィードバックはありません。 |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | はい |
+| `0.8` | いいえ。値がオブジェクトではありません。 |
+| `(0.8, "Close. Missing the date.")` | いいえ。値がオブジェクトではありません。 |
+| `{"score": "0.8"}` | いいえ。スコアが文字列です。 |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | いいえ。名前付きスコアはオブジェクトである必要があります。 |
+| `{"score": 0.8, "feedbak": "OK"}` | いいえ。キー `feedbak` は不明です。 |
 
 ## 役に立つフィードバックを書く
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 `[run]` エントリーがあるケースで失敗すると、そのケースにはスコアがありません。エントリーが起動できない、タイムアウトする、シグナルで止まる、または関数エントリーが値を返す前に例外を送出するか終了すると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。コマンドエントリーの 0 以外の終了コードは失敗ではありません。スコアラーは `output` でそれを受け取ります。そのようなケースを持つバージョンにはスコアがありません。そのバージョンは最良のバージョンにならず、どの `[outcome] target` にも届かず、pull request も開きません。失敗を数値として数える必要がある場合は、プログラムの中で失敗を捕捉し、出力を書き、スコアラーにその出力を採点させてください。[リポジトリのルール](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) をお読みください。
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 スコアラーは、`OPENAI_BASE_URL`、`APP_API_KEY`、`APP_MODEL` の環境変数を使って、任意の OpenAI 互換クライアントを使うこともできます。ゲートウェイは、実行のスコアラーモデルだけを受け付けます。

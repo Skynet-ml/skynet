@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` هو ما أرجعه `entry` في `[run]` للحالة.
 - `case` قاموس (dict). يحتوي `case["input"]` على حقول الإدخال لحالة واحدة. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` إذا لم تكن للحالة قيمة متوقعة.
 - `repo_path` مجلد يحتوي ملفات المقياس فقط.
-- تُرجع `score` زوجًا: رقمًا، وقاموسًا فيه سلسلة نصية `"feedback"`.
+- تُرجع `score` كائنًا واحدًا: رقمًا تحت `"score"`، وسلسلة نصية `"feedback"` اختيارية.
 
 في جذر المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]` في صندوق معزول خاص به. ويستخدمه Skynet لتقديم أفضل نسخة بعد التشغيل.
 

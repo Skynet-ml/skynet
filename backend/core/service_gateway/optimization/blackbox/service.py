@@ -113,6 +113,7 @@ from .protocol import (
     candidate_key,
     is_metric_error,
     is_run_failed,
+    warn_once_without_feedback,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
 from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
@@ -592,9 +593,10 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
 
     Returns:
         Each name's mean score; its feedback verbatim with one case, else one
-        ``Case n: ...`` line per case, capped like any feedback text. A case
-        that failed (its side info is an ``error``) counts as 0 on every name,
-        as it does in the total, so a failure never vanishes from the parts.
+        ``Case n: ...`` line per case that has feedback, capped like any
+        feedback text. A case that failed (its side info is an ``error``)
+        counts as 0 on every name, as it does in the total, so a failure never
+        vanishes from the parts.
     """
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for position, side_info in enumerate(side_infos, start=1):
@@ -606,7 +608,9 @@ def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNa
         if len(side_infos) == 1:
             feedback = entries[0][1]["feedback"]
         else:
-            feedback = "\n".join(f"Case {position}: {entry['feedback']}" for position, entry in entries)
+            feedback = "\n".join(
+                f"Case {position}: {entry['feedback']}" for position, entry in entries if entry["feedback"]
+            )
         merged[name] = BlackboxNamedScore(
             score=sum(entry["score"] for _, entry in entries) / (len(entries) + len(failed)),
             feedback=feedback[:MINIBATCH_FEEDBACK_CHAR_CAP],
@@ -651,8 +655,7 @@ def _final_run(
         errors, and on a repository run the failed runs.
 
     Raises:
-        ServiceError: When the scorer fails on the candidate, including when
-            it returns no feedback.
+        ServiceError: When the scorer fails on the candidate.
     """
     targets: list[Any] = cases or [None]
     observed = getattr(scorer, "score_observed", None)
@@ -1101,6 +1104,7 @@ def run_blackbox_optimization(
             timeout_seconds=payload.scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
             protected_route=evaluator_route,
             label="repository scorer",
+            trusted_reply=True,
         )
     else:
         base_scorer = build_scorer(payload.scorer, job_id=artifact_id, protected_route=evaluator_route)
@@ -1288,7 +1292,11 @@ def _run_job(
         counts.selection_split,
         counts.report_split,
     )
-    server = EvalServer(scorer, max_evals=job.budget.max_scorer_runs, on_eval=_progress_listener(progress_callback))
+    server = EvalServer(
+        warn_once_without_feedback(scorer),
+        max_evals=job.budget.max_scorer_runs,
+        on_eval=_progress_listener(progress_callback),
+    )
     engine_progress = _without_unscored(progress_callback)
     seed_candidate = job.seed_candidate
 

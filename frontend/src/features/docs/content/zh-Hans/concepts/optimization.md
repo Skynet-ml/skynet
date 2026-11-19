@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` 是 `[run]` 入口为该用例返回的内容。
 - `case` 是一个 dict。`case["input"]` 包含一个用例的输入字段。`case["expected"]` 包含期望值；如果该用例没有期望值，则为 `None`。
 - `repo_path` 是一个只包含你的指标文件的文件夹。
-- `score` 返回一对值：一个数字，以及一个包含 `"feedback"` 字符串的 dict。
+- `score` 返回一个对象：`"score"` 下的一个数字，以及一个可选的 `"feedback"` 字符串。
 
 仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口在自己的沙箱中调用它。运行结束后，Skynet 也用它来部署最好的版本。
 

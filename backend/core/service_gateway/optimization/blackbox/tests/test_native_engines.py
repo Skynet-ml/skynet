@@ -897,17 +897,20 @@ def test_the_proposer_never_inherits_a_raw_anthropic_key(
 
 
 def test_named_scores_become_pareto_columns_without_cases() -> None:
-    """Without cases, named scores are the per-example table's columns, so the front and combine still work."""
-    named_a = {"scores": {"accuracy": {"score": 1.0, "feedback": "all right"}, "style": (0.0, "terse")}}
+    """Without cases, named scores are the per-example table's columns, so the front and combine still work.
+
+    A named score without feedback (SKY-769) still is a column, with an empty note.
+    """
+    named_a = {"scores": {"accuracy": {"score": 1.0, "feedback": "all right"}, "style": {"score": 0.0}}}
     named_b = {"scores": {"accuracy": {"score": 0.5, "feedback": "half"}, "style": {"score": 1.0, "feedback": "nice"}}}
 
     columns_a, notes_a = native_engines.named_score_columns([named_a])
     columns_b, _ = native_engines.named_score_columns([named_b])
 
-    assert columns_a == {"score:accuracy": 1.0}
-    assert notes_a == {"score:accuracy": "all right"}
+    assert columns_a == {"score:accuracy": 1.0, "score:style": 0.0}
+    assert notes_a == {"score:accuracy": "all right", "score:style": ""}
     assert columns_b == {"score:accuracy": 0.5, "score:style": 1.0}
-    table = {"a": columns_a | {"score:style": 0.0}, "b": columns_b}
+    table = {"a": columns_a, "b": columns_b}
     assert native_engines.pareto_front(table, {"a": 0.5, "b": 0.75}) == ["b", "a"]
 
 

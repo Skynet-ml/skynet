@@ -39,7 +39,7 @@ VAL_SENTINEL = "VALSET_SENTINEL_51d0"
 METRIC_CODE = (
     "def score(input, output, expected=None):\n"
     f"    marker = '{SENTINEL}'\n"
-    "    return float(output == expected), {'feedback': 'compared'}\n"
+    "    return {'score': float(output == expected), 'feedback': 'compared'}\n"
 )
 TRACEBACK_ERROR = (
     "Traceback (most recent call last):\n"
@@ -159,7 +159,7 @@ def test_local_proposer_workspace_cannot_find_scorer_files() -> None:
 def test_scorer_calls_never_repeat_the_source() -> None:
     """Score through the real runner and confirm no call directory holds the metric."""
     scorer = SandboxPythonScorer(
-        f"def score(candidate, case=None):\n    return 1.0, {{'feedback': 'ok {len(SENTINEL)}'}}  # {SENTINEL}\n",
+        f"def score(candidate, case=None):\n    return {{'score': 1.0, 'feedback': 'ok {len(SENTINEL)}'}}  # {SENTINEL}\n",
         runtime=LocalSubprocessRuntime(),
         gateway=None,
         timeout_seconds=30,
@@ -193,7 +193,7 @@ _REPO_METRIC = (
     f"    # {SENTINEL}\n"
     "    text = open(os.path.join(repo_path, 'eval/metric.py')).read()\n"
     f"    found = 'sentinel' if {SENTINEL!r} in text else 'missing'\n"
-    "    return float(output['doubled']) / 10, found\n"
+    "    return {'score': float(output['doubled']) / 10, 'feedback': found}\n"
 )
 
 
@@ -788,7 +788,8 @@ def score(repo_path, case, output):
     folders = [site.getusersitepackages(), *site.getsitepackages(), *sys.path, '/usr/local/lib/python3.12/site-packages']
     found = sorted({path for folder in folders for path in glob.glob(os.path.join(folder, 'evil_skynet.pth'))})
     ran = os.path.exists(os.path.expanduser('~/PTH_RAN'))
-    return (0.0 if found or ran else 1.0), json.dumps({'found': found, 'ran': ran, 'c': output})
+    seen = {'found': found, 'ran': ran, 'c': output}
+    return {'score': 0.0 if found or ran else 1.0, 'feedback': json.dumps(seen)}
 """
 
 
@@ -859,7 +860,10 @@ def score(repo_path, case, output):
         if b'skynet-daemon-' + b'marker' in command:
             daemons.append(pid)
     left = [name for name in ('daemon_seen.txt', 'daemon_ticks.txt') if os.path.exists(os.path.expanduser('~/' + name))]
-    return (0.0 if daemons or left else 1.0), json.dumps({'daemons': daemons, 'left': left, 'c': output})
+    return {
+        'score': 0.0 if daemons or left else 1.0,
+        'feedback': json.dumps({'daemons': daemons, 'left': left, 'c': output}),
+    }
 """
 
 
@@ -897,7 +901,7 @@ def score(repo_path, case, output):
     digest = hashlib.sha256(open(os.path.join(repo_path, 'eval/metric.py'), 'rb').read()).hexdigest()
     forged = [path for path in ('/tmp/root_forged', '/workspace/root_forged') if os.path.exists(path)]
     honest = digest == {digest!r} and not forged
-    return (0.25 if honest else 0.0), json.dumps({{'digest': digest, 'forged': forged}})
+    return {{'score': 0.25 if honest else 0.0, 'feedback': json.dumps({{'digest': digest, 'forged': forged}})}}
 """
 
 
@@ -1013,7 +1017,7 @@ def score(repo_path, case, output):
     names = ('rename', 'write', 'exit', 'plant', 'remove')
     refused = all(output.get(name) in (errno.EPERM, errno.EACCES) for name in names)
     honest = output.get('uid') != 0 and output.get('outs') == 1 and refused
-    return (0.5 if honest else 0.0), json.dumps(output)
+    return {'score': 0.5 if honest else 0.0, 'feedback': json.dumps(output)}
 """
 
 
@@ -1207,7 +1211,8 @@ import inflection
 
 
 def score(repo_path, case, output):
-    return 1.0, json.dumps({'file': inflection.__file__, 'word': inflection.camelize('metric_box')})
+    seen = {'file': inflection.__file__, 'word': inflection.camelize('metric_box')}
+    return {'score': 1.0, 'feedback': json.dumps(seen)}
 """
 
 

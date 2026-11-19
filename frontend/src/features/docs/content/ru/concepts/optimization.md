@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` — то, что точка входа `[run]` вернула для примера.
 - `case` — это dict. `case["input"]` содержит входные поля одного примера. `case["expected"]` содержит ожидаемое значение или `None`, если у примера его нет.
 - `repo_path` — папка, в которой есть только ваши файлы метрики.
-- `score` возвращает пару: число и dict со строкой `"feedback"`.
+- `score` возвращает один объект: число в `"score"` и необязательную строку `"feedback"`.
 
 В корне репозитория есть файл `serve.py` с `def serve(input)`. Точка входа `[run]` вызывает его в своей отдельной песочнице. После запуска Skynet обслуживает через него лучшую версию.
 

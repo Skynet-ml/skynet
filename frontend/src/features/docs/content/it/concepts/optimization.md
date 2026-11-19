@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` è ciò che la voce `[run]` ha restituito per il caso.
 - `case` è un dict. `case["input"]` contiene i campi di input di un caso. `case["expected"]` contiene il valore atteso, oppure `None` quando il caso non ne ha.
 - `repo_path` è una cartella che contiene solo i tuoi file della metrica.
-- `score` restituisce una coppia: un numero e un dict con una stringa `"feedback"`.
+- `score` restituisce un oggetto: un numero in `"score"` e una stringa `"feedback"` facoltativa.
 
 Il repository ha un file `serve.py` nella radice con `def serve(input)`. La voce `[run]` lo chiama nel proprio box della sandbox. Skynet lo usa per servire la versione migliore dopo l'esecuzione.
 

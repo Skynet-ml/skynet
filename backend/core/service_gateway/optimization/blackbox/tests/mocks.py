@@ -20,7 +20,7 @@ AGENT_OUTPUT_SCORER_CODE = """
 def score(candidate, case=None):
     output = (case or {}).get("output") or ""
     vowels = sum(ch in "aeiou" for ch in output)
-    return vowels / max(1, len(output)), {"feedback": f"{vowels} vowel(s)", "vowels": vowels, "seen_case": (case or {}).get("case")}
+    return {"score": vowels / max(1, len(output)), "feedback": f"{vowels} vowel(s)"}
 """
 
 # Scorer source in the shape users submit; the in-process twin below keeps
@@ -29,7 +29,7 @@ VOWEL_SCORER_CODE = """
 def score(candidate, case=None):
     text = candidate if isinstance(candidate, str) else " ".join(candidate.values())
     vowels = sum(ch in "aeiou" for ch in text)
-    return vowels / max(1, len(text)), {"feedback": f"{vowels} vowel(s)", "vowels": vowels}
+    return {"score": vowels / max(1, len(text)), "feedback": f"{vowels} vowel(s)"}
 """
 
 

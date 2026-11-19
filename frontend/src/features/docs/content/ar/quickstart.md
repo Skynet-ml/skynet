@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 يحتوي `case["input"]` على أعمدة الإدخال لحالة واحدة. ويحتوي `case["expected"]` على عمود الإخراج، ومفتاحه اسم العمود. في المستودع ملف `serve.py` فيه `def serve(input)`. يستدعيه `entry` في `[run]`، و`output` هو قيمة الإرجاع منه. يعمل المُقيِّم في صندوق معزول منفصل لا يحتوي إلا ملفات المقياس ولا يحتوي كود النسخة، لذلك لا يستطيع استيراد `serve.py`. يستخدم Skynet الدالة نفسها لتقديم أفضل نسخة بعد التشغيل.

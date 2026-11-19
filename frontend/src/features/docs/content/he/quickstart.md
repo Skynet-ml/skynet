@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 ‏`case["input"]` מכיל את עמודות הקלט של מקרה אחד. ‏`case["expected"]` מכיל את עמודת הפלט, עם שם העמודה כמפתח. במאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו, ו-`output` הוא ערך ההחזרה שלו. פונקציית הניקוד רצה בתיבת sandbox נפרדת שיש בה רק את קובצי המדד שלך ואין בה קוד של גרסה, ולכן היא לא יכולה לייבא את `serve.py`. ‏Skynet משתמש באותה פונקציה כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.

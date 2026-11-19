@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | 인수        | 담긴 내용                                                                 |
@@ -23,28 +23,35 @@ def score(repo_path, case, output=None):
 
 ## 반환값
 
-`score`는 피드백이 있는 점수를 반환해야 합니다. 다음 형태가 유효합니다.
+`score`는 객체 하나를 반환합니다.
 
-1. 쌍: 숫자 하나와, 피드백 문자열 또는 `"feedback"` 키가 있는 dict.
-2. `"score"`에 숫자, `"feedback"`에 문자열이 있는 dict.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-피드백은 비어 있지 않은 문자열이어야 합니다.
+- `"score"`는 필수입니다. 유한한 숫자입니다. 버전의 순위는 이 점수로만 정해집니다.
+- `"feedback"`은 선택 사항인 텍스트입니다. GEPA와 Auto가 이것으로 배우므로 넣는 것을 권장합니다. 피드백이 없으면 엔진은 점수만 봅니다. 실행 로그는 이 사실을 한 번 알립니다.
+- `"scores"`는 선택 사항입니다. 이름을 이름 있는 점수에 매핑합니다. 각 이름 있는 점수는 자체 `"score"`와 선택 사항인 `"feedback"`이 있는 객체입니다. 모든 엔진은 각 이름 있는 점수를 별도의 목표로 사용합니다.
 
-부가 정보에는 `"scores"` 키도 넣을 수 있습니다. 이름을 이름 있는 점수에 매핑합니다. 각 이름 있는 점수에는 자체 점수와 피드백이 있습니다. 예: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+다른 형태나 키는 모두 오류입니다. 검사는 잘못된 부분과 유효한 형태를 보여 줍니다.
 
-부가 정보에는 같은 형태의 `"cases"` 키도 넣을 수 있습니다. 각 항목은 케이스 하나의 결과입니다. 모든 엔진은 각 케이스를 별도의 목표로 사용합니다.
-
-반환값의 형태가 다르면 검사가 실패하고 그 이유를 보여 줍니다.
-
-| 반환값                                                                          | 유효 여부                                  |
-| ------------------------------------------------------------------------------- | ------------------------------------------ |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | 예                                         |
-| `(0.8, "Close. Missing the date.")`                                             | 예                                         |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | 예                              |
-| `0.8`                                                                           | 아니요. 피드백이 없습니다.                 |
-| `(0.8, {})`                                                                     | 아니요. 피드백 문자열이 없습니다.          |
-| `("0.8", {"feedback": "OK"})`                                                   | 아니요. 점수가 문자열입니다.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | 아니요. 이름 있는 점수가 숫자가 아닙니다. |
+| 반환값 | 유효 여부 |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | 예 |
+| `{"score": 0.8}` | 예. 피드백이 없습니다. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | 예 |
+| `0.8` | 아니요. 값이 객체가 아닙니다. |
+| `(0.8, "Close. Missing the date.")` | 아니요. 값이 객체가 아닙니다. |
+| `{"score": "0.8"}` | 아니요. 점수가 문자열입니다. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | 아니요. 이름 있는 점수는 객체여야 합니다. |
+| `{"score": 0.8, "feedbak": "OK"}` | 아니요. `feedbak` 키는 알 수 없는 키입니다. |
 
 ## 유용한 피드백 작성하기
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]`는 출력 열 이름을 키로 하는 dict입니다. [데이터셋과 분할](/docs/concepts/datasets)을 읽어 보세요.
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 `[run]` 엔트리가 어떤 케이스에서 실패하면 그 케이스에는 점수가 없습니다. 엔트리가 시작되지 않거나, 시간 제한을 넘기거나, 시그널로 멈추거나, 함수 엔트리가 값을 반환하기 전에 예외를 발생시키거나 종료하면 피드백은 `Run failed: …`이고, Skynet은 채점기를 호출하지 않습니다. 명령 엔트리의 0이 아닌 종료 코드는 실패가 아닙니다. 채점기는 그 값을 `output`으로 받습니다. 그런 케이스가 있는 버전에는 점수가 없습니다. 그 버전은 최고 버전이 될 수 없고, 어떤 `[outcome] target`에도 도달하지 않으며, pull request를 열지 않습니다. 실패를 숫자로 세야 한다면 프로그램에서 실패를 잡아 출력을 쓰고, 채점기가 그 출력에 점수를 매기게 하세요. [저장소 규칙](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)을 읽어 보세요.
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 채점기는 `OPENAI_BASE_URL`, `APP_API_KEY`, `APP_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.

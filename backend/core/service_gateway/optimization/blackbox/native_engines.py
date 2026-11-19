@@ -832,7 +832,8 @@ def task_brief(task: Task, example_ids: list[str]) -> str:
     if example_ids:
         lines += [
             f"The evaluator scores a candidate on {_plural(len(example_ids), 'example')} and reports the "
-            "average score (higher is better) together with per-example scores and feedback.",
+            "average score (higher is better) together with per-example scores, and feedback when the metric "
+            "gives it.",
             "",
             "Example ids: " + ", ".join(f"`{eid}`" for eid in example_ids),
             "",
@@ -841,12 +842,13 @@ def task_brief(task: Task, example_ids: list[str]) -> str:
         ]
     else:
         lines += [
-            "The evaluator scores the candidate as a whole and reports a score (higher is better) with feedback "
-            "explaining it."
+            "The evaluator scores the candidate as a whole and reports a score (higher is better), with feedback "
+            "explaining it when the metric gives it."
         ]
     lines += [
         "",
-        "The evaluator may also report named scores, each with its own feedback. Each named score is a column "
+        "The evaluator may also report named scores, each with its own feedback when the metric gives it. "
+        "Each named score is a column "
         f"(`{NAMED_PREFIX}<name>`) of the per-example scores and an axis of the Pareto front, so a candidate that "
         "wins on one of them is worth keeping even when its average is lower.",
     ]

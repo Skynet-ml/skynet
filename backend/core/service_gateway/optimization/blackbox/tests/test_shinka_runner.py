@@ -246,7 +246,7 @@ def test_scores_become_upstream_metrics() -> None:
     metrics = shinka_runner.summarize_scores(
         [
             (1.0, {"feedback": "great", "scores": {"tone": {"score": 0.5, "feedback": "flat"}}}),
-            (0.0, {"scores": {"tone": 1.0}}),
+            (0.0, {"scores": {"tone": {"score": 1.0}}}),
         ]
     )
 
