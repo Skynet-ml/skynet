@@ -420,9 +420,9 @@ class ToolCall(TypedDict):
     """One tool call that a model reply asks for, in the engine loop's flat form.
 
     ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
-    parsed JSON object, or the raw text when the model sent text that is not a JSON object, or
-    :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model can
-    correct its call.
+    parsed JSON object, or the raw text when the model sent text that is not a JSON object or that holds a lone
+    surrogate, or :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for raw text, so the
+    model can correct its call.
     """
 
     id: str
@@ -452,6 +452,63 @@ def openai_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
     ]
 
 
+def escape_surrogates(text: str) -> str:
+    """Write each lone surrogate of a text as its ``\\uXXXX`` escape, so the text encodes as UTF-8.
+
+    A model can send the JSON escape of a lone surrogate. The step log stores UTF-8, which has no surrogates, so
+    one such reply would stop the run at its commit (SKY-821). Other text stays as it is.
+
+    Args:
+        text: The text from the model.
+
+    Returns:
+        The text with no lone surrogate.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _has_surrogate(value: Any) -> bool:
+    """Return whether a parsed JSON value holds a lone surrogate in a key or a text, at any depth.
+
+    Args:
+        value: The parsed value.
+
+    Returns:
+        Whether the value cannot encode as UTF-8.
+    """
+    if isinstance(value, str):
+        return escape_surrogates(value) != value
+    if isinstance(value, dict):
+        return any(_has_surrogate(key) or _has_surrogate(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_has_surrogate(item) for item in value)
+    return False
+
+
+def safe_tool_call(call: ToolCall) -> ToolCall:
+    """Return a tool call with no lone surrogate, so its step commits; a safe call stays as it is.
+
+    Arguments that hold one become their JSON text, which writes it as an escape, so the engine refuses only this
+    call. The id and the name get their surrogates escaped.
+
+    Args:
+        call: The tool call from the model client.
+
+    Returns:
+        The call that the step log can store.
+    """
+    arguments = call["arguments"]
+    if isinstance(arguments, str):
+        arguments = escape_surrogates(arguments)
+    elif _has_surrogate(arguments):
+        arguments = escape_surrogates(json.dumps(arguments, default=str, ensure_ascii=False))
+    return {
+        "id": escape_surrogates(call["id"]) if isinstance(call["id"], str) else call["id"],
+        "name": escape_surrogates(call["name"]) if isinstance(call["name"], str) else call["name"],
+        "arguments": arguments,
+    }
+
+
 def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
@@ -462,7 +519,8 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
     only that call. Deep text must not reach the transcript: a later call would read it again, raise
     :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
-    stack, so the same reply always gives the same calls.
+    stack, so the same reply always gives the same calls. JSON whose parsed object holds a lone surrogate keeps
+    its raw text, and :func:`safe_tool_call` makes each call safe for the step log.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -497,11 +555,11 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
             except RecursionError:
                 # The depth check counts levels, not stack frames; a deep caller stack can still overflow.
                 arguments = TOO_DEEP_ARGUMENTS
-            except ValueError:
+            except (TypeError, ValueError):
                 arguments = raw
             else:
-                arguments = parsed if isinstance(parsed, dict) else raw
-        calls.append({"id": call["id"], "name": function["name"], "arguments": arguments})
+                arguments = parsed if isinstance(parsed, dict) and not _has_surrogate(parsed) else raw
+        calls.append(safe_tool_call({"id": call["id"], "name": function["name"], "arguments": arguments}))
     return calls
 
 

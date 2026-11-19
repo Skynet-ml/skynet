@@ -163,7 +163,9 @@ from ..service_gateway.optimization.blackbox.protocol import (
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
+    escape_surrogates,
     nests_deeper,
+    safe_tool_call,
     text_nests_deeper,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSession
@@ -624,7 +626,8 @@ class EngineLoop:
         "input_schema"}`` (:class:`ToolDefinition`). A returned tool call is ``{"id", "name", "arguments"}``
         (:class:`ToolCall`), with ``arguments`` as a dict, as raw text when it is not a JSON object, or as
         ``TOO_DEEP_ARGUMENTS`` when it nests too deep. The model client converts with :func:`openai_tools` and
-        :func:`tool_calls_from_openai`.
+        :func:`tool_calls_from_openai`. The step stores each lone surrogate of the reply as an escape, and arguments
+        that hold one as their JSON text.
 
         Args:
             prompt: The prompt text or messages.
@@ -681,9 +684,11 @@ class EngineLoop:
                         cost = error.cost_cents if isinstance(error, ModelCallBilledError) else Decimal(0)
                         return StepResult({"prompt_sha256": digest, "error": type(error).__name__}, cost)
                     replies.append(reply)
-                    body: dict[str, Any] = {"prompt_sha256": digest, "text": reply.text or ""}
+                    # Model output is untrusted: a lone surrogate in it would fail the UTF-8 commit and stop the
+                    # run (SKY-821).
+                    body: dict[str, Any] = {"prompt_sha256": digest, "text": escape_surrogates(reply.text or "")}
                     if reply.tool_calls:
-                        body["tool_calls"] = [_bounded_call(call) for call in reply.tool_calls]
+                        body["tool_calls"] = [safe_tool_call(_bounded_call(call)) for call in reply.tool_calls]
                     try:
                         _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
