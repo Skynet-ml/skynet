@@ -25,7 +25,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.billing import mcp_broker
-from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetError, BudgetService
+from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetBoundExceededError, BudgetError, BudgetService
 from core.billing.openrouter_quotes import price_text_request
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.runtime import UsagePendingError
@@ -51,7 +51,14 @@ from core.service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from core.storage.base import JobStore
-from core.storage.models import AgentStepModel, Base, BillingCustomerModel, ExecutionOperationModel, JobModel
+from core.storage.models import (
+    AgentStepModel,
+    Base,
+    BillingCustomerModel,
+    ExecutionOperationModel,
+    ExecutionUsageEvidenceModel,
+    JobModel,
+)
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
@@ -1381,23 +1388,66 @@ def test_a_crashed_loop_requeues_and_bills_only_the_steps_that_the_resume_keeps(
         assert session.get(BillingCustomerModel, "owner").balance_cents == 48
 
 
-def test_a_fenced_worker_that_is_still_alive_bills_its_last_call(tmp_path: Path) -> None:
-    """A fenced worker can still finish a call: its late settle bills that call and holds no coverage."""
+def _lease_id(store: StepJobStore) -> str:
+    """Return the id of the run's only lease slice.
+
+    Args:
+        store: The job store.
+
+    Returns:
+        The lease slice's operation id.
+    """
+    with Session(store.engine) as session:
+        return session.scalars(
+            select(ExecutionOperationModel.id).where(ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND)
+        ).one()
+
+
+def test_a_fenced_worker_that_is_still_alive_charges_nothing_for_its_late_call(tmp_path: Path) -> None:
+    """The resume repeats and bills a fenced worker's late call, so its late settle keeps only the evidence.
+
+    The late usage must not count against the run's limit either: it holds no coverage, so settled and
+    reserved together could pass the budget total.
+    """
     store = _crashed_run(tmp_path, close=False)
     assert store.recover_orphaned_jobs() == 1
     budgets = BudgetService(engine=store.engine)
     budget_id = store.get_job(RUN_ID)["execution_budget_id"]
-    with Session(store.engine) as session:
-        lease = session.scalars(
-            select(ExecutionOperationModel.id).where(ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND)
-        ).one()
+    lease = _lease_id(store)
+    before = budgets.get(budget_id, "owner")
 
     budgets.settle(lease, "owner", evidence_key="late-call", actual_cents=3, evidence={"late": True}, final=True)
 
     budget = budgets.get(budget_id, "owner")
-    assert (budget.billed_cents, budget.pending_operations, budget.reserved_cents) == (3, 0, 0)
+    assert (budget.billed_cents, budget.pending_operations, budget.reserved_cents) == (2, 0, 0)
+    assert (budget.run_spent_cents, budget.wallet_run_spent_cents) == (
+        before.run_spent_cents,
+        before.wallet_run_spent_cents,
+    )
     with Session(store.engine) as session:
-        assert session.get(BillingCustomerModel, "owner").balance_cents == 47
+        assert session.get(BillingCustomerModel, "owner").balance_cents == 48
+        late = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late-call")
+        ).one()
+        assert (late.billed_cents, late.issue) == (0, None)
+
+
+def test_the_fence_keeps_a_lease_slice_whose_settle_the_ledger_refused(tmp_path: Path) -> None:
+    """A refused settle needs review, so the fence must not end its slice or release its coverage."""
+    store = _crashed_run(tmp_path, close=False)
+    budgets = BudgetService(engine=store.engine)
+    budget_id = store.get_job(RUN_ID)["execution_budget_id"]
+    lease = _lease_id(store)
+    with pytest.raises(BudgetBoundExceededError):
+        budgets.settle(lease, "owner", evidence_key="over", actual_cents=1_000, evidence={"over": True}, final=False)
+    before = budgets.get(budget_id, "owner")
+    assert before.reserved_cents > 0
+
+    budgets.fence_generation(budget_id, "owner", expected_generation=before.generation)
+
+    assert budgets.get(budget_id, "owner").reserved_cents == before.reserved_cents
+    with Session(store.engine) as session:
+        assert session.get(ExecutionOperationModel, lease).state == "pending"
 
 
 def test_the_ledger_and_the_worker_name_the_lease_cost_kind_the_same() -> None:

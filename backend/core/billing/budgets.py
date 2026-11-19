@@ -1874,7 +1874,10 @@ class BudgetService:
                 issue = prior.issue
             else:
                 # The fence settles a lease slice while its old worker can still be alive. That worker's
-                # in-flight call and close still bill their usage, but the fence already released the coverage.
+                # in-flight call can still report usage, but recovery already settled and waived the slice, and
+                # the step log drops the old generation's step, so the resume repeats and bills that call again.
+                # So a late settle keeps only its evidence, and Skynet takes its cost (SKY-719: for an unknown
+                # bill, charge nothing). This also frees a step that flushed between its commit and its settle.
                 fenced = (
                     operation.state == "settled"
                     and operation.cost_kind == AGENT_LEASE_COST_KIND
@@ -1886,7 +1889,7 @@ class BudgetService:
                     raise BudgetConflictError("Cumulative usage cannot decrease.")
                 scope_delta = scope - operation.actual_units
                 wallet_delta = charge - operation.actual_wallet_units
-                billed = ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
+                billed = 0 if fenced else ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
                 if scope > operation.max_units or charge > operation.max_wallet_units:
                     issue = "bound_exceeded"
                 elif billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
@@ -1912,19 +1915,18 @@ class BudgetService:
                     budget.blocked_reason = issue
                     if not fenced:
                         operation.state = "pending"
-                else:
+                elif not fenced:
                     budget.settled_units += scope_delta
                     budget.wallet_settled_units += wallet_delta
-                    if not fenced:
-                        budget.reserved_units -= scope_delta
-                        budget.wallet_reserved_units -= wallet_delta
+                    budget.reserved_units -= scope_delta
+                    budget.wallet_reserved_units -= wallet_delta
                     operation.actual_units = scope
                     operation.actual_wallet_units = charge
-                    if final and not fenced:
+                    if final:
                         budget.reserved_units -= operation.max_units - scope
                         budget.wallet_reserved_units -= operation.max_wallet_units - charge
                         operation.state = "settled"
-                    elif not fenced:
+                    else:
                         operation.state = "pending"
                     if billed:
                         from_grant = min(int(wallet.grant_remaining or 0), billed)
