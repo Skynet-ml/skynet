@@ -284,10 +284,11 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
-# A line that names an intent or rules file, for a current file that is not TOML at all. A dotted
-# prefix (``proposer.illegal``) and a quoted key are TOML forms of the same setting.
-_RULE_LINE = re.compile(
-    r"""^\s*(?:[\w"'-]+\s*\.\s*)*["']?(?:instructions|illegal)["']?\s*=\s*["']([^"'\n]+)["']""", re.MULTILINE
+# An ``instructions`` or ``illegal`` key and its string, anywhere in a current file that is not TOML
+# at all: at a line start, after a dotted or quoted key, or inside an inline table, in any TOML quote form.
+_RULE_STRING = re.compile(
+    r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*"
+    r"(?P<s>\"\"\"|'''|\"|')(?P<path>[^\"'\n]+)(?P=s)"
 )
 
 
@@ -340,7 +341,7 @@ def _rule_settings(text: str) -> dict[str, str] | None:
 
 
 def _rule_line_paths(text: str) -> list[str]:
-    """Find the paths of the ``instructions`` and ``illegal`` lines of a text that is not TOML.
+    """Find the paths of the ``instructions`` and ``illegal`` keys of a text that is not TOML.
 
     Args:
         text: The raw file text.
@@ -348,7 +349,7 @@ def _rule_line_paths(text: str) -> list[str]:
     Returns:
         The distinct cleaned paths, in file order.
     """
-    return list(dict.fromkeys(_clean_rule_path(path) for path in _RULE_LINE.findall(text)))
+    return list(dict.fromkeys(_clean_rule_path(match["path"]) for match in _RULE_STRING.finditer(text)))
 
 
 def dropped_rule_files(current: str, text: str) -> str | None:
@@ -601,7 +602,7 @@ def workspace_tools(
             when the repository's file cannot be checked.
         """
         text = str({**state, **turn.wizard_patch}.get("optimize_toml") or "")
-        if text:
+        if text.strip():
             return text
         if not str(state.get("repository") or "").strip():
             return ""

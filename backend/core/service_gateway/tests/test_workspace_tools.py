@@ -787,6 +787,21 @@ async def test_write_refuses_dropping_the_rules_file_that_the_repository_optimiz
 
 
 @pytest.mark.asyncio
+async def test_a_blank_draft_optimize_toml_still_checks_the_repository_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft optimize.toml of only whitespace is no file, so the write is checked against the repository's."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "optimize_toml": "\n"}, turn, token=lambda: "gh-token")[
+        WRITE_FILE_TOOL
+    ].acall(path="optimize.toml", text=_NO_RULES_TOML)
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
 async def test_the_guard_checks_the_repository_file_after_the_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard's read of the repository's optimize.toml works after the agent used every read of its turn."""
     _fake_repo_with_toml(monkeypatch, [])
@@ -852,10 +867,18 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
 
 
 @pytest.mark.parametrize(
-    "line", ['proposer.illegal = "rules.md"', '"illegal" = "rules.md"', "target.'a.b'.illegal = 'rules.md'"]
+    "line",
+    [
+        'proposer.illegal = "rules.md"',
+        '"illegal" = "rules.md"',
+        "target.'a.b'.illegal = 'rules.md'",
+        'proposer = { illegal = "rules.md" }',
+        'illegal = """rules.md"""',
+        "illegal = '''rules.md'''",
+    ],
 )
 def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line: str) -> None:
-    """A dotted or quoted ``illegal`` key in a current text that is not TOML still guards its path."""
+    """A dotted, quoted, inline-table or triple-quoted ``illegal`` key in a non-TOML text still guards its path."""
     refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", "version = 1\n")
 
     assert refusal is not None
