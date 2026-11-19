@@ -64,7 +64,7 @@ knows what to fix and what to do next:
 | Start | `repo_draft_start` (objective, name). It lists the engines. | Yes |
 | Repository | `repo_draft_set_repository` (owner/name, branch or commit, editable paths, setup command) | Yes |
 | Data | `repo_draft_set_data` (inline cases or a staged dataset) | No |
-| Scorer | `repo_draft_set_scorer` (Python metric code) | Yes |
+| Scorer | `repo_draft_set_scorer` (Python metric code; empty when the `optimize.toml` `[metric] entry` is a command, see `repository-constraints.md`) | Yes |
 | Contract | `repo_draft_set_contract` (the `optimize.toml` text) | When the repository has no `optimize.toml` |
 | Models | `repo_draft_set_models` (reflection model, token source, more models) | Yes |
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |

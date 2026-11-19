@@ -977,3 +977,20 @@ def test_a_metric_folder_counts_as_metric_files(tmp_path: Path) -> None:
     files = {**_REPO_MODULES, "eval/score.py": b"from util import util\n"}
 
     assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval"]) == []
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [b'"eval/score.py:grade"', b'["bash", "eval/metric.sh"]'],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_entry_passes_the_gate(tmp_path: Path, entry: bytes, place: str) -> None:
+    """The metric box runs a Python or a command ``[metric] entry`` in every place (SKY-738)."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = ["eval"]\nentry = ' + entry + b"\n"
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "eval/score.py": b"def grade(repo_path): return 1.0\n",
+        "eval/metric.sh": b"exit 0\n",
+    }
+
+    assert check_repository(_archive(tmp_path, files), (), place=place) == []  # type: ignore[arg-type]

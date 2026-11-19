@@ -80,6 +80,7 @@ from ..service_gateway.optimization.blackbox.registry import ENGINES
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
+    DEFAULT_METRIC_ENTRY,
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
@@ -141,6 +142,10 @@ RULE_WATCH_KEY = "rule_watch"
 # Only a job that ended on its own terms ships its suite; a failed, rejected or
 # stale job may hold rounds the user never finished reviewing (SKY-356).
 _FINISHED_HARDENING = frozenset({"clean_stop", "budget_stop", "done"})
+METRIC_CODE_NEEDED = (
+    "The [metric] entry {entry} names a Python function, and the run has no metric code."
+    ' Set the metric code, or make [metric] entry a command such as entry = ["./metric.sh"].'
+)
 # Exploit ids are uuid4 hex; anything else could name a path outside the suite.
 _EXPLOIT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -174,6 +179,8 @@ class StagedRepository:
     # The [run] entry, which runs in the candidate box; the metric files are only in the metric box (E38, SKY-398).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = 60.0
+    # The [metric] entry: a Python function in the request's metric code, or a command (SKY-738).
+    metric_entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY
     # Each role's own box: [run] sizes and walls off the candidate box, [metric]
     # the metric box. No hosts keeps the box offline; None keeps the default size.
     run_hosts: tuple[str, ...] = ()
@@ -460,6 +467,11 @@ def stage_repository(
         # parent's scorer box keeps the full tree, so it scores with the base
         # commit's metric (SKY-353).
         metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
+        # A Python scorer may skip the metric code only for a command entry (SKY-738).
+        scorer = result.get("scorer") or {}
+        code_needed = scorer.get("kind") == "python" and isinstance(metric.entry, str)
+        if code_needed and not str(scorer.get("metric_code") or "").strip():
+            raise ConstraintsError(METRIC_CODE_NEEDED.format(entry=metric.entry), section="metric", key="entry")
         cases_file = environment.constraints.cases_file if environment.constraints is not None else None
         # Two sources would leave it unclear which cases the run scores on (E58).
         if cases_file is not None and result.get("cases"):
@@ -494,6 +506,7 @@ def stage_repository(
                 snapshot.archive,
                 contract_sha256=environment.constraints.sha256,
                 metric_files=metric.files,
+                metric_entry=metric.entry,
                 metric_code=str((result.get("scorer") or {}).get("metric_code") or ""),
                 drafts=drafts,
                 cases_file=cases_file,
@@ -582,6 +595,9 @@ def stage_repository(
         proposer_role=environment.constraints.proposer if environment.constraints is not None else None,
         run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
+        metric_entry=environment.constraints.metric.entry
+        if environment.constraints is not None
+        else DEFAULT_METRIC_ENTRY,
         run_hosts=_role_hosts(environment.constraints.run_role if environment.constraints is not None else None),
         run_vcpus=environment.constraints.run_vcpus if environment.constraints is not None else None,
         metric_hosts=_role_hosts(environment.constraints.metric_role if environment.constraints is not None else None),
@@ -1127,7 +1143,7 @@ def bind_repo_scorer(
             metric_hosts=staged.metric_hosts,
             metric_vcpus=staged.metric_vcpus,
         ),
-        str(scorer_spec["metric_code"]),
+        str(scorer_spec.get("metric_code") or ""),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
         rule_judge=rule_judge,
         gateway=model_gateway,
@@ -1141,6 +1157,7 @@ def bind_repo_scorer(
         mcp_roles=staged.mcp_roles,
         run_entry=staged.run_entry,
         run_timeout=staged.run_timeout,
+        metric_entry=staged.metric_entry,
         secret_bindings=staged.secret_bindings,
         secret_hosts=staged.secret_hosts,
         secret_allowed_hosts=staged.secret_allowed_hosts,
@@ -1475,6 +1492,7 @@ def _record_facts(
     *,
     contract_sha256: str,
     metric_files: tuple[str, ...],
+    metric_entry: str | tuple[str, ...],
     metric_code: str,
     drafts: Mapping[str, str],
     cases_file: str | None,
@@ -1482,11 +1500,12 @@ def _record_facts(
 ) -> dict[str, Any]:
     """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
 
-    ``metric_sha256`` is one SHA-256 over framed parts: first the entry code
-    (path ``metric.py``, the UTF-8 bytes of ``metric_code``), then each
-    regular file under the ``[metric] files`` paths in sorted path order; see
-    :func:`_framed`. The entry code stays first, so a repository file named
-    ``metric.py`` cannot take its place. ``metric_source`` describes the
+    ``metric_sha256`` is one SHA-256 over framed parts, one for each regular
+    file under the ``[metric] files`` paths, in sorted path order; see
+    :func:`_framed`. The rule is the same for a Python and a command
+    ``[metric] entry`` (SKY-738). For a Python entry, ``metric_code`` counts as
+    one file at the entry's path and takes the place of a repository file
+    there. The entry value is not a part: ``contract_sha256`` covers it. ``metric_source`` describes the
     ``[metric] files`` only: it is ``repository`` when the file sets
     ``[metric] files`` and every one comes from the pinned commit, and
     ``request`` when there are none or a draft file replaces or adds one.
@@ -1502,7 +1521,8 @@ def _record_facts(
         archive: The staged tree, after the draft files apply.
         contract_sha256: SHA-256 of the ``optimize.toml`` bytes the run read.
         metric_files: The ``[metric] files`` paths, files or folders.
-        metric_code: The scorer's entry code.
+        metric_entry: The ``[metric] entry``: ``"path.py:function"`` or a command list.
+        metric_code: The request's metric code; a command entry does not use it.
         drafts: The run's draft files by path.
         cases_file: The ``[data] cases`` path, or ``None``.
         cases: The request's cases, used when there is no cases file.
@@ -1519,10 +1539,13 @@ def _record_facts(
             path = posixpath.normpath(member.name).lstrip("/")
             if member.isfile() and inside(path, roots):
                 digests[path] = _stream_digest(packed.extractfile(member))
-    code = metric_code.encode("utf-8")
-    metric = hashlib.sha256(_framed("metric.py", len(code), hashlib.sha256(code).hexdigest()))
-    for path in sorted(path for path in digests if inside(path, metric_files)):
-        metric.update(_framed(path, *digests[path]))
+    parts = {path: digest for path, digest in digests.items() if inside(path, metric_files)}
+    if isinstance(metric_entry, str) and metric_code:
+        code = metric_code.encode("utf-8")
+        parts[posixpath.normpath(metric_entry.rsplit(":", 1)[0])] = (len(code), hashlib.sha256(code).hexdigest())
+    metric = hashlib.sha256()
+    for path in sorted(parts):
+        metric.update(_framed(path, *parts[path]))
     from_commit = bool(metric_files) and not any(inside(path, metric_files) for path in drafts)
     if cases_file is not None:
         cases_sha256 = digests[cases_file][1] if cases_file in digests else hashlib.sha256(b"").hexdigest()

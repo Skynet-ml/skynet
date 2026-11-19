@@ -20,7 +20,11 @@ Parsed and validated here, but not enforced yet: ``[proposer]`` and
 vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``,
 and ``headers`` and a ``query`` table that name secrets only as ``${NAME}``
 placeholders),
-``[metric]`` (the files and exploit folder hidden from the agent) and
+``[metric]`` (the files and exploit folder hidden from the agent, and the
+``entry`` that names the metric: ``"path.py:function"``, by default
+``"metric.py:score"``, or a command list that reads ``ASCENT_INPUT`` and
+writes ``ASCENT_OUTPUT``; a command must run a file from ``[metric] files``,
+SKY-738) and
 ``[run]`` (the entry that starts the candidate for each case, and its
 timeout; a contract needs ``[run]`` or a ``[target.<name>]`` stage, and the
 parser enforces this), and ``[data] cases`` (the path of a JSONL file that holds
@@ -100,6 +104,8 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
+# Every contract written before [metric] entry existed runs as this entry (SKY-738).
+DEFAULT_METRIC_ENTRY = "metric.py:score"
 _ROLE_KEYS = frozenset({"mcp", "network", "services", "illegal"})
 _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
@@ -107,7 +113,7 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "setup": frozenset({"command"}),
     # entry and setup name the user's own proposer command (SKY-753).
     "proposer": _ROLE_KEYS | {"entry", "setup"},
-    "metric": frozenset({"files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus"}),
+    "metric": frozenset({"files", "exploits", "reference", "entry", "mcp", "network", "services", "illegal", "vcpus"}),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
@@ -282,6 +288,8 @@ class MetricSpec:
     files: tuple[str, ...] = ()
     exploits: str = _DEFAULT_EXPLOITS
     reference: str | None = None
+    # "path.py:function" for request code, or a command list that runs a [metric] files file (SKY-738).
+    entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY
 
 
 @dataclass(frozen=True)
@@ -1313,7 +1321,9 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
         The validated section, with the default exploit folder when none is set.
 
     Raises:
-        ConstraintsError: When a path is malformed or names the whole repository.
+        ConstraintsError: When a path is malformed or names the whole repository,
+            or when ``entry`` is neither form, or is a command that runs no file
+            from ``[metric] files``.
     """
     files = _paths(section, "files", "metric") or ()
     exploits = _metric_path(section, "exploits") or _DEFAULT_EXPLOITS
@@ -1321,7 +1331,17 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
     # The runtime hides these paths from the agent, so "." would hide the whole repository.
     if "." in (*files, exploits, reference):
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: [metric] cannot name the whole repository.", section="metric")
-    return MetricSpec(files=files, exploits=exploits, reference=reference)
+    entry = _entry(section["entry"], "[metric]") if "entry" in section else DEFAULT_METRIC_ENTRY
+    # Only the [metric] files reach the metric box, hidden from the agent; a
+    # command that runs no such file would run nothing the contract pins.
+    if isinstance(entry, tuple) and not any(_inside(posixpath.normpath(part.strip()), files) for part in entry):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [metric] entry {list(entry)!r} runs no file from [metric] files. Add the"
+            ' command\'s file to [metric] files, for example files = ["metric.sh"] and entry = ["./metric.sh"].',
+            section="metric",
+            key="entry",
+        )
+    return MetricSpec(files=files, exploits=exploits, reference=reference, entry=entry)
 
 
 def _cases_file(section: Mapping[str, Any] | None) -> str | None:
@@ -1590,6 +1610,14 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: the metric cannot score a version with no output. Add a [run] section"
             " or a [target.<name>] stage whose outputs the metric scores."
+        )
+    # A command metric reads only its input file; it has no call() helper to run a stage itself.
+    if isinstance(metric.entry, tuple) and run_entry is None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: a command [metric] entry scores the [run] output, and this file has no [run]"
+            ' section. Add [run], or use a Python entry such as entry = "metric.py:score".',
+            section="metric",
+            key="entry",
         )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),

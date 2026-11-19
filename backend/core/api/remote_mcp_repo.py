@@ -59,7 +59,12 @@ from ..models.blackbox import (
     BlackboxRunRequest,
 )
 from ..service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE, optimize_toml_error
-from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, CONSTRAINTS_REQUIRED
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
+    CONSTRAINTS_REQUIRED,
+    ConstraintsError,
+    parse_constraints,
+)
 from ..service_gateway.optimization.blackbox.service import engine_catalog, validate_job
 from ..storage.models import McpRunDraftModel
 from .auth import AuthenticatedUser
@@ -341,6 +346,55 @@ def case_shape_issues(cases: list[dict[str, Any]]) -> list[str]:
     return [
         f'Each inline case must be {{"input": ..., "expected": ...}}; "expected" is optional. '
         f"Case {bad[0]} has {keys}, and {len(bad)} of {len(cases)} cases have another shape."
+    ]
+
+
+def draft_metric_entry(spec: dict[str, Any]) -> str | tuple[str, ...] | None:
+    """Read the ``[metric] entry`` of the draft's own ``optimize.toml``.
+
+    Args:
+        spec: The whole draft.
+
+    Returns:
+        The entry, or ``None`` when the draft has no valid contract, as the
+        repository's own file is not read here.
+    """
+    contract = spec.get("contract")
+    if not contract:
+        return None
+    try:
+        return parse_constraints(str(contract["optimize_toml"]).encode("utf-8", "surrogatepass")).metric.entry
+    except ConstraintsError:
+        return None
+
+
+def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Check the scorer step against the draft's ``[metric] entry`` (SKY-738).
+
+    A command entry needs no metric code. Without the draft's own contract, the
+    run's staging checks the repository's entry.
+
+    Args:
+        metric_code: The scorer source; empty for a command metric.
+        spec: The whole draft.
+
+    Returns:
+        The issues and the notes.
+    """
+    entry = draft_metric_entry(spec)
+    if isinstance(entry, tuple):
+        note = "The metric box runs the [metric] entry command, so it does not use the metric code."
+        return [], [note] if metric_code.strip() else []
+    if metric_code.strip():
+        return scorer_issues(metric_code, bool(spec.get("data")))
+    if entry is not None:
+        return [
+            f"The [metric] entry {entry} names a Python function, so the scorer needs metric code."
+            " Set it with repo_draft_set_scorer, or make the entry a command."
+        ], []
+    return [], [
+        f"The scorer has no metric code, so the repository's {CONSTRAINTS_FILE} must give [metric] entry as a"
+        " command. The run's setup checks it."
     ]
 
 
@@ -654,7 +708,9 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
         "recipe": "repo",
         "scorer": {
             "kind": "python",
-            "metric_code": scorer["metric_code"],
+            "metric_code": scorer.get("metric_code") or None,
+            # No code means a command [metric] entry; staging refuses a Python entry without code (SKY-738).
+            "command_metric": not (scorer.get("metric_code") or "").strip(),
             "timeout_seconds": scorer["timeout_seconds"],
             **({"model": _model_config(entries[-1])} if models.get("scorer_model") else {}),
         },
@@ -794,7 +850,7 @@ def review_draft(
             notes.append(f"The staged dataset has {len(rows)} cases.")
         except DomainError as error:
             issues.append(f"The staged dataset cannot be read ({error.code}). Stage it again and set the data step.")
-    scorer_found, scorer_notes = scorer_issues(spec["scorer"]["metric_code"], bool(data))
+    scorer_found, scorer_notes = draft_scorer_issues(spec["scorer"].get("metric_code") or "", spec)
     issues += scorer_found
     notes += scorer_notes
     issues += model_issues(spec["models"], http_client)[0]
@@ -1414,9 +1470,10 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         metric_code: Annotated[
             str,
             Field(
-                min_length=1,
                 max_length=200_000,
-                description="Python that defines score(repo_path), score(repo_path, case) or "
+                description="Leave empty when the optimize.toml [metric] entry is a command, such as "
+                'entry = ["./metric.sh"]: the metric box runs that command. Otherwise Python that defines '
+                "score(repo_path), score(repo_path, case) or "
                 "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
                 "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
                 "entry's run time in seconds, which Skynet measures outside the version's code. It returns one "
@@ -1426,7 +1483,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         ],
         timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 60,
     ) -> dict[str, Any]:
-        """Set the Python scorer that grades each version of the repository.
+        """Set the scorer that grades each version of the repository: Python metric code, or none for a command.
 
         Skynet checks the code statically. It does not run it before the run starts.
         """
@@ -1434,7 +1491,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
 
         def check(spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
             """Check the scorer code without running it."""
-            issues, notes = scorer_issues(metric_code, bool(spec.get("data")))
+            issues, notes = draft_scorer_issues(metric_code, spec)
             return issues, notes, {}
 
         return save_step(draft_id, "scorer", part, check)

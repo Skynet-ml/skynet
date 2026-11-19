@@ -8,7 +8,7 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 18
+SANDBOX_PROTOCOL = 19
 
 # Older image protocols that read this worker's guest request the same way, so a
 # deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
@@ -33,8 +33,12 @@ SANDBOX_PROTOCOL = 18
 # command: it skips ``setup`` and ``ASCENT_TASK``, and AutoSaddler reflect
 # sessions get no default agent. The worker refuses every image before 18 for
 # a run with a file proposer.
+# Protocol 19 (SKY-738) added ``scorer.command_metric`` and runs the contract
+# file's ``[metric] entry``. A run with the default entry reads the same on an
+# older image. A command entry sends no metric code, so an older image refuses
+# the request at validation instead of running the wrong metric.
 # The worker sends an older image the image's own protocol number.
-READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, SANDBOX_PROTOCOL})
+READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, 18, SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.
 # A later bump that keeps the verdict must not refuse the images at this one.

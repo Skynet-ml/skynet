@@ -438,7 +438,7 @@ def validate_blackbox_payload(
             python scorer code does not load.
     """
     validate_job(payload, api_bases=api_bases)
-    if verify_scorer and payload.scorer.kind == "python":
+    if verify_scorer and payload.scorer.kind == "python" and not payload.scorer.command_metric:
         validate_scorer_code(str(payload.scorer.metric_code))
 
 
