@@ -24,6 +24,9 @@ from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
 
+# Restart and resume refuse a stored text or agent run (SKY-834), so the default row is a repository run.
+_REPO_PAYLOAD = {"target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}}
+
 
 class _RepoJobStore(_BaseFakeJobStore):
     """Seed repository runs by default: a stored DSPy run can no longer be re-queued (SKY-316)."""
@@ -39,6 +42,7 @@ class _RepoJobStore(_BaseFakeJobStore):
             The stored job row.
         """
         fields.setdefault("payload_overview", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+        fields.setdefault("payload", _REPO_PAYLOAD)
         return super().seed_job(optimization_id, **fields)
 
 

@@ -16,7 +16,6 @@ from collections.abc import AsyncIterable, AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -35,7 +34,6 @@ from ...models import (
     OptimizationStatus,
     OptimizationSummaryResponse,
 )
-from ...models.blackbox import BLACKBOX_TARGET_REPO, STORED_PAYLOAD_CONTEXT, BlackboxRunRequest
 from ...models.results import result_scores
 from ...service_gateway.language_models import usage_by_model_from_history
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
@@ -735,14 +733,8 @@ def has_retired_target(job_data: dict) -> bool:
     )
     if not isinstance(payload, dict) or "judge" in payload or optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
         return False
-    if isinstance(payload.get("target"), dict):
-        return not is_repo_payload(payload)
-    # The worker reads a payload with no target as a text run, because the target kind defaults to text.
-    try:
-        request = BlackboxRunRequest.model_validate(payload, context=STORED_PAYLOAD_CONTEXT)
-    except ValidationError:
-        return False
-    return request.target.kind != BLACKBOX_TARGET_REPO
+    # A payload with no target is a text run, because the target kind defaults to text.
+    return not is_repo_payload(payload)
 
 
 def _resume_candidate_id(job_data: dict) -> str | None:

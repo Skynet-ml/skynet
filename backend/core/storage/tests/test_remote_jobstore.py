@@ -89,6 +89,10 @@ class SQLiteJobStore(RemoteDBJobStore):
 _RECOVERY_IMAGE = "fixture@sha256:" + "a" * 64
 
 
+# Resume and restart refuse a stored text or agent run (SKY-834), so a funded run is a repository run.
+_REPO_TARGET = {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}
+
+
 def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: pytest.MonkeyPatch) -> BudgetService:
     """Attach reconciled funding and a real pinned checkpoint to an existing test run.
 
@@ -112,6 +116,7 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
     budget = service.create("resume-owner", 20, idempotency_key=optimization_id)
     service.attach_to_job(budget.id, "resume-owner", optimization_id, expected_revision=budget.revision)
     payload = {
+        "target": _REPO_TARGET,
         "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
@@ -2060,7 +2065,7 @@ def _fund_without_checkpoint(store: SQLiteJobStore, optimization_id: str) -> Bud
     store.update_job(
         optimization_id,
         username="restart-owner",
-        payload={"execution_budget_id": budget.id, "execution_budget_generation": 0},
+        payload={"target": _REPO_TARGET, "execution_budget_id": budget.id, "execution_budget_generation": 0},
         execution_budget_id=budget.id,
         execution_budget_generation=0,
     )

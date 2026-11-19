@@ -266,9 +266,8 @@ class GepaEngine:
             Returns:
                 One ``(score, side_info)`` per pair, in order.
             """
-            # Text targets keep the serial loop. Agent targets run each case in
-            # its own sandbox, so their batch runs ``ctx.concurrency`` wide on the
-            # sandbox pool.
+            # A concurrency of 1 keeps the serial loop. A wider one runs the batch
+            # ``ctx.concurrency`` wide on the sandbox pool, one sandbox per case.
             if ctx.concurrency <= 1:
                 return score_batch(score_one, pairs, 1)
             calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]

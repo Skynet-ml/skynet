@@ -617,7 +617,6 @@ def _final_run(
     *,
     label: str,
     phase: str,
-    concurrency: int = 1,
     case_offset: int = 0,
     repo_scorer: bool = False,
 ) -> FinalRun:
@@ -633,7 +632,6 @@ def _final_run(
         cases: The run's cases; empty to score the version on its own.
         label: What the candidate is, for logs and the error message.
         phase: Which pass this is: ``PHASE_BASELINE`` or ``PHASE_FINAL``.
-        concurrency: How many cases to score at once.
         case_offset: Added to each case's index in the usage records, so the
             held-out pass does not overwrite the selection pass's records.
         repo_scorer: Whether ``scorer`` is the repository scorer, the only
@@ -681,12 +679,11 @@ def _final_run(
 
     started = time.perf_counter()
     try:
-        workers = max(1, min(concurrency, len(targets)))
-        logger.info("final run: scoring the %s on %d case(s), %d at a time", label, len(cases), workers)
+        logger.info("final run: scoring the %s on %d case(s)", label, len(cases))
         scored = run_on_pool(
             Phase.RUN,
             [functools.partial(score_case, numbered) for numbered in enumerate(targets, start=1)],
-            workers,
+            1,
         )
     # An interruption, such as an engine loop's scorer outage, must reach the worker as one, so the run requeues.
     except (BudgetError, UsagePendingError, UnpricedOperationError, InfrastructureInterruptionError):

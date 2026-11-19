@@ -706,10 +706,8 @@ class EngineContext:
     # runs until the scorer budget is spent.
     max_iterations: int | None = None
     # How many cases an engine may score at once. Only pays off when the
-    # scorer itself runs elsewhere (one sandbox per case); 1 for text targets.
+    # scorer itself runs elsewhere (one sandbox per case).
     concurrency: int = 1
-    # "harness · model" the proposer is told it writes for, on agent targets.
-    target_label: str | None = None
     # Job-level progress sink. Engines that can narrate their run (GEPA via
     # the trajectory watcher) stream candidate events through it live.
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None

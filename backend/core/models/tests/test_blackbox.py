@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from core.models import blackbox as blackbox_models
 from core.models.blackbox import (
+    TARGET_RETIRED,
     BlackboxRepoSecret,
     BlackboxRepoSource,
     BlackboxRunRequest,
@@ -438,7 +439,11 @@ _RETIRED_TARGETS = [
 ]
 
 
-@pytest.mark.parametrize("target", _RETIRED_TARGETS)
+@pytest.mark.parametrize(
+    "target",
+    # The agent target's own harness and model checks must not answer first.
+    [*_RETIRED_TARGETS, {"kind": "agent", "harness": "claude_code", "model": "m"}, {"kind": "agent"}],
+)
 def test_a_new_text_or_agent_request_is_refused(target: dict[str, str]) -> None:
     """Refuse a new text or agent target, because every run optimizes a repository (SKY-834).
 
@@ -452,8 +457,9 @@ def test_a_new_text_or_agent_request_is_refused(target: dict[str, str]) -> None:
         "target": target,
     }
 
-    with pytest.raises(ValidationError, match="Every run optimizes a repository"):
+    with pytest.raises(ValidationError) as refused:
         BlackboxRunRequest.model_validate(payload)
+    assert [error["msg"] for error in refused.value.errors()] == [f"Value error, {TARGET_RETIRED}"]
     with pytest.raises(ValidationError, match="Every run optimizes a repository"):
         BlackboxRunRequest.model_validate({key: value for key, value in payload.items() if key != "target"})
 

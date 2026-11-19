@@ -892,7 +892,6 @@ def test_unavailable_native_recipe_fails_before_building_a_scorer(
         """
         pytest.fail("Scorer was constructed before native execution was validated")
 
-    monkeypatch.setattr(scorer_mod, "build_scorer", unexpected_scorer)
     monkeypatch.setattr(service_mod, "RemoteScorer", unexpected_scorer)
     payload = _payload(
         strategy=strategy,
@@ -1330,9 +1329,8 @@ def test_service_hands_the_progress_sink_to_the_engine_context(
     assert events[-1] == ("trajectory", {"score": 0.5})
 
 
-@pytest.mark.parametrize("concurrency", [1, 2])
-def test_final_run_logs_a_debug_heartbeat_per_case(caplog: pytest.LogCaptureFixture, concurrency: int) -> None:
-    """Final runs log one DEBUG line per case for the verbose log view, whichever pool serves them."""
+def test_final_run_logs_a_debug_heartbeat_per_case(caplog: pytest.LogCaptureFixture) -> None:
+    """Final runs log one DEBUG line per case for the verbose log view."""
     cases = [{"n": 1}, {"n": 2}]
 
     with caplog.at_level(logging.DEBUG, logger="core.service_gateway.optimization.blackbox.service"):
@@ -1342,7 +1340,6 @@ def test_final_run_logs_a_debug_heartbeat_per_case(caplog: pytest.LogCaptureFixt
             cases,
             label="optimized version",
             phase=PHASE_FINAL,
-            concurrency=concurrency,
         )
 
     assert run.score == pytest.approx(0.375)
@@ -1373,7 +1370,7 @@ def test_final_run_stops_scheduling_cases_once_one_fails() -> None:
 
     cases = [{"n": n} for n in range(1, 7)]
     with pytest.raises(ServiceError, match="scorer failed on the optimized version: ValueError: boom"):
-        service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL, concurrency=2)
+        service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL)
 
     assert set(started) <= {1, 2, 3}
 
@@ -1493,7 +1490,7 @@ def test_final_run_keeps_each_cases_observation_for_both_versions() -> None:
     scorer = ObservedScorer()
     cases = [{"n": 1}, {"n": 2}]
     baseline = service_mod._final_run(scorer, "slow", cases, label="starting point", phase=PHASE_BASELINE)
-    best = service_mod._final_run(scorer, "fast", cases, label="optimized version", phase=PHASE_FINAL, concurrency=2)
+    best = service_mod._final_run(scorer, "fast", cases, label="optimized version", phase=PHASE_FINAL)
     rows = service_mod._case_results(baseline, best)
 
     assert [row.baseline_observation["timing"]["task_ms"] for row in rows if row.baseline_observation] == [100.0] * 2
@@ -2454,7 +2451,6 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
             [{"input": 1}, {"input": 2}],
             label="starting point",
             phase=PHASE_BASELINE,
-            concurrency=1,
             repo_scorer=True,
         )
     finally:

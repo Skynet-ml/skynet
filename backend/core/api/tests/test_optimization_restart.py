@@ -20,6 +20,9 @@ from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
 
+# Restart and resume refuse a stored text or agent run (SKY-834), so the default row is a repository run.
+_REPO_PAYLOAD = {"target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}}
+
 
 class _RepoJobStore(_BaseFakeJobStore):
     """Seed repository runs by default: a stored DSPy run can no longer be re-queued (SKY-316)."""
@@ -35,6 +38,7 @@ class _RepoJobStore(_BaseFakeJobStore):
             The stored job row.
         """
         fields.setdefault("payload_overview", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+        fields.setdefault("payload", _REPO_PAYLOAD)
         return super().seed_job(optimization_id, **fields)
 
 
@@ -134,8 +138,14 @@ _TARGETLESS_TEXT_PAYLOAD = {
 
 @pytest.mark.parametrize(
     "payload",
-    [{"target": {"kind": "text"}}, {"target": {"kind": "agent"}}, _TARGETLESS_TEXT_PAYLOAD],
-    ids=["text", "agent", "no_target"],
+    [
+        {"target": {"kind": "text"}},
+        {"target": {"kind": "agent"}},
+        _TARGETLESS_TEXT_PAYLOAD,
+        # A row with no target that no longer validates is still not a repository run.
+        {"candidate": "x", "scorer": {"metric_code": "x"}},
+    ],
+    ids=["text", "agent", "no_target", "no_target_invalid"],
 )
 def test_restart_of_a_stored_text_or_agent_run_is_refused_and_keeps_its_history(
     client: TestClient, store: _BaseFakeJobStore, payload: dict[str, Any]

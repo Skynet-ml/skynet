@@ -807,19 +807,42 @@ class BlackboxRunRequest(BaseModel):
             return {**data, "proposer_runtime": "vercel"}
         return data
 
-    @model_validator(mode="after")
-    def _ensure_starting_point(self, info: ValidationInfo) -> BlackboxRunRequest:
-        """Reject targets, starting points and limits the selected engine cannot honor.
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_retired_target(cls, data: Any, info: ValidationInfo) -> Any:
+        """Refuse a new text or agent target before the target's own checks run.
+
+        The target's agent checks would otherwise answer first with a harness or
+        model error that hides the real reason (SKY-834).
 
         Args:
+            data: Raw request data before field validation.
             info: Validation info; its context marks a stored run's payload.
+
+        Returns:
+            The input unchanged.
+
+        Raises:
+            ValueError: When a new request names a target other than a repository.
+        """
+        if not isinstance(data, dict) or (info.context or {}).get(STORED_PAYLOAD_KEY):
+            return data
+        target = data.get("target")
+        # A request with no target is a text run, because the target kind defaults to text.
+        kind = target.get("kind") if isinstance(target, dict) else getattr(target, "kind", BLACKBOX_TARGET_TEXT)
+        if kind != BLACKBOX_TARGET_REPO:
+            raise ValueError(TARGET_RETIRED)
+        return data
+
+    @model_validator(mode="after")
+    def _ensure_starting_point(self) -> BlackboxRunRequest:
+        """Reject starting points and limits the selected engine cannot honor.
 
         Returns:
             The validated request instance.
 
         Raises:
-            ValueError: When a new request has a text or agent target; when a
-                repository run sends a task model; or when an iteration cap is
+            ValueError: When a repository run sends a task model; or when an iteration cap is
                 supplied outside a single Meta-Harness, AutoSaddler or
                 ShinkaEvolve run; or when extra optimization models are sent
                 to a single run of another engine.
@@ -828,8 +851,6 @@ class BlackboxRunRequest(BaseModel):
             self._ensure_repo_run()
             if self.task_model_settings is not None:
                 raise ValueError("task_model_config does not apply to a repository run.")
-        elif not (info.context or {}).get(STORED_PAYLOAD_KEY):
-            raise ValueError(TARGET_RETIRED)
         if self.budget.max_iterations is not None and (
             self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_ITERATION_LIMIT_ENGINES
         ):
