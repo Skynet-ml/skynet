@@ -274,6 +274,7 @@
     "optimization.resume_budget_projected": "يتجه التشغيل نحو تكلفة حوالي {projected}، أي أكثر من سقفه البالغ {limit}. ارفع سقف الإنفاق إلى أكثر من {projected} للمتابعة.",
     "optimization.resume_exhausted": "بلغ هذا التحسين أقصى عدد من المحاولات ({attempts}) — شغّله من جديد بدلاً من ذلك.",
     "optimization.resume_not_resumable": "لا يملك هذا التحسين أي نقطة استئناف محفوظة — شغّله من جديد بدلاً من ذلك.",
+    "optimization.resume_target_retired": "كل تشغيل يحسّن الآن مستودعًا. يبقى هذا التشغيل للنص أو الوكيل في سجلك، لكن لا يمكن استئنافه.",
     "optimization.resume_wrong_status": "لا يمكن استئناف سوى عمليات التحسين التي توقّفت في منتصف التشغيل — هذه في الحالة '{status}'.",
     "sandbox.docker_unavailable": "Docker لا يعمل على هذا الكمبيوتر. شغّل Docker Desktop أو OrbStack ثم حاول مرة أخرى.",
     "sandbox.docker_image_missing": "صورة بيئة العزل المحلية لم تُبنَ بعد. أعد تشغيل التطبيق لبنائها.",

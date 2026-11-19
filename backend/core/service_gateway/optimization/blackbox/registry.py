@@ -1,7 +1,6 @@
 """Publish pinned engine contracts and managed execution availability.
 
-Every production proposer runs inside Vercel independently of whether a
-candidate is scored directly or executed by a task harness.
+Every production proposer runs inside Vercel.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from .meta_harness import MetaHarnessEngine
 from .protocol import Engine
 from .shinka_evolve import ShinkaEvolveEngine
 
-_AGENT_TARGET_REASON = "Meta-Harness optimizes a coding agent's harness; the job's target must be an agent."
 _NO_SANDBOX_REASON = "Agent sandboxes are not configured on this deployment."
 
 
@@ -36,12 +34,10 @@ class EngineCapabilities:
     """What the deployment and the job offer the engines.
 
     ``sandbox`` says whether agent sandboxes can be created here (with
-    ``sandbox_reason`` explaining why not); ``agent_target`` says whether
-    the job's versions drive a coding agent.
+    ``sandbox_reason`` explaining why not).
     """
 
     sandbox: bool = False
-    agent_target: bool = False
     sandbox_reason: str | None = None
     proposer_available: bool = False
     proposer_reason: str | None = None
@@ -60,7 +56,6 @@ class EngineSpec:
     factory: Callable[[], Engine] | None = None
     unavailable_reason: str | None = None
     requires_sandbox: bool = False
-    requires_agent_target: bool = False
     requires_proposer: bool = False
     checkpoint_recovery_supported: bool = False
 
@@ -91,8 +86,6 @@ class EngineSpec:
             return caps.proposer_reason or "The upstream proposer runtime is not configured on this deployment."
         if self.requires_sandbox and not caps.sandbox:
             return caps.sandbox_reason or _NO_SANDBOX_REASON
-        if self.requires_agent_target and not caps.agent_target:
-            return _AGENT_TARGET_REASON
         return None
 
     def available_for(self, caps: EngineCapabilities) -> bool:

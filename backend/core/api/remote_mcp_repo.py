@@ -607,7 +607,7 @@ def engine_issues(spec: dict[str, Any]) -> list[str]:
         The issues.
     """
     engine = spec["engine"]["engine"]
-    catalog = {entry.id: entry for entry in engine_catalog("repo").engines}
+    catalog = {entry.id: entry for entry in engine_catalog().engines}
     entry = catalog.get(engine)
     if entry is None:
         return [f"Unknown engine '{engine}'. Use one of: {', '.join(sorted(catalog))}."]
@@ -625,7 +625,7 @@ def engine_choices() -> list[dict[str, Any]]:
     """List the repository engines with their availability, for the agent to offer."""
     return [
         {"id": entry.id, "label": entry.label, "description": entry.description, "available": entry.available}
-        for entry in engine_catalog("repo").engines
+        for entry in engine_catalog().engines
     ]
 
 

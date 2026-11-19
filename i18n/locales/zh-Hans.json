@@ -274,6 +274,7 @@
     "optimization.resume_budget_projected": "照此趋势，运行的费用将达到约 {projected}，超过其 {limit} 的上限。请将支出上限提高到 {projected} 以上以继续。",
     "optimization.resume_exhausted": "该优化已达到最大尝试次数（{attempts}）——请改为重新运行它。",
     "optimization.resume_not_resumable": "该优化没有可保存的恢复点——请改为重新运行它。",
+    "optimization.resume_target_retired": "现在每次运行都会优化一个代码仓库。此文本或智能体运行会保留在历史记录中，但无法恢复。",
     "optimization.resume_wrong_status": "只有运行中途停止的优化才能被恢复——这个优化处于 '{status}' 状态。",
     "sandbox.docker_unavailable": "此电脑上没有运行 Docker。请启动 Docker Desktop 或 OrbStack 后重试。",
     "sandbox.docker_image_missing": "本地沙盒镜像尚未构建。请重新启动应用以构建它。",

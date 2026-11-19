@@ -472,12 +472,14 @@ def test_guest_preflight_remembers_custom_reflection_route(
         "shinka": {"novelty": False},
         "strategy": {"mode": "single", "engine": "shinka_evolve"},
         "max_cost_cents": 100,
+        "target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
     }
     protected = gateway.protect_payload(payload, managed_key="")
     assert "base_url" not in protected["reflection_model_config"]
     protected["shinka"]["novelty"] = True
+    protected["_skynet_evaluator_route"] = {"token": "route"}
     monkeypatch.setattr(blackbox_preflight, "sandbox_runtime_context", lambda *_: nullcontext())
-    monkeypatch.setattr(blackbox_preflight, "SandboxPythonScorer", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(blackbox_preflight, "RemoteScorer", lambda *args, **kwargs: MagicMock(return_value=(1.0, {})))
     with pytest.raises(DomainError) as error:
         blackbox_preflight.verify_anything_in_sandbox(
             protected, scope="execution", identity="fixture", runtime=MagicMock()

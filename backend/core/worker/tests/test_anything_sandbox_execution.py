@@ -181,6 +181,7 @@ def test_protected_parent_does_not_load_scorer_code_before_sandbox() -> None:
             "seed_candidate": "seed",
             "scorer": {"kind": "python", "metric_code": "def score(candidate): return 1.0"},
             "reflection_model_config": {"name": "fixture/model"},
+            "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
         },
         payload_overview={
             "optimization_type": OPTIMIZATION_TYPE_BLACKBOX,

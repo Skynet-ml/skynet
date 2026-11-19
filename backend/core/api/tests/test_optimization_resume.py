@@ -458,3 +458,15 @@ def test_legacy_interrupted_marker_without_a_cause_is_not_exempt_from_the_cap() 
     resp = _owner_client(store, "restart-owner").post("/optimizations/legacy-stop/resume")
     assert resp.status_code == 409
     assert store.get_job("legacy-stop")["status"] == "failed"
+
+
+@pytest.mark.parametrize("kind", ["text", "agent"])
+def test_a_stored_text_or_agent_run_never_resumes(client: TestClient, store: _BaseFakeJobStore, kind: str) -> None:
+    """A text or agent run stays in history, but Resume refuses it (SKY-834)."""
+    oid = f"old_{kind}"
+    store.seed_job(oid, status="failed", username="alice", payload={"target": {"kind": kind}})
+    store.save_gepa_checkpoint(oid, b"GEPA-STATE", iteration=7)
+    assert not is_resumable(store, store.get_job(oid))
+    resp = client.post(f"/optimizations/{oid}/resume")
+    assert resp.status_code == 409
+    assert "Every run now optimizes a repository" in resp.json()["detail"]

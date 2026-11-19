@@ -274,6 +274,7 @@
     "optimization.resume_budget_projected": "この実行はこのままでは約{projected}かかる見込みで、上限の{limit}を超えます。続行するには、支出上限を{projected}より大きい値に引き上げてください。",
     "optimization.resume_exhausted": "この最適化は最大試行回数（{attempts}）に達しました。代わりに再度実行してください。",
     "optimization.resume_not_resumable": "この最適化には保存された再開ポイントがありません。代わりに再度実行してください。",
+    "optimization.resume_target_retired": "現在、すべての実行はリポジトリを最適化します。このテキストまたはエージェントの実行は履歴に残りますが、再開できません。",
     "optimization.resume_wrong_status": "実行途中で停止した最適化のみ再開できます。これは '{status}' の状態です。",
     "sandbox.docker_unavailable": "このコンピューターで Docker が動作していません。Docker Desktop または OrbStack を起動して、もう一度お試しください。",
     "sandbox.docker_image_missing": "ローカルのサンドボックスイメージがまだ作成されていません。アプリを再起動して作成してください。",

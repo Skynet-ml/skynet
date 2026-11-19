@@ -101,7 +101,7 @@ def test_registry_requires_native_proposer_availability() -> None:
 @pytest.mark.parametrize("sandbox", [False, True])
 def test_registry_native_algorithms_do_not_depend_on_candidate_target(sandbox: bool) -> None:
     """Allow native proposal execution for scored code once its runtime is ready."""
-    caps = EngineCapabilities(sandbox=sandbox, agent_target=False, proposer_available=True)
+    caps = EngineCapabilities(sandbox=sandbox, proposer_available=True)
     assert available_engine_ids(caps) == [
         BLACKBOX_ENGINE_GEPA,
         BLACKBOX_ENGINE_BEST_OF_N,

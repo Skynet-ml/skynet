@@ -41,6 +41,7 @@ from ...errors import DomainError
 from ...sharing_access import ShareRole
 from .._helpers import (
     filter_ids_at_least,
+    has_retired_target,
     is_budget_stop,
     is_interrupted_stop,
     is_pausable,
@@ -624,9 +625,13 @@ def register_lifecycle_routes(
         Raises:
             DomainError: 404 (unknown / inaccessible), 403 (caller's share role
                 below ``editor``), 409 (not mid-run / no checkpoint / attempts
-                exhausted / spending limit still below the measured projection).
+                exhausted / spending limit still below the measured projection /
+                a text or agent run).
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
+
+        if has_retired_target(job_data):
+            raise DomainError("optimization.resume_target_retired", status=409)
 
         status = status_to_job_status(job_data.get("status", "pending"))
         budget_stop = is_budget_stop(status, job_data)

@@ -252,6 +252,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.retry_wrong_status": "Only optimizations in 'failed' or 'cancelled' state can be retried — this one is in '{status}'. Clone it instead.",
     "optimization.resume_wrong_status": "Only optimizations that stopped partway through can be resumed — this one is in '{status}'.",
     "optimization.resume_not_resumable": "This optimization has no saved resume point — run it again instead.",
+    "optimization.resume_target_retired": "Every run now optimizes a repository. This text or agent run stays in your history, but it cannot resume.",
     "optimization.resume_exhausted": "This optimization reached its maximum attempts ({attempts}) — run it again instead.",
     "optimization.resume_budget_projected": "The optimization is on track to cost about {projected}, above its {limit} limit. Raise the spending limit above {projected} to continue.",
     "optimization.pause_wrong_status": "Only running optimizations can be paused — this one is in '{status}'.",

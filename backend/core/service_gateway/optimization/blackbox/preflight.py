@@ -11,10 +11,9 @@ from ....config import settings
 from ....exceptions import ServiceError
 from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
-from ....models.blackbox import BLACKBOX_TARGET_REPO, BlackboxScorer, BlackboxTarget
+from ....models.blackbox import BLACKBOX_TARGET_REPO, BlackboxScorer
 from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
-from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
 from .harness import GatewayConfig
 from .native_runtime import NativeOptions, check_native_runtime
 from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
@@ -22,7 +21,7 @@ from .sandbox_contract import SandboxRuntime
 from .sandbox_runtime import sandbox_runtime_context
 from .sandbox_scorer import SandboxPythonScorer, scorer_gateway
 from .scorer import RemoteScorer, build_scorer
-from .service import _agent_scorer, uses_native_runtime, validate_blackbox_payload
+from .service import uses_native_runtime, validate_blackbox_payload
 
 
 def _reflection_bases(config: Any) -> dict[str, str | None]:
@@ -56,20 +55,14 @@ def preflight_lifetime_seconds(payload: dict[str, Any]) -> float:
     hold refused most spending limits before a single check ran.
 
     Args:
-        payload: Canonical scorer and target inputs.
+        payload: Canonical scorer inputs.
 
     Returns:
         The lifetime, in seconds, before the configured ceiling applies.
     """
     scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
-    target = BlackboxTarget.model_validate(payload.get("target") or {})
     # The readiness probe and the sample score each open a scorer box.
-    seconds = _PREFLIGHT_OVERHEAD_SECONDS + 2 * (scorer.timeout_seconds + _SCORER_BOX_OVERHEAD_SECONDS)
-    if target.kind == "agent":
-        # The harness is probed in its own box before one case runs with
-        # every setup step it could carry.
-        seconds += READINESS_LIFETIME_SECONDS + case_lifetime_seconds(target.timeout_seconds, setup_steps=3)
-    return seconds
+    return _PREFLIGHT_OVERHEAD_SECONDS + 2 * (scorer.timeout_seconds + _SCORER_BOX_OVERHEAD_SECONDS)
 
 
 def judge_lifetime_seconds(payload: dict[str, Any], case_count: int) -> float:
@@ -209,40 +202,8 @@ def verify_anything_in_sandbox(
                         else "Evaluator loads; scoring waits for the first generated candidate.",
                     )
                 )
-                if scope == "execution":
-                    target = BlackboxTarget.model_validate(payload.get("target") or {})
-                    if target.kind == "agent":
-                        agent = _agent_scorer(
-                            scorer_instance,
-                            target,
-                            job_id=identity,
-                            progress_callback=None,
-                            agent_run_sink=None,
-                            target_route=payload.get("_skynet_target_route"),
-                        )
-                        result["agent_readiness"] = agent.check_ready()
-                        checks.append(
-                            _check(
-                                "target.readiness",
-                                "succeeded",
-                                "Harness readiness verified; candidate execution waits for the first generated candidate.",
-                                "target",
-                            )
-                        )
             else:
-                target = BlackboxTarget.model_validate(payload.get("target") or {})
-                if target.kind == "agent":
-                    evaluate = _agent_scorer(
-                        scorer_instance,
-                        target,
-                        job_id=identity,
-                        progress_callback=None,
-                        agent_run_sink=None,
-                        target_route=payload.get("_skynet_target_route"),
-                    )
-                    score, side_info = evaluate(candidate, _sample(payload))
-                    preview = {"ok": True, "score": score, "side_info": side_info}
-                elif remote:
+                if remote:
                     try:
                         score, side_info = scorer_instance(candidate, _sample(payload))
                         preview = {"ok": True, "score": score, "side_info": side_info}

@@ -79,7 +79,7 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
-from ..models.blackbox import HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT
+from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT, TARGET_RETIRED
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -801,6 +801,9 @@ class BackgroundWorker:
             if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
                 raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
             execution_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
+            # A stored text or agent run loads for its history, but it never runs again (SKY-834).
+            if execution_payload.target.kind != BLACKBOX_TARGET_REPO:
+                raise ValueError(TARGET_RETIRED)
 
             self._update_owned_job(
                 optimization_id,

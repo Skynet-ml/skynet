@@ -128,6 +128,11 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
     {BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}
 )
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
+# Every run optimizes a repository (SKY-834). A stored text or agent run still
+# loads for its history, but nothing starts or resumes it.
+TARGET_RETIRED = (
+    "Every run optimizes a repository. Text and agent targets are no longer accepted; set target.kind to repo."
+)
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
 # Stands in for ``module_name`` in the job overview and notifications.
@@ -467,17 +472,10 @@ class BlackboxRepoSource(BaseModel):
         return self
 
 
-# What the versions under optimization drive. ``text``: the scorer reads a
-# version directly. ``agent``: every scorer run launches a coding harness in a
-# private workspace inside the run's managed sandbox, with the version as the
-# harness's instruction file(s), and the scorer judges the run record (what
-# the agent produced) instead of the version. The ``(harness, model)`` pair is fixed
-# for the whole run — the optimizer searches harness text only (joint
-# harness + model search is a TODO). ``model`` is the target/worker model
-# id as the agent gateway knows it; the optimizer model is
-# ``reflection_model_config`` on the request. Clients also send the full
-# target role as ``task_model_config`` on the request so its credential source
-# can be metered independently; ``model`` remains for stored-client compatibility.
+# What the versions under optimization drive. A run request takes only
+# ``repo`` (SKY-834). ``text`` and ``agent`` stay in the type so stored runs
+# still load for their history; an ``agent`` target is also how a proposer
+# names the harness and model it launches.
 # ``repo``: every version is a patch against ``repo.commit``. The scorer runs
 # on a checkout with the patch applied, after ``setup_command``; the coding
 # agent that writes versions is the request's ``proposer``. The wizard never
@@ -806,46 +804,28 @@ class BlackboxRunRequest(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def _ensure_starting_point(self) -> BlackboxRunRequest:
-        """Reject starting points and limits the selected engine cannot honor.
+    def _ensure_starting_point(self, info: ValidationInfo) -> BlackboxRunRequest:
+        """Reject targets, starting points and limits the selected engine cannot honor.
+
+        Args:
+            info: Validation info; its context marks a stored run's payload.
 
         Returns:
             The validated request instance.
 
         Raises:
-            ValueError: When the seed is blank or an empty dict; when a multi-part seed is paired with
-                an engine that only takes text; or when an iteration cap is
+            ValueError: When a new request has a text or agent target; when a
+                repository run sends a task model; or when an iteration cap is
                 supplied outside a single Meta-Harness, AutoSaddler or
                 ShinkaEvolve run; or when extra optimization models are sent
                 to a single run of another engine.
         """
-        seed = self.seed_candidate
         if self.target.kind == BLACKBOX_TARGET_REPO:
             self._ensure_repo_run()
-        elif seed is None:
-            # The scorer alone drives the climb; with nothing to draft a seed
-            # from, the run starts from empty text.
-            if not (self.objective or "").strip():
-                self.seed_candidate = ""
-        elif isinstance(seed, dict):
-            if not seed:
-                raise ValueError("A multi-part starting point needs at least one part.")
-            if self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_MULTI_PART_ENGINES:
-                raise ValueError(
-                    "Multi-part starting points are only supported by the "
-                    f"{', '.join(sorted(BLACKBOX_MULTI_PART_ENGINES))} engines."
-                )
-        elif not seed.strip():
-            raise ValueError("The starting point cannot be blank.")
-        if self.target.kind == BLACKBOX_TARGET_AGENT and self.task_model_settings is not None:
-            task_model = self.task_model_settings.normalized_identifier()
-            if not task_model:
-                raise ValueError("An agent target needs a task model.")
-            if self.target.model and self.target.model.strip("/") != task_model:
-                raise ValueError("target.model and task_model_config.name must identify the same model.")
-            self.target.model = self.task_model_settings.name
-        if self.target.kind != BLACKBOX_TARGET_AGENT and self.task_model_settings is not None:
-            raise ValueError("task_model_config is only used when the evaluated target is an agent.")
+            if self.task_model_settings is not None:
+                raise ValueError("task_model_config does not apply to a repository run.")
+        elif not (info.context or {}).get(STORED_PAYLOAD_KEY):
+            raise ValueError(TARGET_RETIRED)
         if self.budget.max_iterations is not None and (
             self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_ITERATION_LIMIT_ENGINES
         ):
@@ -1112,14 +1092,13 @@ class BlackboxRepoArchiveRequest(BaseModel):
 
 
 # One entry of ``GET /blackbox/engines``: the catalog the wizard renders,
-# with availability resolved for the requested target kind.
+# with availability resolved for a repository run.
 class BlackboxEngineInfo(BaseModel):
     id: str
     label: str
     description: str
     available: bool
     unavailable_reason: str | None = None
-    requires_agent_target: bool = False
     supports_parts: bool = False
     checkpoint_recovery_supported: bool = False
     checkpoint_recovery_reason: str | None = None
@@ -1143,7 +1122,7 @@ class BlackboxProposerRuntimeInfo(BaseModel):
 
 
 class BlackboxEngineCatalogResponse(BaseModel):
-    target_kind: Literal["text", "agent", "repo"]
+    target_kind: Literal["repo"]
     sandbox_available: bool
     sandbox_reason: str | None = None
     engines: list[BlackboxEngineInfo] = Field(default_factory=list)

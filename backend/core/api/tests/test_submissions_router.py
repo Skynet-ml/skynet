@@ -476,8 +476,8 @@ def test_retired_submit_endpoints_are_gone(monkeypatch: pytest.MonkeyPatch, path
     assert client.post(path, json={}).status_code in {404, 405}
 
 
-def test_blackbox_engine_catalog_resolves_availability_per_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Expose native engines for either evaluation target when the proposer runtime is available.
+def test_blackbox_engine_catalog_resolves_availability_for_a_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expose native engines for a repository run when the proposer runtime is available.
 
     Args:
         monkeypatch: Pytest fixture for deterministic runtime capabilities.
@@ -488,10 +488,9 @@ def test_blackbox_engine_catalog_resolves_availability_per_target(monkeypatch: p
     monkeypatch.setattr(_bb_service, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
     text = client.get("/blackbox/engines")
-    agent = client.get("/blackbox/engines", params={"target": "agent"})
 
     assert text.status_code == 200
-    assert text.json()["target_kind"] == "text"
+    assert text.json()["target_kind"] == "repo"
     assert text.json()["sandbox_available"] is True
     by_id = {engine["id"]: engine for engine in text.json()["engines"]}
     assert list(by_id) == ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
@@ -504,7 +503,6 @@ def test_blackbox_engine_catalog_resolves_availability_per_target(monkeypatch: p
     assert by_id["autoresearch"]["checkpoint_recovery_supported"] is False
     assert "does not expose" in by_id["autoresearch"]["checkpoint_recovery_reason"]
     assert by_id["meta_harness"]["available"] is True
-    assert by_id["meta_harness"]["requires_agent_target"] is False
     assert {key for key, engine in by_id.items() if engine["supports_parts"]} == {
         "gepa",
         "autosaddler",
@@ -522,11 +520,6 @@ def test_blackbox_engine_catalog_resolves_availability_per_target(monkeypatch: p
     assert runtimes["vercel"]["checkpoint_restore_supported"] is True
     assert runtimes["vercel"]["checkpoint_restore_reason"] is None
     assert runtimes["vercel"]["cost"]["billing_basis"] == "at_cost"
-    assert agent.status_code == 200
-    agent_by_id = {engine["id"]: engine for engine in agent.json()["engines"]}
-    assert agent_by_id["meta_harness"]["available"] is True
-    assert agent_by_id["meta_harness"]["unavailable_reason"] is None
-    assert agent.json()["auto_engines"] == ["gepa", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
 
 
 def test_blackbox_engine_catalog_surfaces_the_missing_sandbox_reason(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -540,7 +533,7 @@ def test_blackbox_engine_catalog_surfaces_the_missing_sandbox_reason(monkeypatch
     monkeypatch.setattr(_bb_service, "agent_target_unavailable_reason", lambda _settings: "no sandbox here")
     monkeypatch.setattr(_bb_service, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
-    resp = client.get("/blackbox/engines", params={"target": "agent"})
+    resp = client.get("/blackbox/engines")
 
     assert resp.status_code == 200
     assert resp.json()["sandbox_available"] is False
@@ -577,14 +570,23 @@ def test_blackbox_engine_catalog_checks_the_managed_sandbox(monkeypatch: pytest.
     assert by_id["meta_harness"]["available"] is False
 
 
-def test_blackbox_engine_catalog_rejects_unknown_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A target kind outside text|agent is a 422, not a silent fallback to text."""
+@pytest.mark.parametrize("target", ["text", "agent", "robot"])
+def test_blackbox_engine_catalog_rejects_targets_other_than_a_repository(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """Return 422 for a retired text or agent target and for an unknown one (SKY-834).
+
+    Args:
+        monkeypatch: Pytest fixture used by the API client factory.
+        target: The target kind that an old client names.
+    """
     store = _FakeJobStore()
     client = make_client(store, monkeypatch=monkeypatch)
 
-    resp = client.get("/blackbox/engines", params={"target": "robot"})
+    resp = client.get("/blackbox/engines", params={"target": target})
 
     assert resp.status_code == 422
+    assert client.get("/blackbox/engines", params={"target": "repo"}).status_code == 200
 
 
 def test_blackbox_engine_catalog_ignores_retired_runtime_query(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -204,6 +204,7 @@
     "optimization.resume_budget_projected": "The optimization is on track to cost about {projected}, above its {limit} limit. Raise the spending limit above {projected} to continue.",
     "optimization.resume_exhausted": "This optimization reached its maximum number of attempts ({attempts}) — run it again instead.",
     "optimization.resume_not_resumable": "This optimization has no saved resume point — run it again instead.",
+    "optimization.resume_target_retired": "Every run now optimizes a repository. This text or agent run stays in your history, but it cannot resume.",
     "optimization.resume_wrong_status": "Only optimizations that stopped partway through can be resumed — this one is in '{status}'.",
     "optimization.retry_no_payload": "Source optimization has no saved payload to retry.",
     "optimization.retry_wrong_status": "Only optimizations in the 'failed' or 'cancelled' states can be retried — this one is in '{status}'. Clone it instead.",

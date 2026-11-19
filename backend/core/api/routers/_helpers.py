@@ -37,6 +37,7 @@ from ...models import (
 from ...models.results import result_scores
 from ...service_gateway.language_models import usage_by_model_from_history
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
+from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, is_admin
 from ..converters import (
     compute_elapsed,
@@ -713,6 +714,23 @@ def _restarts_from_beginning(job_store: Any, job_data: dict) -> bool:
     return callable(has_checkpoint) and not has_checkpoint(job_data["optimization_id"])
 
 
+def has_retired_target(job_data: dict) -> bool:
+    """Return whether a stored run names a text or agent target.
+
+    Every run optimizes a repository (SKY-834). A stored text or agent run stays
+    in history, but it never runs again.
+
+    Args:
+        job_data: Raw job row from the store.
+
+    Returns:
+        ``True`` when the stored payload names a target other than a repository.
+    """
+    payload = job_data.get("payload")
+    target = payload.get("target") if isinstance(payload, dict) else None
+    return isinstance(target, dict) and not is_repo_payload(payload)
+
+
 def _resume_candidate_id(job_data: dict) -> str | None:
     """Apply the cheap (no-query) resume gates and return the job id when they pass.
 
@@ -725,6 +743,9 @@ def _resume_candidate_id(job_data: dict) -> str | None:
     Returns:
         The optimization id when the row is a resume candidate, else ``None``.
     """
+    # List rows load without the payload, so the resume route checks it too.
+    if has_retired_target(job_data):
+        return None
     status = status_to_job_status(job_data.get("status", "pending"))
     budget_stop = is_budget_stop(status, job_data)
     resumable_status = status in {OptimizationStatus.failed, OptimizationStatus.cancelled, OptimizationStatus.paused}

@@ -29,8 +29,7 @@ from ..sandbox import (
     scorer_runtime_from_settings,
 )
 from ..sandbox_scorer import SandboxPythonScorer, ScorerGateway, scorer_gateway
-from .mocks import FakeSandboxRuntime, FakeSandboxSession
-from .test_agent_eval import _scorer_of, _target
+from .mocks import FakeSandboxRuntime
 from .test_sandbox_scorer import _InstallSession, _RunnerSession
 from .test_service import _payload
 
@@ -87,10 +86,6 @@ def test_protected_runtime_refuses_unregistered_model_credentials() -> None:
     gateway = ScorerGateway("https://provider.invalid/v1", "model", "private-provider-key", "model")
     with pytest.raises(ServiceError, match="opaque model route"):
         SandboxPythonScorer("def score(candidate): return 1", runtime=runtime, gateway=gateway, timeout_seconds=10)
-    with sandbox_runtime_context(runtime), pytest.raises(ServiceError, match="opaque model route"):
-        service_module._agent_scorer(
-            lambda candidate, case: (1, {}), _target(), job_id="job", progress_callback=None, agent_run_sink=None
-        )
     assert runtime.specs == []
 
 
@@ -288,58 +283,15 @@ def test_job_finalization_preserves_outcome_while_usage_is_pending(
             raise primary_error
         return outcome
 
-    monkeypatch.setattr(service_module, "build_scorer", lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(service_module, "RemoteScorer", lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(service_module, "validate_blackbox_payload", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_module, "_run_job", run)
+    payload = _payload(target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}})
+    route = {"evaluator_route": {"token": "route"}, "repo_snapshot": {"chunks": ["chunk"]}}
     if primary_error is None:
-        assert service_module.run_blackbox_optimization(_payload(), artifact_id="completed") is outcome
+        assert service_module.run_blackbox_optimization(payload, artifact_id="completed", **route) is outcome
         assert service_module.CASE_SPLIT_KEY in outcome.details
     else:
         with pytest.raises(type(primary_error)) as caught:
-            service_module.run_blackbox_optimization(_payload(), artifact_id="stopped")
+            service_module.run_blackbox_optimization(payload, artifact_id="stopped", **route)
         assert caught.value is primary_error
-
-
-def test_completed_agent_record_survives_pending_close(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preserve the actual agent answer separately from its pending runtime receipt.
-
-    Args:
-        monkeypatch: Pytest patch fixture.
-    """
-    session = FakeSandboxSession(produces={"run-agent": {"output/answer.txt": "actual answer"}})
-    runtime = FakeSandboxRuntime(lambda: session)
-    runtime.protected = True
-
-    def close() -> None:
-        """Report pending runtime usage after cleanup.
-
-        Raises:
-            UsagePendingError: Always, without invalidating the completed answer.
-        """
-        raise UsagePendingError("runtime pending")
-
-    monkeypatch.setattr(session, "close", close)
-    result = _scorer_of(runtime, _target()).run("instructions", {"input": "question"})
-    assert result["output"] == "actual answer"
-    assert result["runtime_usage_pending"] is True
-    assert len(runtime.sessions) == 1
-
-
-def test_protected_agent_transport_failure_does_not_reopen() -> None:
-    """Retain uncertain execution without a hidden new sandbox attempt."""
-
-    def fail(command: str) -> Any:
-        """Simulate losing the reply after agent execution may have started.
-
-        Args:
-            command: Unused agent command.
-
-        Raises:
-            UsagePendingError: Always, to prevent hidden replay.
-        """
-        raise UsagePendingError("lost reply")
-
-    runtime = FakeSandboxRuntime(lambda: FakeSandboxSession(script=fail))
-    runtime.protected = True
-    with pytest.raises(UsagePendingError, match="lost reply"):
-        _scorer_of(runtime, _target()).run("instructions", {"input": "question"})
-    assert len(runtime.sessions) == 1
