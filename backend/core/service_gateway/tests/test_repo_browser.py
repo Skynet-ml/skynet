@@ -128,3 +128,23 @@ def _with_editable(paths: list[str]) -> RepoBrowser:
         entries=[{"path": "a.py", "type": "file"}],
         truncated=False,
     )
+
+
+def test_read_unmetered_skips_the_read_limit_and_the_read_list(monkeypatch) -> None:
+    """An unmetered read works past the read limit, does not use a read, and returns ``None`` for a missing file."""
+    reads: list[tuple[str, int]] = []
+
+    def fake_read(_token: str, _repo: str, _branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Record the read and return short text."""
+        reads.append((path, max_bytes))
+        return f"contents of {path}", False
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", fake_read)
+    browser = _browser(["optimize.toml"])
+    browser._reads = repo_browser.READS_PER_TURN
+
+    assert browser.read_unmetered("optimize.toml", 100) == ("contents of optimize.toml", False)
+    assert browser.read_unmetered("missing.toml", 100) is None
+    assert reads == [("optimize.toml", 100)]
+    assert browser._reads == repo_browser.READS_PER_TURN
+    assert browser.files_read == []

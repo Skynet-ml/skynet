@@ -328,6 +328,24 @@ class RepoBrowser:
 
         return self._tool(run)
 
+    def read_unmetered(self, path: str, limit: int) -> tuple[str, bool] | None:
+        """Read one repository file for Skynet's own checks, outside the agent's read limit.
+
+        The read does not count toward the per-turn read limit and is not
+        added to ``files_read``: it is not the agent's read.
+
+        Args:
+            path: File path inside the repository, exactly as the tree shows it.
+            limit: Most bytes to return.
+
+        Returns:
+            The text and whether it was cut at ``limit``, or ``None`` when the
+            tree has no such file. A failed host read raises.
+        """
+        if path not in self._files:
+            return None
+        return self._read_text(path, limit)
+
     def overview(self) -> RepoRead:
         """Show the repository's tree with its README and manifest, as one read.
 

@@ -578,13 +578,14 @@ def workspace_tools(
             The text, ``""`` when the tree has no ``optimize.toml``, or
             ``{"error": ...}`` when the file cannot be read whole.
         """
-        if "optimize.toml" not in browser._files:
-            return ""
         try:
-            text, truncated = browser._read_text("optimize.toml", DRAFT_FILE_BYTES)
+            read = browser.read_unmetered("optimize.toml", DRAFT_FILE_BYTES)
         except Exception as exc:  # a failed host read refuses the write, not the turn
             logger.info("Setup agent cannot read optimize.toml of %s: %s", browser.repository, type(exc).__name__)
             return {"error": "the host refused the read."}
+        if read is None:
+            return ""
+        text, truncated = read
         if truncated:
             return {"error": f"the file is larger than {DRAFT_FILE_BYTES} bytes."}
         return text
