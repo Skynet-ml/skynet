@@ -705,7 +705,8 @@ class MetaHarnessEngine:
             ServiceError: When a worker-loop run has a proposer setting that the tool loop does not run, would
                 expose the metric source, or the candidate is not one text; or when a repository has a file at the
                 workspace path.
-            BudgetExhaustedError: When the budget cannot score the seed on every case.
+            BudgetExhaustedError: When no scorer call is left.
+            RuntimeError: When the budget cannot score the seed on every case.
         """
         missing = None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file)
         if missing or (ctx.repo_seed is not None and ctx.list_files is None):
@@ -727,9 +728,10 @@ class MetaHarnessEngine:
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
         # Both modes sweep the seed on every case before any session, and a seed with no score fails the run.
+        # Not BudgetExhaustedError: an Auto lane has its own small allowance, and that error fails the whole Auto run.
         sweep = max(1, len(task.cases))
         if server.remaining < sweep:
-            raise BudgetExhaustedError(
+            raise RuntimeError(
                 f"Meta-Harness needs {sweep} evaluation units to score the seed, but only {server.remaining} are left."
             )
         engine_config: dict[str, Any] = {"model": options.model if options else ""}
