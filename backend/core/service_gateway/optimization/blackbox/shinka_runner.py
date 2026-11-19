@@ -72,11 +72,10 @@ try:
     from shinka.edit import summarize_diff
     from shinka.launch import LocalJobConfig
     from shinka.llm.providers import QueryResult
-    from shinka.local_openai_config import parse_local_openai_model
     from shinka.prompts import FULL_SYS_FORMATS
 except ImportError:  # Upstream needs Python 3.12; parent-side tests still import the helpers.
     shinka_async_runner = shinka_embedding = shinka_llm = shinka_query = EvolutionConfig = ShinkaEvolveRunner = None
-    DatabaseConfig = LocalJobConfig = parse_local_openai_model = summarize_diff = QueryResult = np = None
+    DatabaseConfig = LocalJobConfig = summarize_diff = QueryResult = np = None
     FULL_SYS_FORMATS = ()
 
 try:
@@ -116,6 +115,9 @@ _PART_PREFIX = "<!-- APP-PART "
 _PART_SUFFIX = " -->"
 _PART_HEADER = re.compile(r"^<!-- APP-PART (.+) -->$")
 _GENERATION = re.compile(r"(?:^|/)gen_(\d+)/")
+# Copies upstream's local model pattern (shinka 0.0.7), so the ledger keys usage by the gateway
+# model whether or not upstream imports; parent-side tests run without it (SKY-820).
+_LOCAL_MODEL = re.compile(r"^local/(?P<model>[^@]+)@(?P<url>https?://.+)$")
 _FEEDBACK_CHARS = 8000
 # Mirrors usage_tags in the parent; this file runs without the backend's code.
 _USAGE_TAGS_HEADER = "x-app-usage-tags"
@@ -826,8 +828,8 @@ class UsageLedger:
             model_name: Upstream model name the call used.
             result: Upstream query result carrying token counts.
         """
-        resolved = parse_local_openai_model(model_name) if parse_local_openai_model is not None else None
-        model = resolved.api_model_name if resolved is not None else model_name
+        match = _LOCAL_MODEL.match(model_name)
+        model = match.group("model") if match else model_name
         with self._lock:
             current = self.usage_by_model.setdefault(model, dict.fromkeys(_TOKEN_NAMES, 0))
             current["prompt_tokens"] += int(getattr(result, "input_tokens", 0) or 0)
