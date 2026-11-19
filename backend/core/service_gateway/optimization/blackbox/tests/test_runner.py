@@ -673,7 +673,7 @@ def test_log_rejects_a_missing_name_or_an_unknown_level(event: str, level: str) 
         log(event, level=level)
 
 
-def test_scorer_code_imports_log_from_skynet() -> None:
+def test_scorer_code_imports_log_from_openascent() -> None:
     """``from openascent import log`` works in the box and in validation alike."""
     fn = load_scorer_from_code(
         "from openascent import log\ndef score(c, case=None):\n    return {'score': 1.0}\n", helpers={"log": log}
