@@ -380,6 +380,34 @@ def test_the_seed_change_error_says_when_its_list_is_shortened_or_empty(
         proposer.base("seed")
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [BoxFailureError("s", "box died"), TreeRejectedError("s", "refused"), CommandResult(1)],
+    ids=["box-failure", "refused-tree", "exit-1"],
+)
+def test_a_failed_lab_removal_for_a_parent_stops_the_run_and_caches_nothing(
+    outcome: CommandResult | Exception,
+) -> None:
+    """A parent's session needs the setup's output, so a failed lab removal raises, and no plain parent is cached.
+
+    Args:
+        outcome: The result or the error of the lab removal box.
+    """
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+    proposer.base("seed")
+    version = proposer.version("start", "last", "seed")
+    commands.outcomes[f"rm -rf {_LAB}"] = outcome
+
+    with pytest.raises(
+        ServiceError, match=r"check of the \[proposer\] setup .* could not run in a box\. Start a new run"
+    ):
+        proposer.base(version)  # type: ignore[arg-type]
+
+    assert version not in proposer._full
+
+
 def test_a_version_removes_the_lab_and_the_setup_output_in_one_box() -> None:
     """A session's version needs one ``rm`` box; the lab comes off the last tree only when the version is a parent."""
     commands = _Commands()

@@ -599,6 +599,7 @@ class FileProposer:
         self._lab = lab
         self._entry = options.proposer.run_command or ""
         self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
+        self._setup_name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
         # The run's gateway holds the deployment's managed key, so the box gets no grant for it, as in SKY-815.
         model_host = urlsplit(options.gateway.url or "").hostname
         self._grants = tuple(
@@ -624,14 +625,18 @@ class FileProposer:
             The tree to put the lab over.
 
         Raises:
-            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; or
+                when the box that removes the lab folder from the version's last tree fails.
         """
         if self._roots is None:
             self._roots = self._setup()
         if parent not in self._full and parent in self._last:
-            # A box failure here leaves the version without the setup's output, so its session can fail; the run
-            # goes on, as for a failed command.
-            self._full[parent] = drop_lab(self._ctx, "", self._last[parent], parent, self._lab) or parent
+            full = drop_lab(self._ctx, "", self._last[parent], parent, self._lab)
+            if full is None:
+                # Without the setup's output every later session from this version would fail with no report. The
+                # box is a committed step, so a resume raises the same error.
+                raise ServiceError(f"The check of the {self._setup_name} could not run in a box. Start a new run.")
+            self._full[parent] = full
         return self._full.get(parent, parent)
 
     def run(self, start: str) -> tuple[str, str | None]:
@@ -708,7 +713,7 @@ class FileProposer:
         self._full[seed] = seed
         if not self._setup_argv:
             return []
-        name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
+        name = self._setup_name
         listing = "find . -mindepth 1 -print0"
         lab = shlex.quote(self._lab)
         script = "\n".join(
