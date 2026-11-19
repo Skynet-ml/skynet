@@ -1585,7 +1585,8 @@ def test_tool_argument_text_at_the_depth_bound_commits_and_one_level_deeper_comm
         tmp_path: Pytest's temporary folder.
     """
     first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
-    levels = engine_loop._MAX_REPLY_DEPTH - 3
+    # A literal, not the constant, so a change to the bound fails this test.
+    levels = 97
     at_bound = "[" * levels + "]" * levels
     model.reply_calls = [
         {"id": "call_0", "name": "edit", "arguments": at_bound},
@@ -1734,7 +1735,7 @@ def test_too_deep_arguments_is_a_shallow_json_object_with_no_command() -> None:
 def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as_refused_text(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """Arguments that fill the body to exactly ``_MAX_REPLY_DEPTH`` levels commit as they are; deeper ones are refused.
+    """Arguments that fill the body to exactly 100 levels commit as they are; deeper ones are refused.
 
     Args:
         owner: Alice and her budget generation.
@@ -1745,7 +1746,7 @@ def test_tool_arguments_at_the_depth_bound_commit_and_one_level_deeper_commit_as
     """
     first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     # The step body, its tool call list and the call hold the arguments: three levels above them.
-    arguments = _nested(engine_loop._MAX_REPLY_DEPTH - 3)
+    arguments = _nested(97)
     model.reply_calls = [{"id": "call_0", "name": "edit", "arguments": arguments}]
     reply = first.call_model("improve seed", _TOOLS)
     assert reply.tool_calls == model.reply_calls

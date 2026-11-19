@@ -606,8 +606,9 @@ def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(argu
 
 
 def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
-    """Arguments that nest exactly ``_MAX_ARGUMENTS_DEPTH`` levels stay; one level more gives ``TOO_DEEP_ARGUMENTS``."""
-    bound = protocol._MAX_ARGUMENTS_DEPTH
+    """Arguments that nest exactly 97 levels stay; one level more gives ``TOO_DEEP_ARGUMENTS``."""
+    # A literal, not the constant, so a change to the bound fails this test.
+    bound = 97
     at_bound = "[" * bound + "]" * bound
     message = {
         "tool_calls": [

@@ -262,19 +262,15 @@ class CandidateRecord:
         return self.total / self.count
 
 
-class ModelReplyTooDeepError(ValueError):
-    """A model reply nests deeper than the code that reads or stores it can follow (SKY-817)."""
-
-
 # A tool call keeps this text in place of arguments that nest too deep to write or commit (SKY-817). The text is a
 # shallow JSON object with no tool fields, so an engine treats it as a bad call for that tool call only, and the run
 # goes on. It must stay valid JSON: engines put it unchanged into the next prompt, and a provider that gets text that
 # is not a JSON object can fail every later call in the session.
 TOO_DEEP_ARGUMENTS = '{"error": "tool call arguments nest too deep"}'
-# The most levels that tool call arguments may nest. It equals the engine loop's bound for arguments, so a call that
+# The most levels that tool call arguments may nest. The engine loop derives its reply bound from it, so a call that
 # passes here also commits there. It is far below Python's recursion limit, so later code that reads the arguments
 # again does not run out of stack, whatever stack depth it reads them at.
-_MAX_ARGUMENTS_DEPTH = 97
+MAX_ARGUMENTS_DEPTH = 97
 _JSON_STRUCTURE = re.compile(r'[\[\]{}"\\]')
 
 
@@ -396,7 +392,7 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
     ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
     keeps the value and the arguments stay a dict or text. Text or a value that nests more than
-    ``_MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
+    ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
     only that call. Deep text must not reach the transcript: a later call would read it again, raise
     :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
     stack, so the same reply always gives the same calls.
@@ -417,9 +413,9 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
             # Some clients parse the arguments already.
             arguments: dict[str, Any] | str = raw
         elif (
-            text_nests_deeper(raw, _MAX_ARGUMENTS_DEPTH)
+            text_nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
             if isinstance(raw, str)
-            else nests_deeper(raw, _MAX_ARGUMENTS_DEPTH)
+            else nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
         ):
             arguments = TOO_DEEP_ARGUMENTS
         elif not isinstance(raw, str):

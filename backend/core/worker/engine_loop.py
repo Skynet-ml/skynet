@@ -141,12 +141,12 @@ from ..sandbox.trees import (
 from ..service_gateway.optimization.blackbox.harness_bridge import hashed_kind
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes as path_hashes
 from ..service_gateway.optimization.blackbox.protocol import (
+    MAX_ARGUMENTS_DEPTH,
     TOO_DEEP_ARGUMENTS,
     Candidate,
     EngineContext,
     EvalServer,
     ModelReply,
-    ModelReplyTooDeepError,
     ScorerAbortError,
     SideInfo,
     ToolDefinition,
@@ -163,7 +163,7 @@ from ..service_gateway.optimization.blackbox.tree_sandbox import (
 from ..storage.models import AgentStepModel
 from ..storage.step_log_store import StepFenceError, step_id_for
 from ..storage.tree_store import TreeEntry, TreeStore, is_git_part
-from .actors import Agent, LeaseExhaustedError, Run, StepResult, _cost_text, _ledger_cents
+from .actors import Agent, LeaseExhaustedError, Run, StepResult, cost_text, ledger_cents
 from .step_recovery import last_committed_step, still_owns_run
 
 ROOT_AGENT_ID = "loop"
@@ -176,8 +176,9 @@ _MAX_LINK_HOPS = 40
 _MAX_LINKED_PATHS = 100_000
 # The step commit's JSON encoder recurses for each level, and a resume reads the reply again. So a reply that nests
 # near Python's default recursion limit of 1000 would stop the run on every resume (SKY-817). 100 levels keeps a wide
-# margin for the stack under the encoder, and no real tool call nests that deep.
-_MAX_REPLY_DEPTH = 100
+# margin for the stack under the encoder, and no real tool call nests that deep. The step body, its tool call list
+# and the call sit above the arguments, so the bound is the arguments' bound plus three levels.
+_MAX_REPLY_DEPTH = MAX_ARGUMENTS_DEPTH + 3
 # Far above the largest reply that a model's output token limit allows. It bounds the bytes that the step log commits
 # and that every resume reads again, not the memory that the model client uses to hold the reply.
 _MAX_REPLY_BYTES = 4 * 1024 * 1024
@@ -251,6 +252,10 @@ class ModelCallBilledError(RuntimeError):
         self.cost_cents = Decimal(str(cost_cents))
 
 
+class ModelReplyTooDeepError(ValueError):
+    """A model reply nests deeper than the code that reads or stores it can follow (SKY-817)."""
+
+
 class ModelReplyTooLargeError(ValueError):
     """A model reply is larger than ``_MAX_REPLY_BYTES`` (SKY-817)."""
 
@@ -273,12 +278,12 @@ def _bounded_call(call: Any) -> Any:
     if not isinstance(call, dict):
         return call
     arguments = call.get("arguments")
-    # The step body, its tool call list and the call sit above the arguments. Text is bounded by the levels that it
-    # opens, because a later call reads it again, for example LiteLLM's Anthropic conversion at a deeper stack.
+    # Text is bounded by the levels that it opens, because a later call reads it again, for example LiteLLM's
+    # Anthropic conversion at a deeper stack.
     if isinstance(arguments, str):
-        too_deep = text_nests_deeper(arguments, _MAX_REPLY_DEPTH - 3)
+        too_deep = text_nests_deeper(arguments, MAX_ARGUMENTS_DEPTH)
     else:
-        too_deep = nests_deeper(arguments, _MAX_REPLY_DEPTH - 3)
+        too_deep = nests_deeper(arguments, MAX_ARGUMENTS_DEPTH)
     if too_deep:
         return {**call, "arguments": TOO_DEEP_ARGUMENTS}
     return call
@@ -303,8 +308,8 @@ def _check_reply(body: dict[str, Any], cost_cents: Any) -> None:
         raise ModelReplyTooDeepError(f"The model step body nests more than {_MAX_REPLY_DEPTH} levels.")
     # Agent.step commits the body with its cost field, in the step log's encoding, so the bound measures the bytes
     # that the commit writes. A cost that is not a finite number stops the step before any commit, so it adds none.
-    cost = _ledger_cents(cost_cents)
-    committed = {**body, "cost_cents": _cost_text(Decimal(0) if cost is None else cost)}
+    cost = ledger_cents(cost_cents)
+    committed = {**body, "cost_cents": cost_text(Decimal(0) if cost is None else cost)}
     try:
         size = len(json.dumps(committed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     # A key type that the walk does not enter, such as a frozenset of deep tuples, can still recurse in the sort.
