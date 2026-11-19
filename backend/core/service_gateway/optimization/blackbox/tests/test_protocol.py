@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -618,6 +619,40 @@ def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(argu
     assert tool_calls_from_openai(message) == [
         {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
         {"id": "call_y", "name": "bash", "arguments": {"command": "ls"}},
+    ]
+
+
+def test_tool_calls_from_openai_gives_too_deep_arguments_when_parsing_overflows_the_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text under the depth bound that still overflows the caller's stack fails only its own call.
+
+    Args:
+        monkeypatch: Replaces the JSON reader with one that overflows, as a deep caller stack does.
+    """
+
+    def overflow(text: str) -> Any:
+        """Raise as ``json.loads`` does when the caller's stack is already deep.
+
+        Args:
+            text: The arguments text.
+
+        Raises:
+            RecursionError: Always.
+        """
+        raise RecursionError(text[:10])
+
+    monkeypatch.setattr(protocol, "json", SimpleNamespace(loads=overflow, dumps=json.dumps))
+    message = {
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": {"command": "pwd"}}},
+        ]
+    }
+
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_y", "name": "bash", "arguments": {"command": "pwd"}},
     ]
 
 

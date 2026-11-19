@@ -423,6 +423,9 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         else:
             try:
                 parsed = json.loads(raw)
+            except RecursionError:
+                # The depth check counts levels, not stack frames; a deep caller stack can still overflow.
+                arguments = TOO_DEEP_ARGUMENTS
             except ValueError:
                 arguments = raw
             else:
