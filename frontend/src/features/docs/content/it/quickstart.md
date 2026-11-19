@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` contiene le colonne di input di un caso. `case["expected"]` contiene la colonna di output, con il nome della colonna come chiave. Il repository ha un file `serve.py` con `def serve(input)`. La voce `[run]` lo chiama, e `output` è il suo valore restituito. Lo scorer gira in un box della sandbox separato che contiene solo i tuoi file della metrica e nessun codice della versione, quindi non può importare `serve.py`. Skynet usa la stessa funzione per servire la versione migliore dopo l'esecuzione.

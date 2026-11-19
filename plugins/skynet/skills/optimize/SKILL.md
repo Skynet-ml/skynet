@@ -63,10 +63,11 @@ change their plan. Then call `next_tool`.
    `call("<name>", input)`, imported by `from skynet import call, StageError`.
    The scorer runs in its own box that holds only the metric files and no
    version code, so it never imports the repository's code. With no cases, the entry runs once with no
-   input. Return `(score, "<short feedback>")` or
-   `{"score": <number>, "feedback": "<short text>"}`. Higher is better.
-   Skynet refuses a bare number, because the engines learn from the
-   feedback. Call `repo_draft_set_scorer` with the code as `metric_code`.
+   input. Return one object: `{"score": <number>, "feedback": "<short text>"}`.
+   Higher is better. Only `score` is required. Give the feedback: the
+   engines learn from it. Named scores go under
+   `"scores": {"<name>": {"score": <number>}}`. Skynet refuses a bare
+   number, a pair and any other key. Call `repo_draft_set_scorer` with the code as `metric_code`.
    Then set the contract. Every new run needs an `optimize.toml`, in the
    draft or in the repository. When the repository has none, call
    `repo_draft_contract_guide`, write the file from its guide (start with
@@ -158,7 +159,7 @@ A ticket classifier in `acme/support-bot`, in `classifier/`:
    ```python
    def score(repo_path, case, output=None):
        ok = output == case["expected"]
-       return (1.0 if ok else 0.0), "correct" if ok else f"expected {case['expected']}, got {output}"
+       return {"score": 1.0 if ok else 0.0, "feedback": "correct" if ok else f"expected {case['expected']}, got {output}"}
    ```
 
    The repository's `optimize.toml` `[run]` entry runs the classifier on

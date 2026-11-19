@@ -23,11 +23,10 @@ Neither box gets the run's secrets: only the model route reaches the box.
 Both the ``[run]`` entry and the metric run through the tree sandbox session
 API (SKY-785), and the metric box never gets the candidate tree.
 
-A scorer returns a score with its feedback, like any scorer, and may return
-per-case results under ``cases``, a mapping of case name to
-``{"score", "feedback"}``. The run's score stays the top-level number; each
-case becomes a named score that every engine reflects on and keeps on its
-Pareto front.
+A scorer returns one answer object, like any scorer: ``score``, with optional
+``feedback`` and named ``scores`` (SKY-769). The run's score stays the
+top-level number; each named score, such as one per case, is an axis that
+every engine reflects on and keeps on its Pareto front.
 
 A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
 box for each stage for each candidate evaluation, all before the scorer runs
@@ -117,7 +116,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
@@ -222,6 +220,11 @@ class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
 
 
+# Skynet's own text, never the metric's (SKY-353). It ends with the answer
+# form, so the run stops on it before any version has a score (SKY-769).
+_WRONG_FORM = f"The scorer answer does not have the valid form, so the version has no score. {runner.ANSWER_FORM}"
+
+
 class _StageSnapshotError(RepoScoreError):
     """Stage boxes from the stage snapshot did not open or did not hold the tree."""
 
@@ -257,36 +260,6 @@ def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes])
             if size > _SERVICE_BODY_BYTES:
                 raise _AnswerTooLargeError
             yield chunk
-
-
-def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn the per-case scores a repository scorer returned into named scores.
-
-    Each case becomes a named score, so every engine reflects on it and
-    treats it as its own objective, exactly like ``scores``.
-
-    Args:
-        side_info: Everything the scorer returned besides its score.
-
-    Returns:
-        The side info with ``cases`` folded into ``scores``.
-
-    Raises:
-        RepoScoreError: When ``cases`` is not a mapping of names to a finite
-            score with its feedback.
-    """
-    folded = dict(side_info)
-    cases = folded.pop(CASES_KEY, None)
-    if cases is None:
-        return folded
-    try:
-        named = runner.named_scores(cases)
-    except runner.ScorerError as exc:
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a score and feedback. {exc}") from exc
-    if not all(math.isfinite(entry["score"]) for entry in named.values()):
-        raise RepoScoreError(f"'{CASES_KEY}' must map each case name to a finite score.")
-    folded["scores"] = {**named, **(folded.get("scores") or {})}
-    return folded
 
 
 class RepoScorer:
@@ -595,6 +568,9 @@ class RepoScorer:
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
+            # The fixed form text lets the run stop before any score (protocol.py); the metric's text stays out.
+            if runner.ANSWER_FORM in str(output["error"]):
+                raise RepoScoreError(_WRONG_FORM)
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
         if output.get("score") is None:
             raise RepoScoreError("The scorer returned no score.")
@@ -603,11 +579,18 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
-        side_info = fold_case_scores(output.get("side_info") or {})
-        # SKY-221: only a crashed [run] entry above sets this status, so the
-        # metric's own ``status`` key cannot mark a scored case as a failure.
-        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
-            del side_info[STATUS_KEY]
+        side_info = output.get("side_info") or {}
+        # The metric's own code can rewrite the runner's output after the runner
+        # checks it, so the parent checks the answer again: only a crashed [run]
+        # entry above adds ``status`` (SKY-221).
+        try:
+            if not isinstance(side_info, dict):
+                raise runner.ScorerError(f"The side info is {type(side_info).__name__}, not an object.")
+            score, side_info = runner.normalize_score({**side_info, "score": score}, own_keys=False)
+        except runner.ScorerError as exc:
+            # The error text can name keys that the metric's code sets (SKY-353).
+            logger.warning("Repository scorer answer refused: %s", exc)
+            raise RepoScoreError(_WRONG_FORM) from None
         return {**side_info, "score": score}
 
     def _run_candidate(

@@ -5,7 +5,7 @@ O avaliador diz ao Skynet quão boa é uma versão do seu repositório. Ele é u
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argumento   | O que contém                                                                     |
@@ -23,28 +23,35 @@ O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos 
 
 ## O valor de retorno
 
-`score` deve retornar uma pontuação com feedback. Estes formatos são válidos:
+`score` retorna um objeto:
 
-1. Um par: um número e uma string de feedback ou um dict com uma chave `"feedback"`.
-2. Um dict com um número em `"score"` e uma string em `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-O feedback deve ser uma string que não esteja vazia.
+- `"score"` é obrigatório. É um número finito. Só esta pontuação ordena as versões.
+- `"feedback"` é um texto opcional. Ele é recomendado, porque GEPA e Auto aprendem com ele. Sem feedback, os motores veem só as pontuações, e o log da execução avisa isso uma vez.
+- `"scores"` é opcional. Ele mapeia nomes para pontuações nomeadas. Cada pontuação nomeada é um objeto com o seu próprio `"score"` e um `"feedback"` opcional. Todo motor usa cada pontuação nomeada como um objetivo próprio.
 
-As informações adicionais também podem ter uma chave `"scores"`. Ela mapeia nomes para pontuações nomeadas. Cada pontuação nomeada tem a sua própria pontuação e o seu próprio feedback, por exemplo `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Qualquer outro formato ou chave é um erro. A verificação mostra a parte errada e o formato válido.
 
-As informações adicionais também podem ter uma chave `"cases"` com o mesmo formato. Cada entrada é o resultado de um caso. Todo motor usa cada caso como um objetivo próprio.
-
-Se o valor de retorno tiver outro formato, a verificação falha e mostra o motivo.
-
-| Valor de retorno                                                                | Válido                                       |
-| ------------------------------------------------------------------------------- | -------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Sim                                          |
-| `(0.8, "Close. Missing the date.")`                                             | Sim                                          |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Sim                               |
-| `0.8`                                                                           | Não. Não há feedback.                        |
-| `(0.8, {})`                                                                     | Não. Não há string de feedback.              |
-| `("0.8", {"feedback": "OK"})`                                                   | Não. A pontuação é uma string.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Não. Uma pontuação nomeada não é um número. |
+| Valor de retorno | Válido |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Sim |
+| `{"score": 0.8}` | Sim. Não há feedback. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Sim |
+| `0.8` | Não. O valor não é um objeto. |
+| `(0.8, "Close. Missing the date.")` | Não. O valor não é um objeto. |
+| `{"score": "0.8"}` | Não. A pontuação é uma string. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Não. Uma pontuação nomeada deve ser um objeto. |
+| `{"score": 0.8, "feedbak": "OK"}` | Não. A chave `feedbak` é desconhecida. |
 
 ## Escrever um feedback útil
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` é um dict indexado pelo nome da sua coluna de Saída. Leia [Conjuntos de dados e divisões](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada não inicia, excede o tempo limite ou um sinal a para, ou se uma entrada de função lança uma exceção ou sai antes de retornar um valor, o feedback é `Run failed: …`, e o Skynet não chama o avaliador. Um código de saída diferente de zero de uma entrada de comando não é uma falha: o avaliador o recebe em `output`. Uma versão com um caso assim não tem nota. Ela não pode ser a melhor versão, não atinge nenhum `[outcome] target` e não abre nenhum pull request. Se uma falha precisa contar como um número, capture a falha no seu programa, escreva uma saída e deixe o avaliador dar uma nota a ela. Leia as [regras do repositório](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 O avaliador também pode usar qualquer cliente compatível com OpenAI com as variáveis de ambiente `OPENAI_BASE_URL`, `APP_API_KEY` e `APP_MODEL`. O gateway aceita apenas o modelo do avaliador da execução.

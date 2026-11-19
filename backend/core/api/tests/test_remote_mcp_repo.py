@@ -47,7 +47,7 @@ from .test_remote_mcp import (
 )
 
 WRITE_TOKEN = "skym_at_read-write-token"
-SCORER = 'def score(repo_path):\n    return 1.0, "ok"\n'
+SCORER = 'def score(repo_path):\n    return {"score": 1.0, "feedback": "ok"}\n'
 CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n'
 
 
@@ -836,8 +836,8 @@ def test_save_step_locks_the_draft_row(harness: Any, monkeypatch: pytest.MonkeyP
     "code",
     [
         "from mylib import score\n",
-        "class S:\n  def __call__(self, path):\n    return 1.0, 'ok'\n\nscore = S()\n",
-        "def _mk():\n  return lambda path: (1.0, 'ok')\n\nscore = _mk()\n",
+        "class S:\n  def __call__(self, path):\n    return {'score': 1.0, 'feedback': 'ok'}\n\nscore = S()\n",
+        "def _mk():\n  return lambda path: {'score': 1.0, 'feedback': 'ok'}\n\nscore = _mk()\n",
         "@with_feedback\ndef score(path):\n  return 1.0\n",
         "def score(path):\n  return 1.0\n\nscore = add_feedback(score)\n",
         "from lib import score\n\ndef metric(path):\n  return 1.0\n",
@@ -859,18 +859,72 @@ def test_bare_number_return_is_an_issue(value: str) -> None:
 
 def test_bare_number_on_an_error_path_is_an_issue() -> None:
     """Flag a bare number on one path too, because the first one stops the whole run."""
-    code = "def score(path):\n  if not path:\n    return 0.0\n  return 1.0, 'ok'\n"
+    code = "def score(path):\n  if not path:\n    return 0.0\n  return {'score': 1.0, 'feedback': 'ok'}\n"
     issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
     assert "returns a bare number" in issues[0]
+
+
+def test_bare_number_issue_shows_the_object_form() -> None:
+    """Name the object form and say the feedback is optional, not the old pair (SKY-769)."""
+    issues, _notes = remote_mcp_repo.scorer_issues("def score(path):\n  return 1\n", has_cases=False)
+    assert issues == [
+        "The scorer function score returns a bare number. Return an object with score: "
+        "{'score': ..., 'feedback': ...}. The feedback is optional."
+    ]
+
+
+@pytest.mark.parametrize("value", ["1.0, 'ok'", "(0.0, str(error))"])
+def test_pair_return_is_an_issue(value: str) -> None:
+    """Flag a score and feedback pair, which the runner refuses (SKY-769)."""
+    code = f"def score(path):\n  if not path:\n    return {{'score': 0.0}}\n  return {value}\n"
+    issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
+    assert issues == [
+        "The scorer function score returns a pair. Return an object with score: "
+        "{'score': ..., 'feedback': ...}. The feedback is optional."
+    ]
+
+
+@pytest.mark.parametrize("value", ["(1.0,)", "(1.0, 'ok', 'x')", "result"])
+def test_other_returns_are_not_a_pair(value: str) -> None:
+    """Leave a tuple of another length and a name to the runner."""
+    issues, _notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  return {value}\n", has_cases=False)
+    assert issues == []
+
+
+def test_an_object_without_feedback_is_a_note() -> None:
+    """Accept an object with only score, and note that the proposer gets no feedback (SKY-769)."""
+    code = "def score(path):\n  if not path:\n    return {'score': 0.0}\n  return {'score': 1.0, 'scores': {}}\n"
+    issues, notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
+    assert issues == []
+    assert notes == [
+        "The scorer function score returns no feedback, so the proposer sees only the scores. "
+        "Add 'feedback' to say what was wrong or missing."
+    ]
+
+
+@pytest.mark.parametrize(
+    "returns",
+    [
+        ["{'score': 0.0}", "{'score': 1.0, 'feedback': 'ok'}"],
+        ["{'score': 1.0, **extra}"],
+        ["{'score': 0.0}", "result"],
+        ["{'score': 1.0, FEEDBACK: 'ok'}"],
+    ],
+)
+def test_a_return_that_can_hold_feedback_gives_no_note(returns: list[str]) -> None:
+    """Give no note when one return names feedback or is not a plain dict literal."""
+    body = "".join(f"  if x == {index}:\n    return {value}\n" for index, value in enumerate(returns))
+    issues, notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  x = 0\n{body}", has_cases=False)
+    assert (issues, notes) == ([], [])
 
 
 @pytest.mark.parametrize(
     ("code", "issue"),
     [
-        ("async def score(p, case):\n  return 1.0, 'ok'\n", "is async"),
-        ("def score(p, case):\n  yield 1.0, 'ok'\n", "uses yield"),
-        ("def score(p, case, output, extra):\n  return 1.0, 'ok'\n", "needs more arguments"),
-        ("def score(p, *, mode):\n  return 1.0, 'ok'\n", "needs more arguments"),
+        ("async def score(p, case):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "is async"),
+        ("def score(p, case):\n  yield {'score': 1.0, 'feedback': 'ok'}\n", "uses yield"),
+        ("def score(p, case, output, extra):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "needs more arguments"),
+        ("def score(p, *, mode):\n  return {'score': 1.0, 'feedback': 'ok'}\n", "needs more arguments"),
         ("def score(p):\n  return " + "-" * 200_000 + "1\n", "cannot parse"),
     ],
 )
@@ -882,7 +936,7 @@ def test_scorer_the_runner_cannot_call_is_an_issue(code: str, issue: str) -> Non
 
 def test_optional_extra_arguments_are_fine() -> None:
     """Accept extra arguments with defaults and a nested generator."""
-    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return 1.0, 'ok'\n"
+    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return {'score': 1.0, 'feedback': 'ok'}\n"
     assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])
 
 
@@ -891,7 +945,7 @@ def test_optional_extra_arguments_are_fine() -> None:
 )
 def test_each_scorer_signature_is_accepted(signature: str) -> None:
     """Accept the scorer with the checkout, the case, and the [run] entry's output for the case (E39)."""
-    code = f"def {signature}:\n  return 1.0, 'ok'\n"
+    code = f"def {signature}:\n  return {{'score': 1.0, 'feedback': 'ok'}}\n"
     issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
     assert issues == []
 
@@ -907,13 +961,17 @@ def test_missing_scorer_issue_names_all_three_signatures() -> None:
 
 def test_a_required_output_is_an_issue_that_names_the_default() -> None:
     """Refuse output without a default: the runner calls the scorer with (repo_path, case) when nothing ran."""
-    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, case, output):\n  return 1.0, 'ok'\n", True)
+    issues, _notes = remote_mcp_repo.scorer_issues(
+        "def score(p, case, output):\n  return {'score': 1.0, 'feedback': 'ok'}\n", True
+    )
     assert "score(repo_path, case, output=None)" in issues[0]
 
 
 def test_scorer_with_four_required_arguments_names_the_output() -> None:
     """Refuse a fourth required argument and name the three the runner passes."""
-    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, c, o, x):\n  return 1.0, 'ok'\n", True)
+    issues, _notes = remote_mcp_repo.scorer_issues(
+        "def score(p, c, o, x):\n  return {'score': 1.0, 'feedback': 'ok'}\n", True
+    )
     assert "(repo_path, case, output)" in issues[0]
 
 

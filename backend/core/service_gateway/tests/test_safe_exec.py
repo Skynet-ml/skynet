@@ -96,7 +96,9 @@ class TestBoundedCachePut:
         assert cache["code-0"] == 999
 
 
-_VALID_SCORER = "def score(candidate, case=None):\n    return len(candidate) / 10, {'length': len(candidate)}\n"
+_VALID_SCORER = (
+    "def score(candidate, case=None):\n    return {'score': len(candidate) / 10, 'feedback': str(len(candidate))}\n"
+)
 
 
 class TestValidateScorerCode:

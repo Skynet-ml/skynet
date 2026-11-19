@@ -36,7 +36,7 @@ from ..sandbox_scorer import (
     revive_images,
     scorer_gateway,
 )
-from .mocks import VOWEL_SCORER_CODE, FakeGateway, FakeSandboxRuntime, FakeSandboxSession
+from .mocks import FakeGateway, FakeSandboxRuntime, FakeSandboxSession
 
 Responder = Callable[[dict[str, Any]], "CommandResult | dict[str, Any]"]
 
@@ -44,7 +44,12 @@ _GATEWAY = ScorerGateway(
     url="http://gw.example/v1", model="judge", api_key="k", billing_model="fake/judge", timeout_seconds=9.0
 )
 _OK = {"score": 0.5, "side_info": {}, "error": None, "usage": []}
-_LLM_SCORER = "def score(candidate, case=None):\n    return float(llm(candidate, case['input'])), 'judged'\n"
+_LLM_SCORER = "def score(candidate, case=None):\n    return {'score': float(llm(candidate, case['input'])), 'feedback': 'judged'}\n"
+_VOWEL_METRIC = """
+def score(candidate, case=None):
+    vowels = sum(ch in "aeiou" for ch in candidate)
+    return {"score": vowels / max(1, len(candidate)), "feedback": f"{vowels} vowel(s)", "scores": {"vowels": {"score": vowels}}}
+"""
 
 
 def test_unprotected_byok_endpoint_accepts_declared_billing_name() -> None:
@@ -673,10 +678,13 @@ def _score_once(code: str, candidate: Any, case: Any = None, *, timeout_seconds:
 
 def test_sandbox_scorer_runs_the_real_runner_through_the_local_runtime() -> None:
     """End to end on the host: the vowel scorer scores a seed and returns its side info."""
-    probe = _score_once(VOWEL_SCORER_CODE, "aeiou")
+    probe = _score_once(_VOWEL_METRIC, "aeiou")
 
     assert probe == ScorerProbeResult(
-        score=1.0, side_info={"feedback": "5 vowel(s)", "vowels": 5}, error=None, usage_by_model={}
+        score=1.0,
+        side_info={"feedback": "5 vowel(s)", "scores": {"vowels": {"score": 5.0, "feedback": ""}}},
+        error=None,
+        usage_by_model={},
     )
 
 
@@ -684,8 +692,9 @@ def test_sandbox_scorer_runs_the_real_runner_through_the_local_runtime() -> None
     ("code", "error"),
     [
         ("def score(c, case=None): raise ValueError('bad candidate')", "ValueError: bad candidate"),
-        ("def score(c, case=None): return 'nope'", "must return feedback"),
-        ("def score(c, case=None): return 1.0", "must return feedback"),
+        ("def score(c, case=None): return 'nope'", "must be an object, not str"),
+        ("def score(c, case=None): return 1.0", "must be an object, not a bare number"),
+        ("def score(c, case=None): return {'score': 1.0, 'predicted': 41}", "unknown key `predicted`"),
         ("def !!!", "scorer code has a syntax error"),
         (_LLM_SCORER, "Add model= to llm() or check the reflection model"),
     ],
@@ -703,20 +712,15 @@ def test_sandbox_scorer_reports_failures_as_data(code: str, error: str) -> None:
     assert error in (probe.error or "")
 
 
-def test_sandbox_scorer_carries_large_side_info_and_images_back_from_the_box() -> None:
-    """Multi-megabyte side info, image objects and odd types all survive the file round trip."""
-    code = (
-        "def score(candidate, case=None):\n"
-        "    return 0.5, {'feedback': 'f', 'blob': 'x' * 3_000_000, 'render': Image(base64_data='aGk=', media_type='image/png'), 'odd': {1, 2}}\n"
-    )
+def test_sandbox_scorer_carries_large_feedback_back_from_the_box() -> None:
+    """Multi-megabyte feedback survives the file round trip."""
+    code = "def score(candidate, case=None):\n    return {'score': 0.5, 'feedback': 'x' * 3_000_000}\n"
 
     probe = _score_once(code, "x")
 
     assert probe.error is None
     assert probe.score == 0.5
-    assert len(probe.side_info["blob"]) == 3_000_000
-    assert probe.side_info["render"] == "data:image/png;base64,aGk="
-    assert probe.side_info["odd"] == "{1, 2}"
+    assert len(probe.side_info["feedback"]) == 3_000_000
 
 
 def test_sandbox_scorer_stops_a_scorer_that_outruns_its_timeout() -> None:
@@ -868,7 +872,7 @@ def test_scorer_log_events_reach_the_run_log_tagged_with_their_candidate_and_cas
         "def score(candidate, case=None):\n"
         "    log('judge.retry', 'retrying the judge', level='warning', attempt=2)\n"
         "    print('hidden from the log')\n"
-        "    return 1.0, 'ok'\n"
+        "    return {'score': 1.0}\n"
     )
     records: list[logging.LogRecord] = []
     handler = logging.Handler(logging.DEBUG)

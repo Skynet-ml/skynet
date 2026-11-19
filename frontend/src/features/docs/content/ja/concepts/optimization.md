@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` は、`[run]` エントリーがそのケースに対して返した値です。
 - `case` は dict です。`case["input"]` は 1 つのケースの入力フィールドを保持します。`case["expected"]` は期待値を保持します。期待値がないケースでは `None` です。
 - `repo_path` は、メトリクスファイルだけを保持するフォルダーです。
-- `score` はペアを返します。数値と、`"feedback"` 文字列を含む dict です。
+- `score` は 1 つのオブジェクトを返します。`"score"` の下の数値と、任意の `"feedback"` 文字列です。
 
 リポジトリのルートには、`def serve(input)` を持つ `serve.py` ファイルがあります。`[run]` エントリーは、専用のサンドボックスでこの関数を呼び出します。Skynet は実行の後、この関数を使って最も良いバージョンを提供します。
 

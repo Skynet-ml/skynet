@@ -83,7 +83,7 @@ _READY: dict[str, Any] = {
     "dataset_ready": True,
     "staged_dataset_id": "ds_1",
     "run_code": "def run(artifact, input):\n    return input['q']\n",
-    "metric_code": "def score(input, output, expected=None):\n    return 1.0, {'feedback': ''}\n",
+    "metric_code": "def score(input, output, expected=None):\n    return {'score': 1.0, 'feedback': ''}\n",
     "reflection_model_config": {"name": "openai/gpt-4o-mini"},
 }
 

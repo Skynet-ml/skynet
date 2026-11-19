@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output` 係 `[run]` 入口為呢個案例回傳嘅嘢。
 - `case` 係一個 dict。`case["input"]` 裝住一個案例嘅輸入欄位。`case["expected"]` 裝住預期值；如果案例冇預期值，就係 `None`。
 - `repo_path` 係一個只裝住你啲指標檔案嘅資料夾。
-- `score` 回傳一對值：一個數字，同一個包含 `"feedback"` 字串嘅 dict。
+- `score` 回傳一個物件：`"score"` 下面一個數字，同一個可選嘅 `"feedback"` 字串。
 
 倉庫嘅根目錄有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會喺自己嘅沙盒入面呼叫佢。運行完之後，Skynet 會用佢嚟提供最好嗰個版本。
 

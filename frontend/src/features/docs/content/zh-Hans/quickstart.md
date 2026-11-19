@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` 包含一个用例的输入列。`case["expected"]` 包含输出列，以列名作为键。仓库中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。`[run]` 入口调用它，`output` 就是它的返回值。评分器在一个只包含你的指标文件、不包含版本代码的独立沙箱中运行，所以它不能导入 `serve.py`。运行结束后，Skynet 用同一个函数来部署最好的版本。

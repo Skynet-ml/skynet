@@ -5,7 +5,7 @@ El evaluador le dice a Skynet lo buena que es una versión de tu repositorio. Es
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argumento   | Qué contiene                                                                     |
@@ -23,28 +23,35 @@ El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo 
 
 ## El valor devuelto
 
-`score` debe devolver una puntuación con comentarios. Estas formas son válidas:
+`score` devuelve un objeto:
 
-1. Un par: un número, y una cadena de comentarios o un dict con una clave `"feedback"`.
-2. Un dict con un número en `"score"` y una cadena en `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Los comentarios deben ser una cadena que no esté vacía.
+- `"score"` es obligatorio. Es un número finito. Solo esta puntuación ordena las versiones.
+- `"feedback"` es un texto opcional. Se recomienda, porque GEPA y Auto aprenden de él. Sin comentarios, los motores solo ven las puntuaciones, y el registro de la ejecución lo indica una vez.
+- `"scores"` es opcional. Asocia nombres a puntuaciones con nombre. Cada puntuación con nombre es un objeto con su propio `"score"` y un `"feedback"` opcional. Todos los motores usan cada puntuación con nombre como un objetivo propio.
 
-La información adicional también puede tener una clave `"scores"`. Asocia nombres a puntuaciones con nombre. Cada puntuación con nombre tiene su propia puntuación y sus propios comentarios, por ejemplo `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Cualquier otra forma o clave es un error. La comprobación muestra la parte incorrecta y la forma válida.
 
-La información adicional también puede tener una clave `"cases"` con la misma forma. Cada entrada es el resultado de un caso. Todos los motores usan cada caso como un objetivo propio.
-
-Si el valor devuelto tiene otra forma, la comprobación falla y muestra el motivo.
-
-| Valor devuelto                                                                  | Válido                                         |
-| ------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Sí                                             |
-| `(0.8, "Close. Missing the date.")`                                             | Sí                                             |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Sí                                  |
-| `0.8`                                                                           | No. No hay comentarios.                        |
-| `(0.8, {})`                                                                     | No. No hay cadena de comentarios.              |
-| `("0.8", {"feedback": "OK"})`                                                   | No. La puntuación es una cadena.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | No. Una puntuación con nombre no es un número. |
+| Valor devuelto | Válido |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Sí |
+| `{"score": 0.8}` | Sí. No hay comentarios. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Sí |
+| `0.8` | No. El valor no es un objeto. |
+| `(0.8, "Close. Missing the date.")` | No. El valor no es un objeto. |
+| `{"score": "0.8"}` | No. La puntuación es una cadena. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | No. Una puntuación con nombre debe ser un objeto. |
+| `{"score": 0.8, "feedbak": "OK"}` | No. La clave `feedbak` es desconocida. |
 
 ## Escribe comentarios útiles
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` es un dict cuya clave es el nombre de tu columna de salida. Lee [Conjuntos de datos y divisiones](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 Cuando la entrada `[run]` falla en un caso, ese caso no tiene puntuación. Si la entrada no arranca, supera el tiempo límite o una señal la detiene, o si una entrada de función lanza una excepción o termina antes de devolver un valor, el comentario es `Run failed: …`, y Skynet no llama al evaluador. Un código de salida distinto de cero de una entrada de comando no es un fallo: el evaluador lo recibe en `output`. Una versión con un caso así no tiene puntuación. No puede ser la mejor versión, no alcanza ningún `[outcome] target` y no abre ningún pull request. Si un fallo debe contar como un número, captura el fallo en tu programa, escribe una salida y deja que el evaluador la puntúe. Lee las [reglas del repositorio](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 El evaluador también puede usar cualquier cliente compatible con OpenAI con las variables de entorno `OPENAI_BASE_URL`, `APP_API_KEY` y `APP_MODEL`. La pasarela solo acepta el modelo evaluador de la ejecución.

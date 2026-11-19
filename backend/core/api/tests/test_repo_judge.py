@@ -235,7 +235,10 @@ def _session(
     attached = budgets.attach_to_job(budget.id, USER, session_id, expected_revision=budget.revision)
     payload = {
         "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"], "commit": BASE}},
-        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case):\n    return 1.0, 'ok'\n"},
+        "scorer": {
+            "kind": "python",
+            "metric_code": "def score(repo_path, case):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+        },
         "cases": cases,
         "seed": 7,
         "judge": {"version": 1, "draft_id": draft, "base_commit": BASE, "floor_cents": floor},
@@ -1734,6 +1737,32 @@ def dispatched(boxes: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return boxes
 
 
+class _FailedRunScorer:
+    """A staged scorer whose guest endpoint reports a failed ``[run]`` entry, as the repository scorer builds it."""
+
+    def dispatch(self, body: Any) -> Any:
+        """Answer one scoring request with Skynet's run-failed document.
+
+        Args:
+            body: The guest's request.
+
+        Returns:
+            A 200 reply with no score and the ``run_failed`` status.
+        """
+        return SimpleNamespace(
+            status=200, body=json.dumps({"score": None, "feedback": "Run failed: x", "status": "run_failed"}).encode()
+        )
+
+
+def test_the_score_step_reads_a_failed_run_as_a_failed_run_not_a_key_error() -> None:
+    """The final score trusts the repository scorer's own ``status`` key, so a failed run is not a wrong answer (SKY-769)."""
+    final = _REAL_SCORE(SimpleNamespace(scorers=[_FailedRunScorer()]), OTHER_PATCH, ["case"], label="candidate")
+
+    assert final.score is None
+    assert final.run_failed is True
+    assert final.failures == ["x"]
+
+
 def _stored_text(job_store: SQLiteJobStore, session_id: str) -> str:
     """Join the session's job record and every evidence row as text.
 
@@ -1917,7 +1946,10 @@ def _open_request() -> repo_judge.BlackboxRunRequest:
     return repo_judge.BlackboxRunRequest.model_validate(
         {
             "recipe": "repo",
-            "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return 1.0, 'ok'\n"},
+            "scorer": {
+                "kind": "python",
+                "metric_code": "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+            },
             "target": {"kind": "repo", "repo": {"repository": "acme/app", "branch": "main", "editable_paths": ["src"]}},
             "strategy": {"mode": "single", "engine": "gepa"},
             "reflection_model_config": {"name": "openai/gpt-5"},

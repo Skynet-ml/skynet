@@ -109,9 +109,11 @@ The hosted server runs `managed` and `byok` models. The Mac app runs
 source as an issue. In the Mac app, name a subscription model
 `subscription/<codex|claude>/<model>`, so Skynet knows which CLI runs it.
 
-The scorer is `score(repo_path, case)`. It returns a `(score, feedback)` pair
-or a `{"score": ..., "feedback": ...}` dict. The engines learn from the
-feedback. A bare number on any path, an error path too, stops the whole run. A scorer that takes only `repo_path`
+The scorer is `score(repo_path, case)`. It returns one object:
+`{"score": ..., "feedback": ..., "scores": {"<name>": {"score": ..., "feedback": ...}}}`.
+Only `score` is required. The feedback is optional and recommended: the
+engines learn from it. A bare number, a pair or any other key is an error, on
+any path, an error path too. A scorer that takes only `repo_path`
 also works, but the step adds a note when the draft has data: every case gets
 the same score.
 

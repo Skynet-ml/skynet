@@ -166,6 +166,7 @@ def verify_anything_in_sandbox(
                 timeout_seconds=scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
                 protected_route=route,
                 label="repository scorer",
+                trusted_reply=True,
             )
         else:
             scorer_instance = build_scorer(scorer, job_id=identity, protected_route=route)

@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` contient les colonnes d'entrée d'un cas. `case["expected"]` contient la colonne de sortie, indexée par le nom de la colonne. Le dépôt contient un fichier `serve.py` avec `def serve(input)`. L'entrée `[run]` l'appelle, et `output` est sa valeur de retour. L'évaluateur s'exécute dans une boîte de sandbox séparée qui contient seulement vos fichiers de métrique et aucun code de la version, donc il ne peut pas importer `serve.py`. Skynet utilise la même fonction pour servir la meilleure version après l'exécution.

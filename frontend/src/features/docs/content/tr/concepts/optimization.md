@@ -14,13 +14,13 @@ entry = "serve.py:serve"
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
 ```
 
 - `output`, `[run]` giriş noktasının vaka için döndürdüğü değerdir.
 - `case` bir dict'tir. `case["input"]` bir vakanın girdi alanlarını tutar. `case["expected"]` beklenen değeri tutar; vakanın beklenen değeri yoksa `None` olur.
 - `repo_path`, yalnızca metrik dosyalarınızı tutan bir klasördür.
-- `score` bir çift döndürür: bir sayı ve `"feedback"` dizesi içeren bir dict.
+- `score` tek bir nesne döndürür: `"score"` altında bir sayı ve isteğe bağlı bir `"feedback"` dizesi.
 
 Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu kendi sandbox'ında çağırır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
 

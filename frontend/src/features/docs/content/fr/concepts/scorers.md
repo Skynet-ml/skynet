@@ -5,7 +5,7 @@ L'évaluateur indique à Skynet la qualité d'une version de votre dépôt. C'es
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argument    | Ce qu'il contient                                                                |
@@ -23,28 +23,35 @@ L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte cont
 
 ## La valeur de retour
 
-`score` doit renvoyer un score avec un retour. Ces formes sont valides :
+`score` renvoie un objet :
 
-1. Une paire : un nombre, et une chaîne de retour ou un dict avec une clé `"feedback"`.
-2. Un dict avec un nombre sous `"score"` et une chaîne sous `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Le retour doit être une chaîne non vide.
+- `"score"` est obligatoire. C'est un nombre fini. Seul ce score classe les versions.
+- `"feedback"` est un texte facultatif. Il est recommandé, car GEPA et Auto en tirent des leçons. Sans retour, les moteurs ne voient que les scores, et le journal de l'exécution le signale une fois.
+- `"scores"` est facultatif. Il associe des noms à des scores nommés. Chaque score nommé est un objet avec son propre `"score"` et un `"feedback"` facultatif. Chaque moteur utilise chaque score nommé comme un objectif distinct.
 
-Les informations annexes peuvent aussi contenir une clé `"scores"`. Elle associe des noms à des scores nommés. Chaque score nommé a son propre score et son propre retour, par exemple `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Toute autre forme ou clé est une erreur. La vérification affiche la partie fautive et la forme valide.
 
-Les informations annexes peuvent aussi contenir une clé `"cases"` de même forme. Chaque entrée est le résultat d'un cas. Chaque moteur utilise chaque cas comme un objectif distinct.
-
-Si la valeur de retour a une autre forme, la vérification échoue et affiche la raison.
-
-| Valeur de retour                                                                | Valide                                 |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Oui                                    |
-| `(0.8, "Close. Missing the date.")`                                             | Oui                                    |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Oui                         |
-| `0.8`                                                                           | Non. Il n'y a pas de retour.           |
-| `(0.8, {})`                                                                     | Non. Il n'y a pas de chaîne de retour. |
-| `("0.8", {"feedback": "OK"})`                                                   | Non. Le score est une chaîne.          |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Non. Un score nommé n'est pas un nombre. |
+| Valeur de retour | Valide |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Oui |
+| `{"score": 0.8}` | Oui. Il n'y a pas de retour. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Oui |
+| `0.8` | Non. La valeur n'est pas un objet. |
+| `(0.8, "Close. Missing the date.")` | Non. La valeur n'est pas un objet. |
+| `{"score": "0.8"}` | Non. Le score est une chaîne. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Non. Un score nommé doit être un objet. |
+| `{"score": 0.8, "feedbak": "OK"}` | Non. La clé `feedbak` est inconnue. |
 
 ## Rédiger un retour utile
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` est un dict dont la clé est le nom de votre colonne de sortie. Lisez [Jeux de données et répartitions](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entrée ne démarre pas, dépasse le délai ou si un signal l'arrête, ou si une entrée de fonction lève une exception ou se termine avant de renvoyer une valeur, le retour est `Run failed: …`, et Skynet n'appelle pas l'évaluateur. Un code de sortie non nul d'une entrée de commande n'est pas un échec : l'évaluateur le reçoit dans `output`. Une version avec un tel cas n'a pas de score. Elle ne peut pas être la meilleure version, n'atteint aucun `[outcome] target` et n'ouvre aucune pull request. Si un échec doit compter comme un nombre, interceptez l'échec dans votre programme, écrivez une sortie et laissez l'évaluateur la noter. Lisez les [règles du dépôt](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 L'évaluateur peut aussi utiliser n'importe quel client compatible OpenAI avec les variables d'environnement `OPENAI_BASE_URL`, `APP_API_KEY` et `APP_MODEL`. La passerelle n'accepte que le modèle de l'évaluateur de l'exécution.

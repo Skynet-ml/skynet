@@ -101,8 +101,10 @@ How to write the run's files:
   ``score(repo_path, case, output=None)`` and scores ``output``; a metric with fewer arguments never gets the
   output. Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define
   ``score(repo_path)`` or ``score(repo_path, case)``, and that metric calls its stages with
-  ``from skynet import call``. The metric box holds no repository files. It returns
-  ``(score, feedback)`` or ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
+  ``from skynet import call``. The metric box holds no repository files. It returns one object,
+  ``{{"score": ..., "feedback": ..., "scores": {{"<name>": {{"score": ..., "feedback": ...}}}}}}``.
+  Only ``score`` is required. Give ``feedback`` that says what was wrong or missing: without it the proposer
+  sees only the scores. A bare number, a pair or any other key is an error.
   {APP_NAME} starts the candidate, never the metric. Write a ``[run]`` section (or a ``[target.<name>]`` stage)
   in optimize.toml. Set the ``[run]`` ``entry`` to ``"path/to/file.py:function"`` or a command list,
   for example ``entry = "geocode.py:geocode"``, and write ``score(repo_path, case, output=None)``: ``output``

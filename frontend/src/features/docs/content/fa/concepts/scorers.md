@@ -5,7 +5,7 @@
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | آرگومان     | محتوای آن                                                                        |
@@ -23,28 +23,35 @@ def score(repo_path, case, output=None):
 
 ## مقدار بازگشتی
 
-`score` باید یک امتیاز به‌همراه بازخورد برگرداند. این شکل‌ها معتبرند:
+`score` یک شیء برمی‌گرداند:
 
-1. یک جفت: یک عدد، و یک رشتهٔ بازخورد یا یک dict با کلید `"feedback"`.
-2. یک dict با یک عدد زیر `"score"` و یک رشته زیر `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-بازخورد باید رشته‌ای باشد که خالی نیست.
+- کلید `"score"` الزامی است. یک عدد متناهی است. فقط همین امتیاز نسخه‌ها را رتبه‌بندی می‌کند.
+- کلید `"feedback"` یک متن اختیاری است. توصیه می‌شود، چون GEPA و Auto از آن یاد می‌گیرند. بدون بازخورد، موتورها فقط امتیازها را می‌بینند و لاگ اجرا یک بار این را می‌گوید.
+- کلید `"scores"` اختیاری است. این کلید نام‌ها را به امتیازهای نام‌دار نگاشت می‌کند. هر امتیاز نام‌دار یک شیء با `"score"` خودش و یک `"feedback"` اختیاری است. هر موتور هر امتیاز نام‌دار را به‌عنوان یک هدف جداگانه به کار می‌برد.
 
-اطلاعات جانبی می‌تواند کلید `"scores"` هم داشته باشد. این کلید نام‌ها را به امتیازهای نام‌دار نگاشت می‌کند. هر امتیاز نام‌دار امتیاز و بازخورد خودش را دارد، برای مثال `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+هر شکل یا کلید دیگری خطاست. بررسی بخش نادرست و شکل معتبر را نشان می‌دهد.
 
-اطلاعات جانبی می‌تواند کلید `"cases"` هم با همین شکل داشته باشد. هر مدخل نتیجهٔ یک مورد است. هر موتور هر مورد را به‌عنوان یک هدف جداگانه به کار می‌برد.
-
-اگر مقدار بازگشتی شکل دیگری داشته باشد، بررسی ناموفق می‌شود و دلیل را نشان می‌دهد.
-
-| مقدار بازگشتی                                                                   | معتبر                                  |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | بله                                    |
-| `(0.8, "Close. Missing the date.")`                                             | بله                                    |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | بله                         |
-| `0.8`                                                                           | خیر. بازخوردی وجود ندارد.              |
-| `(0.8, {})`                                                                     | خیر. رشتهٔ بازخورد وجود ندارد.          |
-| `("0.8", {"feedback": "OK"})`                                                   | خیر. امتیاز یک رشته است.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | خیر. یک امتیاز نام‌دار عدد نیست.      |
+| مقدار بازگشتی | معتبر |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | بله |
+| `{"score": 0.8}` | بله. بازخوردی ندارد. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | بله |
+| `0.8` | نه. مقدار یک شیء نیست. |
+| `(0.8, "Close. Missing the date.")` | نه. مقدار یک شیء نیست. |
+| `{"score": "0.8"}` | نه. امتیاز یک رشته است. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | نه. امتیاز نام‌دار باید یک شیء باشد. |
+| `{"score": 0.8, "feedbak": "OK"}` | نه. کلید `feedbak` ناشناخته است. |
 
 ## نوشتن بازخورد مفید
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` یک dict است که کلیدهای آن نام ستون «خروجی» شما هستند. صفحهٔ [مجموعه‌داده‌ها و تقسیم](/docs/concepts/datasets) را بخوانید.
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 وقتی `entry` بخش `[run]` روی یک مورد شکست می‌خورد، آن مورد امتیاز ندارد. اگر `entry` شروع نشود، از مهلت بگذرد یا یک سیگنال آن را متوقف کند، یا اگر یک `entry` از نوع تابع خطا بدهد یا پیش از برگرداندن مقدار خارج شود، بازخورد `Run failed: …` است و Skynet امتیازدهنده را فراخوانی نمی‌کند. کد خروج غیرصفر یک `entry` از نوع فرمان شکست نیست: امتیازدهنده آن را در `output` می‌گیرد. نسخه‌ای که چنین موردی دارد امتیاز ندارد. آن نسخه نمی‌تواند بهترین نسخه باشد، به هیچ `[outcome] target` نمی‌رسد و هیچ pull request باز نمی‌کند. اگر شکست باید به‌صورت یک عدد حساب شود، شکست را در برنامهٔ خودتان بگیرید، یک خروجی بنویسید و بگذارید امتیازدهنده به آن امتیاز بدهد. صفحهٔ [قواعد مخزن](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) را بخوانید.
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 امتیازدهنده می‌تواند از هر کلاینت سازگار با OpenAI هم با متغیرهای محیطی `OPENAI_BASE_URL`، `APP_API_KEY` و `APP_MODEL` استفاده کند. دروازه فقط مدل امتیازدهندهٔ اجرا را می‌پذیرد.

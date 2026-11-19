@@ -69,8 +69,8 @@ def score(repo_path, case, output=None):
     got = str(output).strip().lower()
     want = case["expected"]["label"].strip().lower()
     if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
 ```
 
 `case["input"]` は 1 つのケースの入力列を保持します。`case["expected"]` は出力列を、その列名をキーとして保持します。リポジトリには `def serve(input)` を持つ `serve.py` ファイルがあります。`[run]` エントリーがこの関数を呼び出し、`output` はその戻り値です。スコアラーはメトリクスファイルだけがあり、バージョンのコードがない別のサンドボックスで実行されるため、`serve.py` をインポートできません。Skynet は実行の後、同じ関数を使って最も良いバージョンを提供します。

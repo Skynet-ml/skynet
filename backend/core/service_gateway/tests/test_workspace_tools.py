@@ -67,7 +67,7 @@ _REPO_METRIC: dict[str, Any] = {
     "repository": "acme/shop",
     "github_connected": True,
 }
-_SCORER = "def score(repo_path):\n    return 1.0, 'ok'\n"
+_SCORER = "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n"
 # The metric scores only what a [run] or a target stage gives it, so a valid contract names one (SKY-761).
 _VALID_TOML = 'version = 1\n[run]\nentry = "run.py:main"\n'
 # The commit every branch resolves to in these tests, unless a test says otherwise.

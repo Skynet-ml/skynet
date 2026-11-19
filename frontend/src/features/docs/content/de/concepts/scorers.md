@@ -5,7 +5,7 @@ Der Scorer sagt Skynet, wie gut eine Version Ihres Repositorys ist. Er ist eine 
 ```python
 def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | Argument    | Was es enthält                                                                   |
@@ -23,28 +23,35 @@ Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Me
 
 ## Der Rückgabewert
 
-`score` muss einen Score mit Feedback zurückgeben. Diese Formen sind gültig:
+`score` gibt ein Objekt zurück:
 
-1. Ein Paar: eine Zahl und ein Feedback-String oder ein Dict mit einem Schlüssel `"feedback"`.
-2. Ein Dict mit einer Zahl unter `"score"` und einem String unter `"feedback"`.
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-Das Feedback muss ein String sein, der nicht leer ist.
+- `"score"` ist Pflicht. Es ist eine endliche Zahl. Nur dieser Score ordnet die Versionen.
+- `"feedback"` ist optionaler Text. Es wird empfohlen, denn GEPA und Auto lernen daraus. Ohne Feedback sehen die Engines nur die Scores, und das Protokoll des Durchlaufs sagt das einmal.
+- `"scores"` ist optional. Es ordnet Namen benannten Scores zu. Jeder benannte Score ist ein Objekt mit einem eigenen `"score"` und einem optionalen `"feedback"`. Jede Engine verwendet jeden benannten Score als eigenes Ziel.
 
-Die Zusatzinformationen können auch einen Schlüssel `"scores"` haben. Er ordnet Namen benannten Scores zu. Jeder benannte Score hat einen eigenen Score und ein eigenes Feedback, zum Beispiel `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
+Jede andere Form und jeder andere Schlüssel ist ein Fehler. Die Prüfung zeigt den falschen Teil und die gültige Form.
 
-Die Zusatzinformationen können auch einen Schlüssel `"cases"` mit derselben Form haben. Jeder Eintrag ist das Ergebnis eines Falls. Jede Engine verwendet jeden Fall als eigenes Ziel.
-
-Hat der Rückgabewert eine andere Form, schlägt die Prüfung fehl und zeigt den Grund.
-
-| Rückgabewert                                                                    | Gültig                                 |
-| ------------------------------------------------------------------------------- | -------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | Ja                                     |
-| `(0.8, "Close. Missing the date.")`                                             | Ja                                     |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Ja                          |
-| `0.8`                                                                           | Nein. Es gibt kein Feedback.           |
-| `(0.8, {})`                                                                     | Nein. Es gibt keinen Feedback-String.  |
-| `("0.8", {"feedback": "OK"})`                                                   | Nein. Der Score ist ein String.        |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Nein. Ein benannter Score ist keine Zahl. |
+| Rückgabewert | Gültig |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | Ja |
+| `{"score": 0.8}` | Ja. Es gibt kein Feedback. |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | Ja |
+| `0.8` | Nein. Der Wert ist kein Objekt. |
+| `(0.8, "Close. Missing the date.")` | Nein. Der Wert ist kein Objekt. |
+| `{"score": "0.8"}` | Nein. Der Score ist ein String. |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | Nein. Ein benannter Score muss ein Objekt sein. |
+| `{"score": 0.8, "feedbak": "OK"}` | Nein. Der Schlüssel `feedbak` ist unbekannt. |
 
 ## Nützliches Feedback schreiben
 
@@ -73,8 +80,8 @@ entry = "serve.py:serve"
 def score(repo_path, case, output=None):
     want = case["expected"]["label"]
     if output == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` ist ein Dict, dessen Schlüssel der Name Ihrer Ausgabespalte ist. Lesen Sie [Datensätze und Aufteilungen](/docs/concepts/datasets).
@@ -94,8 +101,8 @@ timeout = 300
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
     if output["exit_code"] == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": output["stdout"][-2000:]}
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
 ```
 
 Wenn der `[run]`-Eintrag bei einem Fall fehlschlägt, hat dieser Fall keine Bewertung. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, oder wenn ein Funktionseintrag eine Ausnahme auslöst oder sich beendet, bevor er zurückgibt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Exit-Code ungleich null eines Befehlseintrags ist kein Fehlschlag: Der Scorer erhält ihn in `output`. Eine Version mit einem solchen Fall hat keine Bewertung. Sie kann nicht die beste Version sein, erreicht kein `[outcome] target` und öffnet keinen Pull Request. Wenn ein Fehlschlag als Zahl zählen soll, fangen Sie den Fehlschlag in Ihrem Programm ab, schreiben Sie eine Ausgabe und lassen Sie den Scorer sie bewerten. Lesen Sie die [Repository-Regeln](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
@@ -123,7 +130,7 @@ def score(repo_path, case, output=None):
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
 Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen `OPENAI_BASE_URL`, `APP_API_KEY` und `APP_MODEL` verwenden. Das Gateway akzeptiert nur das Scorer-Modell des Durchlaufs.

@@ -24,7 +24,7 @@ from gepa.oa.budget import BudgetExhausted
 from ....billing.usage_tags import usage_scope
 from ..cost_ceiling import CostCeilingExceededError
 from ..timing import STAGE_TRAINING
-from .runner import FEEDBACK_REQUIRED
+from .runner import ANSWER_FORM
 
 if TYPE_CHECKING:
     from ....sandbox.grants import Grant
@@ -160,6 +160,55 @@ def is_run_failed(side_info: SideInfo) -> bool:
         Whether its ``status`` is :data:`RUN_FAILED_STATUS`.
     """
     return isinstance(side_info, dict) and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+
+
+NO_FEEDBACK_WARNING = (
+    "The metric gives no feedback, so the proposer sees only the scores. "
+    'Add "feedback" to the metric answer to say what was wrong or missing.'
+)
+
+
+def warn_once_without_feedback(scorer: ScorerFn) -> ScorerFn:
+    """Wrap a run's scorer so the run log says once that the metric gives no feedback.
+
+    Feedback is optional (SKY-769). A command metric has no static check, so
+    this line is how its author learns the proposer gets no text. A named
+    score with no feedback gives no line.
+
+    The warning comes once for each run attempt, that is, once in each
+    process that runs the job. The state is in memory only, so a run that
+    resumes in a new process can warn again. This is by design: no flag is
+    persisted.
+
+    Args:
+        scorer: The run's scorer.
+
+    Returns:
+        The same scorer, which logs one warning at the first score with no feedback.
+    """
+    lock = threading.Lock()
+    warned = False
+
+    def score(candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
+        """Score ``candidate`` on ``case`` with the wrapped scorer.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            What the wrapped scorer returned.
+        """
+        nonlocal warned
+        value, side_info = scorer(candidate, case)
+        if value is not None and not side_info.get("feedback"):
+            with lock:
+                first, warned = not warned, True
+            if first:
+                logger.warning(NO_FEEDBACK_WARNING)
+        return value, side_info
+
+    return score
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -629,6 +678,8 @@ class EvalServer:
         self._on_eval = on_eval
         self.used = 0
         self._records: dict[str, CandidateRecord] = {}
+        # Set on the root at the first score: after it, a wrong answer is one version's error.
+        self._scored = False
         # Locks are only ever taken child → parent, so lanes cannot deadlock.
         self._lock = threading.Lock()
 
@@ -715,6 +766,8 @@ class EvalServer:
             side_info: What the scorer said about it.
         """
         root = self._root
+        if score is not None:
+            root._scored = True
         server: EvalServer | None = self
         while server is not None and candidate is not None:
             with server._lock:
@@ -753,16 +806,17 @@ class EvalServer:
             The score and side information, or ``(None, {"error": ..., "status": "metric_error"})``.
 
         Raises:
-            ScorerAbortError: When the scorer asks to stop the run, or returns no feedback.
+            ScorerAbortError: When the scorer asks to stop the run, or the
+                metric answer has a wrong form before any version has a score.
         """
         try:
             score, side_info = self._scorer(candidate, example)
         except (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError):
             raise
         except Exception as exc:
-            # A scorer without feedback lacks it on every version, so flooring
-            # would spend the whole budget teaching the proposer nothing.
-            if FEEDBACK_REQUIRED in str(exc):
+            # A wrong answer form usually comes on every version, so going on
+            # spends the whole budget on errors. After a score, it is one version's error.
+            if ANSWER_FORM in str(exc) and not self._scored:
                 raise ScorerAbortError(str(exc)) from exc
             error = f"{type(exc).__name__}: {exc}"
             logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
