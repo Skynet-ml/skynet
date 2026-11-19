@@ -339,6 +339,22 @@ def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None)
 LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset()
 
 
+def loop_route(engine: str | None, mode: str) -> bool:
+    """Report whether a repository run of this engine and mode runs on the worker's engine loop.
+
+    It reads :data:`LOOP_ROUTES` at each call, so a route that a port adds, or a test patches, takes effect.
+    Staging uses it too, so it accepts ``[proposer] entry`` only for a run that goes to the engine loop (SKY-816).
+
+    Args:
+        engine: The strategy's engine, or ``None`` when the run names none.
+        mode: The strategy's mode.
+
+    Returns:
+        True for a single-engine run whose engine has a ``repo`` row in :data:`LOOP_ROUTES`.
+    """
+    return mode == "single" and (str(engine), "repo") in LOOP_ROUTES
+
+
 def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
     """Report whether a job runs on the worker's engine loop.
 
@@ -348,11 +364,7 @@ def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
     Returns:
         True for a single-engine repository run whose engine has a row in :data:`LOOP_ROUTES`.
     """
-    return (
-        payload.strategy.mode == "single"
-        and payload.target.kind == BLACKBOX_TARGET_REPO
-        and (str(payload.strategy.engine), "repo") in LOOP_ROUTES
-    )
+    return payload.target.kind == BLACKBOX_TARGET_REPO and loop_route(payload.strategy.engine, payload.strategy.mode)
 
 
 def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:

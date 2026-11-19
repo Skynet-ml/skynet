@@ -153,30 +153,33 @@ U+2066 to U+2069), because they can hide what a command does.
   an engine loop route. Without the route, a single run of these engines
   with `entry` fails the setup check, and the message names `[proposer]
   entry` and the engine. Auto does not run on the engine loop, so it leaves
-  out their lanes. On the engine loop, the engine runs the command once
-  for each new version, over the parent version's tree. The engine keeps its
-  own search and lab state. `ASCENT_TASK` names `.autoresearch/ascent-task.md`
+  out their lanes. On the engine loop, the engine runs the command once for
+  each new version, over the parent version's tree. The engine keeps its own
+  search and lab state. `ASCENT_TASK` names `.autoresearch/ascent-task.md`
   or `.meta-harness/ascent-task.md`. The file holds the goal, the past
-  versions, their scores and the lab notes. The tree that the command leaves,
-  without the lab folder and without the files that `setup` added, is the new
-  version, and the engine scores it. `setup` runs once for each engine, over
-  the first version, before the first command. If `setup` changes or removes a file of the repository, the
-  run stops, and the message names the command and the changed files. If the
-  run cannot remove the files that `setup` added (for example, a read-only
-  folder), the run stops too. `setup` and each `entry` command have 30 minutes
-  each. A `setup` that runs out of time stops the run. An `entry` command that
-  runs out of time gives no version. A command that fails gives no version: it
-  is a failed attempt, not a failed run. AutoResearch then ends the run,
+  versions, their scores and the lab notes. The tree that the command
+  leaves, without the lab folder and without the files that `setup` added,
+  is the new version, and the engine scores it. `setup` runs once for each
+  engine, over the first version, before the first command. If `setup`
+  changes or removes a file of the repository, the run stops, and the
+  message names the command and the changed files. If the run cannot remove
+  the files that `setup` added (for example, a read-only folder), the run
+  stops too. `setup` and each `entry` command have 30 minutes each. A
+  `setup` that runs out of time stops the run. An `entry` command that runs
+  out of time gives no version. A command that fails gives no version: it is
+  a failed attempt, not a failed run. AutoResearch then ends the run,
   because a round with no version ends it. Meta-Harness goes on to its next
   iteration. In these two engines, the command gets `ASCENT_TASK`,
   `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
   command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
   key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
-  A run that is not protected gets no model relay and no key. The engine
-  loop does not give the command `[proposer] services` or a reasoning
-  effort. So a single run of these engines on the engine loop, with `entry`
-  and one of these settings, fails the setup check. The message names the
-  setting. An Auto run keeps both settings for its other lanes.
+  Skynet redacts only values of 8 or more characters, so a short value
+  cannot change other output. A run that is not protected gets no model
+  relay and no key. The engine loop does not give the command `[proposer]
+  services` or a reasoning effort. So a single run of these engines on the
+  engine loop, with `entry` and one of these settings, fails the setup
+  check. The message names the setting. An Auto run keeps both settings for
+  its other lanes.
 - ShinkaEvolve cannot use the command, because it writes versions with its
   own editor. A single ShinkaEvolve run with `entry` fails the setup check,
   and the message names `[proposer] entry` and the engine. An engine loop

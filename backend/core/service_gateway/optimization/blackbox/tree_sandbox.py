@@ -338,8 +338,12 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
 
 
+# A shorter value could be a common word, and replacing it would change unrelated output.
+_MIN_REDACTED_LEN = 8
+
+
 def _redacted(result: CommandResult, env: Mapping[str, str] | None) -> CommandResult:
-    """Replace each env value in a command's output with ``[redacted]``.
+    """Replace each env value of 8 or more characters in a command's output with ``[redacted]``.
 
     The step log keeps the output, and failure messages and run events copy its end, so a command that prints its
     scoped model key must not put the key there.
@@ -351,7 +355,9 @@ def _redacted(result: CommandResult, env: Mapping[str, str] | None) -> CommandRe
     Returns:
         The result with clean output.
     """
-    secrets = sorted({value for value in (env or {}).values() if value}, key=len, reverse=True)
+    secrets = sorted(
+        {value for value in (env or {}).values() if len(value) >= _MIN_REDACTED_LEN}, key=len, reverse=True
+    )
     if not secrets:
         return result
     stdout, stderr = result.stdout, result.stderr
@@ -709,7 +715,7 @@ class TreeSandbox:
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
             timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
             env: Extra environment for the command only; ``None`` adds none. Each value is a secret, so the
-                result's output holds ``[redacted]`` in its place.
+                result's output holds ``[redacted]`` in place of each value of 8 or more characters.
 
         Returns:
             The command's result and the tree id after the command. A

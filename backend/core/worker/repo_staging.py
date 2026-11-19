@@ -605,7 +605,7 @@ _FILE_PROPOSER_REFUSALS = {
 def _on_engine_loop(strategy: Mapping[str, Any]) -> bool:
     """Tell whether a run is a single AutoResearch or Meta-Harness run that the engine loop runs.
 
-    It reads ``LOOP_ROUTES`` at each call, so a route that a port adds, or a test patches, takes effect.
+    It uses the routing rule of the job itself, so staging and the worker agree on where the run goes.
 
     Args:
         strategy: The stored run request's ``strategy``.
@@ -614,11 +614,7 @@ def _on_engine_loop(strategy: Mapping[str, Any]) -> bool:
         True when the engine loop runs the file's command for this run (SKY-816).
     """
     engine = strategy.get("engine")
-    return (
-        strategy.get("mode", "auto") == "single"
-        and engine in _ENGINE_LOOP_ENGINES
-        and (engine, "repo") in blackbox_service.LOOP_ROUTES
-    )
+    return engine in _ENGINE_LOOP_ENGINES and blackbox_service.loop_route(engine, strategy.get("mode", "auto"))
 
 
 def _refuse_engine_loop_settings(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:

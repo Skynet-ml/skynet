@@ -1441,3 +1441,13 @@ def test_a_release_that_raises_does_not_release_the_box_again() -> None:
     session.release(healthy=True)
 
     assert source.released == [True]
+
+
+def test_redaction_keeps_an_env_value_shorter_than_8_characters() -> None:
+    """A short value could be a common word, so only a value of 8 or more characters becomes ``[redacted]``."""
+    result = CommandResult(0, stdout="ok 1234567 abcdefgh", stderr="abcdefgh ok")
+
+    clean = tree_sandbox._redacted(result, {"SHORT": "1234567", "KEY": "abcdefgh", "EMPTY": ""})
+
+    assert clean.stdout == "ok 1234567 [redacted]"
+    assert clean.stderr == "[redacted] ok"
