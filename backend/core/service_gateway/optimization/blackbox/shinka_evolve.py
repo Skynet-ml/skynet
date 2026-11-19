@@ -407,6 +407,21 @@ class ShinkaEvolveEngine:
                     "ShinkaEvolve stopped early and keeps its best reported version: %s", document.get("error")
                 )
                 return requests.best_so_far(workdir)
+            # SKY-751: when every version fails, the child ends cleanly on the
+            # seed with no score. The run keeps the seed, as the sandbox path does.
+            if (
+                returncode == 0
+                and not document.get("error")
+                and document.get("best_score") is None
+                and requests.task.seed_candidate is not None
+                and document.get("best_candidate") == requests.task.seed_candidate
+            ):
+                return Result(
+                    best_candidate=requests.task.seed_candidate,
+                    best_score=None,
+                    total_evals=requests.evals,
+                    metadata=metadata,
+                )
             detail = str(document.get("error") or _stderr_tail(workdir) or "No result was produced.")
             raise ServiceError(f"ShinkaEvolve failed: {detail}")
         return Result(

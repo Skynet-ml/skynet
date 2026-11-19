@@ -1461,6 +1461,52 @@ def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
     assert mailbox.total_evals == 1
 
 
+def test_a_null_score_on_the_reply_stream_fails_the_program_with_its_run_failure(tmp_path: Path) -> None:
+    """Fail the program on a worker's null score, and still ask for its later cases (SKY-751).
+
+    Args:
+        tmp_path: Scratch folder for the queue and the program.
+    """
+
+    def reply(request: dict[str, Any]) -> dict[str, Any]:
+        """Send no score for case 1, with its run failure, and score the others.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The worker's reply fields.
+        """
+        if request["example"]["id"] == 1:
+            return {"score": None, "info": {"status": "run_failed", "feedback": "Run failed: boom"}}
+        return {"score": 1.0, "info": {}}
+
+    mailbox, sent = _connected_mailbox(reply)
+    send = mailbox.emit
+    # The scorer also writes progress lines, which the fake worker does not answer.
+    mailbox.emit = lambda prefix, payload: send(prefix, payload) if prefix == "APP_NATIVE_RPC " else None  # type: ignore[method-assign]
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=mailbox,
+        queue=tmp_path / "queue",
+        examples=[{"id": 0}, {"id": 1}, {"id": 2}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("text"))
+
+    answer = scorer.score_program(str(program))
+    scorer.stop()
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 3 case(s) have no score."
+    assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: boom"
+    assert [request["example"]["id"] for request in sent] == [0, 1, 2]
+    assert scorer.best is None
+
+
 @pytest.mark.parametrize(
     ("max_concurrency", "sent_cases"),
     [(1, [0, 1]), (3, [0, 1, 2])],
