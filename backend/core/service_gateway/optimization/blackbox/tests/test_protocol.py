@@ -570,6 +570,21 @@ def _deep_list(levels: int) -> list[Any]:
     return value
 
 
+def _deep_dict(levels: int) -> dict[str, Any]:
+    """Build an object nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested objects, the outer one included.
+
+    Returns:
+        ``{"a": {"a": ... {}}}``, ``levels`` objects deep.
+    """
+    value: dict[str, Any] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
 # 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack can raise. 5000
 # levels raises at any stack.
 @pytest.mark.parametrize(
@@ -579,10 +594,11 @@ def _deep_list(levels: int) -> list[Any]:
         '{"a": ' * 900 + "1" + "}" * 900,
         "[" * 900,
         _deep_list(900),
+        _deep_dict(900),
         "[" * 5000 + "]" * 5000,
         _deep_list(5000),
     ],
-    ids=["array-text", "object-text", "bad-text", "list-value", "text-past-limit", "value-past-limit"],
+    ids=["array-text", "object-text", "bad-text", "list-value", "dict-value", "text-past-limit", "value-past-limit"],
 )
 def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any) -> None:
     """Arguments past the fixed depth bound give ``TOO_DEEP_ARGUMENTS``, whatever the stack and the JSON shape.
@@ -616,6 +632,8 @@ def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
             {"id": "call_b", "type": "function", "function": {"name": "bash", "arguments": f"[{at_bound}]"}},
             {"id": "call_c", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound)}},
             {"id": "call_d", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound + 1)}},
+            {"id": "call_e", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound)}},
+            {"id": "call_f", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound + 1)}},
         ]
     }
 
@@ -623,6 +641,8 @@ def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
         at_bound,
         TOO_DEEP_ARGUMENTS,
         json.dumps(_deep_list(bound)),
+        TOO_DEEP_ARGUMENTS,
+        _deep_dict(bound),
         TOO_DEEP_ARGUMENTS,
     ]
 

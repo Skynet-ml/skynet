@@ -391,7 +391,7 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
     call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
     ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
-    keeps the value and the arguments stay a dict or text. Text or a value that nests more than
+    keeps the value and the arguments stay a dict or text. Text or a value, a dict included, that nests more than
     ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
     only that call. Deep text must not reach the transcript: a later call would read it again, raise
     :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
@@ -409,15 +409,15 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
         raw = function.get("arguments")
         if raw is None or raw == "":
             raw = "{}"
-        if isinstance(raw, dict):
-            # Some clients parse the arguments already.
-            arguments: dict[str, Any] | str = raw
-        elif (
+        if (
             text_nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
             if isinstance(raw, str)
             else nests_deeper(raw, MAX_ARGUMENTS_DEPTH)
         ):
-            arguments = TOO_DEEP_ARGUMENTS
+            arguments: dict[str, Any] | str = TOO_DEEP_ARGUMENTS
+        elif isinstance(raw, dict):
+            # Some clients parse the arguments already.
+            arguments = raw
         elif not isinstance(raw, str):
             arguments = json.dumps(raw, default=str)
         else:
