@@ -305,7 +305,10 @@ def test_any_two_credential_prefixes_on_one_host_are_refused(paths: tuple[str, s
         resolve_grants([Grant("mcp.example.com", credential=True, path=path) for path in paths], registry)
 
 
-@pytest.mark.parametrize("path", ["mcp", "/mcp?x=1", "/mcp#a", "/mcp/*", "/a b", "//mcp", "/mcp/../admin", "/./mcp", 7])
+@pytest.mark.parametrize(
+    "path",
+    ["mcp", "/mcp?x=1", "/mcp#a", "/mcp/*", "/a b", "//mcp", "/mcp/../admin", "/./mcp", "/a/%2e%2e/b", "/%2E/mcp", 7],
+)
 def test_an_invalid_grant_path_is_refused(path: object) -> None:
     """Refuse a path that is not a plain URL path, since an edge path match could not bound it."""
     with pytest.raises(GrantError, match="Grant path"):

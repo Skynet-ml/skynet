@@ -3371,7 +3371,7 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
         tmp_path: Pytest's temporary folder.
     """
     options = _agent_options(
-        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_hosts=["pypi.org", "gw.test"],
         proposer_mcp=[
             {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
             {"name": "unused", "url": "https://x.test", "has_headers": True},
@@ -3411,7 +3411,7 @@ def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) 
         return SimpleNamespace(timed_out=False, exit_code=0, stdout="ok", stderr=""), "after"
 
     options = _agent_options(
-        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_hosts=["pypi.org", "gw.test"],
         proposer_mcp=[{"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True}],
     )
     options.gateway = SimpleNamespace(url="https://gw.test/v1")
@@ -3457,11 +3457,46 @@ def test_two_mcp_servers_with_headers_on_one_host_are_refused(tmp_path: Path) ->
         ],
     )
 
-    with pytest.raises(ServiceError, match=r"\['team', 'web'\] have headers and share the host 'mcp.test'"):
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] share the host 'mcp.test', and \['team', 'web'\]"):
         shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web", "root"])
 
 
-def test_mcp_servers_with_headers_on_other_hosts_each_get_a_credential_grant(tmp_path: Path) -> None:
+@pytest.mark.parametrize("url", ["https://mcp.test/web", "https://mcp.test/team/mcp", "https://mcp.test/team/mcp/"])
+def test_an_mcp_server_with_headers_shares_its_host_with_no_other_server(tmp_path: Path, url: str) -> None:
+    """Refuse any other server on a host with headers: '/team/../web' would take the headers there (SKY-833).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        url: The address of a server with no headers on the same host.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "web", "url": url, "has_headers": False},
+        ],
+    )
+
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] share the host 'mcp.test', and \['team'\] send"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web"])
+
+
+def test_a_proposer_network_host_that_is_an_mcp_host_with_headers_is_refused(tmp_path: Path) -> None:
+    """Refuse a ``[proposer] network`` host that a server with headers owns, since the box would reach its paths.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=["pypi.org", "MCP.test"],
+        proposer_mcp=[{"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True}],
+    )
+
+    with pytest.raises(ServiceError, match=r"server 'team' sends headers, and \[proposer\] network also lists"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
+
+
+def test_mcp_servers_on_other_hosts_each_get_their_own_grant(tmp_path: Path) -> None:
     """Grant each server on its own host a credential for its path, so the edge adds its headers only there.
 
     Args:
@@ -3472,12 +3507,14 @@ def test_mcp_servers_with_headers_on_other_hosts_each_get_a_credential_grant(tmp
         proposer_mcp=[
             {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
             {"name": "root", "url": "https://root.test", "has_headers": True},
+            {"name": "public", "url": "https://open.test/mcp", "has_headers": False},
         ],
     )
 
-    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "root"])
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "root", "public"])
 
     assert session.grants == (
+        Grant("open.test"),
         Grant("mcp.test", credential=True, path="/team/mcp"),
         Grant("root.test", credential=True, path=""),
     )

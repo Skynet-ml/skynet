@@ -887,8 +887,8 @@ class _AgentSession:
             servers: The names of the ``[proposer] mcp`` servers on the run's relay route.
 
         Raises:
-            ServiceError: When the context has no boxes, the options name no address for a server, or two
-                servers with headers share a host.
+            ServiceError: When the context has no boxes, the options name no address for a server, or a
+                server with headers shares its host with another server or a ``[proposer] network`` host.
         """
         if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files, ctx.file_ids):
             raise ServiceError("The ShinkaEvolve agent editor needs the engine loop's boxes.")
@@ -910,19 +910,25 @@ class _AgentSession:
             for parts in (urlsplit(str(known[name]["url"])) for name in servers if known[name].get("has_headers"))
         }
         credential_hosts = {host for host, _ in credentials}
-        # The edge cannot keep a path such as '/a/../b' from reaching server B under prefix '/a', so one host
-        # takes one credential prefix; refuse here with the server names instead of at grant resolution.
-        if len(credentials) != len(credential_hosts):
-            shared = sorted(host for host in credential_hosts if sum(h == host for h, _ in credentials) > 1)
-            names = [
-                name
-                for name in sorted(servers)
-                if known[name].get("has_headers") and (urlsplit(str(known[name]["url"])).hostname or "") in shared
-            ]
-            raise ServiceError(
-                f"The [proposer] mcp servers {names} have headers and share the host '{', '.join(shared)}'; "
-                "give each server with headers its own host."
-            )
+        # The edge matches the raw path, so '/team/../web' takes the team headers to any server that resolves
+        # it, with or without headers. So a server with headers owns its host alone. Other paths of that host,
+        # such as '/team/../admin', can still get the headers; only the edge's path handling bounds that.
+        by_host: dict[str, list[str]] = {}
+        for name, url in self.servers.items():
+            by_host.setdefault(urlsplit(url).hostname or "", []).append(name)
+        listed = {str(host).lower() for host in repo.get("proposer_hosts") or ()}
+        for host in sorted(credential_hosts):
+            if len(by_host[host]) > 1:
+                headed = [name for name in by_host[host] if known[name].get("has_headers")]
+                raise ServiceError(
+                    f"The [proposer] mcp servers {by_host[host]} share the host '{host}', and {headed} send "
+                    "headers; give each server with headers a host of its own."
+                )
+            if host in listed:
+                raise ServiceError(
+                    f"The [proposer] mcp server '{by_host[host][0]}' sends headers, and [proposer] network also lists "
+                    f"its host '{host}'; remove the host from [proposer] network."
+                )
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
         plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}

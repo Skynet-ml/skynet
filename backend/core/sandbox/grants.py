@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import Field, dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, ClassVar, Protocol, TypeVar
+from urllib.parse import unquote
 
 from core.billing.operation_pricing import json_fingerprint
 from core.models.blackbox import REPO_SECRET_HOST_PATTERN
@@ -247,8 +248,9 @@ def _clean_path(path: object) -> str:
     """
     if not isinstance(path, str) or not _PATH_PATTERN.fullmatch(path or "/"):
         raise GrantError(f"Grant path {path!r} must be a URL path such as /mcp.")
-    # A dot segment names another path once the server resolves it, so it cannot bound a credential.
-    if any(segment in {".", ".."} for segment in path.split("/")):
+    # A dot segment names another path once the server resolves it, so it cannot bound a credential. A server
+    # may decode '%2e' before it resolves dot segments, so the decoded segment counts too.
+    if any(unquote(segment).lower() in {".", ".."} for segment in path.split("/")):
         raise GrantError(f"Grant path {path!r} must not hold a '.' or '..' segment.")
     return path.rstrip("/") or ROOT_PATH
 
