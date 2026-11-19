@@ -159,8 +159,9 @@ def resolve_grants(grants: Iterable[Grant], registry: HeaderRules) -> ResolvedGr
     for host, paths in wanted.items():
         if not paths:
             continue
-        # A box can send '/a/../b' or '/a/%2e%2e/b': the edge matches prefix '/a', and a server that
-        # normalizes the path gives A's headers to server B. So one host takes one prefix (SKY-833).
+        # A box can send '/a/../b' or '/a/%2e%2e/b'. The provider rules add headers only to clean paths under
+        # a prefix, but an edge that matched the raw prefix would give A's headers to server B. So one host
+        # takes one prefix (SKY-833).
         if len(paths) > 1:
             listed = ", ".join(f"'{path}'" for path in sorted(paths))
             raise GrantError(

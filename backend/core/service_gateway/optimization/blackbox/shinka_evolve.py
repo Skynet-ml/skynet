@@ -906,9 +906,9 @@ class _AgentSession:
             (hosts[name], urlsplit(self.servers[name]).path) for name in self.servers if known[name].get("has_headers")
         }
         credential_hosts = {host for host, _ in credentials}
-        # The edge matches the raw path, so '/team/../web' takes the team headers to any server that resolves
-        # it, with or without headers. So a server with headers owns its host alone. Other paths of that host,
-        # such as '/team/../admin', can still get the headers; only the edge's path handling bounds that.
+        # The edge matches the raw path. The Vercel rules add headers only to clean paths under the prefix, so
+        # '/team/../admin' goes out with no headers (SKY-728). A server with headers still owns its host alone,
+        # so no other provider's path handling can widen it to another server.
         by_host: dict[str, list[str]] = {}
         for name, host in hosts.items():
             by_host.setdefault(host, []).append(name)

@@ -383,6 +383,25 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
     return "skynet-" + json_fingerprint(parts)[:48]
 
 
+# One path segment below a credential prefix: at least one character that is not a dot, and no '%'. So a
+# '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never matches. Single
+# characters in classes only, because the edge's regex dialect is not known to support escapes or lookarounds.
+_CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+,;=:@-][A-Za-z0-9._~!$&'()+,;=:@-]*"
+
+
+def _path_regex(path: str) -> str:
+    """Build the edge regex that matches a path prefix and only the clean paths below it.
+
+    Args:
+        path: The normalized, non-root path prefix, such as ``/team``.
+
+    Returns:
+        An anchored regex that matches ``path``, ``path/`` and clean segments below it.
+    """
+    literal = "".join(char if char.isalnum() or char == "/" else f"[{char}]" for char in path.rstrip("/"))
+    return f"^{literal}(?:{_CLEAN_SEGMENT})*/?$"
+
+
 def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
     """Build the SDK rules that add headers to a host's requests under one path prefix.
 
@@ -391,16 +410,16 @@ def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
         headers: The headers to add.
 
     Returns:
-        One rule for the root, else one rule for the prefix itself and one for the paths below it.
+        One rule for the root, else one rule for the prefix and the clean paths below it.
     """
     transform = (NetworkPolicyTransform(headers=dict(headers)),)
     if path == "/":
         return (NetworkPolicyRule(transform=transform),)
     # A bare starts_with("/mcp") also matches "/mcp-admin", another server's path on the same host (SKY-833).
-    return tuple(
-        NetworkPolicyRule(transform=transform, match=NetworkPolicyRequestMatcher(path=matcher))
-        for matcher in (NetworkPolicyMatcher.exact(path), NetworkPolicyMatcher.starts_with(path + "/"))
-    )
+    # The edge matches the raw path, so starts_with("/team/") also gives the headers to '/team/../admin',
+    # which a server that normalizes the path serves as '/admin'. Such a request goes out with no headers.
+    match = NetworkPolicyRequestMatcher(path=NetworkPolicyMatcher.regex(_path_regex(path)))
+    return (NetworkPolicyRule(transform=transform, match=match),)
 
 
 def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:

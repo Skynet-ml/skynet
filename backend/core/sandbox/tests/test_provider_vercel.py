@@ -1824,6 +1824,7 @@ def _edge_headers(rules: Sequence[Any], path: str) -> list[dict[str, str]]:
             matcher is None
             or (matcher.kind == "exact" and path == matcher.value)
             or (matcher.kind == "starts_with" and path.startswith(matcher.value))
+            or (matcher.kind == "regex" and re.search(matcher.value, path) is not None)
         ):
             added += [dict(transform.headers) for transform in rule.transform]
     return added
@@ -1835,15 +1836,46 @@ async def test_granted_headers_reach_only_their_server_path(client: FakeClient, 
     env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
     await env.start()
     rules = client.create_kwargs[0]["network_policy"].allow["mcp.example.com"]
-    assert {(rule.match.path.kind, rule.match.path.value) for rule in rules} == {
-        ("exact", "/team"),
-        ("starts_with", "/team/"),
-    }
+    assert [rule.match.path.kind for rule in rules] == ["regex"]
     team = [{"Authorization": "Bearer fake-team"}]
-    assert _edge_headers(rules, "/team") == team
-    assert _edge_headers(rules, "/team/sse") == team
+    for path in ("/team", "/team/", "/team/sse", "/team/v1/.well-known", "/team/a.b/c"):
+        assert _edge_headers(rules, path) == team
     for other in ("/team-web/messages", "/teams", "/", "/admin"):
         assert _edge_headers(rules, other) == []
+    await env.stop()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/team/../admin",
+        "/team/./sse",
+        "/team/..",
+        "/team//admin",
+        "/team/%2e%2e/admin",
+        "/team/%2E%2E/admin",
+        "/team/.%2e/admin",
+        "/team/%2fadmin",
+        "/team/..%5cadmin",
+        "/team/x/../../admin",
+        "/team\\..\\admin",
+    ],
+)
+async def test_granted_headers_skip_a_path_that_leaves_the_prefix(
+    path: str, client: FakeClient, log: list[str]
+) -> None:
+    """Check that a dot, empty, percent-encoded or backslash segment gets no headers (SKY-728).
+
+    Args:
+        path: A raw request path that a normalizing server could serve outside ``/team``.
+        client: The fake Vercel client.
+        log: The provider log.
+    """
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+
+    assert _edge_headers(client.create_kwargs[0]["network_policy"].allow["mcp.example.com"], path) == []
     await env.stop()
 
 
