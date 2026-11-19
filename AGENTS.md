@@ -243,7 +243,7 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
   plug in through the same `SandboxEnvironment` interface. Each candidate
   runs in its own sandbox. The metric scores each candidate in a separate
   sandbox. A sandbox may fail at any time: the step log is the truth, and
-  files cross the boundary only as tree ids. Workers are the control plane: they host
+  it records files only as tree ids. Workers are the control plane: they host
   the user, workspace, run and agent actors, run the engine loops and model
   calls with no box alive, commit every step, reserve and settle budgets,
   broker scoped credentials through the workspace capability registry, and
