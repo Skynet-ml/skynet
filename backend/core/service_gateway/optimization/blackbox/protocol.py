@@ -719,6 +719,8 @@ class EngineContext:
     put_files: PutFiles | None = None
     read_file: ReadFile | None = None
     list_files: ListFiles | None = None
+    # The content id of each visible file of a tree, by path; equal ids mean equal bytes.
+    file_ids: Callable[[str], dict[str, str]] | None = None
     repo_seed: RepoSeed | None = None
     # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
     # keeps only its own job's records.

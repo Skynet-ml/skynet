@@ -28,7 +28,14 @@ unchanged. Skynet contributes only:
   kept inside it;
 * optionally, an agent editor: each new version is written by a Pi coding
   agent (file tools only) editing the parent's files in a scratch directory,
-  instead of upstream's single model call answering with a patch.
+  instead of upstream's single model call answering with a patch;
+* or, on the engine loop, a command editor: the worker runs the contract
+  file's ``[proposer] entry`` command on the parent's tree, and the tree it
+  leaves is the new version (SKY-815);
+* on the engine loop, the agent editor runs as a tool session in the worker,
+  where each model reply and command is one step, and novelty rejection embeds
+  programs with a fixed local embedder, so a resume compares the same vectors
+  (SKY-830).
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ import asyncio
 import base64
 import contextlib
 import difflib
+import hashlib
 import importlib.util
 import io
 import itertools
@@ -129,6 +137,8 @@ _KIND_EMBEDDING = "embedding"
 _AGENT_PROGRAM_FILE = "program.md"
 # Where the launch writes Pi's config inside a scratch directory; never part of a version.
 _AGENT_CONFIG_DIR = ".app"
+# Git in a scratch worktree runs no hook and no fsmonitor, so files a version writes cannot run code (SKY-815).
+_HOOKLESS_GIT = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 _AGENT_KEY_ENV = re.compile(r"[?&]api_key_env=([A-Za-z0-9_]+)$")
 _AGENT_NAME = re.compile(r"^\W*NAME\W*:[\s*_]*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
 _AGENT_DESCRIPTION = re.compile(r"^\W*DESCRIPTION\W*:[\s*_]*(.+)", re.MULTILINE | re.IGNORECASE | re.DOTALL)
@@ -282,8 +292,8 @@ class EvaluatorMailbox:
         """Send one request to the worker and wait for its reply.
 
         Args:
-            kind: ``evaluate`` or ``model``. Only the stdin transport carries it,
-                because the sandbox runtime answers evaluations only.
+            kind: ``evaluate``, ``model`` or ``propose``. Only the stdin transport carries
+                it, because the sandbox runtime answers evaluations only.
             fields: The request fields; the mailbox adds the id.
 
         Returns:
@@ -634,6 +644,22 @@ def job_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def run_seed(payload: Mapping[str, Any]) -> int:
+    """Read the run's seed as a value NumPy and upstream's model bandit accept.
+
+    The seed is an unbounded user value, and ``numpy.random.seed`` refuses one
+    below 0 or at 2**32 and above. Every seeded draw takes this one value, so a
+    replay of the run makes the same draws.
+
+    Args:
+        payload: Parent configuration carrying the optional ``seed``.
+
+    Returns:
+        The seed modulo 2**32.
+    """
+    return int(payload.get("seed") or 0) % 2**32
+
+
 def build_config(
     payload: Mapping[str, Any], results_dir: str, examples: int, *, repo: bool = False
 ) -> dict[str, dict[str, Any]]:
@@ -672,12 +698,18 @@ def build_config(
     )
     embedding = payload.get("shinka_embedding")
     novelty_env = payload.get("shinka_novelty_key_env")
-    novelty = bool(settings.get("novelty")) and bool(embedding) and bool(novelty_env)
+    # On the engine loop the child embeds with ``LocalEmbedder`` and the worker answers the judge's calls, so
+    # novelty needs no embedding route and no key (SKY-830).
+    novelty = bool(settings.get("novelty")) and (stepped or (bool(embedding) and bool(novelty_env)))
     embedding_model = (
-        local_model_name(str(embedding["model"]), str(embedding["url"]), str(embedding["key_env"])) if novelty else None
+        local_model_name(str(embedding["model"]), str(embedding["url"]), str(embedding["key_env"]))
+        if novelty and not stepped
+        else None
     )
     novelty_model = (
-        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), str(novelty_env)) if novelty else None
+        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), None if stepped else str(novelty_env))
+        if novelty
+        else None
     )
     task = payload.get("task") or {}
     objective = str(task.get("objective") or "").strip()
@@ -715,7 +747,7 @@ def build_config(
         # Gateway models carry no upstream catalog price, so the bandit must
         # not weigh cost it cannot see.
         "llm_dynamic_selection_kwargs": (
-            {"cost_aware_coef": 0.0, "seed": int(payload.get("seed") or 0)} if stepped else {"cost_aware_coef": 0.0}
+            {"cost_aware_coef": 0.0, "seed": run_seed(payload)} if stepped else {"cost_aware_coef": 0.0}
         ),
         "meta_rec_interval": int(settings.get("meta_rec_interval", 10)) if meta_model else None,
         "meta_llm_models": [meta_model] if meta_model else None,
@@ -1191,17 +1223,21 @@ def checked_target(checkout: Path, path: str) -> Path:
         The target file.
 
     Raises:
-        ValueError: When the path leaves the checkout, crosses a symlink, or names a non-file.
+        ValueError: When the path leaves the checkout, crosses a symlink, lies below a file, or names a non-file.
     """
     root = checkout.resolve()
     target = root / path
     if not target.resolve().is_relative_to(root):
         raise ValueError(f"'{path}' is outside the repository.")
     current = root
-    for part in Path(path).parts:
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
         current = current / part
         if current.is_symlink():
             raise ValueError(f"'{path}' crosses a symlink.")
+        # Creating the parent folders would raise an OSError whose message names the worker's scratch folder.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise ValueError(f"'{path}' is below a file.")
     if target.exists() and not target.is_file():
         raise ValueError(f"'{path}' is not a regular file.")
     return target
@@ -1360,6 +1396,43 @@ def install_repo_mode(bundle: Any, runner: Any) -> None:
     shinka_async_runner.get_code_embedding_async = embed_changes
 
 
+class LocalEmbedder:
+    """Embed a program with hashed character trigrams, for novelty rejection on the engine loop (SKY-830).
+
+    A provider embedding would be a model call with no step of its own, so a resume could get other vectors and
+    reject other programs. These vectors depend only on the text, and cost nothing.
+    """
+
+    dimensions = 512
+
+    def embed(self, text: str) -> list[float]:
+        """Embed one text.
+
+        Args:
+            text: The text.
+
+        Returns:
+            The unit-length vector, or a zero vector for a text shorter than three characters.
+        """
+        vector = [0.0] * self.dimensions
+        for start in range(len(text) - 2):
+            digest = hashlib.blake2b(text[start : start + 3].encode(), digest_size=4).digest()
+            vector[int.from_bytes(digest, "big") % self.dimensions] += 1.0
+        norm = math.sqrt(sum(value * value for value in vector))
+        return [value / norm for value in vector] if norm else vector
+
+    async def embed_async(self, text: str) -> tuple[list[float], float]:
+        """Embed one text, as upstream's async embeddings client does.
+
+        Args:
+            text: The text.
+
+        Returns:
+            Upstream's ``(embedding, cost)``, with no cost.
+        """
+        return self.embed(text), 0.0
+
+
 def agent_prompt(system: str, user: str, *, repo: bool) -> str:
     """Turn a mutation prompt into the task a coding agent gets.
 
@@ -1420,11 +1493,38 @@ def _git(cwd: Path, *arguments: str) -> str:
         RuntimeError: When git exits non-zero.
     """
     result = subprocess.run(
-        ["git", *repo_tree.SAFE_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-500:]}")
     return result.stdout
+
+
+def _ignored_paths(cwd: Path, paths: list[str]) -> set[str]:
+    """Return the paths that the checkout's ``.gitignore`` rules leave out, as ``git add --all`` does.
+
+    Args:
+        cwd: The checkout to read the ignore rules in.
+        paths: Paths relative to the checkout.
+
+    Returns:
+        The ignored paths. A tracked path is never ignored.
+
+    Raises:
+        RuntimeError: When git fails.
+    """
+    result = subprocess.run(
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, "check-ignore", "-z", "--stdin"],
+        cwd=cwd,
+        input="".join(f"{path}\0" for path in paths),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Exit code 1 means that no path is ignored.
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"git check-ignore failed: {(result.stderr or result.stdout).strip()[-500:]}")
+    return set(filter(None, result.stdout.split("\0")))
 
 
 class AgentEditor:
@@ -1616,6 +1716,25 @@ class AgentEditor:
                 return report
         finally:
             self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+
+    @staticmethod
+    def _save_version(
+        report: dict[str, Any], parent_code: str, code: str, patch: str, changed: int, patch_dir: Path
+    ) -> dict[str, Any]:
+        """Write a new version where upstream reads it, and add it to the session report.
+
+        Args:
+            report: The session report.
+            parent_code: The parent's program text or bundle.
+            code: The new version's program text or bundle.
+            patch: The unified diff from the parent.
+            changed: How many files the version changes.
+            patch_dir: Upstream's generation folder.
+
+        Returns:
+            The report with ``code``, ``patch``, ``patch_path`` and ``changed``.
+        """
         patch_dir.mkdir(parents=True, exist_ok=True)
         (patch_dir / f"original.{_LANGUAGE_EXT}").write_text(parent_code, encoding="utf-8")
         (patch_dir / f"main.{_LANGUAGE_EXT}").write_text(code, encoding="utf-8")
@@ -1697,7 +1816,7 @@ class AgentEditor:
                 continue
         files = bundle.normalize(files)
         if files == bundle.normalize(parent):
-            raise ValueError("The agent left every file as it was.")
+            raise ValueError("The proposer left every file as it was.")
         touched = sorted(set(parent) | set(files))
         patch = "".join(
             shinka_bundle.file_diff(path, bundle.current(parent, path), bundle.current(files, path)) for path in touched
@@ -1718,6 +1837,138 @@ class AgentEditor:
         if self.bundle is not None:
             with self._git_lock, contextlib.suppress(RuntimeError):
                 _git(self.bundle.checkout, "worktree", "prune")
+
+
+class CommandEditor(AgentEditor):
+    """Write a new version by running the contract file's ``[proposer] entry`` command (SKY-815).
+
+    The worker runs the command once in a proposer box over the parent's tree, with this editor's task in the
+    ``ASCENT_TASK`` file, and sends back the files of the tree the command leaves. That tree is the new version:
+    it goes through the same path rules and bundle limits as an agent session's workspace.
+    """
+
+    # The worker request that writes a version, and the writer's name in an error.
+    kind = "propose"
+    writer = "[proposer] entry command"
+
+    def __init__(
+        self,
+        mailbox: EvaluatorMailbox,
+        workdir: Path,
+        *,
+        ledger: UsageLedger,
+        bundle: Any,
+        part_names: Sequence[str] | None = None,
+    ) -> None:
+        """Bind the editor to the worker.
+
+        Args:
+            mailbox: Sends each proposal to the worker.
+            workdir: Run folder the scratch directories go under.
+            ledger: Usage ledger; the worker meters the writer's model use, so it is not in it.
+            bundle: ``shinka_bundle.RepoBundle`` of a repository run, or ``None`` for a text run.
+            part_names: The starting version's part names, or ``None`` for a text version.
+        """
+        super().__init__({}, workdir, ledger=ledger, deadline=math.inf, part_names=part_names, bundle=bundle)
+        self.mailbox = mailbox
+
+    def edit(self, parent_code: str, prompt: str, model_name: str, patch_dir: Path) -> dict[str, Any]:
+        """Have the worker run the command on the parent's files, and read back the version it leaves.
+
+        Args:
+            parent_code: The parent's bundle, or its program text on a text run.
+            prompt: The task, which the command reads from ``ASCENT_TASK``.
+            model_name: Upstream model name the bandit picked; the worker picks the model.
+            patch_dir: Upstream's generation folder; the new version is written there.
+
+        Returns:
+            The report of :meth:`AgentEditor.edit`, with no cost: the worker bills the writer's model use.
+
+        Raises:
+            EvaluationStopped: When the run stopped or the worker did not reply.
+        """
+        parent = (
+            shinka_bundle.decode_bundle(parent_code) if self.bundle is not None else {_AGENT_PROGRAM_FILE: parent_code}
+        )
+        reply = self.mailbox.ask(self.kind, {"files": parent, "task": prompt})
+        text = reply.get("text")
+        name, description = parse_agent_answer(text if isinstance(text, str) else None)
+        tool_calls = reply.get("tool_calls")
+        report: dict[str, Any] = {
+            "cost": 0.0,
+            "tool_calls": tool_calls if type(tool_calls) is int else 0,
+            "tool_cap_reached": reply.get("tool_cap_reached") is True,
+            "name": name,
+            "description": description,
+        }
+        files = reply.get("files")
+        if "error" in reply or not isinstance(files, dict):
+            report["error"] = str(reply.get("error") or "The worker sent no new version.")
+            return report
+        if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
+            report["error"] = "The worker sent a malformed version."
+            return report
+        # The proposer box is untrusted: check every path before anything is written.
+        for path in files:
+            if any(part.lower() == ".git" for part in path.split("/")):
+                # A case-insensitive file system reads ``.GIT`` as ``.git`` (SKY-810).
+                report["error"] = f"The {self.writer} may not write Git metadata: '{path}'."
+                return report
+        workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        if self.bundle is None:
+            # A text version is the one program file; the writer's other files are its own scratch work.
+            if not isinstance(files.get(_AGENT_PROGRAM_FILE), str):
+                report["error"] = f"The {self.writer} left no {_AGENT_PROGRAM_FILE}."
+                return report
+            workspace.mkdir()
+            try:
+                (workspace / _AGENT_PROGRAM_FILE).write_text(files[_AGENT_PROGRAM_FILE], encoding="utf-8")
+                code, patch, changed = self._collect(parent_code, workspace)
+            except ValueError as exc:
+                report["error"] = str(exc)
+                return report
+            finally:
+                self._discard(workspace)
+            return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+        with self._git_lock:
+            _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
+        try:
+            # git check-ignore fails on a path outside the checkout, and its message names the worker's scratch
+            # folder. Refuse such paths first, with a message that names only the path.
+            targets = {path: checked_target(workspace, path) for path in files}
+            # The version's own ``.gitignore`` files decide what ``git add --all`` keeps, so the files are written
+            # before the ignore check, and the check and ``_collect`` read the same rules.
+            for path, text in files.items():
+                targets[path].parent.mkdir(parents=True, exist_ok=True)
+                targets[path].write_text(text, encoding="utf-8")
+            # The command's tree holds its ignored output too, such as ``.pytest_cache``. An agent session's
+            # ``git add`` leaves those out, so the rules must not refuse the version for them.
+            ignored = _ignored_paths(workspace, list(files))
+            for path in files:
+                problem = None if path in ignored else self.bundle.rule_problem(path)
+                if problem is not None:
+                    report["error"] = self.bundle.refusal(path, problem)
+                    return report
+            code, patch, changed = self._collect(parent_code, workspace)
+        except ValueError as exc:
+            report["error"] = str(exc)
+            return report
+        finally:
+            self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+
+
+class LoopAgentEditor(CommandEditor):
+    """Write a new version with the agent editor's tool session in the worker, on the engine loop (SKY-830).
+
+    The worker runs the session over the parent's tree: each model reply is one ``model`` step and each
+    command one ``command`` step, so a resume replays it. It sends back the files of the tree the session
+    leaves, with the agent's last reply, and they go through the same checks as a command's version.
+    """
+
+    kind = "agent"
+    writer = "agent editor"
 
 
 def install_agent_editor(editor: AgentEditor, runner: Any) -> None:
@@ -2259,7 +2510,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if stepped:
         mailbox.own_stdout()
         mailbox.listen(sys.stdin)
-        seed_randomness(int(payload.get("seed") or 0))
+        seed_randomness(run_seed(payload))
     if repo:
         shipped_links = refuse_unsafe_tree(repo["chunks"])
         refuse_unsafe_patch(seed)
@@ -2302,10 +2553,16 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if stepped:
         install_sequential_gate(runner)
+        if config["evolution"]["novelty_llm_models"]:
+            # Upstream builds its embeddings client only for an embedding model, which the loop does not give.
+            runner.embedding_client = LocalEmbedder()
     if bundle is not None:
         install_repo_mode(bundle, runner)
     editor = None
-    if payload.get("shinka_editor"):
+    if stepped and dict(payload.get("shinka") or {}).get("editor") == "agent":
+        editor = LoopAgentEditor(mailbox, workdir, ledger=ledger, bundle=bundle, part_names=part_names)
+        install_agent_editor(editor, runner)
+    elif payload.get("shinka_editor"):
         editor = AgentEditor(
             payload["shinka_editor"],
             workdir,

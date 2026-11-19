@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "呢部 Mac 上面嘅 {cli} 代理完成唔到佢嘅回合：{detail}",
     "blackbox.host_agent_rate_limited": "你嘅 {cli} 訂閱已經用到使用上限。上限會喺 {reset_at} 重設。過咗呢個時間之後再開始執行。",
     "blackbox.repo_target_unavailable": "暫時未支援優化程式碼庫。",
+    "blackbox.shinka_interpreter_missing": "呢個 worker 唔可以運行 ShinkaEvolve，因為佢嘅映像冇包含 ShinkaEvolve 直譯器。揀過另一個引擎，或者請營運者部署一個包含 ShinkaEvolve 嘅 worker 映像。",
     "secrets.invalid_name": "「{name}」唔可以做密鑰名稱。請用英文字母、數字同底線，並以字母或底線開頭。",
     "secrets.invalid_value": "密鑰嘅值最多可以有 {limit} 個位元組。",
     "secrets.limit_reached": "你最多可以儲存 {limit} 個密鑰。刪除一個先可以加新嘅。",

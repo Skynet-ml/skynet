@@ -2250,10 +2250,12 @@ def test_no_context_call_can_pass_its_own_hidden_paths(
     assert ctx.read_file is not None
     assert ctx.list_files is not None
     assert ctx.run_command is not None
+    assert ctx.file_ids is not None
     for call, args in [
         (ctx.read_file, (tree, "eval/metric.py")),
         (ctx.list_files, (tree, "eval")),
         (ctx.run_command, (tree, "cat eval/metric.py", ())),
+        (ctx.file_ids, (tree,)),
     ]:
         with pytest.raises(TypeError):
             call(*args, hidden_hashes={})
@@ -2276,6 +2278,25 @@ def test_list_files_lists_a_folder_and_gives_none_for_a_path_that_is_not_a_folde
     assert ctx.list_files(tree, "README") is None
     assert ctx.list_files(tree, "README/x") is None
     assert ctx.list_files(tree, "missing") is None
+    assert _steps(engine) == []
+    assert boxes.opened == 0
+
+
+def test_file_ids_give_equal_ids_for_equal_bytes_and_leave_out_hidden_paths(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The content ids tell changed files apart with no read, no step and no box, and hide what the loop hides."""
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval/"]))
+    tree = _store(trees, {"eval/metric.py": b"m", "src/a.py": b"a", "src/lib/b.py": b"b", ".optimize/exploits/x": b"x"})
+    ctx = loop.context()
+    assert ctx.file_ids is not None
+    after = loop.put_files({"src/a.py": b"changed"}, tree)
+
+    before_ids, after_ids = ctx.file_ids(tree), ctx.file_ids(after)
+
+    assert sorted(before_ids) == sorted(after_ids) == ["src/a.py", "src/lib/b.py"]
+    assert before_ids["src/lib/b.py"] == after_ids["src/lib/b.py"]
+    assert before_ids["src/a.py"] != after_ids["src/a.py"]
     assert _steps(engine) == []
     assert boxes.opened == 0
 
@@ -2449,15 +2470,22 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(hidden))
     tree = _store(trees, {secret: b"secret", "README": b"r"}, links)
 
-    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
-        loop.read_file(tree, secret)
-    assert "data" not in str(stopped.value)
-    assert "eval" not in str(stopped.value)
+    # A box step needs the run's active generation, so ``run`` goes first, on the first loop.
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         loop.run(tree, f"cat {secret}")
     assert boxes.opened == 0
+    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks each other path.
+    reader, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
+    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
+        reader.read_file(tree, secret)
+    assert "data" not in str(stopped.value)
+    assert "eval" not in str(stopped.value)
+    lister, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=3, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
-        loop.list_files(tree)
+        lister.list_files(tree)
+    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=4, hidden=hidden_hashes(hidden))
+    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
+        fresh.file_ids(tree)
 
 
 def test_links_inside_a_hidden_folder_that_no_box_gets_do_not_stop_the_loop(

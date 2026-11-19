@@ -138,6 +138,14 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
+- ShinkaEvolve refuses `entry` today. The command may reach a model only on
+  your own model key, never on Skynet's key, and its box has no such model
+  route until a metered relay lands. Its command support also runs only on
+  the worker's engine loop, which runs no run yet. In that support, `setup`
+  runs once, in its own box. Only the files that it writes into the
+  repository carry over to each command box: the box is disposable, and the
+  tree is the truth. If `setup` changes or removes a file of the repository,
+  the run stops, and the message names the files.
 - The command runs only in a repository checkout. AutoSaddler also starts
   reflect sessions in a plain folder, which edit no repository. The default
   proposer agent answers those sessions, without `setup`, and the box

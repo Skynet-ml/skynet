@@ -542,6 +542,12 @@ def stage_repository(
         "outcome": record["outcome"],
         "file_proposer": environment.proposer_entry is not None,
         "proposer_setup": list(environment.proposer_setup or ()),
+        # Names, addresses and a has-headers flag only: an engine that calls the servers from a box grants their
+        # hosts, and the provider edge adds the headers, so their secrets stay out of the run's options (SKY-830).
+        "proposer_mcp": [
+            {"name": server.name, "url": server.url, "has_headers": bool(server.headers)}
+            for server in (environment.constraints.proposer.mcp_servers if environment.constraints is not None else ())
+        ],
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -590,15 +596,17 @@ def stage_repository(
 
 # The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
 _FILE_PROPOSER_REFUSALS = {
-    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
+    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve cannot use the [proposer] entry command yet.",
 }
 
 
 def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
     """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
 
-    ShinkaEvolve writes versions with its own editor and never runs the file's
-    command (SKY-753). AutoResearch and Meta-Harness run it (SKY-816).
+    AutoResearch and Meta-Harness run it in the engine loop (SKY-816). The
+    ShinkaEvolve engine refuses the command on every route. The check refuses it
+    here, before a paid box starts, and not at the engine's start (SKY-815).
+    SKY-828 lifts this refusal: it wires the command after the SKY-728 cutover.
 
     Args:
         environment: The run's rules, with the file's proposer command.

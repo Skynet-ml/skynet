@@ -316,6 +316,7 @@
     "blackbox.host_agent_failed": "הסוכן {cli} במחשב הזה לא הצליח לסיים את התור שלו: {detail}",
     "blackbox.host_agent_rate_limited": "המנוי שלך ל-{cli} הגיע למגבלת השימוש. המגבלה מתאפסת ב-{reset_at}. אפשר להפעיל את הריצה שוב אחרי מועד זה.",
     "blackbox.repo_target_unavailable": "עדיין אי אפשר לבצע אופטימיזציה למאגר קוד.",
+    "blackbox.shinka_interpreter_missing": "ה-worker הזה לא יכול להריץ את ShinkaEvolve, כי האימג' שלו לא כולל את המפרש של ShinkaEvolve. בחרו מנוע אחר, או בקשו מהמפעיל לפרוס אימג' של worker שכולל את ShinkaEvolve.",
     "notifier.body.stuck": "לא נמצא שיפור לאורך {percent}% מתקציב ההערכות של האופטימיזציה.",
     "notifier.label.best": "{term.score} מוביל",
     "notifier.label.spent": "הוצאה",

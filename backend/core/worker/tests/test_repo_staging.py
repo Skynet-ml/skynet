@@ -549,7 +549,7 @@ def test_a_single_shinka_evolve_run_with_a_files_proposer_fails_the_setup_check(
     payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}}
 
     with pytest.raises(
-        ConstraintsError, match=re.escape("ShinkaEvolve never runs the [proposer] entry command.")
+        ConstraintsError, match=re.escape("ShinkaEvolve cannot use the [proposer] entry command yet.")
     ) as caught:
         _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     assert (caught.value.section, caught.value.key) == ("proposer", "entry")
@@ -1066,6 +1066,27 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
 
     assert [server.name for server in staged.mcp_roles["run"].mcp_servers] == ["search"]
     assert staged.mcp_roles["metric"].mcp_servers == ()
+    staged.cleanup()
+
+
+def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830)."""
+    files = {
+        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
+        "agent.mcp.json": (
+            '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
+            ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}'
+        ),
+    }
+
+    result, staged = _stage_with(files, monkeypatch)
+
+    servers = result[repo_staging.REPO_SNAPSHOT_KEY]["proposer_mcp"]
+    assert sorted(servers, key=lambda server: server["name"]) == [
+        {"name": "team", "url": "https://team.example.com/mcp", "has_headers": True},
+        {"name": "web", "url": "https://web.example.com/mcp", "has_headers": False},
+    ]
+    assert "header-value-123" not in json.dumps(result)
     staged.cleanup()
 
 
