@@ -1479,6 +1479,22 @@ _CHAT_HARNESSES = [
 ]
 
 
+def _run_kernel_build(command: list[str], env: Mapping[str, str]) -> None:
+    """Run one step of the shared kernel build, and fail the test with the step's output when it fails.
+
+    Args:
+        command: The build step.
+        env: The step's environment.
+    """
+    try:
+        subprocess.run(command, env=env, check=True, capture_output=True, text=True, timeout=900)
+    except subprocess.CalledProcessError as error:
+        pytest.fail(
+            f"The Prime Agent kernel build step {command[:2]} failed with exit code {error.returncode}.\n"
+            f"stderr:\n{error.stderr}\nstdout:\n{error.stdout}"
+        )
+
+
 @pytest.fixture(scope="session")
 def prime_kernel_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     """Build one warm Prime Agent kernel for the whole test run, and name it in the environment.
@@ -1510,7 +1526,7 @@ def prime_kernel_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]
     home.mkdir(parents=True, exist_ok=True)
     warm_env = {**os.environ, **env, "HOME": str(home), "PRIME_AGENT_INSTALL_UV": "1"}
     # Prime Agent locks the venv while it builds it, so parallel workers build it once.
-    subprocess.run([_NODE, str(bootstrap)], env=warm_env, check=True, capture_output=True, timeout=900)
+    _run_kernel_build([_NODE, str(bootstrap)], warm_env)
     warm = (
         "from jupyter_client.manager import start_new_kernel\n"
         "manager, client = start_new_kernel(startup_timeout=600)\n"
@@ -1518,7 +1534,7 @@ def prime_kernel_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]
         "manager.shutdown_kernel(now=True)\n"
     )
     python = shared / "kernel-venv" / "bin" / "python"
-    subprocess.run([str(python), "-c", warm], env=warm_env, check=True, capture_output=True, timeout=900)
+    _run_kernel_build([str(python), "-c", warm], warm_env)
     return env
 
 
@@ -3029,7 +3045,25 @@ def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(
         finally:
             runs.append((command, timeout, time.monotonic() - begun))
 
+    real_common_dir = harness_bridge._common_dir
+    waiter_found_git_dir = threading.Event()
+
+    def spied_common_dir(path: Path) -> Path:
+        """Find the git dir, and tell the test when the waiter has it.
+
+        Args:
+            path: The checkout.
+
+        Returns:
+            The real git common dir.
+        """
+        common = real_common_dir(path)
+        if threading.current_thread().name == "setup-waiter":
+            waiter_found_git_dir.set()
+        return common
+
     monkeypatch.setattr(harness_bridge, "run_setup", timed_run_setup)
+    monkeypatch.setattr(harness_bridge, "_common_dir", spied_common_dir)
     holder = threading.Thread(
         target=lambda: _run_and_keep_error(lambda: harness_bridge.ensure_setup(holder_command, checkout), []),
         daemon=True,
@@ -3045,10 +3079,13 @@ def test_a_waiter_runs_a_failed_setup_again_only_in_the_time_its_limit_has_left(
         waiter = threading.Thread(
             target=_run_and_keep_error,
             args=(lambda: harness_bridge.ensure_setup(waiter_command, checkout, timeout_seconds=limit), errors),
+            name="setup-waiter",
             daemon=True,
         )
         waiter.start()
-        # The waiter waits for the lock at least this long, whatever the load.
+        # ``ensure_setup`` starts the waiter's limit only after its git dir lookup, which is slow under load.
+        # Counting from that lookup, the waiter waits for the lock at least this long.
+        assert waiter_found_git_dir.wait(timeout=20), "the waiter did not find the git dir"
         time.sleep(held)
     finally:
         release.touch()
