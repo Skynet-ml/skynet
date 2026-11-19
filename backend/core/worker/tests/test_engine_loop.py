@@ -1855,9 +1855,9 @@ def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
 
 @pytest.mark.parametrize(
     "arguments",
-    # json.loads accepts the escape of a lone surrogate, but UTF-8 cannot hold it; a set is no JSON value at all.
-    [json.loads('{"text": "\\ud800"}'), {"items": {1, 2}}],
-    ids=["lone-surrogate", "set"],
+    # A set is no JSON value at all. A lone surrogate is no case here: SKY-821 escapes it, so the step commits.
+    [{"items": {1, 2}}],
+    ids=["set"],
 )
 def test_a_reply_that_is_not_utf8_json_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
     owner: tuple[User, int],
