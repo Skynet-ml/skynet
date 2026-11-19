@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import pickle
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -1325,6 +1326,50 @@ def test_the_cancel_close_skips_a_row_that_a_resume_made_pending_at_the_same_gen
 
     budget = _budget(store)
     assert (budget.state, budget.blocked_reason, budget.reserved_cents) == ("attached", None, 5)
+
+
+def test_the_cancel_close_waits_for_a_resume_that_holds_the_job_row(
+    store: StepJobStore, request: pytest.FixtureRequest
+) -> None:
+    """A resume that holds the job row makes the cancel close wait, then skip the new generation (SKY-800).
+
+    Args:
+        store: The job store.
+        request: Pytest request with the database kind.
+    """
+    if "postgres" not in request.node.callspec.id:
+        pytest.skip("SQLite has no row locks; only PostgreSQL shows the close waiting on the job row")
+    _funded_run(store)
+    _claim(store, "pod-a")
+    _set_job(store, status="cancelled", execution_budget_generation=0)
+    budget_id = store.get_job(RUN)["execution_budget_id"]
+    service = BudgetService(engine=store.engine)
+    results: list[bool] = []
+    with Session(store.engine) as holder:
+        holder.execute(select(JobModel.optimization_id).where(JobModel.optimization_id == RUN).with_for_update())
+        thread = threading.Thread(
+            target=lambda: results.append(
+                service.close_for_cancelled_job(budget_id, "owner", job_id=RUN, expected_generation=0)
+            )
+        )
+        thread.start()
+        thread.join(2)
+        waited = thread.is_alive()
+        # The resume's transaction, in requeue_for_resume's order: job row, then the budget fence.
+        service.fence_generation(budget_id, "owner", expected_generation=0, session=holder)
+        holder.execute(
+            update(JobModel)
+            .where(JobModel.optimization_id == RUN)
+            .values(status="pending", execution_budget_generation=1)
+        )
+        holder.commit()
+    thread.join(30)
+
+    assert waited
+    assert not thread.is_alive()
+    assert results == [False]
+    budget = _budget(store)
+    assert (budget.generation, budget.state, budget.blocked_reason) == (1, "attached", None)
 
 
 def test_a_cancel_that_loses_the_race_to_the_wake_cancels_the_woken_run(
