@@ -487,12 +487,12 @@ def test_blackbox_engine_catalog_resolves_availability_for_a_repository(monkeypa
     monkeypatch.setattr(_bb_service, "agent_target_unavailable_reason", lambda _settings: None)
     monkeypatch.setattr(_bb_service, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
-    text = client.get("/blackbox/engines")
+    catalog = client.get("/blackbox/engines")
 
-    assert text.status_code == 200
-    assert text.json()["target_kind"] == "repo"
-    assert text.json()["sandbox_available"] is True
-    by_id = {engine["id"]: engine for engine in text.json()["engines"]}
+    assert catalog.status_code == 200
+    assert catalog.json()["target_kind"] == "repo"
+    assert catalog.json()["sandbox_available"] is True
+    by_id = {engine["id"]: engine for engine in catalog.json()["engines"]}
     assert list(by_id) == ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
     assert by_id["gepa"]["available"] is True
     assert by_id["gepa"]["checkpoint_recovery_supported"] is True
@@ -502,14 +502,14 @@ def test_blackbox_engine_catalog_resolves_availability_for_a_repository(monkeypa
     assert by_id["autoresearch"]["checkpoint_recovery_supported"] is False
     assert "does not expose" in by_id["autoresearch"]["checkpoint_recovery_reason"]
     assert by_id["meta_harness"]["available"] is True
-    assert text.json()["auto_engines"] == ["gepa", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
-    assert text.json()["auto_available"] is True
-    assert text.json()["auto_unavailable_reason"] is None
-    assert text.json()["auto_checkpoint_recovery_supported"] is False
-    assert "multi-engine" in text.json()["auto_checkpoint_recovery_reason"]
-    assert "compatible saved checkpoint" in text.json()["run_recovery_eligibility"]
-    assert text.json()["upstream_revision"] == "0632cdb5dcc052e690eab439e1b4a7e3e9cfe407"
-    runtimes = {runtime["id"]: runtime for runtime in text.json()["proposer_runtimes"]}
+    assert catalog.json()["auto_engines"] == ["gepa", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
+    assert catalog.json()["auto_available"] is True
+    assert catalog.json()["auto_unavailable_reason"] is None
+    assert catalog.json()["auto_checkpoint_recovery_supported"] is False
+    assert "multi-engine" in catalog.json()["auto_checkpoint_recovery_reason"]
+    assert "compatible saved checkpoint" in catalog.json()["run_recovery_eligibility"]
+    assert catalog.json()["upstream_revision"] == "0632cdb5dcc052e690eab439e1b4a7e3e9cfe407"
+    runtimes = {runtime["id"]: runtime for runtime in catalog.json()["proposer_runtimes"]}
     assert list(runtimes) == ["vercel"]
     assert runtimes["vercel"]["checkpoint_restore_supported"] is True
     assert runtimes["vercel"]["checkpoint_restore_reason"] is None

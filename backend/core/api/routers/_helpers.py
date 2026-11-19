@@ -752,9 +752,6 @@ def _resume_candidate_id(job_data: dict) -> str | None:
     Returns:
         The optimization id when the row is a resume candidate, else ``None``.
     """
-    # Rows load without the payload: is_resumable and resumable_id_flags read their targets in one batch.
-    if has_retired_target(job_data):
-        return None
     status = status_to_job_status(job_data.get("status", "pending"))
     budget_stop = is_budget_stop(status, job_data)
     resumable_status = status in {OptimizationStatus.failed, OptimizationStatus.cancelled, OptimizationStatus.paused}
