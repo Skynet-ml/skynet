@@ -449,7 +449,8 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
 
     A host CLI, ``[proposer] mcp`` servers and a reasoning effort would be silently dropped. A command is run only
-    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816).
+    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816). That command does not reach
+    ``[proposer] services``.
 
     Args:
         options: The run's native options.
@@ -472,8 +473,12 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     # Repository staging sets the custom harness for the file's command.
     if proposer.harness != (BLACKBOX_HARNESS_CUSTOM if file_proposer else BLACKBOX_HARNESS_CODEX):
         refused.append("harness")
-    if ((options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}).get("servers"):
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    if mcp_route.get("servers"):
         refused.append("mcp")
+    # FileProposer gives the command no relay token and no service list, so the services would not answer.
+    if file_proposer and mcp_route.get("services"):
+        refused.append("services")
     if options.reasoning_effort:
         refused.append("reasoning_effort")
     if refused:

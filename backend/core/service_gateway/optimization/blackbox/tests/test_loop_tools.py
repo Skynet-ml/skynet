@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BlackboxProposer
 from core.sandbox.grants import Grant
@@ -638,3 +639,28 @@ def test_the_proposer_refusal_says_which_proposer_the_engine_runs(
 
     assert f"AutoResearch {says}, so it cannot apply these settings: install_command." in str(error.value)
     assert never not in str(error.value)
+
+
+@pytest.mark.parametrize(("file_proposer", "refused"), [(True, True), (False, False)])
+def test_proposer_services_are_refused_only_when_the_file_command_runs(file_proposer: bool, refused: bool) -> None:
+    """The file's command gets no relay token and no service list, so ``[proposer] services`` with it fails the run.
+
+    Args:
+        file_proposer: Whether the file's command runs.
+        refused: Whether the services fail the run.
+    """
+    options = SimpleNamespace(
+        proposer=BlackboxProposer(
+            harness=BLACKBOX_HARNESS_CUSTOM if file_proposer else "codex",
+            run_command="my-agent" if file_proposer else None,
+        ),
+        budget_route={MCP_RELAY_ROUTE_KEY: {"token": "t", "servers": [], "services": ["judge"]}},
+        reasoning_effort=None,
+    )
+
+    if not refused:
+        loop_tools.refuse_unsupported_proposer(options, "AutoResearch", file_proposer=file_proposer)  # type: ignore[arg-type]
+        return
+    with pytest.raises(ServiceError) as error:
+        loop_tools.refuse_unsupported_proposer(options, "AutoResearch", file_proposer=file_proposer)  # type: ignore[arg-type]
+    assert "cannot apply these settings: services." in str(error.value)

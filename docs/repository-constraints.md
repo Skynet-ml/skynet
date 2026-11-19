@@ -700,6 +700,9 @@ mcp = "eval/.mcp.json"
   for each service, with a loopback url and no secret. Skynet checks each
   call against the proposer's own list, fills the secrets in the parent,
   and returns redirects without following them.
+  The `[proposer] entry` command of AutoResearch and Meta-Harness does not
+  get this relay yet. A run with `entry` and `[proposer] services` fails
+  with an error that names `services`.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's

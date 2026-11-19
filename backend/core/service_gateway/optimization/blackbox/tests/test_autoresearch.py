@@ -1645,6 +1645,10 @@ def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
     assert loop.read_file(result.best_candidate, "a.py") == b"ax"
 
 
+# Long enough that no other text of the run holds it by chance.
+_ROUTE_KEY = "scoped-route-key-of-this-test"
+
+
 def _protected_options(entry: str, setup: list[str]) -> SimpleNamespace:
     """Build the native options of a protected run whose route key is ``_ROUTE_KEY``.
 
@@ -1659,10 +1663,6 @@ def _protected_options(entry: str, setup: list[str]) -> SimpleNamespace:
     options.budget_route = {"url": "https://gw.example/v1", "token": _ROUTE_KEY}
     options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key=_ROUTE_KEY)
     return options
-
-
-# Long enough that no other text of the run holds it by chance.
-_ROUTE_KEY = "scoped-route-key-of-this-test"
 
 
 def test_an_entry_that_prints_the_route_key_leaves_it_out_of_the_step_log_and_the_run_events(
