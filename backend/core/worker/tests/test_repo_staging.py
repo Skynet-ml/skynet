@@ -635,6 +635,94 @@ def test_a_tool_loop_proposer_runs_its_tool_budget_and_services(
     assert caught.value.key == "harness"
 
 
+_TOOL_LOOP_RUNS = [
+    ({"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH}, "AutoResearch"),
+    ({"mode": "single", "engine": BLACKBOX_ENGINE_META_HARNESS}, "Meta-Harness"),
+    ({"mode": "auto"}, "Auto"),
+]
+
+
+@pytest.mark.parametrize(("strategy", "label"), _TOOL_LOOP_RUNS)
+@pytest.mark.parametrize(
+    ("files", "extra", "setting"),
+    [(_PROPOSER_MCP, {}, "mcp"), ({"optimize.toml": _RUN_ONLY}, {"reasoning_effort": "high"}, "reasoning_effort")],
+)
+def test_a_tool_loop_proposer_refuses_mcp_and_a_reasoning_effort_at_staging(
+    strategy: dict[str, str],
+    label: str,
+    files: dict[str, str],
+    extra: dict[str, str],
+    setting: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse [proposer] mcp and a reasoning effort for AutoResearch, Meta-Harness and Auto (SKY-728).
+
+    Args:
+        strategy: A run strategy whose proposer is the tool loop.
+        label: The engine name that the message gives.
+        files: The fetched tree.
+        extra: The reflection model's extra settings.
+        setting: The name that the refusal must give.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {
+        **_payload("c" * 40),
+        "strategy": strategy,
+        "reflection_model_config": {"name": "vendor/m", "extra": extra},
+    }
+
+    with pytest.raises(ConstraintsError, match=f"^{label} runs only its built-in proposer") as caught:
+        _stage_with(files, monkeypatch, payload=payload)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", setting)
+
+
+@pytest.mark.parametrize(
+    ("setting", "default", "choice", "runs_it", "drops_it"),
+    [
+        ("max_candidates_per_iter", 3, 5, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTORESEARCH),
+        ("ralph", True, False, BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS),
+        ("max_no_eval_seconds", 1_800, 600, BLACKBOX_ENGINE_AUTORESEARCH, "gepa"),
+    ],
+)
+def test_an_engine_refuses_a_loop_setting_that_only_another_engine_reads(
+    setting: str, default: Any, choice: Any, runs_it: str, drops_it: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a non-default loop setting that the engine drops, and keep the wizard's default (SKY-728).
+
+    Args:
+        setting: The proposer setting.
+        default: The value that the submit wizard sends.
+        choice: Another value.
+        runs_it: A single engine that reads the setting.
+        drops_it: A single engine that does not read it.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": _RUN_ONLY}
+
+    def payload(engine: str | None, value: Any) -> dict[str, Any]:
+        """Build a run request with the setting.
+
+        Args:
+            engine: The single engine, or ``None`` for Auto.
+            value: The setting's value.
+
+        Returns:
+            The payload.
+        """
+        strategy = {"mode": "auto"} if engine is None else {"mode": "single", "engine": engine}
+        return {**_payload("c" * 40), "strategy": strategy, "proposer": {setting: value}}
+
+    for engine, value in ((drops_it, default), (runs_it, choice), (None, choice)):
+        _, staged = _stage_with(files, monkeypatch, payload=payload(engine, value))
+        staged.cleanup()
+
+    with pytest.raises(ConstraintsError, match=f"^{ENGINES[drops_it].label} runs only its built-in proposer") as caught:
+        _stage_with(files, monkeypatch, payload=payload(drops_it, choice))
+
+    assert (caught.value.section, caught.value.key) == ("proposer", setting)
+
+
 def test_the_files_proposer_clears_an_empty_install_command(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty install command keeps the file's proposer, and staging clears it to ``None`` (SKY-753).
 

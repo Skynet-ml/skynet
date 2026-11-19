@@ -670,6 +670,10 @@ catch the failure in the program, as above, and let the metric score it.
   - GEPA, Best-of-N and AutoSaddler make model calls only. They also refuse
     a `max_tool_calls` other than the default, `[proposer] mcp` and
     `[proposer] services`. They apply the reasoning effort.
+  - Only AutoResearch applies `ralph` and `max_no_eval_seconds`, and only
+    Meta-Harness applies `max_candidates_per_iter`. Auto applies all three.
+    Every other engine refuses a value other than the default (`ralph =
+    true`, `max_no_eval_seconds = 1800`, `max_candidates_per_iter = 3`).
   - ShinkaEvolve refuses the same settings as GEPA. With the `agent`
     editor, it applies `max_tool_calls`, `[proposer] mcp` and the reasoning
     effort, and it refuses `[proposer] services`.

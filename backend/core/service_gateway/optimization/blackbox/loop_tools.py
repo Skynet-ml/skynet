@@ -460,12 +460,19 @@ def _run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]
 # engine loop. AutoResearch and Meta-Harness run tool loops, which count tool calls and reach the services.
 # Every engine's model calls go through the loop's model client, which applies the reasoning effort (SKY-829);
 # the two tool-loop engines keep their older refusal of it. The ShinkaEvolve agent editor is a tool loop that
-# loads the [proposer] mcp servers but not the services. An Auto run has AutoResearch and Meta-Harness lanes,
-# which refuse at start what their rule refuses, so Auto takes their rule.
+# loads the [proposer] mcp servers but not the services. Only AutoResearch reads ralph and max_no_eval_seconds,
+# and only Meta-Harness reads max_candidates_per_iter. An Auto run has both lanes, and each lane refuses at start
+# what the shared tool-loop rule refuses, so Auto takes both sets.
 TOOL_LOOP_SETTINGS = frozenset({"max_tool_calls", "services"})
+_AUTORESEARCH_SETTINGS = TOOL_LOOP_SETTINGS | {"ralph", "max_no_eval_seconds"}
+_META_HARNESS_SETTINGS = TOOL_LOOP_SETTINGS | {"max_candidates_per_iter"}
+_AUTO_SETTINGS = _AUTORESEARCH_SETTINGS | _META_HARNESS_SETTINGS
 _MODEL_ONLY_SETTINGS = frozenset({"reasoning_effort"})
 _SHINKA_AGENT_SETTINGS = frozenset({"max_tool_calls", "mcp", "reasoning_effort"})
 _DEFAULT_MAX_TOOL_CALLS = BlackboxProposer().max_tool_calls
+# The submit wizard sends these values in every run (frontend/src/features/submit/lib/wizard-v2.ts), and a run
+# request can leave a value unset, so only another value is a choice that an engine would drop.
+_DEFAULT_LOOP_KNOBS = {"max_candidates_per_iter": (None, 3), "ralph": (True,), "max_no_eval_seconds": (None, 1_800)}
 
 
 def proposer_support(engine: str | None, shinka_editor: str | None = None) -> frozenset[str]:
@@ -476,10 +483,15 @@ def proposer_support(engine: str | None, shinka_editor: str | None = None) -> fr
         shinka_editor: The ShinkaEvolve editor setting; only ``agent`` loads the [proposer] mcp servers.
 
     Returns:
-        A subset of ``max_tool_calls``, ``services``, ``mcp`` and ``reasoning_effort``.
+        A subset of ``max_tool_calls``, ``services``, ``mcp``, ``reasoning_effort``, ``ralph``,
+        ``max_no_eval_seconds`` and ``max_candidates_per_iter``.
     """
-    if engine in (None, BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS):
-        return TOOL_LOOP_SETTINGS
+    if engine is None:
+        return _AUTO_SETTINGS
+    if engine == BLACKBOX_ENGINE_AUTORESEARCH:
+        return _AUTORESEARCH_SETTINGS
+    if engine == BLACKBOX_ENGINE_META_HARNESS:
+        return _META_HARNESS_SETTINGS
     if engine == BLACKBOX_ENGINE_SHINKA_EVOLVE and shinka_editor == "agent":
         return _SHINKA_AGENT_SETTINGS
     return _MODEL_ONLY_SETTINGS
@@ -525,6 +537,11 @@ def unsupported_proposer_settings(
     # Only a value other than the default is a choice, and the wizard sends the default.
     if "max_tool_calls" not in supports and proposer.max_tool_calls != _DEFAULT_MAX_TOOL_CALLS:
         refused.append("max_tool_calls")
+    refused.extend(
+        name
+        for name, defaults in _DEFAULT_LOOP_KNOBS.items()
+        if name not in supports and getattr(proposer, name) not in defaults
+    )
     if mcp_servers and "mcp" not in supports:
         refused.append("mcp")
     # FileProposer gives the command no relay token and no service list, so the services would not answer.
@@ -551,7 +568,8 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
     refused = unsupported_proposer_settings(
         options.proposer,
-        supports=TOOL_LOOP_SETTINGS,
+        # An Auto run gives each lane the whole proposer, so a lane allows the other lane's settings too.
+        supports=_AUTO_SETTINGS,
         file_proposer=file_proposer,
         mcp_servers=bool(mcp_route.get("servers")),
         services=bool(mcp_route.get("services")),
