@@ -1411,6 +1411,58 @@ def test_the_job_budget_pays_for_the_run_when_the_workspace_points_at_another_bu
     assert budgets.get(other.id, "alice").run_spent_cents == 0
 
 
+def test_a_command_with_a_long_limit_gets_a_box_that_outlives_it(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 30-minute file proposer command gets a box for its limit and the pack, and another command keeps 900 s."""
+    lifetimes: list[float] = []
+    real_open = LocalSubprocessRuntime.open
+
+    def record_open(self: LocalSubprocessRuntime, spec: SandboxSpec) -> Any:
+        """Record the box's lifetime, then open it.
+
+        Args:
+            self: The runtime.
+            spec: The box spec.
+
+        Returns:
+            The open box.
+        """
+        lifetimes.append(spec.lifetime_seconds)
+        return real_open(self, spec)
+
+    def strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
+        """Run one command with a 30-minute limit and one with the default limit.
+
+        Args:
+            strategy: The job's strategy.
+            task: The task.
+            server: The run's eval server.
+            ctx: The loop's context.
+            *_: The progress sink.
+            **__: The capabilities.
+
+        Returns:
+            The seed as the best version, and no lanes.
+        """
+        assert ctx.run_command is not None
+        assert ctx.repo_seed is not None
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800)
+        ctx.run_command(ctx.repo_seed.tree_id, "true")
+        return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
+
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "run_strategy", strategy)
+    monkeypatch.setattr(LocalSubprocessRuntime, "open", record_open)
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert lifetimes[:2] == [1800 + 300, loop_host.STEP_BOX_SECONDS]
+    assert loop_host.STEP_BOX_SECONDS == 900
+    assert loop_host.command_box_seconds(1800) <= 2700
+
+
 def test_the_host_checks_that_the_run_replayed_every_step(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

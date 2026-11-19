@@ -266,6 +266,32 @@ def test_the_seed_change_error_compares_at_most_the_capped_number_of_files(monke
     assert sorted(set(reads)) == ["f0", "f1", "f2"]
 
 
+def test_the_seed_change_error_names_at_most_the_capped_number_of_added_files() -> None:
+    """A setup that adds many files names only the first ones, and no file is read to compare."""
+    reads: list[str] = []
+    ctx = SimpleNamespace(
+        list_files=lambda tree, path="", executable=False: (
+            [] if executable or tree == "seed" else [f"f{i:02}" for i in range(25)]
+        ),
+        read_file=lambda tree, path, limit=None: reads.append(path) or b"",
+    )
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == [f"f{i:02}" for i in range(20)]  # type: ignore[arg-type]
+    assert reads == []
+
+
+def test_the_seed_change_error_stops_reading_at_the_capped_number_of_changed_files() -> None:
+    """When many common files differ, the compare stops at the name cap, so it reads two files for each name."""
+    reads: list[str] = []
+    ctx = SimpleNamespace(
+        list_files=lambda tree, path="", executable=False: [] if executable else [f"f{i:02}" for i in range(25)],
+        read_file=lambda tree, path, limit=None: reads.append(path) or tree.encode(),
+    )
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == [f"f{i:02}" for i in range(20)]  # type: ignore[arg-type]
+    assert len(reads) == 40
+
+
 def test_a_setup_name_with_a_new_line_is_one_path_of_the_listing() -> None:
     """The setup box lists NUL-separated names, so a name with a new line is removed whole, not as two paths."""
     commands = _Commands()

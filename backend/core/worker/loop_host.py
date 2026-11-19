@@ -81,6 +81,8 @@ CHUNK_CENTS = 100
 MODEL_MAX_CENTS = 100
 # The longest that one command or metric box lives.
 STEP_BOX_SECONDS = 900
+# The time in a command's box for the tree's unpack before the command and its pack after it.
+_PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
@@ -538,7 +540,7 @@ def host_loop_job(
                 run,
                 engine=engine,
                 trees=trees,
-                candidates=RuntimeBoxSource(runtime, spec),
+                candidates=RuntimeBoxSource(runtime, spec, command_lifetime=command_box_seconds),
                 metrics=RuntimeBoxSource(runtime, spec),
                 model=model,
                 model_max_cents=MODEL_MAX_CENTS,
@@ -555,6 +557,19 @@ def host_loop_job(
         _close(step_log.close, "step log")
         if own_dir:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def command_box_seconds(timeout_seconds: float) -> float:
+    """Return the lifetime of the box of a command with its own limit, such as a file proposer command (SKY-816).
+
+    Args:
+        timeout_seconds: The command's limit.
+
+    Returns:
+        At least ``STEP_BOX_SECONDS``, and room for the command and the tree's unpack and pack, but never more
+        than the configured sandbox lifetime.
+    """
+    return min(settings.vercel_sandbox_max_lifetime_seconds, max(STEP_BOX_SECONDS, timeout_seconds + _PACK_SECONDS))
 
 
 def _close(close: Callable[[], None] | None, label: str) -> None:

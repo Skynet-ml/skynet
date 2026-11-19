@@ -1387,6 +1387,49 @@ def test_a_files_proposer_setup_name_with_a_new_line_stays_out_of_every_version(
         assert loop.list_files(version, ".") == ["a.py"]
 
 
+def test_a_files_proposer_setup_folder_inside_a_seed_folder_stays_out_of_every_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A new folder below a seed folder is a setup output, so the setup does not count as a seed change.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=2.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_store(trees, {"a.py": b"a", "src/a.py": b"s"})),
+        native_options=_command_options("printf x >> a.py", setup=["sh", "-c", "mkdir src/cache && touch src/cache/c"]),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert len(versions) == 2
+    for version in versions:
+        assert loop.list_files(version, "src") == ["src/a.py"]
+
+
 def test_a_files_proposer_notebook_line_reaches_the_next_round(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

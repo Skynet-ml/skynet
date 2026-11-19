@@ -70,7 +70,7 @@ import shlex
 import tarfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, TypeVar
 
@@ -185,7 +185,12 @@ class RuntimeBoxSource:
     """Open a fresh box for each acquire and close it at release."""
 
     def __init__(
-        self, runtime: SandboxRuntime, spec: SandboxSpec, registry: Mapping[str, Mapping[str, str]] | None = None
+        self,
+        runtime: SandboxRuntime,
+        spec: SandboxSpec,
+        registry: Mapping[str, Mapping[str, str]] | None = None,
+        *,
+        command_lifetime: Callable[[float], float] | None = None,
     ) -> None:
         """Bind the source to a runtime and the spec of its boxes.
 
@@ -194,15 +199,32 @@ class RuntimeBoxSource:
             spec: The box spec; the grants replace its network fields.
             registry: Maps each capability host to the headers that the edge
                 injects for it; ``None`` holds no credential.
+            command_lifetime: Gives the box lifetime for a command with its own
+                limit, in seconds; ``None`` keeps the spec's lifetime.
         """
         self._runtime = runtime
         self._spec = spec
         self._registry = registry or {}
+        self._command_lifetime = command_lifetime
 
     @property
     def registry(self) -> Mapping[str, Mapping[str, str]]:
         """Return the capability registry that this source resolves grants against."""
         return self._registry
+
+    def for_command(self, timeout_seconds: float) -> RuntimeBoxSource:
+        """Return a source whose boxes live long enough for a command with its own limit.
+
+        Args:
+            timeout_seconds: The command's limit.
+
+        Returns:
+            A source with the lifetime that ``command_lifetime`` gives; this source when it has none.
+        """
+        if self._command_lifetime is None:
+            return self
+        spec = replace(self._spec, lifetime_seconds=self._command_lifetime(timeout_seconds))
+        return RuntimeBoxSource(self._runtime, spec, self._registry)
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
         """Open a new box whose network is the grant list.
@@ -709,7 +731,10 @@ class TreeSandbox:
             after = _processes(box)
             return (result, new_tree_id), before is not None and after is not None and after <= before
 
-        result, new_tree_id = self._in_box(self._candidates, step, grants, work)
+        source = self._candidates
+        if timeout_seconds is not None and isinstance(source, RuntimeBoxSource):
+            source = source.for_command(timeout_seconds)
+        result, new_tree_id = self._in_box(source, step, grants, work)
         if refuse is not None and refuse(new_tree_id):
             # The message names no path, so it does not show which path is refused.
             raise TreeRejectedError(step.step_id, "The command wrote a path that it may not write.")
