@@ -169,6 +169,7 @@
     "notifier.title.failed": "Optimization failed",
     "notifier.title.new": "New optimization",
     "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
+    "optimization.cancel_conflict": "The optimization changed its state during the cancel. It is now in '{status}'. Try to cancel it again.",
     "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",
     "optimization.deletion_storage_unavailable": "The optimization was not deleted: its stored run data could not be removed right now. Try again in a few minutes.",
     "optimization.cannot_resubmit_payload": "Cannot resubmit the saved payload: {error}",

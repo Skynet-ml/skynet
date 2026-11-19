@@ -251,6 +251,7 @@
     "notifier.title.failed": "Сбой оптимизации",
     "notifier.title.new": "Новая оптимизация",
     "optimization.already_terminal": "Оптимизация уже находится в конечном состоянии '{status}'.",
+    "optimization.cancel_conflict": "Оптимизация изменила состояние во время отмены. Сейчас она в состоянии '{status}'. Попробуйте отменить её снова.",
     "optimization.cannot_delete": "Невозможно удалить оптимизацию в состоянии '{status}'. Сначала отмените её.",
     "optimization.deletion_storage_unavailable": "Оптимизация не удалена: сейчас не удалось удалить её сохранённые данные запусков. Повторите попытку через несколько минут.",
     "optimization.cannot_resubmit_payload": "Невозможно повторно отправить сохранённые данные: {error}",

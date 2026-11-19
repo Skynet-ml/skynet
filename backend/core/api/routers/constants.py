@@ -19,7 +19,8 @@ TERMINAL_STATUSES = {
     OptimizationStatus.stopped,
     # Paused is "terminal" in the lifecycle sense — no worker holds it and it has a
     # completed_at — but it is resumable (see ``is_resumable``). Grouping it here
-    # keeps est-remaining, the cancel guard, and frontend active/terminal logic correct.
+    # keeps est-remaining and frontend active/terminal logic correct. The cancel
+    # routes still accept a paused run (SKY-800).
     OptimizationStatus.paused,
 }
 
