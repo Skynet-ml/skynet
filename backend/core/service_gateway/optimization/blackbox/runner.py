@@ -559,7 +559,7 @@ def missing_stage(name: Any = None, input: Any = None) -> Any:
 
 @dataclass
 class Image:
-    """An image a scorer hands to ``llm()`` or puts in side info for the optimizer to look at.
+    """An image a scorer hands to ``llm()``.
 
     Mirrors ``gepa.image.Image`` so a scorer written against the optimizer's
     wrapper works unchanged inside the box.
