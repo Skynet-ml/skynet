@@ -383,6 +383,13 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
                     "is what gets evaluated.\n\n"
                     f"Do not edit `{_REPO_LAB}/task.md`, and change only the paths that it allows.",
                 ),
+                (
+                    "**Combining candidates is valid.** Take the structure from candidate A and the strategy from "
+                    "candidate B,",
+                    "**You see only the leader's code.** The session gets the leader's files and no other "
+                    "candidate's code. Reuse an idea from another candidate only through its hypothesis in "
+                    "`evolution_summary.jsonl` and its feedback in `results/<candidate>/val.json`,",
+                ),
                 ('      "file": "agents/<name>.txt",\n', ""),
                 (
                     "- Each candidate is a plain text file under `agents/`; its whole content is submitted to the "
@@ -751,6 +758,7 @@ class MetaHarnessEngine:
                 expose the metric source, or the candidate is not one text; or when a repository has a file at the
                 workspace path.
             BudgetExhaustedError: When no scorer call is left.
+            RuntimeError: When the budget cannot score the seed on every case.
         """
         missing = None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file)
         if missing or (ctx.repo_seed is not None and ctx.list_files is None):
@@ -775,6 +783,13 @@ class MetaHarnessEngine:
             payload["seed_candidate"] = seed_tree
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
+        # Both modes sweep the seed on every case before any session, and a seed with no score fails the run.
+        # Not BudgetExhaustedError: an Auto lane has its own small allowance, and that error fails the whole Auto run.
+        sweep = max(1, len(task.cases))
+        if server.remaining < sweep:
+            raise RuntimeError(
+                f"Meta-Harness needs {sweep} evaluation units to score the seed, but only {server.remaining} are left."
+            )
         engine_config: dict[str, Any] = {"model": options.model if options else ""}
         if ctx.max_iterations is not None:
             engine_config["max_iterations"] = ctx.max_iterations

@@ -1084,6 +1084,7 @@ class AutoResearchEngine:
                 expose the metric source, or the candidate is not one text; or when a repository has a file at the
                 lab path.
             BudgetExhaustedError: When no scorer call is left.
+            RuntimeError: When a repository run cannot score its seed.
         """
         if None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files):
             # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
@@ -1107,6 +1108,14 @@ class AutoResearchEngine:
             payload["seed_candidate"] = seed_tree
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
+        # A repository session has no ``evaluate`` tool, so a seed that the budget cannot sweep leaves no score.
+        # Not BudgetExhaustedError: an Auto lane has its own small allowance, and that error fails the whole Auto run.
+        sweep = max(1, len(task.cases))
+        if seed_tree is not None and server.remaining < sweep:
+            raise RuntimeError(
+                f"A repository run needs {sweep} evaluation units to score the seed, "
+                f"but only {server.remaining} are left."
+            )
         proposer = options.proposer if options is not None else BlackboxProposer()
         engine_config: dict[str, Any] = {
             "model": options.model if options else "",

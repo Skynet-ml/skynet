@@ -7,6 +7,7 @@ a scripted fake model and a pure Python scorer: no network and no paid call.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import logging
 import math
@@ -29,7 +30,7 @@ from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED, PROGRESS_MI
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxProposer
 from core.sandbox.trees import BoxFailureError, TreeRejectedError
-from core.service_gateway.optimization.blackbox import loop_tools, native_engines
+from core.service_gateway.optimization.blackbox import auto, loop_tools, native_engines
 from core.service_gateway.optimization.blackbox import meta_harness as meta_mod
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.loop_tools import OUTPUT_BYTES
@@ -44,6 +45,8 @@ from core.service_gateway.optimization.blackbox.protocol import (
     Result,
     Task,
 )
+from core.service_gateway.optimization.blackbox.registry import EngineCapabilities
+from core.service_gateway.optimization.blackbox.upstream import upstream_server, upstream_task
 from core.storage.object_store import LocalObjectStore
 from core.storage.step_log_store import StepLogStore
 from core.storage.tree_store import TreeStore
@@ -799,6 +802,100 @@ def test_a_repository_session_that_changes_nothing_gives_no_candidate(
     assert (result.best_candidate, result.best_score, result.total_evals) == (seed, 1.0 * len(seed), 2)
 
 
+@pytest.mark.parametrize("repository", [True, False])
+def test_a_budget_that_cannot_score_the_seed_fails_the_run_before_any_session(
+    repository: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """One evaluation is left for two cases, so the seed gets no sweep: the run ends with no model call (SKY-825).
+
+    Args:
+        repository: Run on a repository seed, else on a text seed.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    fields = {"repo_seed": RepoSeed(tree_id=_tree(trees, "a.py", "a"))} if repository else {}
+
+    with pytest.raises(RuntimeError, match="needs 2 evaluation units to score the seed") as raised:
+        _run(loop, max_evals=1, **fields)
+    # A BudgetExhaustedError would end a whole Auto run, not only this engine's lane.
+    assert type(raised.value) is RuntimeError
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("repository", [True, False])
+def test_a_budget_that_scores_only_the_seed_ends_the_run_on_the_seed(
+    repository: bool,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """Two evaluations are left for two cases, so the seed gets its sweep and no session starts (SKY-825).
+
+    Args:
+        repository: Run on a repository seed, else on a text seed.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a") if repository else "seed"
+    fields = {"repo_seed": RepoSeed(tree_id=seed)} if repository else {}
+
+    result = _run(loop, max_evals=2, **fields)
+
+    assert (result.best_candidate, result.total_evals) == (seed, 2)
+    assert model.calls == []
+
+
+def test_an_auto_lane_that_cannot_score_the_seed_loses_and_the_run_continues(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lane with one evaluation for two cases loses at -inf and does not end the Auto run (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's patch fixture.
+    """
+    model = _Proposer()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    ctx = loop.context(max_iterations=2)
+    task = Task("seed", cases=list(_CASES))
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: MetaHarnessEngine())
+    lanes: list[auto.LaneOutcome] = []
+    lane = auto._LaneEngine("meta_harness", "explore", ctx, EngineCapabilities(), lanes, None, itertools.count())
+
+    result = lane.run(upstream_task(task, "lane"), upstream_server(task, loop.server(_score, max_evals=1), ctx))
+
+    assert (result.best_candidate, result.best_score, result.total_evals) == ("seed", -math.inf, 0)
+    assert lanes[0].status == "failed"
+    assert "needs 2 evaluation units to score the seed" in str(lanes[0].error)
+    assert model.calls == []
+
+
 def test_a_repository_with_a_file_at_the_workspace_path_is_refused(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
@@ -835,6 +932,12 @@ def test_the_repository_skill_and_prompt_point_into_the_workspace_folder(tmp_pat
     assert worker.candidates_per_iter == 1
     assert "agents/<name>.txt" not in skill
     assert "scratch file under `.meta-harness/scratch/`" in skill
+    # The session gets only the leader's tree, so it cannot take code from candidate A and candidate B.
+    assert "Combining candidates is valid" not in skill
+    assert (
+        "Reuse an idea from another candidate only through its hypothesis in `evolution_summary.jsonl` and its "
+        "feedback in `results/<candidate>/val.json`"
+    ) in skill
     assert "`.meta-harness/logs/run/pending_eval.json`" in prompt
     assert "`.meta-harness/.claude/skills/meta-harness/SKILL.md`" in prompt
 

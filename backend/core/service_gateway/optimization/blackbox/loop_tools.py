@@ -480,13 +480,16 @@ def repo_seed_tree(ctx: EngineContext, lab: str, engine: str) -> str:
         The seed tree id.
 
     Raises:
-        ServiceError: When the seed tree holds an entry of any type at the lab path.
+        ServiceError: When the seed tree holds an entry of any type at the lab path, or the check timed out.
     """
     assert ctx.repo_seed is not None
     assert ctx.run_command is not None
     seed = ctx.repo_seed.tree_id
     # ``test -e`` follows a link, so a link to a missing target needs ``test -L``.
     result, _ = ctx.run_command(seed, f"test ! -e {lab} && test ! -L {lab}", ())
+    # A timed-out check says nothing about the repository, so it must not blame the repository's files.
+    if result.timed_out:
+        raise ServiceError(f"{engine} could not check the repository for a `{lab}/` path: the check timed out.")
     if result.exit_code != 0:
         raise ServiceError(f"{engine} keeps its lab in `{lab}/`, so the repository must not have that path.")
     return seed
