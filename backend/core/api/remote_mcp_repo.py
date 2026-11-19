@@ -386,7 +386,8 @@ def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[st
         note = "The metric box runs the [metric] entry command, so it does not use the metric code."
         return [], [note] if metric_code.strip() else []
     if metric_code.strip():
-        return scorer_issues(metric_code, bool(spec.get("data")), function=entry.rsplit(":", 1)[1] if entry else None)
+        function = entry.rsplit(":", 1)[1] if entry else None
+        return scorer_issues(metric_code, bool(spec.get("data")), function=function, entry_known=entry is not None)
     if entry is not None:
         return [
             f"The [metric] entry {entry} names a Python function, so the scorer needs metric code."
@@ -398,7 +399,9 @@ def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[st
     ]
 
 
-def scorer_issues(metric_code: str, has_cases: bool, *, function: str | None = None) -> tuple[list[str], list[str]]:
+def scorer_issues(
+    metric_code: str, has_cases: bool, *, function: str | None = None, entry_known: bool = True
+) -> tuple[list[str], list[str]]:
     """Check scorer code statically: it parses and defines the scorer function.
 
     The code never runs here. The run's setup check runs it in the sandbox.
@@ -408,6 +411,9 @@ def scorer_issues(metric_code: str, has_cases: bool, *, function: str | None = N
         has_cases: Whether the draft has data, so the scorer can get a case.
         function: The function that ``[metric] entry`` names. ``None`` and
             ``score``, the default entry's function, keep the default lookup.
+        entry_known: ``False`` when the draft has no ``optimize.toml`` of its
+            own. The repository's file can then name another function, so a
+            missing default function is a note, not an issue.
 
     Returns:
         The issues and the notes.
@@ -431,6 +437,11 @@ def scorer_issues(metric_code: str, has_cases: bool, *, function: str | None = N
         # Like the runner, a named entry function has no fallback to the single function.
         return [f"The scorer must define {function}(...), the function that [metric] entry names."], []
     scorer = named or (functions[0] if len(functions) == 1 else None)
+    if scorer is None and not entry_known:
+        return [], [
+            "The scorer defines no score(...) or metric(...). The run's setup checks the function that the"
+            f" repository's {CONSTRAINTS_FILE} [metric] entry names."
+        ]
     if scorer is None:
         return [
             "The scorer must define score(repo_path), score(repo_path, case) or score(repo_path, case, output=None)."

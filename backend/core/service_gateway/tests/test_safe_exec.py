@@ -120,6 +120,16 @@ class TestValidateScorerCode:
         with pytest.raises(ServiceError, match="defines no function 'grade'"):
             validate_scorer_code(_VALID_SCORER, entrypoint="grade")
 
+    def test_an_unknown_entry_leaves_a_missing_default_function_to_the_setup_check(self) -> None:
+        """When the repository's own entry is unknown, only a missing default function passes (SKY-738)."""
+        code = "def helper(x):\n    return x\n\ndef grade(candidate, case=None):\n    return 1.0\n"
+
+        assert validate_scorer_code(code, entry_known=False) is None
+        with pytest.raises(ServiceError, match="must define a function named 'score"):
+            validate_scorer_code(code)
+        with pytest.raises(ServiceError, match="syntax error"):
+            validate_scorer_code("def !!!", entry_known=False)
+
     def test_missing_function_is_rejected(self) -> None:
         """Code without a scorer function raises ``ServiceError``."""
         with pytest.raises(ServiceError, match="must define a function named 'score"):

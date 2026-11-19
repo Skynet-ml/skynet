@@ -444,7 +444,9 @@ def validate_blackbox_payload(
         # A command entry does not run the metric code, so the run's setup checks the command (SKY-738).
         if not isinstance(entry, tuple):
             function = entry.rsplit(":", 1)[1] if entry else None
-            validate_scorer_code(str(payload.scorer.metric_code), entrypoint=function)
+            # Without a draft optimize.toml, the repository's own file can name another function.
+            entry_known = entry is not None or payload.target.repo is None
+            validate_scorer_code(str(payload.scorer.metric_code), entrypoint=function, entry_known=entry_known)
 
 
 def _draft_metric_entry(payload: BlackboxRunRequest) -> str | tuple[str, ...] | None:

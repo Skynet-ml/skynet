@@ -230,6 +230,10 @@ class ScorerError(Exception):
     """A mistake in the scorer or its use of the helpers, reported to the user verbatim."""
 
 
+class MissingScorerError(ScorerError):
+    """The scorer code loads but defines none of the functions the default entry looks for."""
+
+
 class GatewayControl(BaseException):
     """Carry a protected admission or reconciliation signal past scorer exception handlers."""
 
@@ -1014,7 +1018,8 @@ def load_scorer_from_code(
 
     Raises:
         ScorerError: When the code fails to compile or load, or defines no
-            unambiguous scorer function.
+            unambiguous scorer function. ``MissingScorerError`` marks the
+            default lookup that finds no function.
     """
     namespace: dict[str, Any] = dict(helpers or {})
     sys.modules[HELPER_MODULE_NAME] = helper_module(namespace)
@@ -1041,7 +1046,7 @@ def load_scorer_from_code(
     ]
     if len(defined) == 1:
         return defined[0]
-    raise ScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
+    raise MissingScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
 
 
 def _takes_positional(fn: Callable[..., Any], count: int) -> bool:

@@ -1626,6 +1626,17 @@ def test_the_draft_scorer_check_reads_the_function_the_metric_entry_names(code: 
         assert issue in found
 
 
+def test_without_a_draft_contract_a_missing_score_function_is_a_note() -> None:
+    """The repository's own optimize.toml can name another function, so the run's setup checks it (SKY-738)."""
+    code = f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}"
+
+    issues, notes = remote_mcp_repo.draft_scorer_issues(code, {})
+
+    assert issues == []
+    assert "[metric] entry names" in notes[0]
+    assert remote_mcp_repo.draft_scorer_issues("def grade(:\n", {})[0]
+
+
 def test_an_empty_scorer_without_a_draft_contract_leaves_the_entry_to_staging() -> None:
     """Without the draft's own optimize.toml, the run's staging checks the repository's entry (SKY-738)."""
     issues, notes = remote_mcp_repo.draft_scorer_issues("", {})
