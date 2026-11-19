@@ -3442,6 +3442,22 @@ def test_a_minimize_run_shows_raw_scores_in_engine_payloads() -> None:
     assert service_mod._raw_engine_scores(payload, maximize) is payload
 
 
+def test_only_engine_score_keys_outside_scorer_owned_keys_turn_raw() -> None:
+    """Pin the keys a minimize run negates: engine score keys at any depth, never under a scorer-owned key."""
+    server = EvalServer(lambda c, e: (1.0, {}), max_evals=1, direction="minimize")
+    engine_keys = sorted(service_mod._ENGINE_SCORE_KEYS)
+    owned = {key: {"score": 0.7, "best_score": 0.7} for key in service_mod._SCORER_OWNED_KEYS}
+    payload = {"nested": {key: -0.5 for key in engine_keys}, "other": -0.5, **owned}
+
+    raw = service_mod._raw_engine_scores(payload, server)
+
+    assert raw["nested"] == {key: 0.5 for key in engine_keys}
+    assert raw["other"] == -0.5
+    for key in service_mod._SCORER_OWNED_KEYS:
+        assert raw[key] == {"score": 0.7, "best_score": 0.7}
+    assert {"scores", "infos", "side_info", "scorer_feedback", "named_scores"} <= service_mod._SCORER_OWNED_KEYS
+
+
 def test_the_side_info_trim_keeps_the_lowest_version_of_a_minimize_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """Over the byte cap, the trim drops side info from the worst versions first: the highest in a minimize run."""
     server = EvalServer(

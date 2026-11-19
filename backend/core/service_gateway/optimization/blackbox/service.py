@@ -867,7 +867,8 @@ VERSION_SIDE_INFO_BYTE_CAP = 3_000_000
 
 # SKY-750: engine events and engine metadata carry engine-scale scores under
 # these keys; a minimize run must show the metric's own scores. Side info
-# (``scores``, ``infos``) holds the scorer's own numbers, so it is left alone.
+# (``scores``, ``infos``) and named scores hold the scorer's own numbers, so
+# they are left alone.
 _ENGINE_SCORE_KEYS = frozenset(
     {
         "score",
@@ -880,7 +881,7 @@ _ENGINE_SCORE_KEYS = frozenset(
         "development_score",
     }
 )
-_SCORER_OWNED_KEYS = frozenset({"scores", "infos", "side_info", "scorer_feedback"})
+_SCORER_OWNED_KEYS = frozenset({"scores", "infos", "side_info", "scorer_feedback", "named_scores"})
 
 
 def _raw_engine_scores(value: Any, server: EvalServer) -> Any:

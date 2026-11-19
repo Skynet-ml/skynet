@@ -162,6 +162,21 @@ def test_named_scores_become_pareto_columns_without_cases() -> None:
     assert native_engines.pareto_front(table, {"a": 0.5, "b": 0.75}) == ["b", "a"]
 
 
+def test_a_missing_column_never_beats_a_negative_engine_score() -> None:
+    """A minimize run gives negative engine scores; a missing column must not count as 0.0 and win (SKY-750)."""
+    table = {"a": {"e1": -0.5, "e2": -0.5}, "b": {"e1": -0.4}}
+
+    assert native_engines.pareto_front(table, {"a": -0.5, "b": -0.4}) == ["b", "a"]
+
+
+def test_the_task_brief_says_scores_are_on_the_engine_scale() -> None:
+    """The agent learns that higher is always better and that a score may be negative (SKY-750)."""
+    task = Task(name="t", seed_candidate="seed", objective="be better")
+
+    for example_ids in ([], ["e1"]):
+        assert "higher is always better, and a score may be negative" in native_engines.task_brief(task, example_ids)
+
+
 def test_named_scores_average_over_cases_with_their_feedback() -> None:
     """With cases, each named score's column is its mean, and every case's note is kept."""
     infos = [

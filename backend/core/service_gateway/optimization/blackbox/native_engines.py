@@ -108,6 +108,11 @@ _STOP_AFTER = 4
 _PLANNED_ROUNDS = 6
 # A named score's Pareto column is keyed apart from example ids.
 NAMED_PREFIX = "score:"
+# A column a candidate has no score for counts as the worst score. Engine
+# scores of a minimize run are negative (SKY-750), so 0.0 would beat them.
+_MISSING_SCORE = -math.inf
+# The engines see every score on one scale where higher is better (SKY-750).
+_SCALE_NOTE = "Scores are on the engine scale: higher is always better, and a score may be negative."
 # The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
 # is refused before it is read. A pending list of a few candidates is far smaller than its cap.
 MAX_PENDING_BYTES = 1024 * 1024
@@ -455,7 +460,7 @@ def task_brief(task: Task, example_ids: list[str]) -> str:
         lines += [
             f"The evaluator scores a candidate on {_plural(len(example_ids), 'example')} and reports the "
             "average score (higher is better) together with per-example scores, and feedback when the metric "
-            "gives it.",
+            "gives it. " + _SCALE_NOTE,
             "",
             "Example ids: " + ", ".join(f"`{eid}`" for eid in example_ids),
             "",
@@ -465,7 +470,7 @@ def task_brief(task: Task, example_ids: list[str]) -> str:
     else:
         lines += [
             "The evaluator scores the candidate as a whole and reports a score (higher is better), with feedback "
-            "explaining it when the metric gives it."
+            "explaining it when the metric gives it. " + _SCALE_NOTE
         ]
     lines += [
         "",
@@ -600,7 +605,7 @@ def pareto_front(table: dict[str, dict[str, float]], ranking: dict[str, float]) 
         Returns:
             ``True`` when ``a`` dominates ``b``.
         """
-        return all(a.get(k, 0.0) >= b[k] for k in b) and any(a.get(k, 0.0) > b[k] for k in b)
+        return all(a.get(k, _MISSING_SCORE) >= b[k] for k in b) and any(a.get(k, _MISSING_SCORE) > b[k] for k in b)
 
     front = [c for c, row in table.items() if not any(dominates(other, row) for d, other in table.items() if d != c)]
     return sorted(front, key=lambda c: -ranking.get(c, _mean(table[c])))
@@ -921,7 +926,7 @@ class AutoResearchEngine:
         leader = table[front[0]]
         best: tuple[str, list[str]] | None = None
         for candidate in front[1:]:
-            wins = [eid for eid, score in table[candidate].items() if score > leader.get(eid, 0.0)]
+            wins = [eid for eid, score in table[candidate].items() if score > leader.get(eid, _MISSING_SCORE)]
             if wins and (best is None or len(wins) > len(best[1])):
                 best = (candidate, wins)
         return best
@@ -1069,7 +1074,7 @@ class AutoResearchEngine:
             lines += ["| column | " + " | ".join(self._ids[c] for c in front) + " |"]
             lines += ["| --- " * (len(front) + 1) + "|"]
             for column in columns:
-                cells = " | ".join(f"{table[c].get(column, 0.0):.3f}" for c in front)
+                cells = " | ".join(f"{table[c].get(column, _MISSING_SCORE):.3f}" for c in front)
                 lines.append(f"| `{column}` | {cells} |")
         lines += ["", "## Failure dossier", ""]
         lines += self._dossier(table, front)
@@ -1140,9 +1145,9 @@ class AutoResearchEngine:
             if not columns:
                 return lines
             lines.append("")
-        best_anywhere = {column: max(row.get(column, 0.0) for row in table.values()) for column in columns}
+        best_anywhere = {column: max(row.get(column, _MISSING_SCORE) for row in table.values()) for column in columns}
         hard = sorted(columns, key=lambda column: best_anywhere[column])[:_DOSSIER_EXAMPLES]
-        weakest = sorted(columns, key=lambda column: table[leader].get(column, 0.0))[:_DOSSIER_EXAMPLES]
+        weakest = sorted(columns, key=lambda column: table[leader].get(column, _MISSING_SCORE))[:_DOSSIER_EXAMPLES]
         lines += [
             "Hardest examples and named scores (best score any candidate reached): "
             + ", ".join(f"`{column}` {best_anywhere[column]:.3f}" for column in hard),
@@ -1152,7 +1157,7 @@ class AutoResearchEngine:
         ]
         for eid in weakest:
             note = feedback.get(eid) or "(no feedback)"
-            lines += [f"- `{eid}` scored {table[leader].get(eid, 0.0):.3f}: {note}"]
+            lines += [f"- `{eid}` scored {table[leader].get(eid, _MISSING_SCORE):.3f}: {note}"]
         return lines
 
     def _round_prompt(self, directive: str) -> str:
