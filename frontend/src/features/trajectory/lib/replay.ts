@@ -32,6 +32,11 @@ export function needsNextPage(index: number, loaded: number, hasMore: boolean): 
   return hasMore && index + 1 >= loaded;
 }
 
+/** Whether a response is stale: a later load started after its request. */
+export function isStaleRequest(request: number, latest: number): boolean {
+  return request !== latest;
+}
+
 /** A tree id short enough to read; the full id stays in the title. */
 export function shortTreeId(treeId: string): string {
   return treeId.slice(0, 12);

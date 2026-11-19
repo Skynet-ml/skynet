@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CaretLeft, CaretRight, ClockCounterClockwise } from "@/shared/ui/icons";
 import { getReplaySteps, type ReplayStep, type ReplayStepPage } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
@@ -18,6 +18,7 @@ import {
   agentStepCount,
   canStepBack,
   canStepForward,
+  isStaleRequest,
   needsNextPage,
   shortTreeId,
 } from "../lib/replay";
@@ -66,27 +67,31 @@ export function ReplayViewer({
   const [page, setPage] = useState<ReplayStepPage | null>(null);
   const [steps, setSteps] = useState<ReplayStep[]>([]);
   const [index, setIndex] = useState(0);
-  const [agentId, setAgentId] = useState<string | null>(null);
+  // A new object on each pick, so a pick of the same agent after a failed load loads it again.
+  const [selection, setSelection] = useState<{ agentId: string | null }>({ agentId: null });
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Each load takes a new number; a response whose number is no longer the latest is dropped,
+  // so a page of the previous agent cannot land in the list of the agent the user picked.
+  const latestRequest = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
-    getReplaySteps(optimizationId, { agentId, limit: REPLAY_PAGE_SIZE }, source)
+    const request = ++latestRequest.current;
+    getReplaySteps(optimizationId, { agentId: selection.agentId, limit: REPLAY_PAGE_SIZE }, source)
       .then((first) => {
-        if (cancelled) return;
+        if (isStaleRequest(request, latestRequest.current)) return;
         setPage(first);
         setSteps(first.steps);
         setIndex(0);
         setFailed(false);
       })
       .catch(() => {
-        if (!cancelled) setFailed(true);
+        if (!isStaleRequest(request, latestRequest.current)) setFailed(true);
+      })
+      .finally(() => {
+        if (!isStaleRequest(request, latestRequest.current)) setBusy(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [optimizationId, agentId, source]);
+  }, [optimizationId, selection, source]);
 
   const step = steps[Math.min(index, steps.length - 1)];
   if (page === null || step === undefined) return null;
@@ -94,11 +99,17 @@ export function ReplayViewer({
   const shownAgent = page.agent_id;
   const total = Math.max(agentStepCount(page, shownAgent), steps.length);
 
+  const selectAgent = (next: string) => {
+    setBusy(true);
+    setSelection({ agentId: next });
+  };
+
   const stepForward = async () => {
     if (!needsNextPage(index, steps.length, page.has_more)) {
       setIndex(index + 1);
       return;
     }
+    const request = ++latestRequest.current;
     setBusy(true);
     try {
       const next = await getReplaySteps(
@@ -106,14 +117,15 @@ export function ReplayViewer({
         { agentId: shownAgent, afterSeq: page.next_after_seq, limit: REPLAY_PAGE_SIZE },
         source,
       );
+      if (isStaleRequest(request, latestRequest.current)) return;
       setPage(next);
       setSteps((loaded) => [...loaded, ...next.steps]);
       if (next.steps.length > 0) setIndex(index + 1);
       setFailed(false);
     } catch {
-      setFailed(true);
+      if (!isStaleRequest(request, latestRequest.current)) setFailed(true);
     } finally {
-      setBusy(false);
+      if (!isStaleRequest(request, latestRequest.current)) setBusy(false);
     }
   };
 
@@ -128,7 +140,7 @@ export function ReplayViewer({
           {msg("replay.title")}
         </h3>
         {page.agents.length > 1 && (
-          <Select value={shownAgent ?? undefined} onValueChange={setAgentId}>
+          <Select value={shownAgent ?? undefined} onValueChange={selectAgent} disabled={busy}>
             <SelectTrigger
               size="sm"
               className="w-auto min-w-[9rem] text-xs"

@@ -5,6 +5,7 @@ import {
   agentStepCount,
   canStepBack,
   canStepForward,
+  isStaleRequest,
   needsNextPage,
   shortTreeId,
 } from "./replay.ts";
@@ -37,6 +38,11 @@ describe("replay position", () => {
     assert.equal(agentStepCount(page, "b"), 1);
     assert.equal(agentStepCount(page, "missing"), 0);
     assert.equal(agentStepCount(page, null), 0);
+  });
+
+  it("drops a response once a later load started", () => {
+    assert.equal(isStaleRequest(3, 3), false);
+    assert.equal(isStaleRequest(2, 3), true);
   });
 
   it("shortens a tree id to 12 characters", () => {
