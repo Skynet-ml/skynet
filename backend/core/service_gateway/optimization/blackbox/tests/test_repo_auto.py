@@ -11,6 +11,8 @@ import pytest
 from gepa.oa.ensemble import optimize_best_of
 
 from core.models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BlackboxRunRequest,
     BlackboxStrategy,
@@ -150,12 +152,13 @@ def test_auto_on_a_repository_explores_five_lanes_then_continues_gepa_from_the_w
     assert result.best_score == 1.0
 
 
-def test_auto_with_the_files_proposer_leaves_out_only_the_shinka_evolve_lane(
+def test_auto_with_the_files_proposer_leaves_out_the_lanes_that_cannot_use_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ShinkaEvolve cannot use ``[proposer] entry``, so Auto explores without it.
+    """AutoResearch, Meta-Harness and ShinkaEvolve cannot use ``[proposer] entry``, so Auto explores without them.
 
-    The other lanes, AutoResearch and Meta-Harness included, and the GEPA continuation still run (SKY-753, SKY-816).
+    Auto never runs on the engine loop, where AutoResearch and Meta-Harness run the command. The other lanes and
+    the GEPA continuation still run (SKY-753, SKY-816).
 
     Args:
         tmp_path: Artifact directory.
@@ -184,15 +187,15 @@ def test_auto_with_the_files_proposer_leaves_out_only_the_shinka_evolve_lane(
 
     _, lanes = auto.run_strategy(BlackboxStrategy(), Task(""), server, ctx, caps=CAPS)
 
-    refused = {BLACKBOX_ENGINE_SHINKA_EVOLVE}
+    refused = {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
     explored = sorted(lane.engine for lane in lanes if lane.phase == "explore")
     assert explored == sorted(name for name in AUTO_ENGINES if name not in refused)
-    assert explored == ["autoresearch", "autosaddler", "gepa", "meta_harness"]
+    assert explored == ["autosaddler", "gepa"]
     assert not refused & {call["name"] for call in RepoFixtureEngine.calls}
     assert [lane.phase for lane in lanes][-1] == "continue"
-    # Four explore lanes and the continuation split the budget in five.
-    assert [config.max_evals for config in configs] == [10 // 5] * 4
-    assert [config.max_token_cost for config in configs] == [pytest.approx(3.0 / 5)] * 4
+    # Two explore lanes and the continuation split the budget in three.
+    assert [config.max_evals for config in configs] == [10 // 3] * 2
+    assert [config.max_token_cost for config in configs] == [pytest.approx(3.0 / 3)] * 2
 
 
 def test_gepa_on_a_repository_runs_the_native_repository_engine(

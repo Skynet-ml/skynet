@@ -148,15 +148,19 @@ U+2066 to U+2069), because they can hide what a command does.
 - The run record names the command in a note: "The run uses the proposer
   command in the contract file: ...". The run page shows the command as the
   proposer.
-- AutoResearch and Meta-Harness run the command in their engine loop, once
+- AutoResearch and Meta-Harness run the command only on the worker's engine
+  loop. The engine loop takes a single repository run of an engine that has
+  an engine loop route. Without the route, a single run of these engines
+  with `entry` fails the setup check, and the message names `[proposer]
+  entry` and the engine. Auto does not run on the engine loop, so it leaves
+  out their lanes. On the engine loop, the engine runs the command once
   for each new version, over the parent version's tree. The engine keeps its
   own search and lab state. `ASCENT_TASK` names `.autoresearch/ascent-task.md`
   or `.meta-harness/ascent-task.md`. The file holds the goal, the past
   versions, their scores and the lab notes. The tree that the command leaves,
   without the lab folder and without the files that `setup` added, is the new
   version, and the engine scores it. `setup` runs once for each engine, over
-  the first version, before the first command. In an Auto run, each lane runs
-  `setup` once. If `setup` changes or removes a file of the repository, the
+  the first version, before the first command. If `setup` changes or removes a file of the repository, the
   run stops, and the message names the command and the changed files. If the
   run cannot remove the files that `setup` added (for example, a read-only
   folder), the run stops too. `setup` and each `entry` command have 30 minutes
@@ -168,15 +172,16 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
   command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
   key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
-  A run that is not protected gets no model relay and no key. These two
-  engines do not give the command `[proposer] services` or a reasoning
-  effort. So a single AutoResearch or Meta-Harness run, or an Auto run, with
-  `entry` and one of these settings fails the setup check. The message
-  names the setting.
+  A run that is not protected gets no model relay and no key. The engine
+  loop does not give the command `[proposer] services` or a reasoning
+  effort. So a single run of these engines on the engine loop, with `entry`
+  and one of these settings, fails the setup check. The message names the
+  setting. An Auto run keeps both settings for its other lanes.
 - ShinkaEvolve cannot use the command, because it writes versions with its
   own editor. A single ShinkaEvolve run with `entry` fails the setup check,
-  and the message names `[proposer] entry` and the engine. Auto leaves out
-  the ShinkaEvolve lane, and the run record says so in a note.
+  and the message names `[proposer] entry` and the engine. An engine loop
+  route does not change this. Auto leaves out the AutoResearch, Meta-Harness
+  and ShinkaEvolve lanes, and the run record says so in a note.
 - Every repository file or folder that `entry` or `setup` names by its
   exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
   `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
@@ -704,10 +709,10 @@ mcp = "eval/.mcp.json"
   for each service, with a loopback url and no secret. Skynet checks each
   call against the proposer's own list, fills the secrets in the parent,
   and returns redirects without following them.
-  The `[proposer] entry` command of AutoResearch and Meta-Harness does not
-  get this relay yet. A single run of these engines, or an Auto run, with
-  `entry` and `[proposer] services` fails the setup check, and the message
-  names `services`.
+  The `[proposer] entry` command of AutoResearch and Meta-Harness runs only
+  on the engine loop, and it does not get this relay yet. A single run of
+  these engines on the engine loop, with `entry` and `[proposer] services`,
+  fails the setup check, and the message names `services`.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
