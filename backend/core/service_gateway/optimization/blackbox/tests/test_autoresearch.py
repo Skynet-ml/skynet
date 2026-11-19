@@ -315,6 +315,7 @@ def _options(
         reasoning_effort=reasoning_effort,
         budget_route=budget_route,
         proposer=BlackboxProposer(**proposer),
+        repo=None,
     )
 
 
@@ -1222,6 +1223,124 @@ def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
     assert list(tmp_path.rglob("lab/notebook.md")) == []
 
 
+_ENTRY = (
+    'grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
+    '&& [ "$(cat deps/lib.txt)" = lib ] && printf x >> a.py && printf n >> .autoresearch/notebook.md'
+)
+
+
+def _command_options(entry: str = _ENTRY, setup: list[str] | None = None) -> SimpleNamespace:
+    """Build native options that run a fake ``[proposer] entry`` command in place of the tool loop.
+
+    Args:
+        entry: The shell command.
+        setup: The ``[proposer] setup`` argv; one that writes ``deps/lib.txt`` when ``None``.
+
+    Returns:
+        The options.
+    """
+    options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command=entry)
+    options.gateway = SimpleNamespace(url="")
+    options.repo = {
+        "file_proposer": True,
+        "proposer_setup": ["sh", "-c", "mkdir deps && printf lib > deps/lib.txt"] if setup is None else setup,
+        "proposer_hosts": [],
+    }
+    return options
+
+
+def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_called(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Each round runs the entry once, with the setup's output, and its tree without the lab is the scored version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher()
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    seed = _tree(trees, "a.py", "a")
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    result = _run(
+        loop, stop_at_score=4.0, score=score, repo_seed=RepoSeed(tree_id=seed), native_options=_command_options()
+    )
+
+    assert model.calls == []
+    versions = list(dict.fromkeys(scored))
+    assert [loop.read_file(version, "a.py") for version in versions] == [b"a", b"ax", b"axx", b"axxx"]
+    for version in versions:
+        assert loop.list_files(version, ".") == ["a.py"]
+    assert result.best_candidate == versions[-1]
+    assert result.metadata["rounds"] == 3
+
+
+def test_a_failed_files_proposer_command_leaves_no_version_and_does_not_crash_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A command that exits 1 is a failed mutation: the seed stays the best version and the run ends.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(
+        loop,
+        score=_score_a_py,
+        repo_seed=RepoSeed(tree_id=seed),
+        native_options=_command_options("printf x >> a.py; exit 1"),
+    )
+
+    assert result.best_candidate == seed
+
+
+def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A setup output would enter every version when it changes a seed file, so the run stops before any command.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    with pytest.raises(ServiceError, match="changed or removed files of the repository"):
+        _run(
+            loop,
+            score=_score_a_py,
+            repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+            native_options=_command_options(setup=["sh", "-c", "printf b >> a.py"]),
+        )
+
+
 @pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])
 def test_a_repository_with_an_entry_at_the_lab_path_is_refused(
     links: dict[str, str],
@@ -1309,7 +1428,7 @@ def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """Until SKY-816, the tool loop is the only proposer: a setting that it would drop fails the run before any call.
+    """With no files proposer, the tool loop is the proposer: a setting that it would drop fails the run before any call.
 
     Args:
         options: The native options with one refused setting.
