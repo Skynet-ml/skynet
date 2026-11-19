@@ -2412,6 +2412,75 @@ def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(
     assert runners[0]._generate_proposal_async.__qualname__ == "install_sequential_gate.<locals>.gated"
 
 
+@pytest.mark.parametrize(("seed", "reduced"), [(-1, 2**32 - 1), (2**40, 0)])
+def test_on_the_engine_loop_execute_reduces_an_out_of_range_seed_for_every_seeded_draw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int, reduced: int
+) -> None:
+    """Start the child with a seed NumPy refuses, and give NumPy and the bandit the same reduced seed.
+
+    The test restores the ``random`` and NumPy random states that the seeding changes.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream, ``uuid.uuid4`` and the reply stream.
+        seed: The user's seed.
+        reduced: The seed modulo 2**32.
+    """
+    seeded: list[int] = []
+    configs: list[Any] = []
+    real_seed_randomness = shinka_runner.seed_randomness
+
+    def recording_seed_randomness(value: int) -> None:
+        """Record the seed, then seed for real.
+
+        Args:
+            value: The seed the child passes.
+        """
+        seeded.append(value)
+        real_seed_randomness(value)
+
+    def runner(**fields: Any) -> _IdleRunner:
+        """Build an idle runner and record its evolution config.
+
+        Args:
+            **fields: Upstream's runner arguments.
+
+        Returns:
+            The runner.
+        """
+        configs.append(fields["evo_config"])
+        return _IdleRunner(**fields)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    # The test environment has no upstream, so the runner may have no NumPy of its own.
+    monkeypatch.setattr(shinka_runner, "np", np)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "seed_randomness", recording_seed_randomness)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    state = random.getstate()
+    np_state = np.random.get_state()
+    try:
+        shinka_runner.execute(
+            _payload(
+                nonce="testnonce",
+                timeout_seconds=5.0,
+                transport="stdio",
+                seed=seed,
+                task={"seed_candidate": "seed", "train_set": []},
+            )
+        )
+    finally:
+        random.setstate(state)
+        np.random.set_state(np_state)
+
+    assert seeded == [reduced]
+    assert configs[0].llm_dynamic_selection_kwargs["seed"] == reduced
+
+
 def test_runner_git_refuses_a_bare_repository_layout(
     planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

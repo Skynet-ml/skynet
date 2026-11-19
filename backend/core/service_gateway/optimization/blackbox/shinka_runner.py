@@ -632,6 +632,22 @@ def job_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def run_seed(payload: Mapping[str, Any]) -> int:
+    """Read the run's seed as a value NumPy and upstream's model bandit accept.
+
+    The seed is an unbounded user value, and ``numpy.random.seed`` refuses one
+    below 0 or at 2**32 and above. Every seeded draw takes this one value, so a
+    replay of the run makes the same draws.
+
+    Args:
+        payload: Parent configuration carrying the optional ``seed``.
+
+    Returns:
+        The seed modulo 2**32.
+    """
+    return int(payload.get("seed") or 0) % 2**32
+
+
 def build_config(
     payload: Mapping[str, Any], results_dir: str, examples: int, *, repo: bool = False
 ) -> dict[str, dict[str, Any]]:
@@ -713,7 +729,7 @@ def build_config(
         # Gateway models carry no upstream catalog price, so the bandit must
         # not weigh cost it cannot see.
         "llm_dynamic_selection_kwargs": (
-            {"cost_aware_coef": 0.0, "seed": int(payload.get("seed") or 0)} if stepped else {"cost_aware_coef": 0.0}
+            {"cost_aware_coef": 0.0, "seed": run_seed(payload)} if stepped else {"cost_aware_coef": 0.0}
         ),
         "meta_rec_interval": int(settings.get("meta_rec_interval", 10)) if meta_model else None,
         "meta_llm_models": [meta_model] if meta_model else None,
@@ -2257,7 +2273,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if stepped:
         mailbox.own_stdout()
         mailbox.listen(sys.stdin)
-        seed_randomness(int(payload.get("seed") or 0))
+        seed_randomness(run_seed(payload))
     if repo:
         shipped_links = refuse_unsafe_tree(repo["chunks"])
         refuse_unsafe_patch(seed)
