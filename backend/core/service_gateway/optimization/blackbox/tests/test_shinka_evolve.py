@@ -3274,6 +3274,96 @@ def test_an_agent_run_that_leaves_too_many_files_is_an_error_with_no_read(tmp_pa
     assert reads == []
 
 
+def test_an_agent_run_past_the_file_cap_at_the_tool_call_limit_reports_the_cap(tmp_path: Path) -> None:
+    """Mark the tool-call cap in the error reply of a session that ends at the limit with too many files (SKY-830).
+
+    The child reads the tool-call counts from every reply, an error reply too.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}}
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    options.proposer.max_tool_calls = 1
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: ModelReply("", Decimal(1), [_call(0, "run", command="npm install")]),  # type: ignore[list-item]
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert "error" in reply
+    assert reply["tool_calls"] == 1
+    assert reply["tool_cap_reached"] is True
+
+
+def test_an_agent_run_that_leaves_exactly_the_file_cap_is_read_in_full(tmp_path: Path) -> None:
+    """Read every file of a session whose ``run`` changes exactly as many files as a tree listing holds (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    replies = [
+        ModelReply("", Decimal(1), [_call(0, "run", command="node gen.js")]),  # type: ignore[list-item]
+        ModelReply("done", Decimal(1), []),
+    ]
+    paths = [f"gen/m{index}.js" for index in range(shinka_bundle._MAX_TREE_ENTRIES)]
+    trees = {"after": {path: path for path in paths}}
+    reads: list[str] = []
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: replies.pop(0),
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert reply == {
+        "files": dict.fromkeys(paths, "text\n"),
+        "text": "done",
+        "tool_calls": 1,
+        "tool_cap_reached": False,
+    }
+    assert sorted(reads) == sorted(paths)
+
+
+@pytest.mark.parametrize(
+    ("first", "cut"), [(shinka_evolve._TOOL_OUTPUT_CHARS - 2, False), (shinka_evolve._TOOL_OUTPUT_CHARS - 1, True)]
+)
+def test_a_file_list_is_cut_only_when_its_joined_text_passes_the_output_limit(first: int, cut: bool) -> None:
+    """Keep a list that joins to exactly the output limit, and cut one that joins to one character more (SKY-830).
+
+    The newlines go only between paths, so the joined text has one character fewer than the paths with a
+    newline each.
+
+    Args:
+        first: The length of the first path; the second path is one character, with a newline between them.
+        cut: Whether the list is cut.
+    """
+    listed = ["a" * first, "b"]
+
+    text = shinka_evolve._listing_output(listed)
+
+    if cut:
+        assert text == f"{listed[0]}\n[cut: 1 of 2 files; use the run tool, for example find]"
+    else:
+        assert text == "\n".join(listed)
+        assert len(text) == shinka_evolve._TOOL_OUTPUT_CHARS
+
+
 def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gateway(tmp_path: Path) -> None:
     """Grant an MCP host with headers with ``credential=True``, so the edge adds them and no secret enters the box.
 
