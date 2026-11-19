@@ -1236,6 +1236,82 @@ def test_a_fenced_lane_scorer_stops_the_auto_run(
     assert boxes.opened == 0
 
 
+class _FailingLaneEngine:
+    """An Auto lane fixture that fails before its first step, as an engine that cannot score its seed does."""
+
+    name = "meta_harness"
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Fail at once.
+
+        Args:
+            task: Not used.
+            server: Not used.
+            ctx: Not used.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("the lane cannot score its seed")
+
+
+@pytest.mark.parametrize("failing", [None, "meta_harness"], ids=["all-lanes", "one-lane-fails"])
+def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_call(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str | None,
+) -> None:
+    """The Auto parent commits its plan and lane results; a resume replays every agent with no model call or box.
+
+    A lane that fails loses at -inf, and the run goes on (SKY-832).
+    """
+    monkeypatch.setattr(
+        auto, "get_engine", lambda name, caps: _FailingLaneEngine() if name == failing else _LaneEngine(name)
+    )
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    def run(loop: EngineLoop) -> tuple[Result, list[auto.LaneOutcome]]:
+        """Run Auto on the loop and check that every committed step replayed.
+
+        Args:
+            loop: The engine loop.
+
+        Returns:
+            The Auto result and its lanes.
+        """
+        outcome = auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            loop.server(scorer, max_evals=2 * (len(AUTO_ENGINES) + 1)),
+            loop.context(),
+            caps=EngineCapabilities(proposer_available=True),
+        )
+        loop.finish()
+        return outcome
+
+    first, first_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    result, lanes = run(first)
+
+    # The root agent holds only the parent's plan and its lane results.
+    assert len(_steps(engine)) == 2
+    statuses = {lane.engine: lane.status for lane in lanes if lane.phase == "explore"}
+    assert statuses == {name: "failed" if name == failing else "completed" for name in AUTO_ENGINES}
+    assert len(first_model.prompts) == len(AUTO_ENGINES) + 1 - (failing is not None)
+
+    _new_generation(engine)
+    loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    resumed, _ = run(loop)
+
+    assert (resumed.best_candidate, resumed.best_score) == (result.best_candidate, result.best_score)
+    assert resumed.metadata["explore_engine"] == result.metadata["explore_engine"]
+    assert model.prompts == []
+    assert boxes.opened == 0
+
+
 def test_a_settle_failure_after_the_commit_stops_the_loop_and_the_resume_replays_the_reply(
     owner: tuple[User, int],
     engine: Engine,

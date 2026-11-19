@@ -38,7 +38,7 @@ from core.exceptions import (
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 from core.sandbox.trees import tar_to_tree
-from core.service_gateway.optimization.blackbox import service
+from core.service_gateway.optimization.blackbox import auto, service
 from core.service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     EvalServer,
@@ -50,6 +50,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
 from core.service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
+from core.service_gateway.optimization.blackbox.upstream import AUTO_ENGINES
 from core.storage.base import JobStore
 from core.storage.models import (
     AgentStepModel,
@@ -1294,6 +1295,89 @@ def test_a_killed_run_resumes_on_the_host_and_repeats_no_evaluation_or_model_cal
     # The final runs score the starting point and the winner, each as one new step.
     assert _FakeRepoScorer.calls[1:] == ["", first_calls[0]]
     assert _steps(engine) == [("model", 1), ("command", 1), ("model", 2), ("command", 2), ("command", 2)]
+
+
+class _RepoLane:
+    """An Auto lane on the host: one model call, its reply written to the seed, and one score."""
+
+    def __init__(self, name: str) -> None:
+        """Set the engine id.
+
+        Args:
+            name: The engine id.
+        """
+        self.name = name
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Write the model's reply to the seed tree and score it.
+
+        Args:
+            task: The lane's task; not used.
+            server: The lane's eval server.
+            ctx: The lane's loop context.
+
+        Returns:
+            The written tree and its score.
+        """
+        assert ctx.call_model is not None
+        assert ctx.put_files is not None
+        assert ctx.repo_seed is not None
+        # The run folder names the phase, so each lane and the continuation write a different patch.
+        reply = ctx.call_model(f"write {Path(ctx.run_dir).name}")
+        tree = ctx.put_files({"src/app.py": reply.text.encode()}, ctx.repo_seed.tree_id)
+        return Result(best_candidate=tree, best_score=server.evaluate(tree)[0], total_evals=server.used)
+
+
+class _LaneKillModel(_Model):
+    """A fake model that kills the worker in the Meta-Harness lane's call."""
+
+    def __call__(self, prompt: str | list[dict[str, Any]], tools: Any) -> ModelReply:
+        """Answer one prompt, or kill the worker for the Meta-Harness lane.
+
+        Args:
+            prompt: The prompt text.
+            tools: The tool definitions; not used.
+
+        Returns:
+            The reply and its cost in cents.
+
+        Raises:
+            _WorkerDiedError: In the Meta-Harness lane's call.
+        """
+        if "meta_harness" in str(prompt):
+            raise _WorkerDiedError
+        return super().__call__(prompt, tools)
+
+
+def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Auto repository run uses the loop, and a resume repeats no committed model or scorer call (SKY-832)."""
+    payload = {**_host_payload(owner, tmp_path, monkeypatch), "strategy": {"mode": "auto"}}
+    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset((name, "repo") for name in AUTO_ENGINES))
+    monkeypatch.setattr(service, "run_strategy", auto.run_strategy)
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: _RepoLane(name))
+    assert service.has_loop_route(BlackboxRunRequest.model_validate(payload))
+
+    first_model = _LaneKillModel()
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=first_model)
+    assert [event["type"] for event in events][-1] == "error"
+    lanes = [name for name in AUTO_ENGINES if name != "meta_harness"]
+    assert sorted(first_model.prompts) == sorted(f"write explore-{name}-0" for name in lanes)
+    first_calls = list(_FakeRepoScorer.calls)
+    assert len(first_calls) == len(lanes)
+    # The parent committed its lane plan; the lane results never committed.
+    assert _steps(engine) == [("command", 1)]
+
+    _new_generation(engine)
+    model = _Model()
+    events = _host(payload, owner, engine, tmp_path, generation=2, model=model)
+
+    [result] = [event for event in events if event["type"] == "result"]
+    assert result["result"]["best_score"] == 1.0
+    assert model.prompts == ["write explore-meta_harness-0", "write continue-gepa"]
+    assert not set(_FakeRepoScorer.calls[len(first_calls) :]) & set(first_calls)
+    assert _steps(engine)[:2] == [("command", 1), ("command", 2)]
 
 
 def test_the_job_budget_pays_for_the_run_when_the_workspace_points_at_another_budget(

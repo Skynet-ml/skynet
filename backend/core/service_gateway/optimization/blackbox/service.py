@@ -335,7 +335,7 @@ def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None)
 
 
 # The ``(engine, target kind)`` pairs that run on the worker's engine loop (SKY-829), not in the native runtime.
-# Each engine port adds its own row. Auto stays native until every Auto engine has a row.
+# Each engine port adds its own row. An Auto repository run uses the loop once every Auto engine has a row.
 LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset()
 
 
@@ -346,13 +346,11 @@ def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
         payload: The submitted or stored job.
 
     Returns:
-        True for a single-engine repository run whose engine has a row in :data:`LOOP_ROUTES`.
+        True for a repository run whose engine, or every Auto engine in auto mode, has a row in
+        :data:`LOOP_ROUTES`.
     """
-    return (
-        payload.strategy.mode == "single"
-        and payload.target.kind == BLACKBOX_TARGET_REPO
-        and (str(payload.strategy.engine), "repo") in LOOP_ROUTES
-    )
+    engines = AUTO_ENGINES if payload.strategy.mode == "auto" else (str(payload.strategy.engine),)
+    return payload.target.kind == BLACKBOX_TARGET_REPO and all((name, "repo") in LOOP_ROUTES for name in engines)
 
 
 def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:

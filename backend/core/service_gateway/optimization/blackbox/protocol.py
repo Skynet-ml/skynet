@@ -725,6 +725,8 @@ class EngineContext:
     # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
     # keeps only its own job's records.
     log_owner: str | None = None
+    # Commits ``work()``'s JSON object as one step under ``key``; a resume gives the committed object back.
+    record_step: Callable[[Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None
 
 
 class Engine(Protocol):

@@ -426,9 +426,12 @@ def run_strategy(
         "background": task.background,
         "name": Path(ctx.run_dir).name,
     }
+    plan = {"engines": list(engines), "per_lane": server.remaining // (lane_count + 1)}
+    plan["continuation"] = server.remaining - lane_count * plan["per_lane"]
+    if ctx.record_step is not None:
+        plan = ctx.record_step({"auto": "plan"}, lambda: plan)
+    per_lane, continuation_allowance = plan["per_lane"], plan["continuation"]
     try:
-        per_lane = server.remaining // (lane_count + 1)
-        continuation_allowance = server.remaining - lane_count * per_lane
         winner = optimize_best_of(
             **kwargs,
             configs=[configuration(name, "explore", per_lane, share) for name in engines],
@@ -450,6 +453,26 @@ def run_strategy(
         ]
         exc.evidence["selection_scope"] = "validation" if exc.result is not None else "unpublished_composition"
         raise
+    if ctx.record_step is not None:
+        results = winner.metadata["all_results"]
+        # On the engine loop each lane replays from its own log; the parent commits the lane results and picks
+        # the winner from the committed list, so a resume hands off to the same lane.
+        committed = ctx.record_step(
+            {"auto": "lanes"},
+            lambda: {
+                "lanes": [
+                    {
+                        "engine": result.metadata.get("engine"),
+                        "score": _stored_score(result.best_score),
+                        "candidate": result.best_candidate,
+                    }
+                    for result in results
+                ]
+            },
+        )
+        scores = [-math.inf if lane["score"] is None else lane["score"] for lane in committed["lanes"]]
+        winner = results[scores.index(max(scores))]
+        winner.metadata["all_results"] = results
     if winner.metadata.get("failed"):
         errors = "; ".join(f"{lane.engine}: {lane.error}" for lane in lanes if lane.error)
         raise ServiceError(f"Every Auto exploration lane failed ({errors}).")

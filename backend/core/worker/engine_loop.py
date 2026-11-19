@@ -539,6 +539,7 @@ class EngineLoop:
                 list_files=self.list_files,
                 log_owner=self._run.run_id,
                 file_ids=self.file_ids,
+                record_step=self.evaluate,
                 **fields,
             )
 
