@@ -1358,7 +1358,28 @@ class _OtherCandidateLaneEngine(_LaneEngine):
         return Result(f"{result.best_candidate} changed", result.best_score, result.total_evals)
 
 
-@pytest.mark.parametrize(("change", "message"), [("lane-candidate", "lane results"), ("plan-engines", "lane plan")])
+class _OtherScoreLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but reports another score."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and change only its score.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            The lane's version with a score 1 higher.
+        """
+        result = super().run(task, server, ctx)
+        return Result(result.best_candidate, result.best_score + 1.0, result.total_evals)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [("lane-candidate", "lane results"), ("lane-score", "lane results"), ("plan-engines", "lane plan")],
+)
 def test_an_auto_resume_that_gives_other_lanes_or_another_plan_stops_as_diverged(
     owner: tuple[User, int],
     engine: Engine,
@@ -1369,7 +1390,7 @@ def test_an_auto_resume_that_gives_other_lanes_or_another_plan_stops_as_diverged
     change: str,
     message: str,
 ) -> None:
-    """A resume whose lane hands off another version, or that explores other engines, stops (SKY-832)."""
+    """A resume whose lane hands off another version or score, or that explores other engines, stops (SKY-832)."""
     monkeypatch.setattr(auto, "get_engine", lambda name, caps: _LaneEngine(name))
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
@@ -1400,6 +1421,13 @@ def test_an_auto_resume_that_gives_other_lanes_or_another_plan_stops_as_diverged
             auto,
             "get_engine",
             lambda name, caps: _OtherCandidateLaneEngine(name) if name == changed else _LaneEngine(name),
+        )
+    elif change == "lane-score":
+        changed = AUTO_ENGINES[0]
+        monkeypatch.setattr(
+            auto,
+            "get_engine",
+            lambda name, caps: _OtherScoreLaneEngine(name) if name == changed else _LaneEngine(name),
         )
     else:
         monkeypatch.setattr(auto, "AUTO_ENGINES", AUTO_ENGINES[:-1])
