@@ -2258,7 +2258,8 @@ def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
     _run(loop)
 
     assert _tool_result(model, 1)["error"].startswith("Send the bash tool arguments as JSON")
-    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == text
+    # The arguments are refused, so the transcript holds an empty object, as for every refused argument.
+    assert model.calls[1][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
     assert [kind for _, kind, _ in _steps(engine)][:3] == ["model", "model", "command"]
     assert boxes.opened == 2
 
@@ -2267,7 +2268,7 @@ def test_a_lone_surrogate_in_a_command_gets_the_bound_error_and_opens_no_box(
     "arguments", [{"command": "echo \ud800"}, '{"command": "echo \ud800"}'], ids=["mapping", "raw-text"]
 )
 def test_arguments_with_a_raw_lone_surrogate_get_the_bound_error_and_an_empty_transcript(arguments: Any) -> None:
-    """The step commit refuses such a reply first (SKY-821); the tool loop still refuses it with no crash.
+    """``_parse`` refuses such arguments, so the tool loop gives the bound error with no crash.
 
     Args:
         arguments: The arguments with a raw lone surrogate, as a mapping or as JSON text.
@@ -2515,7 +2516,23 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
     """
     at_bound = "[" * loop_tools.MAX_ARGUMENT_DEPTH + "]" * loop_tools.MAX_ARGUMENT_DEPTH
     in_string = json.dumps({"command": "echo " + '[{\\"' * 1000})
-    texts = ["[" * 990, "[" * 900 + "]" * 900, "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1), at_bound, in_string]
+    # Many shallow lists side by side: the depth goes down at each close, so the text stays inside the bound.
+    wide = "[" + "[]," * 40 + "[]]"
+    # A closing brace also takes the depth down, so many shallow objects side by side stay inside the bound.
+    wide_objects = "[" + "{}," * 40 + "{}]"
+    # The escape ends after one character, so the string closes and the deep brackets after it count. The text is
+    # not JSON, so only the text count, not the parsed-value check, can refuse it.
+    after_escape = '["a\\nb", ' + "[" * loop_tools.MAX_ARGUMENT_DEPTH
+    texts = [
+        "[" * 990,
+        "[" * 900 + "]" * 900,
+        "[" * (loop_tools.MAX_ARGUMENT_DEPTH + 1),
+        at_bound,
+        in_string,
+        wide,
+        wide_objects,
+        after_escape,
+    ]
 
     def results() -> list[tuple[Any, bool]]:
         """Give each text's transcript arguments and whether the tool loop refuses it.
@@ -2544,8 +2561,56 @@ def test_the_depth_bound_on_text_does_not_depend_on_the_stack() -> None:
         return results() if levels == 0 else deep(levels - 1)
 
     top = results()
-    assert top == [("{}", True), ("{}", True), ("{}", True), (at_bound, False), (in_string, False)]
+    assert top == [
+        ("{}", True),
+        ("{}", True),
+        ("{}", True),
+        (at_bound, False),
+        (in_string, False),
+        (wide, False),
+        (wide_objects, False),
+        ("{}", True),
+    ]
     assert deep(sys.getrecursionlimit() - 200) == top
+
+
+def test_compact_text_that_grows_past_the_bound_gives_an_empty_transcript_object() -> None:
+    """Compact JSON text inside the length bound grows past it when dumped with spaces, so the tool loop refuses it.
+
+    The transcript must then hold ``{}``, not the refused text, as for every other refused argument.
+    """
+    compact = json.dumps({f"k{i}": i for i in range(14_000)}, separators=(",", ":"))
+    assert len(compact) <= loop_tools.MAX_ARGUMENT_CHARS
+    assert len(json.dumps(json.loads(compact), ensure_ascii=False)) > loop_tools.MAX_ARGUMENT_CHARS
+    call = {"id": "c", "name": "bash", "arguments": compact}
+
+    assert loop_tools.refused_arguments(call, "bash") is not None
+    assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
+
+
+def test_text_that_is_not_json_with_a_raw_lone_surrogate_gives_an_empty_transcript_object() -> None:
+    """Text that is not JSON passes the bound and gets the misuse error, but its lone surrogate stays out of the prompt."""
+    call = {"id": "c", "name": "bash", "arguments": '{"command": "echo \ud800'}
+
+    def run_command(tree: str, command: str, env: Any) -> Any:
+        """Fail the test: a call with no command must not run.
+
+        Args:
+            tree: Not used.
+            command: Not used.
+            env: Not used.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("the command ran")
+
+    assert loop_tools.refused_arguments(call, "bash") is None
+    output, tree = loop_tools.run_bash(SimpleNamespace(run_command=run_command), "t", call, misuse="misuse")
+
+    assert json.loads(output) == {"error": "misuse"}
+    assert tree == "t"
+    assert loop_tools.openai_call(call)["function"]["arguments"] == "{}"
 
 
 def test_an_evaluation_of_the_lab_parent_is_refused(

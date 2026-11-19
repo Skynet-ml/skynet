@@ -90,8 +90,7 @@ def _parse(call: Mapping[str, Any]) -> tuple[Any, bool]:
             return None, True
         try:
             value = json.loads(value)
-        # JSON nested past the parser's recursion limit raises RecursionError.
-        except (ValueError, RecursionError):
+        except ValueError:
             value = None
     if _too_deep(value):
         return None, True
@@ -165,20 +164,19 @@ def openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         ``{"id", "type": "function", "function": {"name", "arguments"}}``, with the arguments as JSON text.
     """
     value = call.get("arguments")
-    # ``run_bash`` refuses arguments past the depth or length bound or not valid UTF-8, so the transcript holds an
-    # empty object in their place.
-    if isinstance(value, str):
-        if _refused_text(value) or _too_deep_text(value):
+    # The transcript holds an empty object for every argument that ``refused_arguments`` refuses. Compact text can
+    # grow past the bound when ``_parse`` dumps it again with spaces, so a check on the text alone would keep some
+    # refused text.
+    if _parse(call)[1]:
+        value = _REFUSED_ARGUMENTS
+    elif isinstance(value, str):
+        # Text that is not a JSON object passes ``_parse`` and gets the misuse error, but a lone surrogate in it would
+        # still break the UTF-8 prompt, so the transcript also holds an empty object for it.
+        if _refused_text(value):
             value = _REFUSED_ARGUMENTS
     else:
-        # Sorted keys give the same text for a live reply and for its replay from the step log. ``_parse`` measures
-        # the arguments with no escapes, so Hebrew text does not count six characters a letter.
-        if _too_deep(value):
-            value = _REFUSED_ARGUMENTS
-        else:
-            value = json.dumps(value, sort_keys=True, ensure_ascii=False)
-            if _refused_text(value):
-                value = _REFUSED_ARGUMENTS
+        # Sorted keys give the same text for a live reply and for its replay from the step log.
+        value = json.dumps(value, sort_keys=True, ensure_ascii=False)
     return {
         "id": call.get("id"),
         "type": "function",
@@ -364,7 +362,6 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     Returns:
         The tool result as JSON text, and the tree after the command.
     """
-    assert ctx.run_command is not None
     # A bad tool call goes back to the model as an error result, as in the Agents SDK tool loop. The name comes
     # first, so a call to an unknown tool never gets the bash bound error.
     if call.get("name") != "bash":
@@ -376,10 +373,10 @@ def run_bash(ctx: EngineContext, tree: str, call: Mapping[str, Any], *, misuse: 
     command = parsed.get("command") if isinstance(parsed, dict) else None
     if not isinstance(command, str):
         return json.dumps({"error": misuse}, ensure_ascii=False), tree
-    return run_command(ctx, tree, command)
+    return _run_command(ctx, tree, command)
 
 
-def run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
+def _run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
     """Run one command over the tree, inside the command bound, and cut its outputs for the prompt.
 
     Args:
@@ -391,8 +388,7 @@ def run_command(ctx: EngineContext, tree: str, command: str) -> tuple[str, str]:
         The tool result as JSON text, and the tree after the command.
     """
     assert ctx.run_command is not None
-    # ``_parse`` or the step commit (SKY-821) refuses a lone surrogate first; ``surrogatepass`` keeps this measure
-    # from ever raising.
+    # ``_parse`` refuses a lone surrogate first; ``surrogatepass`` keeps this measure from ever raising.
     if len(command.encode("utf-8", "surrogatepass")) > MAX_COMMAND_BYTES:
         error = f"Keep the command at most {MAX_COMMAND_BYTES} bytes as UTF-8. Write long content in parts."
         return json.dumps({"error": error}, ensure_ascii=False), tree

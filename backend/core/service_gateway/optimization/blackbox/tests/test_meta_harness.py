@@ -1794,8 +1794,19 @@ def _nested(depth: int) -> dict[str, Any]:
         (_nested(900), "nested at most"),
         # Short JSON text nested past the depth bound: the transcript holds an empty object, as in AutoResearch.
         (json.dumps(_nested(loop_tools.MAX_ARGUMENT_DEPTH)), "nested at most"),
+        # Short text that is not JSON breaks no bound, so the transcript keeps it and the error asks for a command.
+        ("not json", "command string"),
     ],
-    ids=["deep-text", "long-text", "padded-text", "long-command", "long-object", "deep-object", "short-deep-text"],
+    ids=[
+        "deep-text",
+        "long-text",
+        "padded-text",
+        "long-command",
+        "long-object",
+        "deep-object",
+        "short-deep-text",
+        "not-json",
+    ],
 )
 def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run_goes_on(
     arguments: Any,
@@ -1806,7 +1817,9 @@ def test_an_over_long_or_deeply_nested_argument_gets_an_error_result_and_the_run
     trees: TreeStore,
     tmp_path: Path,
 ) -> None:
-    """A model reply with arguments past the bounds gets an error result and opens no box; a resume replays it.
+    """A model reply with arguments past the bounds, or not JSON, gets an error result and opens no box.
+
+    A resume replays it.
 
     Args:
         arguments: The tool call's arguments.
@@ -1857,6 +1870,29 @@ def test_an_argument_at_the_depth_bound_still_runs(
     )
     deeper = _nested(loop_tools.MAX_ARGUMENT_DEPTH)
     assert "error" in json.loads(worker._exec(tree, {"id": "c", "name": "bash", "arguments": deeper})[0])
+
+
+def test_an_unknown_tool_with_too_deep_arguments_gets_the_misuse_error(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A call to an unknown tool gets the misuse error before the bash bound error, as in AutoResearch.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    tree = loop.put_files({"a.txt": b"a"})
+    deeper = _nested(loop_tools.MAX_ARGUMENT_DEPTH + 8)
+
+    output, after = worker._exec(tree, {"id": "c", "name": "x", "arguments": deeper})
+
+    assert json.loads(output) == {"error": "Call the bash tool with a command string."}
+    assert after == tree
 
 
 def test_a_pending_file_over_its_cap_gives_no_candidate(
