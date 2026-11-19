@@ -428,22 +428,29 @@ def test_a_command_failure_keeps_the_end_of_a_long_output() -> None:
     ],
     ids=["exit-1", "box-failure"],
 )
+@pytest.mark.parametrize(("setup", "removed"), [(_SETUP, f"{_LAB} deps"), (None, _LAB)], ids=["setup", "no-setup"])
 def test_a_failed_removal_after_the_entry_command_loses_only_that_version(
-    outcome: CommandResult | Exception, says: str, caplog: pytest.LogCaptureFixture
+    outcome: CommandResult | Exception,
+    says: str,
+    setup: list[str] | None,
+    removed: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The entry command can write a path that ``rm`` cannot remove, so the version is lost, the run goes on, and a
-    warning names the entry command.
+    """The entry command can write a path that ``rm`` cannot remove, so the version is lost, the run does not stop
+    with an error, and a warning names the entry command, with or without ``[proposer] setup``.
 
     Args:
         outcome: The result or the error of the removal box.
         says: Text that the warning holds.
+        setup: The ``[proposer] setup`` argv; none when ``None``.
+        removed: The paths that the removal box removes.
         caplog: Pytest's log capture.
     """
     commands = _Commands()
-    proposer = _proposer(commands, setup=_SETUP)
+    proposer = _proposer(commands, setup=setup)
     proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
     proposer.base("seed")
-    commands.outcomes[f"rm -rf -- {_LAB} deps"] = outcome
+    commands.outcomes[f"rm -rf -- {removed}"] = outcome
     last, full = dict(proposer._last), dict(proposer._full)
 
     with caplog.at_level(logging.WARNING, logger="app.engine"):
@@ -455,6 +462,31 @@ def test_a_failed_removal_after_the_entry_command_loses_only_that_version(
     assert len(warnings) == 1
     assert "[proposer] entry command" in warnings[0]
     assert says in warnings[0]
+
+
+def test_a_session_that_changed_nothing_gives_its_parent_with_no_box() -> None:
+    """A session whose last tree is its first tree left the parent unchanged, so no ``rm`` box runs."""
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+    proposer.base("seed")
+    before = list(commands.calls)
+
+    assert proposer.version("start", "start", "seed") == "seed"
+    assert commands.calls == before
+
+
+def test_a_version_with_no_setup_needs_one_box_and_starts_a_session_with_none() -> None:
+    """With no ``[proposer] setup``, the version's ``rm`` box removes only the lab, and a session from it needs no box."""
+    commands = _Commands()
+    proposer = _proposer(commands)
+    proposer.base("seed")
+
+    version = proposer.version("start", "last", "seed")
+
+    assert [command for command, _ in commands.calls] == [f"rm -rf -- {_LAB}"]
+    assert proposer.base(version) == version  # type: ignore[arg-type]
+    assert len(commands.calls) == 1
 
 
 def test_a_version_removes_the_lab_and_the_setup_output_in_one_box() -> None:

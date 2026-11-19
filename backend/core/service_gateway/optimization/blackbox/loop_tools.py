@@ -678,18 +678,17 @@ class FileProposer:
             parent: The tree of the version that the session started from.
 
         Returns:
-            The version's tree id, or ``None`` when a box could not remove the paths. As with ``drop_lab``, only
-            this version is lost: the entry command can write a path that ``rm`` cannot remove, so the
-            run goes on.
+            The version's tree id, or ``None`` when a box could not remove the paths. The entry command can write
+            a path that ``rm`` cannot remove, so a warning names the failure and the run does not stop with an
+            error: Meta-Harness goes on to its next iteration, and AutoResearch ends the run as its stop rule says.
         """
         if tree == start:
             return parent
-        if not self._roots:
-            return drop_lab(self._ctx, start, tree, parent, self._lab)
+        roots = self._roots or []
         assert self._ctx.run_command is not None
-        name = "removal of the lab folder and the setup's output after the [proposer] entry command"
+        name = "removal of the lab folder and any setup output after the [proposer] entry command"
         try:
-            result, version = self._ctx.run_command(tree, f"rm -rf -- {shlex.join([self._lab, *self._roots])}", ())
+            result, version = self._ctx.run_command(tree, f"rm -rf -- {shlex.join([self._lab, *roots])}", ())
         except (TreeRejectedError, BoxFailureError) as error:
             log_event(
                 "proposer.done", f"The {name} could not run in a box: {error}", level=logging.WARNING, source="proposer"
@@ -704,7 +703,9 @@ class FileProposer:
                 source="proposer",
             )
             return None
-        self._last.setdefault(version, tree)
+        # With no setup output the version is already a session's full tree, so ``base`` needs no lab removal for it.
+        if roots:
+            self._last.setdefault(version, tree)
         return version
 
     def _setup(self) -> list[str]:
