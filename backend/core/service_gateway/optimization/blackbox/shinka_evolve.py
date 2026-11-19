@@ -201,9 +201,8 @@ class ShinkaEvolveEngine:
 
         Raises:
             ServiceError: When the worker has no ShinkaEvolve interpreter, when the settings need a feature
-                the worker does not run yet, when the child
-                sends a malformed request or candidate, or when upstream fails, goes quiet or writes an
-                overlong line before it scores a version.
+                the worker does not run yet, when the child sends a malformed request or candidate, or when
+                upstream fails, goes quiet or writes an overlong line before it scores a version.
             BudgetExhaustedError: When no scorer call remains, or the cap stops the run before a version is scored.
             BudgetReached: When the budget stops the run; it carries the best version scored so far.
         """

@@ -3030,6 +3030,55 @@ def test_an_agent_session_ends_at_the_tool_call_limit(tmp_path: Path) -> None:
     assert len(models) == 1
 
 
+def test_an_agent_session_at_the_tool_call_limit_keeps_the_files_it_wrote(tmp_path: Path) -> None:
+    """Return the version the session wrote before the limit, not the parent's files (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def call_model(messages: list[dict[str, Any]], tools: object) -> ModelReply:
+        """Write a file, then ask for a listing past the limit.
+
+        Args:
+            messages: The session's messages.
+            tools: The tool definitions.
+
+        Returns:
+            A reply with two calls.
+        """
+        calls = [_call(0, "write_file", path="new.py", content="new\n"), _call(1, "list_files", path="")]
+        return ModelReply("", Decimal(1), calls)  # type: ignore[arg-type]
+
+    def put_files(files: dict[str, bytes], base: str | None) -> str:
+        """Name the parent's tree, or the tree after the write.
+
+        Args:
+            files: The files to write.
+            base: The tree the files go on.
+
+        Returns:
+            The new tree.
+        """
+        return "parent" if base == "tree" else "child"
+
+    ids = {"child": {"new.py": "new-oid"}}
+    options = _agent_options()
+    options.proposer.max_tool_calls = 1
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=call_model,
+        put_files=put_files,
+        file_ids=lambda tree: ids.get(tree, {}),
+        read_file=lambda tree, path: b"new\n" if (tree, path) == ("child", "new.py") else None,
+    )
+
+    result = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert result == {"files": {"new.py": "new\n"}, "text": None, "tool_calls": 1, "tool_cap_reached": True}
+
+
 def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gateway(tmp_path: Path) -> None:
     """Grant an MCP host with headers with ``credential=True``, so the edge adds them and no secret enters the box.
 
@@ -3183,6 +3232,71 @@ def test_the_agent_run_tool_keeps_the_exit_code_and_the_output_ends_when_it_cuts
     assert text.endswith(
         f"[cut: kept the last {len(kept)} of {len(stdout)} stdout characters and the last 9 of 9 stderr characters]"
     )
+
+
+def test_the_agent_run_tool_keeps_the_end_of_a_long_stderr_next_to_a_long_stdout(tmp_path: Path) -> None:
+    """Keep the end of both streams, with at least half the room for stderr, when both are long (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    stdout = "s" * (2 * size) + "stdout end"
+    stderr = "e" * (2 * size) + "stderr end"
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Fail with a long stdout and a long stderr.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A failed result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=False, exit_code=1, stdout=stdout, stderr=stderr), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="true"), "tree")
+
+    out_kept, rest = text.split("\nstdout:\n", 1)[1].split("\nstderr:\n", 1)
+    err_kept = rest.rsplit("\n[cut: ", 1)[0]
+    assert len(text) <= size
+    assert out_kept.endswith("stdout end")
+    assert err_kept.endswith("stderr end")
+    assert len(err_kept) >= (len(out_kept) + len(err_kept)) // 2
+
+
+def test_the_agent_run_tool_says_a_command_timed_out_instead_of_an_exit_code(tmp_path: Path) -> None:
+    """Report a timed-out command as timed out, since its exit code is not the command's own (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Time out.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A timed-out result and the tree after the command.
+        """
+        return SimpleNamespace(timed_out=True, exit_code=124, stdout="partial", stderr=""), "after"
+
+    options = _agent_options()
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, [])
+
+    text, _ = session._tool(_call(0, "run", command="sleep 999"), "tree")
+
+    assert text.split("\n", 1)[0] == "timed out"
+    assert "exit code" not in text
 
 
 def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: Path) -> None:

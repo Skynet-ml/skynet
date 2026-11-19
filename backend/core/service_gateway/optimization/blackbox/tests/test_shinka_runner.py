@@ -2761,7 +2761,7 @@ def _install_loop_agent_editor(tmp_path: Path, mailbox: _ProposalMailbox) -> Any
 
 
 def test_the_loop_agent_editor_files_the_text_version_the_session_leaves(tmp_path: Path) -> None:
-    """Send a text parent as ``program.md``, and file the session's ``program.md`` with its name (SKY-830).
+    """Send a text parent as ``program.md``, and file the session's ``program.md`` with its name and tool use (SKY-830).
 
     Args:
         tmp_path: Run folder.
@@ -2772,8 +2772,8 @@ def test_the_loop_agent_editor_files_the_text_version_the_session_leaves(tmp_pat
         {
             "files": {"program.md": child, "notes.txt": "scratch"},
             "text": "Name: shorter\nDescription: Ask for one line.",
-            "tool_calls": 4,
-            "tool_cap_reached": False,
+            "tool_calls": 7,
+            "tool_cap_reached": True,
         }
     )
     runner = _install_loop_agent_editor(tmp_path, mailbox)
@@ -2785,10 +2785,11 @@ def test_the_loop_agent_editor_files_the_text_version_the_session_leaves(tmp_pat
     assert (kind, fields["files"]) == ("agent", {"program.md": parent})
     assert "+Answer in one line." in patch
     assert (tmp_path / "results" / "gen_3" / "main.md").read_text() == child
-    assert (meta["patch_name"], meta["patch_description"], meta["tool_calls"]) == (
+    assert (meta["patch_name"], meta["patch_description"], meta["tool_calls"], meta["tool_cap_reached"]) == (
         "shorter",
         "Ask for one line.",
-        4,
+        7,
+        True,
     )
 
 
