@@ -850,21 +850,32 @@ async def test_a_late_probe_cannot_leave_the_known_hosts_file_behind(
     temp.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp))
     monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
-    monkeypatch.setattr(ec2_provider, "_SSH_PROBE_INTERVAL_SEC", 0.3)
+    # A 0.3 s real probe interval let the launch wake and pass its file
+    # removal before a slow test wrote the file. The launch now sleeps until
+    # the clock jump below, which comes only after the write.
+    monkeypatch.setattr(ec2_provider, "_SSH_PROBE_INTERVAL_SEC", 3600.0)
     (fake_ec2.state / "ssh_down").touch()
     env = EC2Environment(_spec())
     task = asyncio.create_task(env.start())
-    await _until(lambda: len(_ssh_calls(fake_ec2)) == 1)
+    await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
+    launch = next(item for item in asyncio.all_tasks() if item.get_coro().__name__ == "_launch")
     path = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("UserKnownHostsFile="))
     path = path.split("=", 1)[1]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert list(temp.glob("skynet-ec2-*")) == []
+    assert not launch.done()
     # ssh with accept-new writes the file again when a late probe connects.
     os.close(os.open(path, os.O_CREAT | os.O_WRONLY))
-    await _until(lambda: not list(temp.glob("skynet-ec2-*")))
-    await _until(lambda: not ec2_provider._LATE_TERMINATES)
+    _jump_loop_clock(monkeypatch, 3600.0)
+    # These bounds only stop a broken provider from hanging the run; no timing decides the result.
+    await asyncio.wait({launch}, timeout=60)
+    assert launch.done()
+    if ec2_provider._LATE_TERMINATES:
+        await asyncio.wait(set(ec2_provider._LATE_TERMINATES), timeout=60)
+    assert list(temp.glob("skynet-ec2-*")) == []
+    assert not ec2_provider._LATE_TERMINATES
     assert fake_ec2.live() == []
 
 
