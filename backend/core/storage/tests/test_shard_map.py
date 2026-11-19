@@ -3,7 +3,8 @@
 Most tests use SQLite files: one main database with the ``jobs`` table and
 one shard database with only the step log tables. The Alembic tests need
 disposable PostgreSQL databases: set ``APP_TEST_DB_URL`` (main) and, for the
-test that migrates a shard, ``APP_TEST_SHARD_DB_URL`` (shard).
+test that migrates a shard, ``APP_TEST_SHARD_DB_URL`` (shard). The tests use new
+databases on those servers, which the module creates and drops.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from core.storage.remote import RemoteDBJobStore
 from core.storage.schema_lock import SCHEMA_BOOTSTRAP_LOCK_KEY
 from core.storage.shard_map import MAIN, ShardMap, UnroutableRunError
 from core.storage.step_log_store import _FOOTER, CLAIM_BYTE_SIZE, StepFenceError, StepLogStore, _read_manifest
+from core.storage.tests.test_remote_jobstore_postgres import own_database
 from core.storage.tree_compactor import TreeCompactor
 from core.storage.tree_purge import (
     TreePurgeError,
@@ -68,6 +70,24 @@ needs_postgres = pytest.mark.skipif(
 RUNS = [f"run-{index}" for index in range(12)]
 SHARD_TABLES = [AgentStepModel.__table__, TreeObjectModel.__table__, StoragePackModel.__table__]
 TREE = "b" * 64
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _own_postgres_databases() -> Iterator[None]:
+    """Point the PostgreSQL tests of this module at new databases that only this module uses.
+
+    The tests wipe ``public`` and change the migrated tables. In the shared ``APP_TEST_DB_URL``
+    database, that broke the tests that other xdist workers ran at the same time (SKY-831).
+
+    Yields:
+        Nothing. ``MAIN_DB_URL`` and ``SHARD_DB_URL`` name the new databases until the module ends.
+    """
+    with contextlib.ExitStack() as databases, pytest.MonkeyPatch.context() as mp:
+        for name in ("MAIN_DB_URL", "SHARD_DB_URL"):
+            url = globals()[name]
+            if (url or "").startswith("postgresql"):
+                mp.setitem(globals(), name, databases.enter_context(own_database(url, "shard_map")))
+        yield
 
 
 def _main_engine(path: Path) -> Engine:

@@ -74,7 +74,9 @@ def engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Engine]:
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
         eng = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema},public"})
     try:
-        Base.metadata.create_all(eng)
+        # The search path names ``public`` too, so a check-first create found the migrated tables of
+        # APP_TEST_DB_URL there, and parallel workers wrote the same rows into them (SKY-831).
+        Base.metadata.create_all(eng, checkfirst=False)
         with Session(eng) as session:
             for run_id in ADA_RUNS:
                 session.add(JobModel(optimization_id=run_id, username="ada", execution_generation=1))
@@ -89,6 +91,21 @@ def engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Engine]:
             with admin.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
             admin.dispose()
+
+
+def test_the_postgres_tables_are_in_the_schema_of_the_test(engine: Engine) -> None:
+    """Keep the tables of a PostgreSQL test in its own schema, never in ``public`` (SKY-831).
+
+    Args:
+        engine: The test database.
+    """
+    if engine.dialect.name != "postgresql":
+        pytest.skip("only PostgreSQL has schemas")
+    with engine.connect() as connection:
+        home = connection.scalar(
+            text("SELECT relnamespace::regnamespace::text FROM pg_class WHERE oid = 'jobs'::regclass")
+        )
+        assert home == connection.scalar(text("SELECT current_schema()"))
 
 
 @pytest.fixture
