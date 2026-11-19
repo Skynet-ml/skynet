@@ -1830,30 +1830,19 @@ def _edge_headers(rules: Sequence[Any], path: str) -> list[dict[str, str]]:
 
 
 async def test_granted_headers_reach_only_their_server_path(client: FakeClient, log: list[str]) -> None:
-    """Check that two servers on one host each get only their own headers, and other paths get none (SKY-833)."""
+    """Check that a server's headers reach its path and the paths below it, and no other path (SKY-833)."""
     client.readback = readback("custom", ("mcp.example.com",))
-    env = make_env(
-        client,
-        log,
-        protected=False,
-        **_granted(
-            Grant("mcp.example.com", credential=True, path="/team"),
-            Grant("mcp.example.com", credential=True, path="/team-web/"),
-        ),
-    )
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
     await env.start()
     rules = client.create_kwargs[0]["network_policy"].allow["mcp.example.com"]
     assert {(rule.match.path.kind, rule.match.path.value) for rule in rules} == {
         ("exact", "/team"),
         ("starts_with", "/team/"),
-        ("exact", "/team-web"),
-        ("starts_with", "/team-web/"),
     }
-    team, web = [{"Authorization": "Bearer fake-team"}], [{"Authorization": "Bearer fake-web"}]
+    team = [{"Authorization": "Bearer fake-team"}]
     assert _edge_headers(rules, "/team") == team
     assert _edge_headers(rules, "/team/sse") == team
-    assert _edge_headers(rules, "/team-web/messages") == web
-    for other in ("/", "/admin", "/teams", "/team-other"):
+    for other in ("/team-web/messages", "/teams", "/", "/admin"):
         assert _edge_headers(rules, other) == []
     await env.stop()
 

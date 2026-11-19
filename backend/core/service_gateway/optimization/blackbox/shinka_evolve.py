@@ -887,7 +887,8 @@ class _AgentSession:
             servers: The names of the ``[proposer] mcp`` servers on the run's relay route.
 
         Raises:
-            ServiceError: When the context has no boxes, or the options name no address for a server.
+            ServiceError: When the context has no boxes, the options name no address for a server, or two
+                servers with headers share a host.
         """
         if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files, ctx.file_ids):
             raise ServiceError("The ShinkaEvolve agent editor needs the engine loop's boxes.")
@@ -903,12 +904,25 @@ class _AgentSession:
         mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
         # A credential grant fails to resolve when the registry holds no headers for its host and path, so a
         # server with no headers gets a plain grant. The path keeps a server's headers off the host's other
-        # paths, such as another server on the same host (SKY-833).
+        # paths (SKY-833).
         credentials = {
             (parts.hostname or "", parts.path)
             for parts in (urlsplit(str(known[name]["url"])) for name in servers if known[name].get("has_headers"))
         }
         credential_hosts = {host for host, _ in credentials}
+        # The edge cannot keep a path such as '/a/../b' from reaching server B under prefix '/a', so one host
+        # takes one credential prefix; refuse here with the server names instead of at grant resolution.
+        if len(credentials) != len(credential_hosts):
+            shared = sorted(host for host in credential_hosts if sum(h == host for h, _ in credentials) > 1)
+            names = [
+                name
+                for name in sorted(servers)
+                if known[name].get("has_headers") and (urlsplit(str(known[name]["url"])).hostname or "") in shared
+            ]
+            raise ServiceError(
+                f"The [proposer] mcp servers {names} have headers and share the host '{', '.join(shared)}'; "
+                "give each server with headers its own host."
+            )
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
         plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}

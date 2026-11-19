@@ -260,17 +260,24 @@ def test_a_provider_without_an_edge_refuses_a_path_credential(caps: EnvironmentC
         validate_spec(spec, caps)
 
 
-def test_two_servers_on_one_host_each_take_their_own_headers() -> None:
-    """Keep each prefix's headers under its own prefix when two servers share a host (SKY-833)."""
+def test_two_credential_prefixes_on_one_host_are_refused() -> None:
+    """Refuse two servers with headers on one host: '/team/../web' would take the team headers to web (SKY-833)."""
     grants = [
         Grant("mcp.example.com", credential=True, path="/web"),
         Grant("mcp.example.com", credential=True, path="/team"),
     ]
+    with pytest.raises(GrantError, match=r"Host 'mcp.example.com' .* \('/team', '/web'\); one host takes one"):
+        resolve_grants(grants, MCP_REGISTRY)
+
+
+def test_two_grants_for_one_prefix_on_one_host_resolve() -> None:
+    """Merge ``/team`` and ``/team/`` into one prefix, since both name the same server."""
+    grants = [
+        Grant("mcp.example.com", credential=True, path="/team"),
+        Grant("mcp.example.com", credential=True, path="/team/"),
+    ]
     resolved = resolve_grants(grants, MCP_REGISTRY)
-    assert dict(resolved.inject_headers["mcp.example.com"]) == {
-        "/team": {"Authorization": "Bearer fake-team-token"},
-        "/web": {"Authorization": "Bearer fake-web-token"},
-    }
+    assert dict(resolved.inject_headers["mcp.example.com"]) == {"/team": {"Authorization": "Bearer fake-team-token"}}
 
 
 def test_a_credential_grant_for_an_unknown_path_names_the_path() -> None:
@@ -282,21 +289,20 @@ def test_a_credential_grant_for_an_unknown_path_names_the_path() -> None:
         resolve_grants([Grant("mcp.example.com", credential=True, path="/admin")], MCP_REGISTRY)
 
 
-@pytest.mark.parametrize("paths", [("/", "/team"), ("/team", "/team/inner")])
-def test_nested_credential_prefixes_on_one_host_are_refused(paths: tuple[str, str]) -> None:
-    """Refuse nested prefixes: a request under the inner one would take both credentials."""
+@pytest.mark.parametrize(
+    "paths", [("/", "/team"), ("/team", "/team/inner"), ("/team", "/web"), ("/team", "/team-admin")]
+)
+def test_any_two_credential_prefixes_on_one_host_are_refused(paths: tuple[str, str]) -> None:
+    """Refuse nested and sibling prefixes alike, since the edge cannot bound a path that normalizes elsewhere.
+
+    Args:
+        paths: Two credential path prefixes of one host.
+    """
     registry = {
         "mcp.example.com": {path: {"Authorization": f"Bearer fake-{index}"} for index, path in enumerate(paths)}
     }
-    with pytest.raises(GrantError, match="overlap"):
+    with pytest.raises(GrantError, match="more than one path prefix"):
         resolve_grants([Grant("mcp.example.com", credential=True, path=path) for path in paths], registry)
-
-
-def test_sibling_prefixes_that_share_text_are_not_nested() -> None:
-    """Treat ``/team`` and ``/team-admin`` as two servers, since neither path is under the other."""
-    registry = {"mcp.example.com": {"/team": {"x": "1"}, "/team-admin": {"x": "2"}}}
-    grants = [Grant("mcp.example.com", credential=True, path=path) for path in ("/team", "/team-admin")]
-    assert set(resolve_grants(grants, registry).inject_headers["mcp.example.com"]) == {"/team", "/team-admin"}
 
 
 @pytest.mark.parametrize("path", ["mcp", "/mcp?x=1", "/mcp#a", "/mcp/*", "/a b", "//mcp", "/mcp/../admin", "/./mcp", 7])

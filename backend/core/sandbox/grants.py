@@ -142,7 +142,7 @@ def resolve_grants(grants: Iterable[Grant], registry: HeaderRules) -> ResolvedGr
 
     Raises:
         GrantError: A host or path is not valid, ``OPEN_EGRESS`` asks for a
-            credential, or one host has nested credential path prefixes.
+            credential, or one host has more than one credential path prefix.
         UnknownCapabilityError: A credential grant names a host and path
             prefix that the registry does not hold.
     """
@@ -158,7 +158,14 @@ def resolve_grants(grants: Iterable[Grant], registry: HeaderRules) -> ResolvedGr
     for host, paths in wanted.items():
         if not paths:
             continue
-        _refuse_nested(host, paths)
+        # A box can send '/a/../b' or '/a/%2e%2e/b': the edge matches prefix '/a', and a server that
+        # normalizes the path gives A's headers to server B. So one host takes one prefix (SKY-833).
+        if len(paths) > 1:
+            listed = ", ".join(f"'{path}'" for path in sorted(paths))
+            raise GrantError(
+                f"Host '{host}' has credential grants for more than one path prefix ({listed}); "
+                "one host takes one credential prefix."
+            )
         for path in paths:
             if path not in capabilities.get(host, {}):
                 raise UnknownCapabilityError(host, path)
@@ -197,28 +204,6 @@ def merge_grants(grants: Iterable[Grant]) -> dict[str, frozenset[str]]:
         paths = frozenset({_clean_path(grant.path)}) if grant.credential else frozenset()
         wanted[host] = wanted.get(host, frozenset()) | paths
     return wanted
-
-
-def _refuse_nested(host: str, paths: frozenset[str]) -> None:
-    """Refuse two credential path prefixes on one host when one holds the other.
-
-    A request under the inner prefix matches both edge rules and would take
-    both credentials, so each server would no longer get only its own.
-
-    Args:
-        host: The normalized host.
-        paths: The normalized credential path prefixes of the host.
-
-    Raises:
-        GrantError: One prefix holds another.
-    """
-    for outer in paths:
-        for inner in paths:
-            if inner != outer and (outer == ROOT_PATH or inner.startswith(outer + "/")):
-                raise GrantError(
-                    f"The credential path prefixes '{outer}' and '{inner}' of host '{host}' overlap; "
-                    "each credential needs its own path."
-                )
 
 
 def _clean_registry(registry: HeaderRules) -> dict[str, dict[str, Mapping[str, str]]]:

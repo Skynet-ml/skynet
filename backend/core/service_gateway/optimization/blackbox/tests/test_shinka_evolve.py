@@ -3442,8 +3442,8 @@ def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(t
     assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))
 
 
-def test_two_mcp_servers_on_one_host_get_one_credential_grant_for_each_path(tmp_path: Path) -> None:
-    """Grant each server on a shared host its own path, so the edge adds each server's headers only there (SKY-833).
+def test_two_mcp_servers_with_headers_on_one_host_are_refused(tmp_path: Path) -> None:
+    """Refuse two servers with headers on one host, and name them, since one host takes one prefix (SKY-833).
 
     Args:
         tmp_path: Pytest's temporary folder.
@@ -3457,11 +3457,28 @@ def test_two_mcp_servers_on_one_host_get_one_credential_grant_for_each_path(tmp_
         ],
     )
 
-    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web", "root"])
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] have headers and share the host 'mcp.test'"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web", "root"])
+
+
+def test_mcp_servers_with_headers_on_other_hosts_each_get_a_credential_grant(tmp_path: Path) -> None:
+    """Grant each server on its own host a credential for its path, so the edge adds its headers only there.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "root", "url": "https://root.test", "has_headers": True},
+        ],
+    )
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "root"])
 
     assert session.grants == (
         Grant("mcp.test", credential=True, path="/team/mcp"),
-        Grant("mcp.test", credential=True, path="/web"),
         Grant("root.test", credential=True, path=""),
     )
 
