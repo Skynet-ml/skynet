@@ -80,7 +80,7 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....sandbox.box_lease import BoxLease
 from ....sandbox.capabilities import MODAL_GPU_TYPES, modal_gpu_name
-from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, HeaderRules, resolve_grants
 from ....sandbox.placement import MODAL, VERCEL, Placement, gpu_type, network_grants
 from ....sandbox.trees import (
     MAX_ARCHIVE_BYTES,
@@ -185,23 +185,21 @@ _Result = TypeVar("_Result")
 class RuntimeBoxSource:
     """Open a fresh box for each acquire and close it at release."""
 
-    def __init__(
-        self, runtime: SandboxRuntime, spec: SandboxSpec, registry: Mapping[str, Mapping[str, str]] | None = None
-    ) -> None:
+    def __init__(self, runtime: SandboxRuntime, spec: SandboxSpec, registry: HeaderRules | None = None) -> None:
         """Bind the source to a runtime and the spec of its boxes.
 
         Args:
             runtime: Opens the boxes.
             spec: The box spec; the grants replace its network fields.
-            registry: Maps each capability host to the headers that the edge
-                injects for it; ``None`` holds no credential.
+            registry: Maps each capability host and path prefix to the headers that
+                the edge injects under it; ``None`` holds no credential.
         """
         self._runtime = runtime
         self._spec = spec
         self._registry = registry or {}
 
     @property
-    def registry(self) -> Mapping[str, Mapping[str, str]]:
+    def registry(self) -> HeaderRules:
         """Return the capability registry that this source resolves grants against."""
         return self._registry
 
@@ -247,7 +245,7 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         self,
         runtimes: Mapping[str, SandboxRuntime],
         spec: SandboxSpec,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         **options: Any,
     ) -> None:
         """Bind the lease to one runtime for each provider and the spec of its boxes.
@@ -255,8 +253,8 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         Args:
             runtimes: Maps each provider name that placement can pick to the runtime that opens its boxes.
             spec: The box spec; the network grants replace its network fields.
-            registry: Maps each capability host to the headers that the edge
-                injects for it; ``None`` holds no credential.
+            registry: Maps each capability host and path prefix to the headers that
+                the edge injects under it; ``None`` holds no credential.
             **options: The :class:`BoxLease` options, such as ``vercel_cap`` and ``keep_warm``.
 
         Raises:
@@ -276,7 +274,7 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
             raise ValueError(f"The lease needs a runtime for each provider it can place on: {', '.join(missing)}.")
 
     @property
-    def registry(self) -> Mapping[str, Mapping[str, str]]:
+    def registry(self) -> HeaderRules:
         """Return the capability registry that this lease resolves grants against."""
         return self._registry
 
@@ -575,7 +573,7 @@ class TreeSandbox:
         candidates: BoxSource[SandboxSession],
         metrics: BoxSource[SandboxSession],
         *,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         timeout_seconds: float = 600,
     ) -> None:
         """Bind the layer to its stores and box sources.

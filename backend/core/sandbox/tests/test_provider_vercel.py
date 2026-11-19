@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1751,7 +1751,13 @@ def test_policy_confirmed_rules() -> None:
 
 
 GRANT_TOKEN = "Bearer fake-token-not-a-secret"
-GRANT_REGISTRY = {"api.github.example": {"Authorization": GRANT_TOKEN}}
+GRANT_REGISTRY = {
+    "api.github.example": {"/": {"Authorization": GRANT_TOKEN}},
+    "mcp.example.com": {
+        "/team": {"Authorization": "Bearer fake-team"},
+        "/team-web": {"Authorization": "Bearer fake-web"},
+    },
+}
 
 
 def _granted(*grants: Grant) -> dict[str, Any]:
@@ -1798,6 +1804,46 @@ async def test_granted_headers_reach_only_the_credential_host(client: FakeClient
     assert policy.allow["files.example.org"] == ()
     (rule,) = policy.allow["api.github.example"]
     assert [dict(transform.headers) for transform in rule.transform] == [{"Authorization": GRANT_TOKEN}]
+    await env.stop()
+
+
+def _edge_headers(rules: Sequence[Any], path: str) -> list[dict[str, str]]:
+    """Apply a host's SDK rules to one request path as the edge does, and return the headers it adds.
+
+    Args:
+        rules: The host's ``NetworkPolicyRule`` values.
+        path: The request path.
+
+    Returns:
+        The headers of each rule that matches the path.
+    """
+    added = []
+    for rule in rules:
+        matcher = rule.match.path if rule.match is not None else None
+        if (
+            matcher is None
+            or (matcher.kind == "exact" and path == matcher.value)
+            or (matcher.kind == "starts_with" and path.startswith(matcher.value))
+        ):
+            added += [dict(transform.headers) for transform in rule.transform]
+    return added
+
+
+async def test_granted_headers_reach_only_their_server_path(client: FakeClient, log: list[str]) -> None:
+    """Check that a server's headers reach its path and the paths below it, and no other path (SKY-833)."""
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+    rules = client.create_kwargs[0]["network_policy"].allow["mcp.example.com"]
+    assert {(rule.match.path.kind, rule.match.path.value) for rule in rules} == {
+        ("exact", "/team"),
+        ("starts_with", "/team/"),
+    }
+    team = [{"Authorization": "Bearer fake-team"}]
+    assert _edge_headers(rules, "/team") == team
+    assert _edge_headers(rules, "/team/sse") == team
+    for other in ("/team-web/messages", "/teams", "/", "/admin"):
+        assert _edge_headers(rules, other) == []
     await env.stop()
 
 

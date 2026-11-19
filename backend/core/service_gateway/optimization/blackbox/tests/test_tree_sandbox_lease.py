@@ -1644,7 +1644,7 @@ def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLog
         trees: The tree store.
         step_log: The step log.
     """
-    registry = {"api.example.com": {"Authorization": "x"}}
+    registry = {"api.example.com": {"/": {"Authorization": "x"}}}
 
     with pytest.raises(ValueError, match="registry"):
         TreeSandbox(

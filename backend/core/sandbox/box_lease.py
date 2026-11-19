@@ -110,7 +110,7 @@ class StartBudget:
             self._sleep(wait)
 
 
-_GrantKey = tuple[str | None, frozenset[tuple[str, bool]]]
+_GrantKey = tuple[str | None, frozenset[tuple[str, frozenset[str]]]]
 
 
 def _grant_key(grants: Sequence[Grant]) -> _GrantKey:
@@ -120,7 +120,7 @@ def _grant_key(grants: Sequence[Grant]) -> _GrantKey:
         grants: The box's grants.
 
     Returns:
-        The GPU type, and each normalized host with its merged credential flag.
+        The GPU type, and each normalized host with the path prefixes of its credential grants.
 
     Raises:
         GrantError: When a GPU grant or a host is not valid.

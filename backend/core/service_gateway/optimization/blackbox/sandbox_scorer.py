@@ -105,12 +105,12 @@ class ScorerGateway:
             payload["gateway_reasoning"] = True
         return payload
 
-    def injected_headers(self) -> dict[str, dict[str, str]]:
-        """Return the headers a network edge adds to the box's requests to the gateway host, keyed by host."""
+    def injected_headers(self) -> dict[str, dict[str, dict[str, str]]]:
+        """Return the headers a network edge adds to every request to the gateway host, keyed by host and path."""
         host = urlsplit(self.url).hostname
         if not host or not self.api_key:
             return {}
-        return {host: {"Authorization": f"Bearer {self.api_key}"}}
+        return {host: {"/": {"Authorization": f"Bearer {self.api_key}"}}}
 
 
 def _without_provider(name: str) -> str:

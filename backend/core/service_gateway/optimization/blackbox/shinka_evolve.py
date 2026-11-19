@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import IO, Any
 from urllib.parse import urlsplit
 
+from ....billing.env_connectors import host_allowed
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
 from ....i18n import t
@@ -887,7 +888,8 @@ class _AgentSession:
             servers: The names of the ``[proposer] mcp`` servers on the run's relay route.
 
         Raises:
-            ServiceError: When the context has no boxes, or the options name no address for a server.
+            ServiceError: When the context has no boxes, the options name no address for a server, or a
+                server with headers shares its host with another server or a host the proposer's network reaches.
         """
         if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.list_files, ctx.file_ids):
             raise ServiceError("The ShinkaEvolve agent editor needs the engine loop's boxes.")
@@ -900,12 +902,40 @@ class _AgentSession:
         if missing:
             raise ServiceError(f"The [proposer] mcp servers have no address in the run's options: {missing}.")
         self.servers = {name: str(known[name]["url"]) for name in sorted(servers)}
-        mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
-        # A credential grant fails to resolve when the registry holds no headers for its host, so a server
-        # with no headers gets a plain grant.
-        credential_hosts = {
-            urlsplit(str(known[name]["url"])).hostname or "" for name in servers if known[name].get("has_headers")
+        # The grants normalize a host the same way, so 'mcp.test.' and 'MCP.test' are the host 'mcp.test' here too.
+        hosts = {name: (urlsplit(url).hostname or "").rstrip(".").lower() for name, url in self.servers.items()}
+        mcp_hosts = set(hosts.values())
+        # A credential grant fails to resolve when the registry holds no headers for its host and path, so a
+        # server with no headers gets a plain grant. The path keeps a server's headers off the host's other
+        # paths (SKY-833).
+        credentials = {
+            (hosts[name], urlsplit(self.servers[name]).path) for name in self.servers if known[name].get("has_headers")
         }
+        credential_hosts = {host for host, _ in credentials}
+        # The edge matches the raw path, so '/team/../web' takes the team headers to any server that resolves
+        # it, with or without headers. So a server with headers owns its host alone. Other paths of that host,
+        # such as '/team/../admin', can still get the headers; only the edge's path handling bounds that.
+        by_host: dict[str, list[str]] = {}
+        for name, host in hosts.items():
+            by_host.setdefault(host, []).append(name)
+        listed = {str(host).rstrip(".").lower() for host in repo.get("proposer_hosts") or ()}
+        for host in sorted(credential_hosts):
+            if len(by_host[host]) > 1:
+                headed = [name for name in by_host[host] if known[name].get("has_headers")]
+                raise ServiceError(
+                    f"The [proposer] mcp servers {by_host[host]} share the host '{host}', and {headed} send "
+                    "headers; give each server with headers a host of its own."
+                )
+            # The run's options merge the [proposer] network list, the default package registries and the
+            # account's saved package index into one host list, so the message names each source. No test can
+            # show whether the edge matches '*.mcp.test' to 'mcp.test' itself, so that counts as a match too.
+            if host_allowed(host, listed) or f"*.{host}" in listed:
+                raise ServiceError(
+                    f"The [proposer] mcp server '{by_host[host][0]}' sends headers, and the proposer's network "
+                    f"also reaches its host '{host}' through [proposer] network, a package registry or the "
+                    "account's saved package index. Give the server a host of its own, remove its headers, or "
+                    "remove that host from [proposer] network or the saved package index."
+                )
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
         plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}
@@ -913,7 +943,7 @@ class _AgentSession:
         # provider edge to add the server's headers, so its secrets never enter the box (SKY-714).
         self.grants = (
             *(Grant(host) for host in sorted(plain_hosts | (mcp_hosts - credential_hosts))),
-            *(Grant(host, credential=True) for host in sorted(credential_hosts)),
+            *(Grant(host, credential=True, path=path) for host, path in sorted(credentials)),
         )
         self.seed = ctx.repo_seed.tree_id if ctx.repo_seed is not None else None
         self.seed_ids = ctx.file_ids(self.seed) if self.seed is not None and ctx.file_ids is not None else {}

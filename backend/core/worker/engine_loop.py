@@ -142,7 +142,7 @@ from ..billing.runtime import UsagePendingError
 from ..billing.usage_tags import LANE_KEY, current_tags
 from ..constants import HARDENING_EXPLOITS_DIR
 from ..exceptions import InfrastructureInterruptionError
-from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
+from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, HeaderRules, resolve_grants
 from ..sandbox.trees import (
     BoxFailureError,
     BoxSource,
@@ -421,7 +421,7 @@ class EngineLoop:
         model: ModelCall,
         model_max_cents: Decimal | int | str,
         run_dir: Path,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         hidden_hashes: Mapping[str, str] | None = None,
     ) -> None:
         """Bind the loop to its run and its step layers.

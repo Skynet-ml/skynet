@@ -43,8 +43,9 @@ class ResourceRequest:
 class SandboxSpec:
     """Describe one sandbox before a provider opens it.
 
-    ``inject_headers`` maps an allowed host to the headers that the provider
-    adds to egress requests for that host.
+    ``inject_headers`` maps an allowed host and a URL path prefix to the
+    headers that the provider adds to egress requests for that host under
+    that prefix; the prefix ``/`` covers the whole host.
     """
 
     lifetime_seconds: float
@@ -53,7 +54,7 @@ class SandboxSpec:
     name: str | None = None
     tags: Mapping[str, str] = field(default_factory=dict)
     image: str | None = None
-    inject_headers: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    inject_headers: Mapping[str, Mapping[str, Mapping[str, str]]] = field(default_factory=dict)
     network_disabled: bool = False
     allowed_hosts: tuple[str, ...] = ()
     operation_key: str | None = None

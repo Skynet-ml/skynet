@@ -251,7 +251,7 @@ def test_rejects_header_injection() -> None:
                 lifetime_seconds=60,
                 image=BASE_IMAGE,
                 allowed_hosts=("api.example.com",),
-                inject_headers={"api.example.com": {"X-Key": "value"}},
+                inject_headers={"api.example.com": {"/": {"X-Key": "value"}}},
             )
         )
 

@@ -1127,7 +1127,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     # one header added at the network edge cannot authorize its calls; its
     # tokens travel in the environment instead and are scrubbed from its logs.
     headers = (
-        {gateway_host: {"Authorization": f"Bearer {options.gateway.api_key}"}}
+        {gateway_host: {"/": {"Authorization": f"Bearer {options.gateway.api_key}"}}}
         if runtime.injects_headers and gateway_host and not shinka
         else {}
     )

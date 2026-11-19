@@ -3371,7 +3371,7 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
         tmp_path: Pytest's temporary folder.
     """
     options = _agent_options(
-        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_hosts=["pypi.org", "gw.test"],
         proposer_mcp=[
             {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
             {"name": "unused", "url": "https://x.test", "has_headers": True},
@@ -3381,7 +3381,7 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
 
     session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["docs"])
 
-    assert session.grants == (Grant("pypi.org"), Grant("mcp.test", credential=True))
+    assert session.grants == (Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))
     assert "- docs: https://mcp.test/mcp" in session._system()
     assert "unused" not in session._system()
     with pytest.raises(ServiceError, match="no address"):
@@ -3411,7 +3411,7 @@ def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) 
         return SimpleNamespace(timed_out=False, exit_code=0, stdout="ok", stderr=""), "after"
 
     options = _agent_options(
-        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_hosts=["pypi.org", "gw.test"],
         proposer_mcp=[{"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True}],
     )
     options.gateway = SimpleNamespace(url="https://gw.test/v1")
@@ -3420,7 +3420,7 @@ def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) 
     _, tree = session._tool(_call(0, "run", command="true"), "tree")
 
     assert tree == "after"
-    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True))]
+    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))]
 
 
 def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(tmp_path: Path) -> None:
@@ -3439,7 +3439,144 @@ def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(t
 
     session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["public", "docs"])
 
-    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True))
+    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True, path="/mcp"))
+
+
+def test_two_mcp_servers_with_headers_on_one_host_are_refused(tmp_path: Path) -> None:
+    """Refuse two servers with headers on one host, and name them, since one host takes one prefix (SKY-833).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "web", "url": "https://mcp.test/web", "has_headers": True},
+            {"name": "root", "url": "https://root.test", "has_headers": True},
+        ],
+    )
+
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] share the host 'mcp.test', and \['team', 'web'\]"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web", "root"])
+
+
+@pytest.mark.parametrize("url", ["https://mcp.test/web", "https://mcp.test/team/mcp", "https://mcp.test/team/mcp/"])
+def test_an_mcp_server_with_headers_shares_its_host_with_no_other_server(tmp_path: Path, url: str) -> None:
+    """Refuse any other server on a host with headers: '/team/../web' would take the headers there (SKY-833).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        url: The address of a server with no headers on the same host.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "web", "url": url, "has_headers": False},
+        ],
+    )
+
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] share the host 'mcp.test', and \['team'\] send"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web"])
+
+
+@pytest.mark.parametrize(
+    ("team", "web"),
+    [
+        ("https://mcp.test/team/mcp", "https://mcp.test./web"),
+        ("https://mcp.test/team/mcp", "https://MCP.test/web"),
+        ("https://mcp.test./team/mcp", "https://mcp.test/web"),
+    ],
+)
+def test_a_trailing_dot_or_capital_does_not_split_a_host_with_headers(tmp_path: Path, team: str, web: str) -> None:
+    """Refuse a server on a host with headers when only a trailing dot or a capital tells the hosts apart (SKY-833).
+
+    The grants normalize both forms to one host, so the edge would add the headers to both servers.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        team: The address of the server with headers.
+        web: The address of a server with no headers on the same host.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": team, "has_headers": True},
+            {"name": "web", "url": web, "has_headers": False},
+        ],
+    )
+
+    with pytest.raises(ServiceError, match=r"\['team', 'web'\] share the host 'mcp.test', and \['team'\] send"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "web"])
+
+
+@pytest.mark.parametrize(
+    ("url", "network"),
+    [
+        ("https://mcp.test/team/mcp", "MCP.test"),
+        ("https://mcp.test/team/mcp", "mcp.test."),
+        ("https://mcp.test./team/mcp", "mcp.test"),
+        ("https://mcp.test/team/mcp", "*.test"),
+        ("https://api.mcp.test/team/mcp", "*.mcp.test"),
+    ],
+)
+def test_a_proposer_network_host_that_covers_an_mcp_host_with_headers_is_refused(
+    tmp_path: Path, url: str, network: str
+) -> None:
+    """Refuse a network host or wildcard that covers a host with headers, since the box would reach its paths.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        url: The address of the server with headers.
+        network: A host the proposer's network reaches.
+    """
+    options = _agent_options(
+        proposer_hosts=["pypi.org", network],
+        proposer_mcp=[{"name": "team", "url": url, "has_headers": True}],
+    )
+
+    with pytest.raises(ServiceError, match=r"server 'team' sends headers, and the proposer's network also reaches"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
+
+
+def test_a_proposer_network_wildcard_of_the_host_itself_is_refused(tmp_path: Path) -> None:
+    """Refuse ``*.mcp.test`` next to a server with headers on ``mcp.test``: the edge may match the bare suffix.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=["*.mcp.test."],
+        proposer_mcp=[{"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True}],
+    )
+
+    with pytest.raises(ServiceError, match=r"server 'team' sends headers, and the proposer's network also reaches"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
+
+
+def test_mcp_servers_on_other_hosts_each_get_their_own_grant(tmp_path: Path) -> None:
+    """Grant each server on its own host a credential for its path, so the edge adds its headers only there.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=[],
+        proposer_mcp=[
+            {"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True},
+            {"name": "root", "url": "https://root.test", "has_headers": True},
+            {"name": "public", "url": "https://open.test/mcp", "has_headers": False},
+        ],
+    )
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team", "root", "public"])
+
+    assert session.grants == (
+        Grant("open.test"),
+        Grant("mcp.test", credential=True, path="/team/mcp"),
+        Grant("root.test", credential=True, path=""),
+    )
 
 
 def test_read_file_marks_a_file_it_cuts_so_the_agent_does_not_write_back_a_part(tmp_path: Path) -> None:
