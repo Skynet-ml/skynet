@@ -734,7 +734,8 @@ mcp = "eval/.mcp.json"
   - a server with no `headers` uses the host of a server with `headers`;
   - the proposer's network reaches that host: a `[proposer] network` entry,
     a package registry or the account's saved package index. A suffix entry
-    such as `*.example.com` counts when it matches the host.
+    such as `*.example.com` counts when it matches the host, and also when
+    the host is `example.com` itself.
 
   The check ignores case and a trailing dot, so `MCP.example.com.` is
   `mcp.example.com`. To fix it, give each server with `headers` its own

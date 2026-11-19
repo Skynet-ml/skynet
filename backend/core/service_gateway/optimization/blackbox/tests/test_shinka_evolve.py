@@ -3540,20 +3540,19 @@ def test_a_proposer_network_host_that_covers_an_mcp_host_with_headers_is_refused
         shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
 
 
-def test_a_proposer_network_wildcard_does_not_cover_its_own_suffix(tmp_path: Path) -> None:
-    """Keep a server with headers on ``mcp.test`` next to ``*.mcp.test``: the wildcard matches only hosts below it.
+def test_a_proposer_network_wildcard_of_the_host_itself_is_refused(tmp_path: Path) -> None:
+    """Refuse ``*.mcp.test`` next to a server with headers on ``mcp.test``: the edge may match the bare suffix.
 
     Args:
         tmp_path: Pytest's temporary folder.
     """
     options = _agent_options(
-        proposer_hosts=["*.mcp.test"],
+        proposer_hosts=["*.mcp.test."],
         proposer_mcp=[{"name": "team", "url": "https://mcp.test/team/mcp", "has_headers": True}],
     )
 
-    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
-
-    assert session.grants == (Grant("*.mcp.test"), Grant("mcp.test", credential=True, path="/team/mcp"))
+    with pytest.raises(ServiceError, match=r"server 'team' sends headers, and the proposer's network also reaches"):
+        shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["team"])
 
 
 def test_mcp_servers_on_other_hosts_each_get_their_own_grant(tmp_path: Path) -> None:

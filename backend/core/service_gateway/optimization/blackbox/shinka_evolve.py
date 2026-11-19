@@ -927,8 +927,9 @@ class _AgentSession:
                     "headers; give each server with headers a host of its own."
                 )
             # The run's options merge the [proposer] network list, the default package registries and the
-            # account's saved package index into one host list, so the message names each source.
-            if host_allowed(host, listed):
+            # account's saved package index into one host list, so the message names each source. No test can
+            # show whether the edge matches '*.mcp.test' to 'mcp.test' itself, so that counts as a match too.
+            if host_allowed(host, listed) or f"*.{host}" in listed:
                 raise ServiceError(
                     f"The [proposer] mcp server '{by_host[host][0]}' sends headers, and the proposer's network "
                     f"also reaches its host '{host}' through [proposer] network, a package registry or the "
