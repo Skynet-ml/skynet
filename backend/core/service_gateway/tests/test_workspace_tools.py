@@ -851,6 +851,17 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
     assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
 
 
+@pytest.mark.parametrize(
+    "line", ['proposer.illegal = "rules.md"', '"illegal" = "rules.md"', "target.'a.b'.illegal = 'rules.md'"]
+)
+def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line: str) -> None:
+    """A dotted or quoted ``illegal`` key in a current text that is not TOML still guards its path."""
+    refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", "version = 1\n")
+
+    assert refusal is not None
+    assert "'rules.md'" in refusal
+
+
 @pytest.mark.asyncio
 async def test_the_raw_fallback_cleans_paths_the_way_the_parser_does() -> None:
     """A raw path with a backslash, spaces or slashes compares equal to the parser's clean path."""

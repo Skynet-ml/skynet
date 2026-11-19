@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from ...api.errors import DomainError
 from ...connectors import github, repo_hosts
 
 logger = logging.getLogger(__name__)
@@ -340,10 +341,18 @@ class RepoBrowser:
 
         Returns:
             The text and whether it was cut at ``limit``, or ``None`` when the
-            tree has no such file. A failed host read raises.
+            repository has no such file. A failed host read raises.
         """
         if path not in self._files:
-            return None
+            if not self._truncated:
+                return None
+            # A cut tree may not list the file, so only the host's 404 proves it is missing.
+            try:
+                return self._read_text(path, limit)
+            except DomainError as error:
+                if error.code == "connectors.not_found":
+                    return None
+                raise
         return self._read_text(path, limit)
 
     def overview(self) -> RepoRead:

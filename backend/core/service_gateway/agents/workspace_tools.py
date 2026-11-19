@@ -284,8 +284,11 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
-# A line that names an intent or rules file, for a current file that is not TOML at all.
-_RULE_LINE = re.compile(r"""^\s*(?:instructions|illegal)\s*=\s*["']([^"'\n]+)["']""", re.MULTILINE)
+# A line that names an intent or rules file, for a current file that is not TOML at all. A dotted
+# prefix (``proposer.illegal``) and a quoted key are TOML forms of the same setting.
+_RULE_LINE = re.compile(
+    r"""^\s*(?:[\w"'-]+\s*\.\s*)*["']?(?:instructions|illegal)["']?\s*=\s*["']([^"'\n]+)["']""", re.MULTILINE
+)
 
 
 def _clean_rule_path(path: str) -> str:
