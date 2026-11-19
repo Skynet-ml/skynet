@@ -802,6 +802,23 @@ async def test_a_blank_draft_optimize_toml_still_checks_the_repository_file(monk
 
 
 @pytest.mark.asyncio
+async def test_an_edit_of_a_blank_draft_optimize_toml_still_checks_the_repository_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit of a whitespace-only draft is checked against the repository's optimize.toml, not the blank draft."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "optimize_toml": "\n"}, turn, token=lambda: "gh-token")[
+        EDIT_FILE_TOOL
+    ].acall(path="optimize.toml", old_text="\n", new_text=_NO_RULES_TOML)
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
 async def test_the_guard_checks_the_repository_file_after_the_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard's read of the repository's optimize.toml works after the agent used every read of its turn."""
     _fake_repo_with_toml(monkeypatch, [])
@@ -893,6 +910,14 @@ def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line
 
     assert refusal is not None
     assert "'rules.md'" in refusal
+
+
+def test_the_raw_search_decodes_basic_string_escapes() -> None:
+    """A backslash escape in a non-TOML current text decodes as TOML does, so a kept path matches."""
+    current = 'instructions = "docs/intent.md"\n[proposer]\nillegal = "docs\\\\rules.md"\n[broken\n'
+
+    assert workspace_tools.dropped_rule_files(current, OPTIMIZE_TOML_EXAMPLE) is None
+    assert workspace_tools.dropped_rule_files(current, _NO_RULES_TOML) is not None
 
 
 @pytest.mark.asyncio

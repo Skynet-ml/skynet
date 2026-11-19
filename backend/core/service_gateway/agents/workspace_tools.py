@@ -34,7 +34,7 @@ from ...models.blackbox import (
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
-from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
+from ..optimization.blackbox.repo_constraints import ConstraintsError, _rule_file_settings, parse_constraints
 from .repo_browser import RepoBrowser, RepoRead
 
 if TYPE_CHECKING:
@@ -320,12 +320,7 @@ def _rule_settings(text: str) -> dict[str, str] | None:
     except ConstraintsError:
         pass
     else:
-        roles = {"[proposer] illegal": parsed.proposer, "[run] illegal": parsed.run_role}
-        roles["[metric] illegal"] = parsed.metric_role
-        roles |= {f"[target.{name}] illegal": stage for name, stage in parsed.targets.items()}
-        settings = {"instructions": parsed.instructions_file}
-        settings |= {setting: role.illegal_file for setting, role in roles.items()}
-        return {setting: path for setting, path in settings.items() if path is not None}
+        return dict(_rule_file_settings(parsed))
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
@@ -340,6 +335,23 @@ def _rule_settings(text: str) -> dict[str, str] | None:
     return {setting: _clean_rule_path(value) for setting, value in raw.items() if isinstance(value, str)}
 
 
+def _decode_string(match: re.Match[str]) -> str:
+    """Decode the escapes of a basic TOML string the raw search found, as the TOML reader would.
+
+    Args:
+        match: A :data:`_RULE_STRING` match.
+
+    Returns:
+        The decoded value; the raw text for a literal (single-quote) string or an escape TOML refuses.
+    """
+    if match["s"].startswith("'"):
+        return match["path"]
+    try:
+        return str(tomllib.loads(f"x = {match['s']}{match['path']}{match['s']}")["x"])
+    except tomllib.TOMLDecodeError:
+        return match["path"]
+
+
 def _rule_line_paths(text: str) -> list[str]:
     """Find the paths of the ``instructions`` and ``illegal`` keys of a text that is not TOML.
 
@@ -349,7 +361,7 @@ def _rule_line_paths(text: str) -> list[str]:
     Returns:
         The distinct cleaned paths, in file order.
     """
-    return list(dict.fromkeys(_clean_rule_path(match["path"]) for match in _RULE_STRING.finditer(text)))
+    return list(dict.fromkeys(_clean_rule_path(_decode_string(match)) for match in _RULE_STRING.finditer(text)))
 
 
 def dropped_rule_files(current: str, text: str) -> str | None:
@@ -675,8 +687,13 @@ def workspace_tools(
         edited = current.replace(old_text, new_text, 1)
         if not edited.strip():
             return {"error": "The edit leaves the file empty: send the whole file text instead."}
-        if field == "optimize_toml" and (refusal := dropped_rule_files(current, edited)):
-            return {"error": refusal}
+        if field == "optimize_toml":
+            # A blank draft is the edit's base but not the file to guard, so check against current_toml.
+            guarded = await current_toml()
+            if isinstance(guarded, dict):
+                return dict(guarded)
+            if refusal := dropped_rule_files(guarded, edited):
+                return {"error": refusal}
         return save(clean, field, edited)
 
     file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example optimize.toml."
