@@ -14,9 +14,6 @@ EVENT_LOG = "log"
 EVENT_RESULT = "result"
 EVENT_ERROR = "error"
 EVENT_TERMINAL = "terminal"
-# A sandboxed agent run's record or a piece of its live transcript, for the
-# ``blackbox_agent_runs`` table rather than the progress log.
-EVENT_AGENT_RUN = "agent_run"
 # The parent relay is still awaiting an economy batch: proves liveness to the
 # stall watchdog without writing anything to the job's log.
 EVENT_HEARTBEAT = "heartbeat"

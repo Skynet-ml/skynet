@@ -302,7 +302,7 @@ def test_get_agent_run_serves_the_record_and_the_transcript_tail(
 ) -> None:
     """The record comes back whole, with only the transcript past the caller's offset."""
     store.seed_job("r2")
-    store.save_agent_run("r2", _agent_run())
+    store._agent_runs["r2"] = {1: _agent_run()}
 
     resp = opt_client.get("/optimizations/r2/agent-runs/1?since_transcript=4")
 
@@ -321,7 +321,7 @@ def test_get_agent_run_serves_the_record_and_the_transcript_tail(
 def test_get_agent_run_clamps_an_offset_past_the_end(opt_client: TestClient, store: _ExtendedFakeJobStore) -> None:
     """An offset beyond the transcript yields an empty tail at the transcript's length."""
     store.seed_job("r3")
-    store.save_agent_run("r3", _agent_run())
+    store._agent_runs["r3"] = {1: _agent_run()}
 
     resp = opt_client.get("/optimizations/r3/agent-runs/1?since_transcript=99")
 
@@ -333,7 +333,7 @@ def test_get_agent_run_clamps_an_offset_past_the_end(opt_client: TestClient, sto
 def test_get_agent_run_rejects_a_negative_offset(opt_client: TestClient, store: _ExtendedFakeJobStore) -> None:
     """A negative offset is a validation error."""
     store.seed_job("r4")
-    store.save_agent_run("r4", _agent_run())
+    store._agent_runs["r4"] = {1: _agent_run()}
 
     resp = opt_client.get("/optimizations/r4/agent-runs/1?since_transcript=-1")
 

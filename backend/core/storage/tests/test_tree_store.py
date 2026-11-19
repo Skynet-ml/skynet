@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from core.storage.models import Base, JobModel, TreeObjectModel
 from core.storage.object_store import LocalObjectStore
-from core.storage.step_log_store import StepLogStore
+from core.storage.step_log_store import ObjectTooLargeError, StepLogStore
 from core.storage.tree_store import TreeEntry, TreeStore, decode_tree, encode_blob, encode_tree, object_id_of
 from core.storage.usage import compute_user_storage
 
@@ -204,6 +204,79 @@ def test_a_repeated_object_is_stored_once_per_account(step_log, engine) -> None:
     with Session(engine) as session:
         owners = sorted(session.scalars(select(TreeObjectModel.username).where(TreeObjectModel.object_id == first)))
     assert owners == ["ada", "bob"]
+
+
+def test_a_capped_blob_read_refuses_a_larger_blob_before_it_loads(step_log, monkeypatch) -> None:
+    """A capped read compares the stored length to the cap first, with the read rules of an uncapped read.
+
+    Before the flush the length is the buffer's; after it, the pack row's, and a read that passes the cap finds
+    its object in one pack lookup. A blob above the cap reads no range of the pack.
+
+    Args:
+        step_log: The step log under the tree store.
+        monkeypatch: Pytest's patcher, for the lookup and range records.
+    """
+    trees = TreeStore(step_log)
+    big = b"\0" * 1000
+    blob = trees.put_blob("job-ada", big)
+    empty = trees.put_blob("job-ada", b"")
+    lookups: list[str] = []
+    ranges: list[int | None] = []
+    locate, get = StepLogStore._object_location, LocalObjectStore.get
+
+    def located(store: StepLogStore, run_id: str, object_id: str) -> tuple[str, int, int] | None:
+        """Record a pack lookup.
+
+        Args:
+            store: The step log.
+            run_id: The job that reads.
+            object_id: The object's id.
+
+        Returns:
+            The object's pack key, offset and length.
+        """
+        lookups.append(object_id)
+        return locate(store, run_id, object_id)
+
+    def ranged(store: LocalObjectStore, key: str, offset: int = 0, length: int | None = None) -> bytes:
+        """Record the length of a range read.
+
+        Args:
+            store: The object store.
+            key: The pack key.
+            offset: The first byte.
+            length: The bytes to read; ``None`` reads to the end.
+
+        Returns:
+            The bytes of the range.
+        """
+        ranges.append(length)
+        return get(store, key, offset, length)
+
+    monkeypatch.setattr(StepLogStore, "_object_location", located)
+    monkeypatch.setattr(LocalObjectStore, "get", ranged)
+
+    with pytest.raises(ObjectTooLargeError) as before:
+        trees.get_blob("job-ada", blob, max_bytes=999)
+    assert before.value.size == 1000
+    assert trees.get_blob("job-ada", blob, max_bytes=1000) == big
+    assert trees.get_blob("job-ada", empty, max_bytes=0) == b""
+    assert trees.get_blob("job-bob", blob, max_bytes=0) is None
+    step_log.flush()
+    lookups.clear()
+    ranges.clear()
+
+    with pytest.raises(ObjectTooLargeError) as after:
+        trees.get_blob("job-ada-2", blob, max_bytes=999)
+    assert after.value.size == 1000
+    assert ranges == []
+    lookups.clear()
+    assert trees.get_blob("job-ada", blob, max_bytes=1000) == big
+    assert lookups == [blob]
+    assert ranges == [len(encode_blob(big))]
+    assert trees.get_blob("job-ada", empty, max_bytes=0) == b""
+    assert trees.get_blob("job-bob", blob, max_bytes=0) is None
+    assert trees.get_blob("job-ada", "f" * 64, max_bytes=0) is None
 
 
 def test_a_blob_read_as_a_tree_or_a_changed_object_is_refused(step_log) -> None:

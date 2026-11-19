@@ -2470,6 +2470,44 @@ export function getAgentRun(
   );
 }
 
+/** One flushed agent step of a run. Long text is cut on the server; `truncated` says so. */
+export interface ReplayStep {
+  step_id: string;
+  seq: number;
+  kind: string;
+  tree_id: string | null;
+  created_at: string;
+  command: string | null;
+  output: string | null;
+  response: string | null;
+  truncated: boolean;
+}
+
+/** One page of one agent's steps, oldest first, with the run's agents. */
+export interface ReplayStepPage {
+  agents: Array<{ agent_id: string; step_count: number }>;
+  agent_id: string | null;
+  steps: ReplayStep[];
+  has_more: boolean;
+  next_after_seq: number;
+}
+
+/** One page of a run's step log for one agent; no agent picks the first one. */
+export function getReplaySteps(
+  optimizationId: string,
+  options: { agentId?: string | null; afterSeq?: number; limit?: number } = {},
+  source?: ApiSource,
+) {
+  const q = new URLSearchParams({ after_seq: String(options.afterSeq ?? -1) });
+  if (options.agentId) q.set("agent_id", options.agentId);
+  if (options.limit) q.set("limit", String(options.limit));
+  return request<ReplayStepPage>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/steps?${q.toString()}`,
+    undefined,
+    source,
+  );
+}
+
 /**
  * Download a repository run's whole repository at its pinned commit with one
  * version's patch applied, as a zip. The version is named by its patch text,

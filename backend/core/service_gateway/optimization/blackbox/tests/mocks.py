@@ -14,15 +14,6 @@ from ..sandbox import CommandResult, OutputSink, SandboxSpec
 
 VOWELS = "aeiou"
 
-# A scorer for agent targets: it judges what the agent wrote, which the
-# runner hands over in place of the case.
-AGENT_OUTPUT_SCORER_CODE = """
-def score(candidate, case=None):
-    output = (case or {}).get("output") or ""
-    vowels = sum(ch in "aeiou" for ch in output)
-    return {"score": vowels / max(1, len(output)), "feedback": f"{vowels} vowel(s)"}
-"""
-
 # Scorer source in the shape users submit; the in-process twin below keeps
 # the engine tests free of the sandbox.
 VOWEL_SCORER_CODE = """

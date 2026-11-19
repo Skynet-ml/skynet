@@ -570,7 +570,7 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
 
     try:
         # A repository target scores one case at a time, as in a run.
-        return _final_run(score, patch, cases, label=label, phase=PHASE_FINAL, concurrency=1, repo_scorer=True)
+        return _final_run(score, patch, cases, label=label, phase=PHASE_FINAL)
     except ServiceError as error:
         # _final_run quotes the text of any error; an unexpected type must reach the handlers raw,
         # so they show only its type name and log it. The raw error keeps its own cause: the SDK

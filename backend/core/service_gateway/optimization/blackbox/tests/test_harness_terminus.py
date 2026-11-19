@@ -15,9 +15,8 @@ import pytest
 
 from core.api.model_catalog import REASONING_EFFORTS
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
 
-from ..harness import GatewayConfig, build_launch, pinned_harness_check
+from ..harness import GatewayConfig
 from ..harness_bridge import parse_output, parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.base import _version_check
@@ -25,7 +24,6 @@ from ..harnesses.terminus import ENV_REASONING_EFFORT, HARBOR_VERSION, HARNESS_I
 from .mocks import FakeGateway
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
-_RELAY = "http://127.0.0.1:3210/v1"
 _DIRECT_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
@@ -305,60 +303,6 @@ def test_launch_refuses_a_bad_gateway_url(url: str) -> None:
     """Without a clean absolute http(s) URL there is no launch, so no direct provider route."""
     with pytest.raises(ServiceError):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
-
-
-def test_protected_launch_checks_the_pin_offline_and_rewrites_the_runner_to_the_relay(tmp_path: Path) -> None:
-    """Protected mode uses the version probe, offline uv env, and points the runner at the local relay."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True)
-
-    assert launch.install_command is not None
-    assert launch.install_command == pinned_harness_check(HARNESS_ID)
-    assert "pip install" not in launch.install_command
-    assert launch.env["UV_OFFLINE"] == "1"
-    assert launch.env["HARBOR_TELEMETRY"] == "0"
-    for name in _DIRECT_KEYS:
-        assert launch.env[name] == ""
-    for name, content in launch.files.items():
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    subprocess.run(
-        launch.run_command,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
-        timeout=10,
-        check=True,
-    )
-    runner = (tmp_path / RUNNER_FILE).read_text()
-    assert _GATEWAY.url not in runner
-    assert f"GATEWAY_URL = {_RELAY!r}" in runner
-
-
-@pytest.mark.parametrize(("reported", "ok"), [("0.25.0", True), ("0.25.1", False), ("10.25.0", False)])
-def test_pinned_check_accepts_only_the_exact_harbor_version(tmp_path: Path, reported: str, ok: bool) -> None:
-    """The offline probe passes only when the warmed environment reports the pinned Harbor release."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text(f"#!/bin/sh\necho {reported}\n")
-    fake_uv.chmod(0o755)
-    check = pinned_harness_check(HARNESS_ID)
-    assert check is not None
-
-    result = subprocess.run(
-        check,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
-        timeout=10,
-        check=False,
-    )
-
-    assert (result.returncode == 0) is ok
 
 
 def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:

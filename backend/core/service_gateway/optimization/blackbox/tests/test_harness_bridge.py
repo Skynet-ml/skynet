@@ -14,10 +14,9 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -426,7 +425,8 @@ def _alive(pid: int) -> bool:
     """
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    # Linux raises ProcessLookupError when the process ends between the open and the read.
+    except (FileNotFoundError, ProcessLookupError):
         return False
 
 
@@ -1303,28 +1303,6 @@ def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> N
     assert not (session / harness_bridge.GUARD_DIR).exists()
 
 
-@pytest.mark.parametrize(
-    "launch",
-    [
-        lambda gateway: harness._pi_launch("m1", gateway),
-        lambda gateway: harness._prime_agent_launch("m1", gateway),
-        lambda gateway: harness.pi_editor_launch("m1", gateway),
-    ],
-    ids=["pi", "prime", "pi-editor"],
-)
-def test_pi_family_launches_load_the_guard_extension_only_when_installed(launch, tmp_path: Path) -> None:
-    """Add ``-e <guard>`` to Pi-family commands when the guard is set, and nothing when it is not."""
-    command = launch(harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
-    assert harness._GUARD_PI_ARG in command
-    expand = f"printf '%s|' {harness._GUARD_PI_ARG}"
-    with_guard = subprocess.run(
-        ["bash", "-c", expand], env={"APP_GUARD_PI": "/g/pi.ts"}, capture_output=True, text=True, check=True
-    )
-    without = subprocess.run(["bash", "-c", expand], env={}, capture_output=True, text=True, check=True)
-    assert with_guard.stdout == "-e|/g/pi.ts|"
-    assert without.stdout == "|"
-
-
 def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) -> None:
     """Copy the guard hooks into the session's Codex home only when the guard is set."""
     command = harness._codex_launch("m1", harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
@@ -1336,10 +1314,6 @@ def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) 
     env = {"APP_GUARD_CODEX": str(tmp_path / "hooks.json")}
     subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env=env, check=True)
     assert (tmp_path / ".app" / "codex" / "hooks.json").read_text() == "{}"
-
-
-# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
-_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
 
 
 class _FakeResponses(http.server.BaseHTTPRequestHandler):
@@ -1382,42 +1356,6 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         for event in events:
             self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
-
-
-@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
-def test_installed_codex_runs_the_guard_hook_and_refuses_a_hidden_read(tmp_path: Path) -> None:
-    """Drive the real Codex against a fake model: its shell read of optimize.toml is refused and logged."""
-    assert _CODEX is not None
-    _FakeResponses.tool_outputs = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeResponses)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    (workspace / "optimize.toml").write_text("secret = 1\n")
-    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
-    proposer = {
-        **harness.launch_payload(harness._codex_launch("fake-model", gateway)),
-        "hidden_hashes": harness_bridge.hidden_hashes(["optimize.toml"]),
-    }
-    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
-    try:
-        outcome = run_session(
-            proposer,
-            workspace=workspace,
-            prompt="Read the config.",
-            model="fake-model",
-            session_dir=tmp_path / "session",
-            timeout_seconds=120,
-            extra_env={"PATH": path},
-            api_key="k",
-        )
-    finally:
-        server.shutdown()
-    assert outcome.returncode == 0, outcome.stderr
-    assert outcome.refusals == [{"tool": "Bash", "kind": "config"}]
-    assert len(_FakeResponses.tool_outputs) == 1
-    assert harness_bridge.GUARD_REFUSAL in _FakeResponses.tool_outputs[0]
-    assert "secret" not in _FakeResponses.tool_outputs[0]
 
 
 class _FakeChat(http.server.BaseHTTPRequestHandler):
@@ -1469,161 +1407,6 @@ class _FakeChat(http.server.BaseHTTPRequestHandler):
         for chunk in chunks:
             self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
         self.wfile.write(b"data: [DONE]\n\n")
-
-
-# Each harness's own read tool and arguments. Prime Agent has only ``ipython``.
-_CHAT_HARNESSES = [
-    ("opencode", harness._opencode_launch, "read", "filePath"),
-    ("pi", harness._pi_launch, "read", "path"),
-    ("prime-agent", harness._prime_agent_launch, "ipython", "code"),
-]
-
-
-def _run_kernel_build(command: list[str], env: Mapping[str, str]) -> None:
-    """Run one step of the shared kernel build, and fail the test with the step's output when it fails.
-
-    Args:
-        command: The build step.
-        env: The step's environment.
-    """
-    try:
-        subprocess.run(command, env=env, check=True, capture_output=True, text=True, timeout=900)
-    except subprocess.CalledProcessError as error:
-        pytest.fail(
-            f"The Prime Agent kernel build step {command[:2]} failed with exit code {error.returncode}.\n"
-            f"stderr:\n{error.stderr}\nstdout:\n{error.stdout}"
-        )
-
-
-@pytest.fixture(scope="session")
-def prime_kernel_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    """Build one warm Prime Agent kernel for the whole test run, and name it in the environment.
-
-    Args:
-        tmp_path_factory: Gives the run's temp folder, which all xdist workers share.
-
-    Returns:
-        The environment that points Prime Agent and uv at the shared kernel.
-    """
-    # Prime Agent waits only 5 s for its kernel to bind its ports (SKY-839). A kernel venv in the
-    # test's own HOME is new each time, and macOS checks each new binary at its first load, so that
-    # first start took about 5 s on an idle machine and more under load. One venv per run, started
-    # once here, keeps each test's kernel start well inside that limit.
-    root = tmp_path_factory.getbasetemp()
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        root = root.parent
-    shared = root / "prime-agent-kernel"
-    env = {
-        "PRIME_AGENT_KERNEL_VENV": str(shared / "kernel-venv"),
-        "UV_CACHE_DIR": str(shared / "uv-cache"),
-        "UV_PYTHON_INSTALL_DIR": str(shared / "uv-python"),
-    }
-    executable = shutil.which("prime-agent")
-    if executable is None or _NODE is None:
-        return env
-    bootstrap = Path(executable).resolve().parents[1] / "core" / "kernel" / "bootstrap-cli.js"
-    home = shared / "home"
-    home.mkdir(parents=True, exist_ok=True)
-    warm_env = {**os.environ, **env, "HOME": str(home), "PRIME_AGENT_INSTALL_UV": "1"}
-    # Prime Agent locks the venv while it builds it, so parallel workers build it once.
-    _run_kernel_build([_NODE, str(bootstrap)], warm_env)
-    warm = (
-        "from jupyter_client.manager import start_new_kernel\n"
-        "manager, client = start_new_kernel(startup_timeout=600)\n"
-        "client.execute_interactive('import rlm', timeout=600)\n"
-        "manager.shutdown_kernel(now=True)\n"
-    )
-    python = shared / "kernel-venv" / "bin" / "python"
-    _run_kernel_build([str(python), "-c", warm], warm_env)
-    return env
-
-
-@pytest.fixture
-def harness_tmp() -> Iterator[Path]:
-    """Give one harness run its own temp folder, and stop the daemon that the run leaves there.
-
-    Yields:
-        The folder to pass to the harness as ``TMPDIR``.
-    """
-    # Prime Agent keeps its daemon sockets under the temp folder, and the daemon lives on after the
-    # run. A daemon left in the machine's shared temp folder makes every later Prime Agent start
-    # fail. The folder is directly under /tmp because a Unix socket path has a length limit, and
-    # the macOS default temp folder and pytest's tmp_path are too long for the daemon's sockets.
-    folder = Path(tempfile.mkdtemp(dir="/tmp"))
-    try:
-        yield folder
-    finally:
-        daemons = []
-        for owner in folder.glob("prime-agent-*/supervisor-owners/*/owner.json"):
-            with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
-                daemon = int(json.loads(owner.read_text())["pid"])
-                os.kill(daemon, signal.SIGTERM)
-                daemons.append(daemon)
-        # A daemon and its worker write into the folder while they stop, so the folder goes only
-        # after both. The daemon leads their process group, and signal 0 only probes the group.
-        deadline = time.monotonic() + 10
-        for daemon in daemons:
-            with contextlib.suppress(OSError):
-                while time.monotonic() < deadline:
-                    os.killpg(daemon, 0)
-                    time.sleep(0.05)
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-@pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
-@pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
-def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-    harness_tmp: Path,
-    binary: str,
-    launch: Any,
-    tool: str,
-    key: str,
-    target: str,
-) -> None:
-    """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
-    executable = shutil.which(binary)
-    if executable is None:
-        pytest.skip(f"{binary} is not installed")
-    kernel_env = request.getfixturevalue("prime_kernel_env") if binary == "prime-agent" else {}
-    value = f'print(open("{target}").read())' if key == "code" else target
-    _FakeChat.tool = (tool, {key: value})
-    _FakeChat.tool_outputs = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeChat)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    (workspace / "optimize.toml").write_text("secret = 1\n")
-    (workspace / "notes.txt").write_text("hello\n")
-    (tmp_path / "home").mkdir()
-    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
-    proposer = {
-        **harness.launch_payload(launch("fake-model", gateway)),
-        "hidden_hashes": harness_bridge.hidden_hashes(["optimize.toml"]),
-    }
-    path = f"{Path(executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
-    try:
-        outcome = run_session(
-            proposer,
-            workspace=workspace,
-            prompt="Read the file.",
-            model="fake-model",
-            session_dir=tmp_path / "session",
-            timeout_seconds=120,
-            extra_env={"PATH": path, "HOME": str(tmp_path / "home"), "TMPDIR": str(harness_tmp), **kernel_env},
-            api_key="k",
-        )
-    finally:
-        server.shutdown()
-    assert outcome.returncode == 0, outcome.stderr
-    assert len(_FakeChat.tool_outputs) == 1
-    if target == "optimize.toml":
-        assert outcome.refusals == [{"tool": tool, "kind": "config"}]
-        assert _FakeChat.tool_outputs[0] == harness_bridge.GUARD_REFUSAL
-    else:
-        assert outcome.refusals == []
-        assert "hello" in _FakeChat.tool_outputs[0]
 
 
 def _fake_tool(bin_dir: Path, name: str, script: str) -> None:

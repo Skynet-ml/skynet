@@ -65,7 +65,7 @@ import type {
 } from "@/shared/types/api";
 import type { SharedOptimizationData } from "@/shared/lib/api";
 import { extractBlackboxScorePoints } from "../lib/blackbox";
-import { extractCandidates, scopeToLatestLane } from "@/features/trajectory";
+import { ReplayViewer, extractCandidates, scopeToLatestLane } from "@/features/trajectory";
 import {
   rememberRunKind,
   measureOverview,
@@ -844,6 +844,8 @@ export function OptimizationDetailView({
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
   // The billing reads behind it have no hosted route.
   const showUsageTab = !skipNetwork && source === "local";
+  // The steps route is owner only, so a shared viewer or editor never asks for it.
+  const showReplay = !skipNetwork && source === "local" && sharedTier === null;
   // Continuous optimization starts from the owner's own successful repository
   // run; the backend still decides whether this run can carry a plan.
   const showContinuousTab =
@@ -1207,6 +1209,13 @@ export function OptimizationDetailView({
                 payload={payload}
                 source={source}
               />
+              {showReplay && (
+                <ReplayViewer
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
+              )}
             </TabsContent>
 
             {showBestVersionTab && job.blackbox_result && (

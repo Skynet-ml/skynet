@@ -20,7 +20,8 @@ from gepa.oa.task import Task as UpstreamTask
 from ....billing.usage_tags import LANE_KEY, usage_scope
 from ....constants import PROGRESS_LANE_COMPLETED, PROGRESS_LANE_HANDOFF, PROGRESS_LANE_STARTED
 from ....exceptions import ServiceError
-from ....models.blackbox import FILE_PROPOSER_REFUSED_ENGINES, BlackboxStrategy
+from ....models.blackbox import BlackboxStrategy
+from ....worker.engine_loop import StepDivergedError
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
 from .protocol import (
@@ -323,6 +324,8 @@ def run_strategy(
 
     Raises:
         ServiceError: If the exact recipe cannot run; never substitutes an engine.
+        StepDivergedError: If an Auto replay on the engine loop gives another lane plan or other lane results
+            than the committed ones.
     """
     lanes: list[LaneOutcome] = []
     lane_ids = itertools.count()
@@ -365,10 +368,8 @@ def run_strategy(
 
     if not task.str_mode:
         raise ServiceError("The upstream Auto recipe requires a text starting point; use GEPA for named parts.")
-    # A run that uses the repository's [proposer] entry leaves out the lanes
-    # of the engines that cannot use that command (SKY-753).
-    file_proposer = bool(ctx.native_options is not None and (ctx.native_options.repo or {}).get("file_proposer"))
-    engines = tuple(name for name in AUTO_ENGINES if not (file_proposer and name in FILE_PROPOSER_REFUSED_ENGINES))
+    # Repository staging refuses an Auto run with the file's [proposer] entry (SKY-728), so every lane runs.
+    engines = AUTO_ENGINES
     for name in engines:
         get_engine(name, caps)
     lane_count = len(engines)
@@ -398,7 +399,7 @@ def run_strategy(
             engine=_LaneEngine(name, phase, context, caps, lanes, progress_callback, lane_ids),
             max_evals=allowance,
             max_token_cost=token_budget,
-            max_concurrency=ctx.concurrency,
+            max_concurrency=1,
             output_dir=str(Path(ctx.run_dir) / f"{phase}-{name}-evals"),
         )
 
@@ -426,9 +427,14 @@ def run_strategy(
         "background": task.background,
         "name": Path(ctx.run_dir).name,
     }
+    plan = {"engines": list(engines), "per_lane": server.remaining // (lane_count + 1)}
+    plan["continuation"] = server.remaining - lane_count * plan["per_lane"]
+    if ctx.record_step is not None:
+        plan = ctx.record_step({"auto": "plan"}, lambda: plan)
+        if plan["engines"] != list(engines):
+            raise StepDivergedError("The replayed Auto run explores other engines than its committed lane plan.")
+    per_lane, continuation_allowance = plan["per_lane"], plan["continuation"]
     try:
-        per_lane = server.remaining // (lane_count + 1)
-        continuation_allowance = server.remaining - lane_count * per_lane
         winner = optimize_best_of(
             **kwargs,
             configs=[configuration(name, "explore", per_lane, share) for name in engines],
@@ -450,6 +456,20 @@ def run_strategy(
         ]
         exc.evidence["selection_scope"] = "validation" if exc.result is not None else "unpublished_composition"
         raise
+    if ctx.record_step is not None:
+        # On the engine loop each lane replays from its own log. The parent commits the lane results, and a
+        # replay that gives other results stops, so a resume hands off to the same lane with the same version.
+        lanes_now = [
+            {
+                "engine": result.metadata.get("engine"),
+                "score": _stored_score(result.best_score),
+                "candidate": result.best_candidate,
+            }
+            for result in winner.metadata["all_results"]
+        ]
+        committed = ctx.record_step({"auto": "lanes"}, lambda: {"lanes": lanes_now})
+        if committed["lanes"] != lanes_now:
+            raise StepDivergedError("The replayed Auto lanes give other results than the committed lane results.")
     if winner.metadata.get("failed"):
         errors = "; ".join(f"{lane.engine}: {lane.error}" for lane in lanes if lane.error)
         raise ServiceError(f"Every Auto exploration lane failed ({errors}).")

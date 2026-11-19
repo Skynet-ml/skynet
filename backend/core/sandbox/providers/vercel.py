@@ -88,6 +88,8 @@ try:
         NetworkPolicy as SdkNetworkPolicy,
     )
     from vercel.sandbox import (
+        NetworkPolicyMatcher,
+        NetworkPolicyRequestMatcher,
         NetworkPolicyRule,
         NetworkPolicyTransform,
         SandboxApiError,
@@ -105,6 +107,8 @@ try:
 except ImportError:
     httpx2 = None
     SdkNetworkPolicy = None
+    NetworkPolicyMatcher = None
+    NetworkPolicyRequestMatcher = None
     NetworkPolicyRule = None
     NetworkPolicyTransform = None
     SandboxApiError = None
@@ -377,6 +381,47 @@ def box_name(operation_key: str | None, budget: Any | None = None) -> str:
         return f"skynet-{uuid.uuid4().hex}"
     parts = [budget.budget_id, budget.generation, operation_key] if budget is not None else [operation_key]
     return "skynet-" + json_fingerprint(parts)[:48]
+
+
+# One path segment below a credential prefix: no '%' and no ';', and after any leading dots a character that is
+# not ',' or '='. So a '.', '..', empty ('//'), percent-encoded ('%2e', '%2f') or backslash segment never
+# matches, and neither does a path parameter such as '..;' or '..=x', which Tomcat and Jetty read as '..'.
+# The regex uses only character classes, plain groups, '*', '?' and anchors, because the edge's regex dialect is
+# not known to support escapes, non-capturing groups or lookarounds.
+_CLEAN_SEGMENT = r"/[.]*[A-Za-z0-9_~!$&'()+:@-][A-Za-z0-9._~!$&'()+,=:@-]*"
+
+
+def _path_regex(path: str) -> str:
+    """Build the edge regex that matches a path prefix and only the clean paths below it.
+
+    Args:
+        path: The normalized, non-root path prefix, such as ``/team``.
+
+    Returns:
+        An anchored regex that matches ``path``, ``path/`` and clean segments below it.
+    """
+    literal = "".join(char if char.isalnum() or char == "/" else f"[{char}]" for char in path.rstrip("/"))
+    return f"^{literal}({_CLEAN_SEGMENT})*/?$"
+
+
+def _header_rules(path: str, headers: Mapping[str, str]) -> tuple[Any, ...]:
+    """Build the SDK rules that add headers to a host's requests under one path prefix.
+
+    Args:
+        path: The normalized path prefix; ``/`` covers the whole host.
+        headers: The headers to add.
+
+    Returns:
+        One rule for the root, else one rule for the prefix and the clean paths below it.
+    """
+    transform = (NetworkPolicyTransform(headers=dict(headers)),)
+    if path == "/":
+        return (NetworkPolicyRule(transform=transform),)
+    # A bare starts_with("/mcp") also matches "/mcp-admin", another server's path on the same host (SKY-833).
+    # The edge matches the raw path, so starts_with("/team/") also gives the headers to '/team/../admin',
+    # which a server that normalizes the path serves as '/admin'. Such a request goes out with no headers.
+    match = NetworkPolicyRequestMatcher(path=NetworkPolicyMatcher.regex(_path_regex(path)))
+    return (NetworkPolicyRule(transform=transform, match=match),)
 
 
 def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:
@@ -656,8 +701,8 @@ class VercelEnvironment(SandboxEnvironment):
             The SDK policy, or ``None`` for the create default of open egress.
         """
         rules = {
-            host: (NetworkPolicyRule(transform=(NetworkPolicyTransform(headers=dict(headers)),)),)
-            for host, headers in self.spec.inject_headers.items()
+            host: tuple(rule for path, headers in prefixes.items() for rule in _header_rules(path, headers))
+            for host, prefixes in self.spec.inject_headers.items()
         }
         if policy.disabled:
             return SdkNetworkPolicy.deny_all()

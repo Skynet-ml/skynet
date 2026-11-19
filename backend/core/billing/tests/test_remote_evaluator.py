@@ -1,11 +1,10 @@
-"""Verify fixed external evaluator transport, isolation, and real setup evidence without live calls."""
+"""Verify fixed external evaluator transport and isolation without live calls."""
 
 from __future__ import annotations
 
 import json
 import socket
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -15,9 +14,6 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from core.api import preflight_execution
-from core.api.auth import AuthenticatedUser
-from core.api.preflight_execution import WizardPreflightRequest, run_preflight
 from core.billing import mcp_broker
 from core.billing.model_gateway import ModelGateway
 from core.billing.model_mailbox import ModelMailbox
@@ -31,10 +27,9 @@ from core.billing.signals import BudgetReached
 from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxScorer
-from core.service_gateway.optimization.blackbox import preflight
 from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
-from core.service_gateway.optimization.blackbox.scorer import build_scorer
+from core.service_gateway.optimization.blackbox.scorer import RemoteScorer
 from core.storage.models import ExecutionOperationModel
 from core.worker.scoped_relay import model_forwarder
 
@@ -43,10 +38,28 @@ from .test_model_gateway_transport import gateway as _gateway_fixture
 gateway = _gateway_fixture
 
 
+def _relay_scorer(payload: dict[str, Any]) -> RemoteScorer:
+    """Build the remote scorer that relays a protected payload through its parent route.
+
+    Args:
+        payload: The protected payload, with its scorer and evaluator route.
+
+    Returns:
+        The relaying remote scorer.
+    """
+    spec = BlackboxScorer.model_validate(payload["scorer"])
+    return RemoteScorer(
+        str(spec.url),
+        secret=spec.secret,
+        timeout_seconds=spec.timeout_seconds,
+        protected_route=payload["_skynet_evaluator_route"],
+    )
+
+
 def test_scorer_model_pending_points_to_metric_code() -> None:
     """Tell clients where to declare a model when no reflection model exists."""
     result = verify_anything_in_sandbox(
-        {"scorer": {"kind": "python", "metric_code": "llm('x')"}},
+        {"scorer": {"kind": "python", "metric_code": "llm('x')"}, "target": {"kind": "repo"}},
         scope="evaluation",
         identity="test",
         runtime=LocalSubprocessRuntime(),
@@ -54,24 +67,18 @@ def test_scorer_model_pending_points_to_metric_code() -> None:
     assert result["checks"][0]["message"] == "Set the model with llm(model=...) in the metric code."
 
 
-def test_preflight_resolves_declared_scorer_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Resolve the model before constructing the sandbox scorer."""
-    observed = []
-    monkeypatch.setattr(preflight, "scorer_gateway", lambda model, settings: observed.append(model.name))
-    monkeypatch.setattr(
-        preflight, "SandboxPythonScorer", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop"))
-    )
-    with pytest.raises(RuntimeError, match="stop"):
-        verify_anything_in_sandbox(
-            {
-                "scorer": {"kind": "python", "metric_code": "llm(model='judge')"},
-                "reflection_model_config": {"name": "reflection"},
-            },
-            scope="evaluation",
-            identity="test",
-            runtime=LocalSubprocessRuntime(),
-        )
-    assert observed == ["judge"]
+@pytest.mark.parametrize("target", [None, {"kind": "text"}, {"kind": "agent"}])
+def test_the_sandbox_check_refuses_a_text_or_agent_target(target: dict[str, str] | None) -> None:
+    """Only a repository scorer runs in the setup check, so a retired target is refused (SKY-834).
+
+    Args:
+        target: The retired target, or none, which means a text run.
+    """
+    payload: dict[str, Any] = {"scorer": {"kind": "python", "metric_code": "def score(c, case=None):\n    return 1"}}
+    if target is not None:
+        payload["target"] = target
+    with pytest.raises(ValueError, match="Every run optimizes a repository"):
+        verify_anything_in_sandbox(payload, scope="evaluation", identity="test", runtime=LocalSubprocessRuntime())
 
 
 @dataclass
@@ -154,9 +161,7 @@ def test_actual_protocol_pins_destination_and_preserves_endpoint_result(
     assert all(
         secret not in encoded for secret in ("parent-evaluator-secret", "unused-parent-key", "evaluator.example")
     )
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     assert scorer(payload["seed_candidate"], {"question": "actual case"}) == (
         0.75,
         {"feedback": "actual endpoint feedback"},
@@ -185,10 +190,7 @@ def test_remote_evaluator_response_cannot_echo_parent_credentials(
         "feedback": "Bearer parent-evaluator-secret at parent-query-secret",
     }
     payload = _protect(gateway)
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]),
-        protected_route=payload["_skynet_evaluator_route"],
-    )
+    scorer = _relay_scorer(payload)
 
     score, metadata = scorer(payload["seed_candidate"], {"question": "actual case"})
 
@@ -205,9 +207,7 @@ def test_http_failure_is_original_and_never_retried_or_redirected(
     endpoint.status = status
     endpoint.result = {"error": "the real endpoint rejected this candidate"}
     endpoint.headers = {"Location": "http://169.254.169.254/credentials"}
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     with pytest.raises(ServiceError, match=f"HTTP {status}.*real endpoint rejected"):
         scorer("actual candidate", None)
     assert len(endpoint.requests) == 1
@@ -226,9 +226,7 @@ def test_network_failure_is_safe_provider_error_without_hidden_retry(
         raise httpx.ConnectError("sensitive endpoint transport detail", request=request)
 
     monkeypatch.setattr(mcp_broker.httpx, "AsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(fail))
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     with pytest.raises(ServiceError, match="HTTP 502") as failed:
         scorer("actual candidate", None)
     assert "evaluator.example" not in str(failed.value)
@@ -307,22 +305,6 @@ def test_capabilities_cannot_change_destination_or_invoke_other_services(
     assert len(endpoint.requests) == 1
 
 
-def test_seedless_readiness_never_invents_a_candidate(gateway: ModelGateway, endpoint: _Endpoint) -> None:
-    """Record endpoint validation separately from a future candidate's actual score."""
-    payload = _protect(gateway)
-    payload.pop("seed_candidate")
-    result = verify_anything_in_sandbox(
-        payload,
-        scope="evaluation",
-        identity="seedless",
-        runtime=LocalSubprocessRuntime(),
-    )
-    assert result["checks"][0]["status"] == "succeeded"
-    assert result["evaluator_readiness"]["candidate_evaluation"] == "awaiting_first_generated_candidate"
-    assert "scorer_result" not in result
-    assert endpoint.requests == []
-
-
 def test_guest_mailbox_preserves_evaluator_response_without_endpoint_credentials(
     gateway: ModelGateway, endpoint: _Endpoint
 ) -> None:
@@ -359,51 +341,8 @@ def test_persistent_budget_stop_crosses_relay_without_external_dispatch(
 ) -> None:
     """Restore the normal typed stop from authoritative parent state without a paid retry."""
     payload = _protect(gateway)
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     gateway.runtime.service.stop_admission(gateway.runtime.budget_id, "alice", reason="budget_reached")
     with pytest.raises(BudgetReached):
         scorer("actual candidate", None)
     assert endpoint.requests == []
-
-
-def test_continue_uses_nonheldout_case_and_persists_actual_remote_result(
-    gateway: ModelGateway, endpoint: _Endpoint, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Execute the real setup lease, gateway, and scorer through the selected outer runtime."""
-    monkeypatch.setattr(preflight_execution.settings, "openrouter_api_key", None)
-    monkeypatch.setattr(settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
-    bindings = []
-    monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", lambda *args, **kwargs: bindings.append(kwargs))
-
-    def execute(payload: dict[str, Any], _artifact_id: str, events: Any, _start_method: str) -> None:
-        """Replace only the platform sandbox while retaining its guest preflight entry point."""
-        preflight = payload["_preflight"]
-        result = verify_anything_in_sandbox(
-            payload,
-            scope=preflight["scope"],
-            identity=preflight["identity"],
-            runtime=LocalSubprocessRuntime(),
-        )
-        events.put({"type": "preflight_result", "result": result})
-
-    monkeypatch.setattr(preflight_execution, "run_vercel_dspy", execute)
-    request = WizardPreflightRequest(
-        scope="evaluation",
-        workflow="anything",
-        payload=_payload(),
-        execution_budget_id=gateway.runtime.budget_id,
-        execution_budget_revision=1,
-    )
-    result = run_preflight(
-        request, AuthenticatedUser("alice", "user", ()), SimpleNamespace(engine=gateway.runtime.service._engine)
-    ).model_dump(mode="json")
-    assert result["status"] == "succeeded"
-    assert result["scorer_result"]["score"] == 0.75
-    [request] = endpoint.requests
-    assert json.loads(request.content)["case"] == {"question": "training case"}
-    assert result["budget"]["setup_spent_cents"] == "0"
-    assert len(bindings) == 1
-    assert isinstance(bindings[0]["owner_id"], str)
-    assert bindings[0]["owner_id"]

@@ -79,7 +79,7 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
-from ..models.blackbox import HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT
+from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT, TARGET_RETIRED
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -107,7 +107,6 @@ from .checkpoint_compat import (
     validate_checkpoint,
 )
 from .constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_HEARTBEAT,
     EVENT_LOG,
@@ -128,12 +127,12 @@ from .repo_staging import (
     infer_repo_setup,
     is_repo_payload,
     publish_improvement,
+    runs_proposer_entry,
     stage_repository,
 )
 from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
-from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
 
@@ -801,6 +800,9 @@ class BackgroundWorker:
             if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
                 raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
             execution_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
+            # A stored text or agent run loads for its history, but it never runs again (SKY-834).
+            if execution_payload.target.kind != BLACKBOX_TARGET_REPO:
+                raise ValueError(TARGET_RETIRED)
 
             self._update_owned_job(
                 optimization_id,
@@ -1079,28 +1081,39 @@ class BackgroundWorker:
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
-                loop_route = has_loop_route(execution_payload)
-                if loop_route:
-                    # After the exposure check: the worker's own child runs this run, not a guest box, so it may
-                    # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
-                    payload_dict[LOOP_HOST_KEY] = {
-                        "run_id": optimization_id,
-                        "username": execution_payload.username,
-                        "budget_id": job_data["execution_budget_id"],
-                        "budget_generation": job_data["execution_budget_generation"],
-                        "execution_generation": execution_generation,
-                        "worker_id": self._pod_name,
-                        "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
-                        "token_source": parent_payload.get("token_source"),
-                        # The child has no database for the owner's setting, so the parent reads it.
-                        "data_policy": data_policy_for(execution_payload.username),
-                    }
+                if not has_loop_route(execution_payload):
+                    # Every engine has a loop route since the cutover (SKY-728); a stored job of an engine
+                    # without one has no other place to run.
+                    raise ValueError("The stored job names an engine that the worker engine loop does not run.")
+                # Staging at each claim refuses this too. A job stored before the cutover must never reach the
+                # loop with the file's command, because the loop would run the built-in proposer in silence (SKY-728).
+                staged_snapshot = payload_dict.get(REPO_SNAPSHOT_KEY) or {}
+                if staged_snapshot.get("file_proposer") and not runs_proposer_entry(payload_dict.get("strategy") or {}):
+                    raise ValueError(
+                        "The stored job runs the [proposer] entry command of optimize.toml, but only a single"
+                        " AutoResearch or Meta-Harness run can use it now. Remove [proposer] entry, or choose"
+                        " one of those engines, and start the run again."
+                    )
+                # After the exposure check: the worker's own child runs this run, not a guest box, so it may
+                # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
+                payload_dict[LOOP_HOST_KEY] = {
+                    "run_id": optimization_id,
+                    "username": execution_payload.username,
+                    "budget_id": job_data["execution_budget_id"],
+                    "budget_generation": job_data["execution_budget_generation"],
+                    "execution_generation": execution_generation,
+                    "worker_id": self._pod_name,
+                    "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
+                    "token_source": parent_payload.get("token_source"),
+                    # The child has no database for the owner's setting, so the parent reads it.
+                    "data_policy": data_policy_for(execution_payload.username),
+                }
 
                 execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
                 budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_loop_job if loop_route else run_vercel_dspy,
+                    target=run_loop_job,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"
@@ -2201,13 +2214,12 @@ class BackgroundWorker:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
         """Drain all pending events from the subprocess queue, routing each by type.
 
-        Handles the event types emitted by ``run_vercel_dspy``:
+        Handles the event types emitted by ``run_loop_job``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
-        ``job_store.append_log``; ``EVENT_AGENT_RUN`` → ``job_store.save_agent_run``
-        or ``append_agent_run_transcript`` (on stores that keep agent runs);
-        ``EVENT_RESULT`` → captured as the return value; ``EVENT_ERROR`` →
-        captured as the error return value.  Store errors are swallowed so a DB
-        hiccup cannot abort an otherwise-healthy optimization.
+        ``job_store.append_log``; ``EVENT_RESULT`` → captured as the return
+        value; ``EVENT_ERROR`` → captured as the error return value.  Store
+        errors are swallowed so a DB hiccup cannot abort an otherwise-healthy
+        optimization.
 
         Args:
             optimization_id: ID the events are persisted under.
@@ -2304,8 +2316,6 @@ class BackgroundWorker:
                         **run_log.normalize(event),
                     }
                 )
-            elif event_type == EVENT_AGENT_RUN:
-                self._persist_agent_run_event(optimization_id, event.get("run"))
             elif event_type == EVENT_RESULT:
                 payload = event.get("result")
                 if isinstance(payload, dict):
@@ -2331,28 +2341,6 @@ class BackgroundWorker:
                     "Optimization %s: failed to persist %d subprocess log entries", optimization_id, len(log_batch)
                 )
         return result_payload, error_payload, drained_count
-
-    def _persist_agent_run_event(self, optimization_id: str, run: Any) -> None:
-        """Store one agent run record or transcript delta, on stores that keep agent runs.
-
-        Args:
-            optimization_id: The job the run belongs to.
-            run: The event's ``run`` payload.
-        """
-        if not isinstance(run, dict) or not isinstance(run.get("run_id"), int):
-            return
-        save_run = getattr(self._job_store, "save_agent_run", None)
-        append_transcript = getattr(self._job_store, "append_agent_run_transcript", None)
-        if save_run is None or append_transcript is None:
-            return
-        try:
-            delta = run.get("transcript_delta")
-            if isinstance(delta, str):
-                append_transcript(optimization_id, run["run_id"], delta)
-            else:
-                save_run(optimization_id, run)
-        except Exception:
-            logger.exception("Optimization %s: failed to persist agent run %s", optimization_id, run.get("run_id"))
 
     def _checkpoints_enabled(self, optimization_type: str) -> bool:
         """Return whether this job is a GEPA run on a checkpoint-capable store.

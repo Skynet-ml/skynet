@@ -1,12 +1,11 @@
-"""Scorer adapters for black-box runs: sandboxed python code and remote HTTP endpoints.
+"""Scorer helpers for repository runs: score normalization, code loading and the remote adapter.
 
-Both adapters normalize to the engine contract ``(score, side_info)``, carry
-a ``usage`` ledger the run bills (``None`` for remote scorers, whose calls
-are billed by their endpoint outside Skynet Total) and a ``close()`` the run calls when it is done.
-Python scorers run inside a sandbox — see :mod:`.sandbox_scorer`; the
-helpers here are thin wrappers over :mod:`.runner`, the stdlib-only module
-that executes scorer code in the box, translating its errors into the
-worker's ``ServiceError``.
+Every scorer normalizes to the engine contract ``(score, side_info)``,
+carries a ``usage`` ledger the run bills (``None`` for remote scorers, whose
+calls are billed by their endpoint outside Skynet Total) and a ``close()`` the
+run calls when it is done. The helpers here are thin wrappers over
+:mod:`.runner`, the stdlib-only module that executes scorer code in the box,
+translating its errors into the worker's ``ServiceError``.
 """
 
 from __future__ import annotations
@@ -16,14 +15,11 @@ from typing import Any, Protocol
 
 import httpx
 
-from ....config import settings
 from ....exceptions import ServiceError
-from ....models.blackbox import BlackboxScorer
 from . import runner
 from .protocol import RUN_FAILED_STATUS, STATUS_KEY, Candidate, SideInfo
 from .remote_evaluator import RemoteEvaluatorClient
-from .sandbox import SandboxRuntime, scorer_runtime_from_settings
-from .sandbox_scorer import SandboxPythonScorer, ScorerUsage, scorer_gateway
+from .sandbox_scorer import ScorerUsage
 
 
 class JobScorer(Protocol):
@@ -177,41 +173,3 @@ class RemoteScorer:
 
     def close(self) -> None:
         """Nothing to release: each call is one stateless request."""
-
-
-def build_scorer(
-    spec: BlackboxScorer,
-    *,
-    job_id: str | None = None,
-    runtime: SandboxRuntime | None = None,
-    protected_route: dict[str, str] | None = None,
-) -> JobScorer:
-    """Build the engine-facing scorer for a request's scorer spec.
-
-    Args:
-        spec: The submitted scorer definition.
-        job_id: Names the python scorer's sandbox after the job, when known.
-        runtime: Where python scorers open their sandbox; the configured
-            runtime when unset.
-        protected_route: Fixed parent capability for a remote scorer, when protected.
-
-    Returns:
-        A scorer over ``(candidate, case)`` → ``(score, side_info)``.
-
-    Raises:
-        ServiceError: When a python scorer's model has no reachable gateway
-            or the required sandbox runtime is not configured.
-    """
-    if spec.kind == "remote":
-        return RemoteScorer(
-            str(spec.url), secret=spec.secret, timeout_seconds=spec.timeout_seconds, protected_route=protected_route
-        )
-    return SandboxPythonScorer(
-        str(spec.metric_code),
-        runtime=runtime or scorer_runtime_from_settings(settings),
-        gateway=scorer_gateway(spec.model, settings) if spec.model is not None else None,
-        timeout_seconds=spec.timeout_seconds,
-        job_id=job_id,
-        install_command=spec.install_command,
-        dependency_lock=spec.dependency_lock.model_dump(mode="json") if spec.dependency_lock else None,
-    )

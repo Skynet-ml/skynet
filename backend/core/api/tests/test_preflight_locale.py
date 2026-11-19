@@ -60,7 +60,10 @@ def _body(**extra: Any) -> dict[str, Any]:
     return {
         "scope": "evaluation",
         "workflow": "anything",
-        "payload": {"scorer": {"kind": "python", "metric_code": "def metric(candidate, case):\n    return 1.0\n"}},
+        "payload": {
+            "scorer": {"kind": "python", "metric_code": "def metric(candidate, case):\n    return 1.0\n"},
+            "target": {"kind": "repo"},
+        },
         "execution_budget_id": "b1",
         "execution_budget_revision": 1,
         **extra,

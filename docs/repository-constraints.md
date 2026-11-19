@@ -101,7 +101,16 @@ U+2066 to U+2069), because they can hide what a command does.
 - The run's own proposer wins. When the run request names a proposer, the
   run ignores `entry` and `setup`, and the run record shows the note "The
   run's own proposer replaces the one in the contract file."
+  A setting of that proposer that the engine does not apply fails the setup
+  check (see "What fails the setup check").
 - `setup` without `entry` fails the setup check.
+- Only a single AutoResearch or Meta-Harness run can use `entry` today.
+  Every other run with `entry` fails the setup check, and the message names
+  `[proposer] entry`. This includes a single GEPA, Best-of-N, AutoSaddler or
+  ShinkaEvolve run, and every Auto run. GEPA, Best-of-N and AutoSaddler ran
+  the command in a native box, and every run now uses the worker's engine
+  loop (SKY-728). SKY-828 brings the command back to those engines. The
+  notes below about GEPA, Best-of-N and AutoSaddler apply from then.
 - `setup` runs once in each proposer box, in the repository checkout where
   the command runs, before the first proposer session, also in a protected
   run. The run keeps a copy of the files that `setup` adds in the git
@@ -114,12 +123,13 @@ U+2066 to U+2069), because they can hide what a command does.
   checkout (for example a Python virtual environment) can fail in an
   AutoSaddler worktree, because each worktree has a different path. The copy
   uses disk space in the box, and each later session spends time to copy it.
-  The files it adds never join a version. It has 30 minutes, but never more
-  than the time that the proposer session has left: the setup time counts
-  inside the session's time limit. If it fails or runs out of time, the run
-  stops, and the message names the command and its output. When `setup`
-  ends, the run stops every process that it left running. When the run stops
-  a proposer session, it also stops a `setup` that runs.
+  The files it adds never join a version. In GEPA, Best-of-N and AutoSaddler,
+  it has 30 minutes, but never more than the time that the proposer session
+  has left: the setup time counts inside the session's time limit. If it fails
+  or runs out of time, the run stops, and the message names the command and
+  its output. When `setup` ends, the run stops every process that it left
+  running. When the run stops a proposer session, it also stops a `setup` that
+  runs.
 - `setup` can write only files that git does not track. If it changes,
   adds to the index or removes a tracked file, the run stops. The message
   names the command and the changed files, because the change would join
@@ -127,10 +137,12 @@ U+2066 to U+2069), because they can hide what a command does.
   The same applies to the new files of the version that git does not track
   yet (GEPA and Best-of-N): if `setup` changes or removes one, the run stops.
   If `setup` makes a commit or checks out another commit, the run stops too.
-- A file or folder name that `setup` adds must be UTF-8. It cannot hold a
-  control character (such as a new line) or end in a space. The run cannot
-  keep such a name out of the versions, so the run stops, and the message
-  names the file.
+- In GEPA, Best-of-N and AutoSaddler, a file or folder name that `setup`
+  adds must be UTF-8. It cannot hold a control character (such as a new
+  line) or end in a space. The run cannot keep such a name out of the
+  versions, so the run stops, and the message names the file. AutoResearch
+  and Meta-Harness keep any UTF-8 name out of the versions. A name that is
+  not UTF-8 stops the run there, because the run cannot store it.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
   `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
@@ -138,6 +150,14 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
+- ShinkaEvolve refuses `entry` today. The command may reach a model only on
+  your own model key, never on Skynet's key, and its box has no such model
+  route until a metered relay lands. Its command support is on the worker's
+  engine loop, but the engine does not turn it on yet. In that support, `setup`
+  runs once, in its own box. Only the files that it writes into the
+  repository carry over to each command box: the box is disposable, and the
+  tree is the truth. If `setup` changes or removes a file of the repository,
+  the run stops, and the message names the files.
 - The command runs only in a repository checkout. AutoSaddler also starts
   reflect sessions in a plain folder, which edit no repository. The default
   proposer agent answers those sessions, without `setup`, and the box
@@ -145,13 +165,36 @@ U+2066 to U+2069), because they can hide what a command does.
 - The run record names the command in a note: "The run uses the proposer
   command in the contract file: ...". The run page shows the command as the
   proposer.
-- AutoResearch, Meta-Harness and ShinkaEvolve cannot use the command.
-  ShinkaEvolve writes versions with its own editor. AutoResearch and
-  Meta-Harness call the proposer from their own lab folder, so the files the
-  command changes are not their versions. A single run of one of these
-  engines with `entry` fails the setup check, and the message names
-  `[proposer] entry` and the engine. Auto leaves out their lanes, and the run
-  record says so in a note.
+- AutoResearch and Meta-Harness run the command on the worker's engine
+  loop, in a single run. The engine runs the command once for
+  each new version, over the parent version's tree. The engine keeps its own
+  search and lab state. `ASCENT_TASK` names `.autoresearch/ascent-task.md`
+  or `.meta-harness/ascent-task.md`. The file holds the goal, the past
+  versions, their scores and the lab notes. The tree that the command
+  leaves, without the lab folder and without the files that `setup` added,
+  is the new version, and the engine scores it. `setup` runs once for each
+  engine, over the first version, before the first command. If `setup`
+  changes or removes a file of the repository, the run stops, and the
+  message names the command and the changed files. If the run cannot remove
+  the files that `setup` added (for example, a read-only folder), the run
+  stops too. `setup` and each `entry` command have 30 minutes each. A
+  `setup` that runs out of time stops the run. An `entry` command that runs
+  out of time gives no version. A command that fails gives no version: it is
+  a failed attempt, not a failed run. AutoResearch then ends the run,
+  because a round with no version ends it. Meta-Harness goes on to its next
+  iteration. In these two engines, the command gets `ASCENT_TASK`,
+  `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
+  command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
+  key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
+  Skynet redacts only values of 8 or more characters, so a short value
+  cannot change other output. A run that is not protected gets no model
+  relay and no key. The engine loop does not give the command `[proposer]
+  services` or a reasoning effort. So a single run of these engines with
+  `entry` and one of these settings fails the setup check. The message
+  names the setting.
+- ShinkaEvolve cannot use the command, because it writes versions with its
+  own editor. A single ShinkaEvolve run with `entry` fails the setup check,
+  and the message names `[proposer] entry`.
 - Every repository file or folder that `entry` or `setup` names by its
   exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
   `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
@@ -594,7 +637,7 @@ catch the failure in the program, as above, and let the metric score it.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. AutoResearch, Meta-Harness and ShinkaEvolve refuse it. |
+| `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. Only a single AutoResearch or Meta-Harness run can use it today; every other run refuses it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
@@ -615,8 +658,30 @@ catch the failure in the program, as above, and let the metric score it.
 - A `[proposer] entry` or `setup` that is not a list of non-empty strings,
   or a part with a control character, or that contains `__APP_API_KEY__` or
   `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
-  `[proposer] mcp`. An `entry` in a single AutoResearch, Meta-Harness or
-  ShinkaEvolve run.
+  `[proposer] mcp`. An `entry` in any run that is not a single AutoResearch
+  or Meta-Harness run.
+- A proposer setting that the run's engine does not apply (SKY-728). Every
+  run uses the worker's engine loop, and each engine runs only its built-in
+  proposer there. The setup check refuses these settings before paid work,
+  and the message names the engine and each setting:
+  - Every engine refuses a `harness` other than the default (such as
+    `opencode`, `pi` or `aider`), a `run_command`, an `install_command` and
+    a `host_cli` in the run request.
+  - GEPA, Best-of-N and AutoSaddler make model calls only. They also refuse
+    a `max_tool_calls` other than the default, `[proposer] mcp` and
+    `[proposer] services`. They apply the reasoning effort.
+  - Only AutoResearch applies `ralph` and `max_no_eval_seconds`, and only
+    Meta-Harness applies `max_candidates_per_iter`. Auto applies all three.
+    Every other engine refuses a value other than the default (`ralph =
+    true`, `max_no_eval_seconds = 1800`, `max_candidates_per_iter = 3`).
+  - ShinkaEvolve refuses the same settings as GEPA. With the `agent`
+    editor, it applies `max_tool_calls`, `[proposer] mcp` and the reasoning
+    effort, and it refuses `[proposer] services`. It does not support a
+    `[proposer] mcp` server with `headers` yet, so it refuses one. MCP
+    servers with no headers still work. SKY-840 lifts this limit.
+  - AutoResearch and Meta-Harness, and Auto, which runs their lanes, apply
+    `max_tool_calls` and `[proposer] services`. They refuse `[proposer] mcp`
+    and a reasoning effort.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section, or a setting that the format does not define in any
   section. A missing `version`, a `version` that is not `1`, or invalid TOML.
@@ -675,11 +740,15 @@ mcp = "eval/.mcp.json"
 - There are no default services. A role gets only the services that its own
   `services` list names. `[run]`, `[metric]` and `[proposer]` can have a
   `services` list now. In a `[target.<name>]`, it fails the setup check.
-- The proposer reaches the services of `[proposer] services` through the
-  parent's relay (SKY-612). Its box gets one `SKYNET_SERVICE_<NAME>_URL`
-  for each service, with a loopback url and no secret. Skynet checks each
-  call against the proposer's own list, fills the secrets in the parent,
-  and returns redirects without following them.
+- Only the AutoResearch and Meta-Harness tool loops (also in Auto) reach
+  the services of `[proposer] services`. Skynet checks each call against the
+  proposer's own list, fills the secrets in the parent, and returns
+  redirects without following them. Every other engine refuses
+  `[proposer] services` at the setup check (see "What fails the setup
+  check"). The `[proposer] entry` command of AutoResearch and Meta-Harness
+  does not get the services. A single run of these engines with `entry` and
+  `[proposer] services` fails the setup check, and the message names
+  `services`.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
@@ -721,6 +790,21 @@ mcp = "eval/.mcp.json"
   ```
 - Each secret goes to one host only: the host of the `url` that uses it. A
   file that sends the same `${NAME}` to two hosts fails.
+- A `[proposer] mcp` server with `headers` owns its host alone. The edge
+  adds the headers only on the server's url path, but a path such as
+  `/team/../web` can still reach them. So the ShinkaEvolve agent editor
+  refuses to start when:
+  - two servers with `headers` use one host;
+  - a server with no `headers` uses the host of a server with `headers`;
+  - the proposer's network reaches that host: a `[proposer] network` entry,
+    a package registry or the account's saved package index. A suffix entry
+    such as `*.example.com` counts when it matches the host, and also when
+    the host is `example.com` itself.
+
+  The check ignores case and a trailing dot, so `MCP.example.com.` is
+  `mcp.example.com`. To fix it, give each server with `headers` its own
+  host, or remove its `headers`, or remove the host from `[proposer]
+  network` or the saved package index.
 - The run, not the repository, says where each user secret may go. Each
   secret in `target.repo.secrets` has `allowed_hosts`: up to 20 entries, each
   an exact host (`api.example.com`) or a suffix (`*.example.com`, which
