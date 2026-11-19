@@ -239,14 +239,33 @@ def test_fallback_drops_the_capped_cli_thinking(tmp_path: Path, monkeypatch: pyt
     assert _body(result)["choices"][0]["message"]["reasoning_content"] == "Kept"
 
 
-def test_timeout_is_not_retried(tmp_path: Path) -> None:
+def test_timeout_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer a timed-out call with 502 after one attempt, so a hung CLI holds a slot once."""
     fake_cli(tmp_path, "claude", "time.sleep(30)")
-    settings = local_settings(tmp_path, cli_call_timeout_seconds=3.0)
+    real_runner = cli_dispatch.RUNNERS["claude"]
+    attempts: list[str] = []
+
+    def counting_runner(*args: Any, **kwargs: Any) -> Any:
+        """Count one attempt, then run the real claude runner.
+
+        Args:
+            *args: The runner's positional arguments.
+            **kwargs: The runner's keyword arguments.
+
+        Returns:
+            The real runner's completion.
+        """
+        attempts.append("claude")
+        return real_runner(*args, **kwargs)
+
+    # The fake CLI logs its call only after Python starts; on a loaded machine
+    # the timeout can kill it first, so its log cannot count the attempts.
+    monkeypatch.setitem(cli_dispatch.RUNNERS, "claude", counting_runner)
+    settings = local_settings(tmp_path, cli_call_timeout_seconds=0.5)
     result = CliDispatcher(None, "claude", MODEL, "judge", settings).dispatch("/chat/completions", REQUEST)
     assert result.status == 502
     assert _body(result)["error"]["message"] == "claude timed out"
-    assert len(calls(tmp_path, "claude")) == 1
+    assert attempts == ["claude"]
 
 
 def test_messages_request_answers_in_the_anthropic_shape(tmp_path: Path) -> None:

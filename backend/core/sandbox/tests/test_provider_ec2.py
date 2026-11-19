@@ -425,6 +425,18 @@ async def _until(check: Callable[[], bool]) -> None:
     raise AssertionError("The condition did not come true in time.")
 
 
+def _jump_loop_clock(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """Move the running event loop's clock forward, so a deadline on it passes at once.
+
+    Args:
+        monkeypatch: Restores the loop clock after the test.
+        seconds: How far to move the clock.
+    """
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: real_time() + seconds)
+
+
 def _run_kwargs(fake: FakeEC2) -> dict[str, Any]:
     """Return the arguments of the last ``run_instances`` call.
 
@@ -1498,17 +1510,22 @@ async def test_a_stop_after_the_launch_returns_never_leaves_a_terminated_instanc
     assert env not in ec2_provider._LIVE
 
 
-async def test_a_failed_start_removes_the_host_key_that_its_probe_wrote(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+async def test_a_failed_start_removes_the_host_key_that_its_probe_wrote(
+    fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Remove the alias line of the instance from a configured known hosts file when the SSH wait fails."""
     known = tmp_path / "known_hosts"
     (fake_ec2.state / "ssh_down").touch()
     env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
-    env._connect_timeout = 1.0
+    # A short real deadline raced the probe's Python start and the key write
+    # below on a loaded machine. The clock jump ends the wait only after the write.
+    env._connect_timeout = 600.0
     task = asyncio.create_task(env.start())
     await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
     alias = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("HostKeyAlias=")).split("=", 1)[1]
     # ssh with accept-new writes the key once the probe reaches the host, also when the probe then fails.
     known.write_text(f"{alias} ssh-ed25519 AAAA1\ni-other ssh-ed25519 AAAA2\n")
+    _jump_loop_clock(monkeypatch, env._connect_timeout)
     with pytest.raises(StartTimeoutError):
         await task
     assert known.read_text() == "i-other ssh-ed25519 AAAA2\n"
