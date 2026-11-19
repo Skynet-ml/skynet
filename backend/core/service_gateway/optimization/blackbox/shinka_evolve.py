@@ -134,7 +134,8 @@ class ShinkaEvolveEngine:
 
         Returns:
             The best version upstream found, or the best version scored before
-            upstream failed or the scorer cap stopped it.
+            upstream failed or the scorer cap stopped it. The seed with no score
+            when the child ends cleanly on the seed and no version has a full score.
 
         Raises:
             ServiceError: When the settings need a feature the worker does not run yet, when the child
@@ -369,10 +370,12 @@ class ShinkaEvolveEngine:
 
         Returns:
             The best version and its score. When upstream failed after it scored
-            a version, the best version scored before the failure.
+            a version, the best version scored before the failure. The seed with
+            no score when the child ends cleanly on the seed and no version has a
+            full score.
 
         Raises:
-            ServiceError: When the child failed before it scored a version without a metric error.
+            ServiceError: When no version has a full score, unless the child ended cleanly on the seed.
         """
         path = workdir / _RESULT_FILE
         try:
@@ -407,6 +410,21 @@ class ShinkaEvolveEngine:
                     "ShinkaEvolve stopped early and keeps its best reported version: %s", document.get("error")
                 )
                 return requests.best_so_far(workdir)
+            # SKY-751: when every version fails, the child ends cleanly on the
+            # seed with no score. The run keeps the seed, as the sandbox path does.
+            if (
+                returncode == 0
+                and not document.get("error")
+                and document.get("best_score") is None
+                and requests.task.seed_candidate is not None
+                and document.get("best_candidate") == requests.task.seed_candidate
+            ):
+                return Result(
+                    best_candidate=requests.task.seed_candidate,
+                    best_score=None,
+                    total_evals=requests.evals,
+                    metadata=metadata,
+                )
             detail = str(document.get("error") or _stderr_tail(workdir) or "No result was produced.")
             raise ServiceError(f"ShinkaEvolve failed: {detail}")
         return Result(

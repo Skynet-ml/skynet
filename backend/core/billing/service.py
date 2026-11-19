@@ -1982,13 +1982,23 @@ class StripeBillingService:
             event_id: Stripe event id, recorded on the ledger row.
             payment_intent: The PaymentIntent id, stamped on the ledger row so a
                 later clawback nets against it.
-            username: Account to draw the cents back from.
+            username: Account to draw the cents back from. When its wallet is
+                gone, the current owner of the PaymentIntent's ledger rows is
+                used instead.
             cents: Cents owed back to Stripe (positive).
             kind: Ledger kind (``"refund"`` or ``"dispute"``).
             description: Human label for the ledger row.
         """
         now = datetime.now(UTC)
         customer = session.get(BillingCustomerModel, username, with_for_update=True)
+        if customer is None:
+            # An account deletion can commit between the owner lookup and this
+            # lock. It renames the wallet and the ledger to its tombstone, so
+            # read the owner again from the ledger (SKY-601).
+            owner = self._pi_clawback_context(session, payment_intent)[0]
+            if owner is not None and owner != username:
+                username = owner
+                customer = session.get(BillingCustomerModel, username, with_for_update=True)
         if customer is None:
             customer = BillingCustomerModel(
                 username=username,

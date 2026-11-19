@@ -55,6 +55,7 @@ from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
 from ..protocol import (
     METRIC_ERROR,
+    RUN_FAILED_STATUS,
     UNSCORED,
     Candidate,
     EngineContext,
@@ -1223,6 +1224,42 @@ def test_version_history_sheds_images_from_the_weakest_versions_first(monkeypatc
     assert best.side_info == {"feedback": "len 3", "render": image, "frames": [image]}
 
 
+def test_version_history_sheds_an_unscored_versions_images_before_negative_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With negative scores, a version with no score still ranks weakest and loses its renders first (SKY-751)."""
+    image = "data:image/png;base64," + "A" * 400
+
+    def rendering_scorer(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score by minus the length, fail the [run] entry of "ccc", and attach renders.
+
+        Args:
+            candidate: The version.
+            case: Ignored.
+
+        Returns:
+            Minus the length, or no score for "ccc", and side info with two images.
+        """
+        info = {"feedback": f"len {len(candidate)}", "render": image, "frames": [image]}
+        if candidate == "ccc":
+            return None, {**info, "status": "run_failed"}
+        return -float(len(candidate)), info
+
+    server = service_mod.EvalServer(rendering_scorer, max_evals=10)
+    for candidate in ("a", "ccc", "bb"):
+        server.evaluate(candidate)
+    monkeypatch.setattr(service_mod, "VERSION_SIDE_INFO_BYTE_CAP", 2_000)
+
+    versions = service_mod._version_history(server)
+
+    best, unscored, middle = versions
+    assert (best.score, unscored.score, middle.score) == (-1.0, None, -2.0)
+    assert "render" not in unscored.side_info
+    assert unscored.side_info["frames"] == []
+    assert middle.side_info["render"] == image
+    assert best.side_info["render"] == image
+
+
 def test_service_hands_the_progress_sink_to_the_engine_context(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1351,6 +1388,34 @@ def test_a_failed_case_counts_as_zero_in_every_named_score() -> None:
     assert run.named["accuracy"].score == pytest.approx(0.4)
 
 
+@pytest.mark.parametrize(("status", "run_failed"), [(RUN_FAILED_STATUS, True), (METRIC_ERROR, False)])
+def test_final_run_marks_only_a_failed_run_case(status: str, run_failed: bool) -> None:
+    """The final run records a failed ``[run]`` case apart from a metric error, for the pull request rule (SKY-751).
+
+    Args:
+        status: Status the scorer gives the case with no score.
+        run_failed: Whether the final run must mark a failed ``[run]`` case.
+    """
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Give the second case no score, with the given status.
+
+        Args:
+            candidate: The version under test.
+            case: The case to score.
+
+        Returns:
+            The score and side info.
+        """
+        if case["n"] == 2:
+            return None, {"feedback": "no score", "status": status}
+        return 0.5, {"feedback": "ok"}
+
+    run = service_mod._final_run(scorer, "v", [{"n": 1}, {"n": 2}], label="starting point", phase=PHASE_BASELINE)
+
+    assert (run.score, run.run_failed) == (None, run_failed)
+
+
 def test_final_run_keeps_each_cases_observation_for_both_versions() -> None:
     """A scorer that measures its runs gives each case result the baseline's and the winner's observation."""
 
@@ -1398,6 +1463,39 @@ def test_version_history_shows_the_validation_score_and_keeps_the_running_mean()
         ("aaa", 0.75, server.mean_score("aaa"), 2),
         ("bcd", server.mean_score("bcd"), server.mean_score("bcd"), 1),
     ]
+
+
+def test_version_history_shows_the_run_failure_text_and_its_status() -> None:
+    """A version whose [run] entry failed shows that failure as its error, apart from a metric crash (SKY-751)."""
+    failure = "Run failed: ConnectionError: egress blocked"
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Fail the run of ``broken``, crash the metric on ``crash`` and score the rest.
+
+        Args:
+            candidate: The version.
+            case: The case (unused).
+
+        Returns:
+            No score with the failure's status, or a score of 0.5.
+        """
+        if candidate == "broken":
+            return None, {"feedback": failure, "status": RUN_FAILED_STATUS}
+        if candidate == "crash":
+            raise ValueError("cannot score this")
+        return 0.5, {"feedback": "ok"}
+
+    server = EvalServer(scorer, max_evals=5)
+    for candidate in ("broken", "crash", "fine"):
+        server.evaluate(candidate)
+
+    versions = {version.candidate: version for version in service_mod._version_history(server)}
+
+    assert (versions["broken"].score, versions["broken"].side_info["status"]) == (None, RUN_FAILED_STATUS)
+    assert versions["broken"].side_info["error"] == failure
+    assert (versions["crash"].score, versions["crash"].side_info["status"]) == (None, METRIC_ERROR)
+    assert "cannot score this" in versions["crash"].side_info["error"]
+    assert versions["fine"].score == 0.5
 
 
 def test_validation_scores_come_from_every_lane_with_the_later_lane_winning() -> None:
@@ -1877,6 +1975,42 @@ def _failure_counts(caplog: pytest.LogCaptureFixture, label: str) -> list[tuple[
     ]
 
 
+class _AsRepositoryScorer:
+    """Give a python scorer's ``run_failed`` case no score, as the repository scorer does (SKY-751)."""
+
+    def __init__(self, scorer: Any) -> None:
+        """Wrap ``scorer``.
+
+        Args:
+            scorer: The python scorer that stands in for the repository scorer.
+        """
+        self._scorer = scorer
+
+    def __getattr__(self, name: str) -> Any:
+        """Return the wrapped scorer's attribute, for example ``usage`` or ``close``.
+
+        Args:
+            name: Attribute name.
+
+        Returns:
+            The wrapped scorer's attribute of that name.
+        """
+        return getattr(self._scorer, name)
+
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score one case; a ``run_failed`` case loses its score.
+
+        Args:
+            candidate: The version to score.
+            case: The case to score it on.
+
+        Returns:
+            The score, or None for a failed run, and the side info.
+        """
+        score, side_info = self._scorer(candidate, case)
+        return (None if side_info.get("status") == "run_failed" else score), side_info
+
+
 def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
     """Run ``payload`` with its python scorer in the place of the repository scorer.
 
@@ -1894,7 +2028,7 @@ def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id:
     """
     return service_mod.run_job(
         service_mod.job_spec_from_payload(payload),
-        service_mod.build_scorer(payload.scorer, job_id=artifact_id),
+        _AsRepositoryScorer(service_mod.build_scorer(payload.scorer, job_id=artifact_id)),
         service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
         artifact_id=artifact_id,
         started=time.perf_counter(),
@@ -1929,7 +2063,14 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Some failed cases keep the run and its score; the response and the log give the count (SKY-221)."""
+    """Some failed cases keep the run but leave no score; the run keeps the start and says why (SKY-221, SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the repository run.
+        monkeypatch: Sets the winner strategy.
+        caplog: Captures the service warnings.
+    """
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"hello world", "winner"}, every=2)
 
@@ -1941,10 +2082,97 @@ def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     report_on = service_mod.report_cases(service_mod.legacy_case_splits(list(_MANY_CASES), 1))
     failed = sum(1 for case in report_on if case["i"] % 2 == 0)
     assert calls == ["search"]
-    assert response.best_score is not None
+    assert response.best_candidate == "hello world"
+    assert response.regression_guard_applied is True
+    assert response.best_score is None
+    assert response.baseline_score is None
+    assert response.metric_improvement is None
     assert 0 < failed < len(report_on)
     assert response.details["failed_cases"] == failed
-    assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
+    assert _failure_counts(caplog, "starting point") == [(failed, len(report_on))]
+    assert any("No version has a score" in record.getMessage() for record in caplog.records)
+
+
+def test_a_scored_version_beats_a_starting_point_that_fails_some_cases(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully scored version beats a starting point with a failed case; no start score, no improvement (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the repository run.
+        monkeypatch: Sets the winner strategy.
+    """
+    calls = _winner_strategy(monkeypatch)
+    code = _run_fails_code({"hello world"}, every=2)
+
+    response = _run_as_repository(
+        _payload(scorer={"kind": "python", "metric_code": code}, cases=_MANY_CASES), tmp_path, "job-start-fails"
+    )
+
+    assert calls == ["search"]
+    assert response.best_candidate == "winner"
+    assert response.regression_guard_applied is False
+    assert response.best_score == 0.5
+    assert response.baseline_score is None
+    assert response.metric_improvement is None
+    assert response.details["failed_cases"] == 0
+    assert response.details["baseline_run_failed"] is True
+
+
+def test_a_metric_error_on_the_starting_point_never_marks_a_failed_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metric error leaves the starting point unscored, but its final run has no failed ``[run]`` case (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Makes the metric crash on the starting point.
+    """
+    _crash_metric_on(monkeypatch, {"hello world"})
+
+    response = run_blackbox_optimization(_payload(), artifact_id="job-start-crash", gepa_log_dir_path=str(tmp_path))
+
+    assert response.baseline_score is None
+    assert response.details["baseline_run_failed"] is False
+
+
+def test_a_budget_stop_in_the_winners_held_out_run_marks_no_finished_final_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The starting point's held-out run finished, the winner's did not, so no run-failed flag is set (SKY-751).
+
+    Args:
+        fake_lm: Reflection model stand-in.
+        tmp_path: Folder for the run.
+        monkeypatch: Stops the budget in the winner's held-out run.
+    """
+    real_final_run = service_mod._final_run
+
+    def final_run(*args: Any, **kwargs: Any) -> service_mod.FinalRun:
+        """Stop the budget in the winner's held-out run; run every other final run.
+
+        Args:
+            *args: The final run's positional arguments.
+            **kwargs: The final run's keyword arguments.
+
+        Returns:
+            The real final run.
+        """
+        if kwargs["label"] == "optimized version on held-out cases":
+            raise BudgetReached()
+        return real_final_run(*args, **kwargs)
+
+    _winner_strategy(monkeypatch)
+    monkeypatch.setattr(service_mod, "_final_run", final_run)
+    with pytest.raises(BudgetReached) as caught:
+        run_blackbox_optimization(_payload(), artifact_id="job-held-out-stop", gepa_log_dir_path=str(tmp_path))
+
+    response = caught.value.result
+    assert response.baseline_score is not None
+    assert response.best_score is None
+    assert response.details["baseline_run_failed"] is None
 
 
 def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
@@ -1976,6 +2204,63 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
     repo_meta = response.optimization_metadata["target"]["repo"]
     assert repo_meta["repository"] == "o/r"
     assert "contract_source" not in repo_meta
+
+
+class _NativeOptionsBuiltError(Exception):
+    """Stop a run once the service builds its native options."""
+
+
+def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_engines(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+) -> None:
+    """The snapshot's ``file_proposer`` and ``proposer_setup`` reach ``NativeOptions.repo`` (SKY-753).
+
+    Args:
+        fake_lm: Fake reflection model for the run.
+        tmp_path: Log folder for the run.
+        monkeypatch: Native runtime switch and the options capture.
+        fake_native_proposers: Fake native proposers, so no engine starts.
+    """
+    built: list[dict[str, Any]] = []
+
+    def capture(**options: Any) -> NativeOptions:
+        """Keep the native options and stop the run.
+
+        Args:
+            **options: The options the service builds.
+
+        Raises:
+            _NativeOptionsBuiltError: Always, after it keeps the options.
+        """
+        built.append(options)
+        raise _NativeOptionsBuiltError
+
+    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: True)
+    monkeypatch.setattr(service_mod, "NativeOptions", capture)
+    payload = _payload(max_cost_cents=100)
+    job = replace(
+        service_mod.job_spec_from_payload(payload),
+        target=BlackboxTarget(kind="repo", repo=BlackboxRepoSource(repository="o/r", editable_paths=["src"])),
+    )
+    setup = ["npm", "ci"]
+
+    with pytest.raises(_NativeOptionsBuiltError):
+        service_mod.run_job(
+            job,
+            service_mod.build_scorer(payload.scorer, job_id="job-file-proposer"),
+            service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+            artifact_id="job-file-proposer",
+            started=time.perf_counter(),
+            progress_callback=None,
+            gepa_log_dir_path=str(tmp_path),
+            repo_snapshot={"chunks": [], "file_proposer": True, "proposer_setup": setup},
+        )
+
+    assert built[0]["repo"]["file_proposer"] is True
+    assert built[0]["repo"]["proposer_setup"] == setup
 
 
 def test_a_run_where_every_case_scores_a_valid_zero_succeeds(

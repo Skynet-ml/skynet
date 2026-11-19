@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ....storage.step_log_store import StepLogStore
-from ....storage.tree_store import TreeEntry, TreeStore
+from ....storage.tree_store import TreeEntry, TreeStore, is_git_part
 from .exec_shim import COMMAND_CUT, COMMAND_LIMIT, OUTPUT_LIMIT
 from .harness_bridge import EXEC_LOG, EXEC_SHIM_DIR, KEY_TOKEN, SESSIONS_DIR, workspace_files
 
@@ -511,11 +511,13 @@ def snapshot_session(
 
     Left out with no record: the launch files (``harness_bridge.workspace_files``),
     which hold the key; a workspace entry named ``SESSIONS_DIR``, whose slot
-    holds the real session folder; and the session folder's logs
-    (``_SESSION_LOGS``). Left out and recorded: entries that cannot be read or
-    stored (a failed open, a name that holds the key or is not UTF-8, a pipe
-    or socket, a linked session folder), folders at ``_MAX_DEPTH``, files past
-    the size caps and entries past the count cap.
+    holds the real session folder; the session folder's logs
+    (``_SESSION_LOGS``); and a ``.git`` entry in any letter case, at any
+    depth, which the tree store refuses (SKY-810). Left out and recorded:
+    entries that cannot be read or stored (a failed open, a name that holds
+    the key or is not UTF-8, a pipe or socket, a linked session folder),
+    folders at ``_MAX_DEPTH``, files past the size caps and entries past the
+    count cap.
 
     The session folder is walked first, so a full workspace cannot use up the
     caps before it: a resume needs the harness's own state more than any file.
@@ -646,7 +648,7 @@ def _put_directory(
                 budget.skip(prefix + name)
                 break
             budget.entries += 1
-            if skip(prefix + name):
+            if skip(prefix + name) or is_git_part(name):
                 continue
             if (route_key and route_key in name) or not _is_utf8(name):
                 budget.skip(prefix + name)
@@ -788,6 +790,10 @@ def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path
     A file the agent deleted can come back, but no file is lost because the
     snapshot skipped it.
 
+    A ``.git`` entry in any letter case is neither written nor deleted, at any
+    depth: a tree stored before SKY-810 can hold one, and a snapshot leaves
+    the box's own out.
+
     Args:
         trees: The tree store.
         run_id: The job that reads the objects.
@@ -821,12 +827,15 @@ def restore_session(trees: TreeStore, run_id: str, tree_id: str, workspace: Path
 def _prune(folder: Path, keep: set[str]) -> None:
     """Delete the entries of ``folder`` that ``keep`` does not name, without following a link.
 
+    A ``.git`` entry stays: snapshots leave it out, so its absence from the
+    tree does not mean the agent deleted it.
+
     Args:
         folder: A real folder.
         keep: The names to keep.
     """
     for path in folder.iterdir():
-        if path.name in keep:
+        if path.name in keep or is_git_part(path.name):
             continue
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
@@ -843,7 +852,7 @@ def _entries(trees: TreeStore, run_id: str, tree_id: str) -> list[TreeEntry]:
         tree_id: The tree id.
 
     Returns:
-        The entries.
+        The entries, without a ``.git`` entry in any letter case.
 
     Raises:
         ValueError: When the tree is missing or an entry name could leave its folder.
@@ -854,7 +863,7 @@ def _entries(trees: TreeStore, run_id: str, tree_id: str) -> list[TreeEntry]:
     for entry in entries:
         if entry.name in ("", ".", "..") or "/" in entry.name or "\0" in entry.name:
             raise ValueError(f"bad tree entry name: {entry.name!r}")
-    return entries
+    return [entry for entry in entries if not is_git_part(entry.name)]
 
 
 def _restore(trees: TreeStore, run_id: str, entry: TreeEntry, target: Path, prune: bool) -> None:

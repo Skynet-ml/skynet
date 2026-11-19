@@ -15,7 +15,7 @@ import tarfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -546,6 +546,285 @@ def test_repository_versions_reach_the_scorer_as_patches(tmp_path: Path) -> None
     assert scorer.best["best_candidate"] == mailbox.candidates[0]
     program.write_text(shinka_bundle.encode_bundle({"../escape": "x\n"}))
     assert "not a path inside the repository" in scorer.score_program(str(program))["error"]
+
+
+def test_a_case_with_no_score_fails_the_program_with_its_run_failure(tmp_path: Path, monkeypatch: Any) -> None:
+    """A null parent score fails the program, and its "Run failed" text reaches the proposer (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    monkeypatch.chdir(tmp_path)
+    ids = iter(["r0", "r1"])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": 0.5, "info": {"feedback": "fine"}}))
+    failure = {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps({"score": None, "info": failure}))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[{"id": "a"}, {"id": "b"}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+
+    answer = scorer.score_program(str(program))
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 2 case(s) have no score."
+    assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: Traceback: boom"
+    assert scorer.best is None
+    assert scorer.scored == {}
+
+
+def _two_case_answer(
+    tmp_path: Path, monkeypatch: Any, second: dict[str, Any], stop_at_score: float | None = None
+) -> tuple[Any, dict[str, Any]]:
+    """Score one program on two cases: the first scores 0.5, the second gets ``second`` from the parent.
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+        second: The parent's response for the second case.
+        stop_at_score: Score that stops the run, if any.
+
+    Returns:
+        The program scorer and its answer for the program.
+    """
+    monkeypatch.chdir(tmp_path)
+    ids = iter(["r0", "r1"])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": 0.5, "info": {"feedback": "fine"}}))
+    (tmp_path / "rpc" / "r1.json").write_text(json.dumps(second))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[{"id": "a"}, {"id": "b"}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=stop_at_score,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+    return scorer, scorer.score_program(str(program))
+
+
+def test_a_metric_error_case_keeps_the_programs_mean_over_its_scored_cases(tmp_path: Path, monkeypatch: Any) -> None:
+    """A metric error is the metric's fault, so the program keeps its mean over the scored cases (SKY-367, SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    scorer, answer = _two_case_answer(tmp_path, monkeypatch, {"score": None, "info": {"error": "KeyError: 'x'"}})
+
+    assert answer["correct"] is True
+    assert answer["metrics"]["combined_score"] == 0.5
+    assert answer["metrics"]["private"] == {"case_0": 0.5}
+    assert "Case 1 has no score: the metric failed:\nKeyError: 'x'" in answer["metrics"]["text_feedback"]
+    assert scorer.best is None
+    assert scorer.scored[2]["per_example"] == [("0", 0.5)]
+
+
+def test_a_metric_error_version_cannot_reach_stop_at_score(tmp_path: Path, monkeypatch: Any) -> None:
+    """A version with a metric error keeps its mean for selection, but it cannot stop the run or become best (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    second = {"score": None, "info": {"error": "KeyError: 'x'"}}
+    scorer, answer = _two_case_answer(tmp_path, monkeypatch, second, stop_at_score=0.4)
+
+    assert answer["correct"] is True
+    assert answer["metrics"]["combined_score"] == 0.5
+    assert not scorer.target_reached.is_set()
+    assert scorer.best is None
+    assert scorer.failed_versions == 1
+
+
+def test_a_program_the_metric_fails_on_every_case_has_no_score(tmp_path: Path, monkeypatch: Any) -> None:
+    """With no scored case, a metric error leaves the program with no mean, so it fails (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex="r0"))
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "r0.json").write_text(json.dumps({"score": None, "info": {"error": "KeyError: 'x'"}}))
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=shinka_runner.EvaluatorMailbox("testnonce", 5.0),
+        queue=tmp_path / "queue",
+        examples=[None],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_1" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("Answer."))
+
+    answer = scorer.score_program(str(program))
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 1 case(s) have no score."
+    assert scorer.best is None
+
+
+class _NoProgramRunner:
+    """Stand in for upstream's runner: it finishes without submitting one program."""
+
+    def __init__(self, **_: Any) -> None:
+        """Take upstream's keyword arguments.
+
+        Args:
+            **_: Upstream's constructor arguments, ignored.
+        """
+
+    def run(self) -> None:
+        """Finish at once, as when upstream submits no generation."""
+
+
+class _FailedProgramRunner(_NoProgramRunner):
+    """Stand in for upstream's runner: it submits the seed and waits for the scorer's answer."""
+
+    def run(self) -> None:
+        """Queue the seed as generation 0 and wait for the scorer's answer, as ``evaluate.py`` does."""
+        program = Path("shinka-run/results/gen_0/main.md")
+        program.parent.mkdir(parents=True)
+        program.write_text(shinka_runner.pack_program("Answer."), encoding="utf-8")
+        queue = Path("shinka-run/eval-queue")
+        (queue / "requests" / "q0.json").write_text(json.dumps({"program_path": str(program.resolve())}))
+        deadline = time.monotonic() + 4.0
+        while not (queue / "responses" / "q0.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+
+_RUN_FAILED_RESPONSE = {"score": None, "info": {"feedback": "Run failed: Traceback: boom", "status": "run_failed"}}
+
+
+def _execute_with(
+    tmp_path: Path, monkeypatch: Any, runner: type, responses: Sequence[dict[str, Any]] = (_RUN_FAILED_RESPONSE,)
+) -> dict[str, Any]:
+    """Run ``execute`` with one case per parent response and ``runner`` in place of upstream's runner.
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        runner: The stand-in runner class.
+        responses: The parent's response for each case of the seed.
+
+    Returns:
+        The run's result document.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    for name in ("EvolutionConfig", "DatabaseConfig", "LocalJobConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner.UsageLedger, "install", lambda self: None)
+    ids = iter([f"r{index}" for index in range(len(responses))])
+    monkeypatch.setattr(shinka_runner.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    (tmp_path / "rpc").mkdir()
+    for index, response in enumerate(responses):
+        (tmp_path / "rpc" / f"r{index}.json").write_text(json.dumps(response))
+    train_set = [{"id": str(index)} for index in range(len(responses))]
+    payload = _payload(
+        nonce="testnonce",
+        timeout_seconds=5.0,
+        task={"objective": "Be concise.", "background": "", "seed_candidate": "Answer.", "train_set": train_set},
+    )
+    return shinka_runner.execute(payload)
+
+
+def test_a_run_where_every_scored_version_fails_keeps_the_seed_and_says_why(
+    tmp_path: Path, monkeypatch: Any, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """When every scored version fails a case, the run keeps the seed with no score and logs why (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capfd: Captures the framed log lines.
+    """
+    document = _execute_with(tmp_path, monkeypatch, _FailedProgramRunner)
+
+    assert "error" not in document
+    assert (document["best_candidate"], document["best_score"]) == ("Answer.", None)
+    lines = [line for line in capfd.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
+        "No version has a score: each one failed on at least one case. The run keeps the starting version."
+    ]
+
+
+def test_a_run_whose_every_version_has_a_metric_error_keeps_the_seed_and_says_why(
+    tmp_path: Path, monkeypatch: Any, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A metric error on one case leaves the seed with no score, and the run still finishes (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capfd: Captures the framed log lines.
+    """
+    responses = [{"score": 0.5, "info": {"feedback": "fine"}}, {"score": None, "info": {"error": "KeyError: 'x'"}}]
+
+    document = _execute_with(tmp_path, monkeypatch, _FailedProgramRunner, responses)
+
+    assert "error" not in document
+    assert (document["best_candidate"], document["best_score"]) == ("Answer.", None)
+    lines = [line for line in capfd.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert [json.loads(line.split(" ", 2)[2])["message"] for line in lines] == [
+        "No version has a score: each one failed on at least one case. The run keeps the starting version."
+    ]
+
+
+def test_a_metric_error_version_stays_in_the_version_tree_as_a_parent(tmp_path: Path, monkeypatch: Any) -> None:
+    """The lineage reporter sends a metric-error version, so its child's parent resolves (SKY-751).
+
+    Args:
+        tmp_path: Working folder with the parent's response files.
+        monkeypatch: Working folder and fixed request ids.
+    """
+    scorer, _ = _two_case_answer(tmp_path, monkeypatch, {"score": None, "info": {"error": "KeyError: 'x'"}})
+    scorer.scored[3] = {"candidate": "y", "score": 0.7, "per_example": [("0", 0.7), ("1", 0.7)]}
+    db_path = tmp_path / "programs.sqlite"
+    with shinka_runner.contextlib.closing(shinka_runner.sqlite3.connect(db_path)) as db:
+        db.execute("CREATE TABLE programs (id TEXT, generation INTEGER, parent_id TEXT)")
+        db.executemany("INSERT INTO programs VALUES (?, ?, ?)", [("p2", 2, None), ("p3", 3, "p2")])
+        db.commit()
+    mailbox = _Mailbox()
+
+    shinka_runner.LineageReporter(mailbox, scorer, db_path).poll()
+
+    assert [(line["candidate_id"], line["parent_id"]) for line in mailbox.lines] == [(2, None), (3, 2)]
+    assert mailbox.lines[0]["per_example"] == [("0", 0.5)]
+
+
+def test_a_run_that_scores_no_program_at_all_fails_with_an_error(
+    tmp_path: Path, monkeypatch: Any, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """When upstream submits no program for scoring, the run fails explicitly, as Best-of-N does (SKY-751).
+
+    Args:
+        tmp_path: Working folder for the run.
+        monkeypatch: Replaces upstream's runner and configuration classes.
+        capfd: Captures the framed log lines.
+    """
+    document = _execute_with(tmp_path, monkeypatch, _NoProgramRunner)
+
+    assert document["error"] == "ShinkaEvolve finished without scoring any version."
+    assert "best_candidate" not in document
+    assert "No version has a score" not in capfd.readouterr().out
 
 
 def test_repository_mode_swaps_prompts_edits_and_novelty_input(tmp_path: Path, monkeypatch: Any) -> None:
@@ -1200,6 +1479,52 @@ def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
     assert mailbox.total_evals == 1
 
 
+def test_a_null_score_on_the_reply_stream_fails_the_program_with_its_run_failure(tmp_path: Path) -> None:
+    """Fail the program on a worker's null score, and still ask for its later cases (SKY-751).
+
+    Args:
+        tmp_path: Scratch folder for the queue and the program.
+    """
+
+    def reply(request: dict[str, Any]) -> dict[str, Any]:
+        """Send no score for case 1, with its run failure, and score the others.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The worker's reply fields.
+        """
+        if request["example"]["id"] == 1:
+            return {"score": None, "info": {"status": "run_failed", "feedback": "Run failed: boom"}}
+        return {"score": 1.0, "info": {}}
+
+    mailbox, sent = _connected_mailbox(reply)
+    send = mailbox.emit
+    # The scorer also writes progress lines, which the fake worker does not answer.
+    mailbox.emit = lambda prefix, payload: send(prefix, payload) if prefix == "APP_NATIVE_RPC " else None  # type: ignore[method-assign]
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=mailbox,
+        queue=tmp_path / "queue",
+        examples=[{"id": 0}, {"id": 1}, {"id": 2}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("text"))
+
+    answer = scorer.score_program(str(program))
+    scorer.stop()
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 3 case(s) have no score."
+    assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: boom"
+    assert [request["example"]["id"] for request in sent] == [0, 1, 2]
+    assert scorer.best is None
+
+
 @pytest.mark.parametrize(
     ("max_concurrency", "sent_cases"),
     [(1, [0, 1]), (3, [0, 1, 2])],
@@ -1231,7 +1556,8 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
         """
         if request["kind"] == "model":
             return {"text": "next version"}
-        return {"score": None} if request["example"]["id"] == 1 else {"score": 1.0}
+        # A null score is a case with no score (SKY-751), so a non-numeric one crashes the case.
+        return {"score": "crash"} if request["example"]["id"] == 1 else {"score": 1.0}
 
     mailbox, sent = _connected_mailbox(reply)
     send = mailbox.emit
@@ -1270,7 +1596,7 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
     program.parent.mkdir(parents=True)
     program.write_text(shinka_runner.pack_program("text"))
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         scorer.score_program(str(program))
     mailbox.complete([{"role": "user", "content": "next proposal"}])
     time.sleep(0.5)
@@ -1823,6 +2149,19 @@ def test_the_patch_check_reads_the_whole_patch_from_inside_a_repository_subfolde
         shinka_runner.refuse_unsafe_patch(_symlink_patch("/etc"))
 
 
+def test_git_summary_of_a_mode_change_to_a_symlink_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the new mode from git's ``mode change OLD => NEW`` summary line.
+
+    Args:
+        monkeypatch: Turns off the text check, so only git's summary can see the mode.
+    """
+    monkeypatch.setattr(shinka_runner, "_PATCH_MODE", re.compile(r"(?!)"))
+    patch = "diff --git a/f b/f\nold mode 100644\nnew mode 120000\n"
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.refuse_unsafe_patch(patch)
+
+
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2089,3 +2428,88 @@ def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(
 
     assert scorers[0]._cases._max_workers == 1
     assert runners[0]._generate_proposal_async.__qualname__ == "install_sequential_gate.<locals>.gated"
+
+
+@pytest.mark.parametrize(("seed", "reduced"), [(-1, 2**32 - 1), (2**40, 0)])
+def test_on_the_engine_loop_execute_reduces_an_out_of_range_seed_for_every_seeded_draw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int, reduced: int
+) -> None:
+    """Start the child with a seed NumPy refuses, and give NumPy and the bandit the same reduced seed.
+
+    The test restores the ``random`` and NumPy random states that the seeding changes.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream, ``uuid.uuid4`` and the reply stream.
+        seed: The user's seed.
+        reduced: The seed modulo 2**32.
+    """
+    seeded: list[int] = []
+    configs: list[Any] = []
+    real_seed_randomness = shinka_runner.seed_randomness
+
+    def recording_seed_randomness(value: int) -> None:
+        """Record the seed, then seed for real.
+
+        Args:
+            value: The seed the child passes.
+        """
+        seeded.append(value)
+        real_seed_randomness(value)
+
+    def runner(**fields: Any) -> _IdleRunner:
+        """Build an idle runner and record its evolution config.
+
+        Args:
+            **fields: Upstream's runner arguments.
+
+        Returns:
+            The runner.
+        """
+        configs.append(fields["evo_config"])
+        return _IdleRunner(**fields)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    # The test environment has no upstream, so the runner may have no NumPy of its own.
+    monkeypatch.setattr(shinka_runner, "np", np)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "seed_randomness", recording_seed_randomness)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    state = random.getstate()
+    np_state = np.random.get_state()
+    try:
+        shinka_runner.execute(
+            _payload(
+                nonce="testnonce",
+                timeout_seconds=5.0,
+                transport="stdio",
+                seed=seed,
+                task={"seed_candidate": "seed", "train_set": []},
+            )
+        )
+    finally:
+        random.setstate(state)
+        np.random.set_state(np_state)
+
+    assert seeded == [reduced]
+    assert configs[0].llm_dynamic_selection_kwargs["seed"] == reduced
+
+
+def test_runner_git_refuses_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's git helper does not treat a bare-repository layout as a repository (SKY-812).
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    with pytest.raises(RuntimeError, match=r"safe\.bareRepository"):
+        shinka_runner._git(repo, "rev-parse", "--git-dir")
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    assert shinka_runner._git(repo, "rev-parse", "--git-dir").strip() == "."
