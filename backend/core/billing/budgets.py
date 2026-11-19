@@ -1888,7 +1888,8 @@ class BudgetService:
             Updated attempt and authoritative budget snapshot.
 
         Raises:
-            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path.
+            BudgetBoundExceededError: After preserving evidence and blocking the faulty priced path. For a fenced
+                lease's late settle, it keeps only the evidence and blocks nothing.
             BudgetFundingLostError: After preserving evidence when an external adjustment removed funding.
         """
         key = _identifier(evidence_key)
@@ -1933,7 +1934,10 @@ class BudgetService:
                         select(
                             func.max(ExecutionUsageEvidenceModel.actual_units),
                             func.max(ExecutionUsageEvidenceModel.actual_wallet_units),
-                        ).where(ExecutionUsageEvidenceModel.operation_id == operation_id)
+                        ).where(
+                            ExecutionUsageEvidenceModel.operation_id == operation_id,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
                     ).one()
                     floor_units = max(floor_units, late_units or 0)
                     floor_wallet = max(floor_wallet, late_wallet or 0)
@@ -1944,7 +1948,7 @@ class BudgetService:
                 billed = 0 if fenced else ceil_cents(budget.wallet_settled_units + wallet_delta) - budget.billed_cents
                 if scope > operation.max_units or charge > operation.max_wallet_units:
                     issue = "bound_exceeded"
-                elif not fenced and billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
+                elif billed > int(wallet.balance_cents) + int(wallet.grant_remaining or 0):
                     issue = "funding_lost"
                 event_id = str(uuid4())
                 session.add(

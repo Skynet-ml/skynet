@@ -588,6 +588,65 @@ def test_a_fenced_late_settle_cannot_go_below_an_earlier_late_settle_on_postgres
         service.settle(lease, "alice", evidence_key="late-2", actual_cents=4, evidence={"step": 3}, final=False)
 
 
+def test_a_fenced_late_settle_floor_counts_scope_usage_when_the_wallet_charge_is_smaller_on_postgres(
+    database: Engine,
+) -> None:
+    """A BYOK-shaped late settle charges the wallet less than its scope, so the scope floor must hold (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(
+        lease, "alice", evidence_key="late-1", actual_cents=6, actual_wallet_cents=2, evidence={"step": 2}, final=False
+    )
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(
+            lease,
+            "alice",
+            evidence_key="late-2",
+            actual_cents=4,
+            actual_wallet_cents=3,
+            evidence={"step": 3},
+            final=False,
+        )
+
+
+def test_a_fenced_late_settle_floor_counts_wallet_usage_when_the_scope_grows_on_postgres(database: Engine) -> None:
+    """A later late settle can raise its scope, but its wallet charge must not go below an earlier one (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(
+        lease, "alice", evidence_key="late-1", actual_cents=6, actual_wallet_cents=4, evidence={"step": 2}, final=False
+    )
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(
+            lease,
+            "alice",
+            evidence_key="late-2",
+            actual_cents=7,
+            actual_wallet_cents=3,
+            evidence={"step": 3},
+            final=False,
+        )
+
+
+def test_a_refused_fenced_late_settle_does_not_raise_the_floor_on_postgres(database: Engine) -> None:
+    """A late settle that the bound refused counts for nothing, as on the live path (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    with pytest.raises(BudgetBoundExceededError):
+        service.settle(lease, "alice", evidence_key="late-1", actual_cents=15, evidence={"step": 2}, final=False)
+
+    late = service.settle(lease, "alice", evidence_key="late-2", actual_cents=8, evidence={"step": 3}, final=True)
+
+    assert late.budget.billed_cents == 2
+    with Session(database) as session:
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "late-2")
+        ).one()
+        assert (evidence.actual_units, evidence.billed_cents, evidence.issue) == (8 * CENT_SCALE, 0, None)
+
+
 def test_a_current_generation_lease_cannot_settle_again_after_its_final_settle_on_postgres(
     database: Engine,
 ) -> None:
