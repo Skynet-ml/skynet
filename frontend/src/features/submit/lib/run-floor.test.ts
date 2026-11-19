@@ -146,7 +146,8 @@ test("module keyword names are not value uses", () => {
 });
 
 test("global helper rebinding is unsafe", () => {
-  const code = "from openascent import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')";
+  const code =
+    "from openascent import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')";
   assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
 });
 
@@ -327,9 +328,11 @@ test("the floor prices the literal model declared by the metric", () => {
     extraReflectionModels: [],
   };
   assert.equal(
-    runModels(optimizer, true, "from openascent import llm\nllm('x', model='anthropic/expensive')").at(
-      -1,
-    )?.name,
+    runModels(
+      optimizer,
+      true,
+      "from openascent import llm\nllm('x', model='anthropic/expensive')",
+    ).at(-1)?.name,
     "anthropic/expensive",
   );
 });
@@ -359,7 +362,9 @@ test("a declared extra reflection model keeps its source for the floor", () => {
     extraReflectionModels: [extra],
   };
   assert.deepEqual(
-    runModels(optimizer, true, "from openascent import llm\nllm(model='anthropic/claude-x')").at(-1),
+    runModels(optimizer, true, "from openascent import llm\nllm(model='anthropic/claude-x')").at(
+      -1,
+    ),
     extra,
   );
 });
@@ -405,8 +410,11 @@ test("metric model parsing ignores comments and reads aliases", () => {
     "openai/cheap",
   );
   assert.equal(
-    runModels(optimizer, true, "import openascent\nopenascent . llm(model=(r'openai/' 'judge'))").at(-1)
-      ?.name,
+    runModels(
+      optimizer,
+      true,
+      "import openascent\nopenascent . llm(model=(r'openai/' 'judge'))",
+    ).at(-1)?.name,
     "openai/judge",
   );
   assert.equal(
@@ -545,9 +553,11 @@ test("a local subscription metric does not inherit a BYOK reflection source", ()
       reflectionModel: { name: "openai/reflection", token_source: "managed" as const },
     };
     assert.equal(
-      runModels(managed, true, "from openascent import llm\nllm(model='subscription/claude/model')").at(
-        -1,
-      )?.token_source,
+      runModels(
+        managed,
+        true,
+        "from openascent import llm\nllm(model='subscription/claude/model')",
+      ).at(-1)?.token_source,
       "subscription",
     );
     const invalid = runModels(
