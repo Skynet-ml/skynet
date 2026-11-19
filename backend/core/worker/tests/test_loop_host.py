@@ -29,13 +29,14 @@ from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetBoundExceededError
 from core.billing.openrouter_quotes import price_text_request
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.runtime import UsagePendingError
+from core.constants import PROGRESS_LANE_STARTED
 from core.exceptions import (
     DETERMINISTIC_FAILURE,
     INFRASTRUCTURE_INTERRUPTION,
     InfrastructureInterruptionError,
     ServiceError,
 )
-from core.models.blackbox import BlackboxRunRequest
+from core.models.blackbox import BlackboxBudget, BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 from core.sandbox.trees import tar_to_tree
 from core.service_gateway.optimization.blackbox import auto, service
@@ -1349,10 +1350,29 @@ class _LaneKillModel(_Model):
         return super().__call__(prompt, tools)
 
 
+def _lane_budgets(events: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
+    """Collect the scorer allowance that each Auto lane started with.
+
+    Args:
+        events: The host's job events.
+
+    Returns:
+        Each lane's allowance by phase and engine.
+    """
+    return {
+        (event["metrics"]["phase"], event["metrics"]["engine"]): event["metrics"]["budget"]
+        for event in events
+        if event["type"] == "progress" and event["event"] == PROGRESS_LANE_STARTED
+    }
+
+
 def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An Auto repository run uses the loop, and a resume repeats no committed model or scorer call (SKY-832)."""
+    """An Auto repository run uses the loop, and a resume repeats no committed model or scorer call (SKY-832).
+
+    The resume gets a larger scorer allowance, so only the committed lane plan keeps the lane allowances.
+    """
     payload = {**_host_payload(owner, tmp_path, monkeypatch), "strategy": {"mode": "auto"}}
     monkeypatch.setattr(service, "LOOP_ROUTES", frozenset((name, "repo") for name in AUTO_ENGINES))
     monkeypatch.setattr(service, "run_strategy", auto.run_strategy)
@@ -1368,13 +1388,20 @@ def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
     assert len(first_calls) == len(lanes)
     # The parent committed its lane plan; the lane results never committed.
     assert _steps(engine) == [("command", 1)]
+    per_lane = BlackboxBudget().max_scorer_runs // (len(AUTO_ENGINES) + 1)
+    assert _lane_budgets(events) == {("explore", name): per_lane for name in AUTO_ENGINES}
 
     _new_generation(engine)
     model = _Model()
-    events = _host(payload, owner, engine, tmp_path, generation=2, model=model)
+    resumed = {**payload, "budget": {"max_scorer_runs": 2 * BlackboxBudget().max_scorer_runs}}
+    events = _host(resumed, owner, engine, tmp_path, generation=2, model=model)
 
     [result] = [event for event in events if event["type"] == "result"]
     assert result["result"]["best_score"] == 1.0
+    assert _lane_budgets(events) == {
+        **{("explore", name): per_lane for name in AUTO_ENGINES},
+        ("continue", "gepa"): BlackboxBudget().max_scorer_runs - len(AUTO_ENGINES) * per_lane,
+    }
     assert model.prompts == ["write explore-meta_harness-0", "write continue-gepa"]
     assert not set(_FakeRepoScorer.calls[len(first_calls) :]) & set(first_calls)
     assert _steps(engine)[:2] == [("command", 1), ("command", 2)]
