@@ -503,13 +503,12 @@ def _perform_preflight(
     status = "failed"
     result: dict[str, Any] = {}
     try:
-        remote_evaluation = request.scope == "evaluation" and payload.get("scorer", {}).get("kind") == "remote"
         uses_managed_models = payload_uses_token_source(
             payload,
             TOKEN_SOURCE_MANAGED,
             default_token_source=str(payload.get("token_source") or TOKEN_SOURCE_MANAGED),
         )
-        if settings.openrouter_api_key is None and uses_managed_models and not remote_evaluation:
+        if settings.openrouter_api_key is None and uses_managed_models:
             raise ValueError("Managed model routing is not configured.")
         gateway = ModelGateway(
             BudgetRuntime(

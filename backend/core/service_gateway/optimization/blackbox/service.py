@@ -1070,9 +1070,6 @@ def run_blackbox_optimization(
         payload,
         verify_scorer=payload.execution_budget_id is None and ROUTE_KEY not in payload.reflection_model_settings.extra,
     )
-    protected = payload.execution_budget_id is not None or ROUTE_KEY in payload.reflection_model_settings.extra
-    if payload.scorer.kind == "remote" and protected and not evaluator_route:
-        raise ServiceError("Protected remote evaluation requires its parent-issued capability.")
     if not evaluator_route:
         raise ServiceError("A repository run is scored only by its trusted parent.")
     # The engine loop reads the worker's archive; only a guest box gets the tree in chunks.
