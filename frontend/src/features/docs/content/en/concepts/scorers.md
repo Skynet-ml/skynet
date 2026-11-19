@@ -19,7 +19,7 @@ The `optimize.toml` file of the repository must have a `[run]` section or a `[ta
 - A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
 - A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
 
-The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from skynet import call`. Read [How optimization works](/docs/concepts/optimization).
+The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from openascent import call`. Read [How optimization works](/docs/concepts/optimization).
 
 ## The return value
 
@@ -109,7 +109,7 @@ When the `[run]` entry fails on a case, that case has no score. If the entry can
 
 ### Model as judge
 
-The scorer can call a model. Import `llm` from the `skynet` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
+The scorer can call a model. Import `llm` from the `openascent` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`,
 ## Model calls and secrets
 
 - Calls on Skynet's keys are metered against the run budget. With your own key (BYOK), the call goes to your provider key, with no Skynet model fee. Read [Billing](/docs/concepts/billing).
-- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists, or through a server in the `[metric] mcp` file. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
+- The scorer gets no run secrets as environment variables. A secret reaches the scorer only through a `[services.<name>]` table that `[metric] services` lists, or through a server in the `[metric] mcp` file. Write the secret in the table's `headers` as `${NAME}`. The scorer sends its requests to the URL in `ASCENT_SERVICE_<NAME>_URL`. Skynet adds the secret outside the sandbox.
 - Skynet hides secret values in the scorer output and in the logs.
 
 ## Limits

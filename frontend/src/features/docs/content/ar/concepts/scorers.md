@@ -19,7 +19,7 @@ def score(repo_path, case, output=None):
 - مدخل من نوع دالة، مثل `entry = "serve.py:serve"`، يتلقى `case["input"]` كوسيطة. و`output` هو قيمة الإرجاع منه.
 - مدخل من نوع أمر، مثل `entry = ["python", "-m", "pytest", "-q"]`، يتلقى الإدخال بصيغة JSON على stdin. و`output` هو `{"exit_code": ..., "stdout": "..."}`.
 
-يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from skynet import call`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
+يعمل المُقيِّم في صندوق معزول منفصل. لا يحتوي هذا الصندوق إلا ملفات المقياس. لا يستطيع المُقيِّم استيراد كود النسخة ولا تشغيله. يرى النسخة فقط من خلال `output`، أو من خلال `call()` إلى مرحلة `[target.<name>]`. استورد `call` باستخدام `from openascent import call`. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization).
 
 ## قيمة الإرجاع
 
@@ -109,7 +109,7 @@ def score(repo_path, case, output=None):
 
 ### النموذج كحَكَم
 
-يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `skynet`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
+يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `openascent`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ def score(repo_path, case, output=None):
 ## استدعاءات النماذج والأسرار
 
 - تُقاس الاستدعاءات بمفاتيح Skynet على ميزانية التشغيل. بمفتاحك الخاص (BYOK)، يذهب الاستدعاء إلى مفتاح مزوّدك، دون رسوم نموذج من Skynet. اقرأ [الفوترة](/docs/concepts/billing).
-- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`، أو عبر خادم في ملف `[metric] mcp`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `SKYNET_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
+- لا يتلقى المُقيِّم أسرار التشغيل كمتغيرات بيئة. يصل السر إلى المُقيِّم فقط عبر جدول `[services.<name>]` يذكره `[metric] services`، أو عبر خادم في ملف `[metric] mcp`. اكتب السر في `headers` الجدول بالشكل `${NAME}`. يرسل المُقيِّم طلباته إلى عنوان URL الموجود في `ASCENT_SERVICE_<NAME>_URL`. يضيف Skynet السر خارج البيئة المعزولة.
 - يُخفي Skynet قيم الأسرار في مخرجات المُقيِّم وفي السجلات.
 
 ## الحدود

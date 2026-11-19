@@ -19,7 +19,7 @@ Le fichier `optimize.toml` du dépôt doit avoir une section `[run]` ou une éta
 - Une entrée de fonction, par exemple `entry = "serve.py:serve"`, reçoit `case["input"]` comme argument. `output` est sa valeur de retour.
 - Une entrée de commande, par exemple `entry = ["python", "-m", "pytest", "-q"]`, reçoit l'entrée en JSON sur stdin. `output` est `{"exit_code": ..., "stdout": "..."}`.
 
-L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique. L'évaluateur ne peut ni importer ni exécuter le code de la version. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from skynet import call`. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
+L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique. L'évaluateur ne peut ni importer ni exécuter le code de la version. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from openascent import call`. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
 
 ## La valeur de retour
 
@@ -109,7 +109,7 @@ Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entré
 
 ### Un modèle comme juge
 
-L'évaluateur peut appeler un modèle. Importez `llm` depuis le module d'aide `skynet`. L'appel passe par la passerelle de modèles de Skynet vers le modèle de l'évaluateur de l'exécution.
+L'évaluateur peut appeler un modèle. Importez `llm` depuis le module d'aide `openascent`. L'appel passe par la passerelle de modèles de Skynet vers le modèle de l'évaluateur de l'exécution.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ L'évaluateur peut aussi utiliser n'importe quel client compatible OpenAI avec l
 ## Appels de modèle et secrets
 
 - Les appels sur les clés de Skynet sont décomptés du budget de l'exécution. Avec votre propre clé (BYOK), l'appel passe par la clé de votre fournisseur, sans frais de modèle Skynet. Lisez [Facturation](/docs/concepts/billing).
-- L'évaluateur ne reçoit pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à l'évaluateur seulement par une table `[services.<name>]` que `[metric] services` liste, ou par un serveur du fichier `[metric] mcp`. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'évaluateur envoie ses requêtes à l'URL de `SKYNET_SERVICE_<NAME>_URL`. Skynet ajoute le secret hors de la sandbox.
+- L'évaluateur ne reçoit pas les secrets de l'exécution sous forme de variables d'environnement. Un secret arrive à l'évaluateur seulement par une table `[services.<name>]` que `[metric] services` liste, ou par un serveur du fichier `[metric] mcp`. Écrivez le secret dans les `headers` de la table sous la forme `${NAME}`. L'évaluateur envoie ses requêtes à l'URL de `ASCENT_SERVICE_<NAME>_URL`. Skynet ajoute le secret hors de la sandbox.
 - Skynet masque les valeurs des secrets dans la sortie de l'évaluateur et dans les journaux.
 
 ## Limites

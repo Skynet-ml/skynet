@@ -1139,7 +1139,7 @@ def _stage_scorer(
 def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
     """The scorer calls two stages; each stage box runs the scored version, and every box closes."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    doubled = call('double', {'v': 3})\n"
         "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
@@ -1163,7 +1163,7 @@ def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
 
 def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None:
     """The guest's wait covers the stage layout and the scorer, so it never stops before the parent answers."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1176,7 +1176,7 @@ def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None
 
 def test_one_stage_is_enough(tmp_path: Path) -> None:
     """A run with one stage opens one box for each evaluation."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
     runtime = RecordingRuntime()
     scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
     try:
@@ -1197,7 +1197,7 @@ def test_one_stage_is_enough(tmp_path: Path) -> None:
 def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: str, expected: str) -> None:
     """A failed stage, a stage past its timeout and an unknown name each raise ``StageError``."""
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         f"        call({name!r}, 3)\n"
@@ -1218,7 +1218,7 @@ def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Pat
     """A good and a failed stage call each write one ``stage`` run call (E28)."""
     code = (
         "import os\n"
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    for name in ('double', 'broken'):\n"
         "        try:\n"
@@ -1350,7 +1350,7 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
         entry=("python3", "-c", f"import sys; sys.stderr.write({secret!r} + 'B' * 490); sys.exit(1)"), timeout=30
     )
     code = (
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        call('failing', 1)\n"
@@ -1542,7 +1542,7 @@ def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
 def test_a_partial_line_before_a_call_does_not_hide_the_frame(tmp_path: Path) -> None:
     """A scorer that prints without a newline before ``call`` still gets the stage's answer."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    print('x', end='', flush=True)\n"
         "    return {'score': call('double', {'v': 2})['v'] / 10, 'feedback': 'ok'}\n"
@@ -1561,7 +1561,7 @@ def test_calls_reach_their_stage_while_another_thread_prints(tmp_path: Path) -> 
     """A thread that keeps printing partial lines never makes a call wait for the scorer timeout."""
     code = (
         "import threading\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    stop = threading.Event()\n"
         "    def chatter():\n"
@@ -1590,7 +1590,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
     """Four calls to one stage overlap, each in its own process, up to ``max_concurrency``."""
     code = (
         "from concurrent.futures import ThreadPoolExecutor\n"
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    with ThreadPoolExecutor(4) as pool:\n"
         "        values = list(pool.map(lambda value: call('slow', value), [1.5] * 4))\n"
@@ -1613,7 +1613,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
 
 def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(tmp_path: Path) -> None:
     """Each answer write moves every file's change time, yet a clean version keeps its score."""
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
@@ -1631,7 +1631,7 @@ def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(
 def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_path: Path) -> None:
     """A version that changes a protected file gets no score, named once, before the metric calls a stage."""
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    total = sum(call('double', {'v': v})['v'] for v in (1, 2, 3))\n"
         "    return {'score': total / 100, 'feedback': 'ok'}\n"
@@ -1679,7 +1679,7 @@ def test_a_metric_stage_answer_skips_the_protected_file_check(tmp_path: Path, mo
         return real(self, path, text)
 
     monkeypatch.setattr(CandidateBox, "answer", answer)
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v'] / 10, 'feedback': 'ok'}\n"
     scorer, _ = _stage_scorer(
         tmp_path,
         code,
@@ -2174,7 +2174,7 @@ import urllib.request
 def score(repo_path, case=None):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(
-        os.environ["SKYNET_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
+        os.environ["ASCENT_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
         data=b'{"text": "hi"}',
         headers={"Content-Type": "application/json", "Authorization": "Bearer guessed"},
         method="POST",
@@ -2285,7 +2285,7 @@ import urllib.request
 
 
 def run(value):
-    url = os.environ.get("SKYNET_SERVICE_JUDGE_API_URL")
+    url = os.environ.get("ASCENT_SERVICE_JUDGE_API_URL")
     seen = {
         "key_in_env": any(v in ("judge-secret-value", "other-value") for v in os.environ.values()),
         "service_url": url is not None,
@@ -2577,7 +2577,7 @@ def test_a_lost_stage_budget_stop_answer_still_stops_the_evaluation(
     """
     monkeypatch.setattr(_StageRelay, "_run", _stop_the_stage)
     _refuse_answer_writes(monkeypatch, _write_error(503)[1])
-    code = "from skynet import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v']}\n"
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 3})['v']}\n"
     scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"double": STAGES["double"]})
     scorer._timeout_seconds = 3
     scorer.raw_provider_errors = judge
@@ -4057,7 +4057,7 @@ def lookup(value):
     # Long enough that parallel calls in one stage box overlap.
     time.sleep(1.0)
     body = value["body"].encode() if value.get("body") else None
-    url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
+    url = os.environ["ASCENT_MCP_SEARCH_URL"] + value.get("path", "")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
     try:
         with opener.open(urllib.request.Request(url, data=body, method="POST" if body else "GET")) as response:
@@ -4069,8 +4069,8 @@ def lookup(value):
         "body": text,
         "key_in_env": "JUDGE_KEY" in os.environ,
         "span": [started, time.time()],
-        "url": os.environ["SKYNET_MCP_SEARCH_URL"],
-        "config": json.load(open(os.environ["SKYNET_MCP_CONFIG"])),
+        "url": os.environ["ASCENT_MCP_SEARCH_URL"],
+        "config": json.load(open(os.environ["ASCENT_MCP_CONFIG"])),
     }
 """
 _LOOKUP_COMMAND = (
@@ -4081,7 +4081,7 @@ _LOOKUP_COMMAND = (
 _LOOKUP_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}, {'path': '/events'}]\n"
     "    with ThreadPoolExecutor(3) as pool:\n"
@@ -4142,7 +4142,7 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
 _TWO_LOOKUPS_SCORER = (
     "import json\n"
     "from concurrent.futures import ThreadPoolExecutor\n"
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}]\n"
     "    with ThreadPoolExecutor(2) as pool:\n"
@@ -4205,7 +4205,7 @@ def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
 
     monkeypatch.setattr(repo_scorer, "relay_request", stop)
     code = (
-        "from skynet import call\n"
+        "from openascent import call\n"
         "def score(repo_path, case=None):\n"
         "    try:\n"
         "        return {'score': call('lookup', {'body': '{}'})['status'] / 1000, 'feedback': 'ran'}\n"

@@ -130,7 +130,7 @@ def test_legacy_model_conflict_is_rejected() -> None:
     assert payload["models"]["metric_model"]["name"] == "old"
 
 
-@pytest.mark.parametrize("prefix", ["", "from skynet import llm\n"])
+@pytest.mark.parametrize("prefix", ["", "from openascent import llm\n"])
 def test_parameter_binding_is_unsafe_in_any_scope(prefix: str) -> None:
     """Reject parameter bindings even beside a global helper call."""
     scan = scan_metric_llm(prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')")
@@ -154,14 +154,14 @@ def test_positional_model_name_is_not_keyword() -> None:
 
 def test_keyword_name_is_not_a_value_use() -> None:
     """Ignore keyword names."""
-    code = "import skynet\nf(skynet=1)\nllm(model='a')"
+    code = "import openascent\nf(openascent=1)\nllm(model='a')"
     scan = scan_metric_llm(code)
     assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"a"}, False)
 
 
 def test_global_helper_rebinding_is_ambiguous() -> None:
     """Reject rebinding a module helper through a global declaration."""
-    scan = scan_metric_llm("from skynet import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')")
+    scan = scan_metric_llm("from openascent import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')")
     assert scan.uses_llm
     assert scan.non_literal
 
@@ -181,16 +181,16 @@ def test_omitted_and_distinct_model_are_ambiguous(suffix: str) -> None:
 @pytest.mark.parametrize(
     "expr",
     [
-        "getattr(skynet, 'llm')",
+        "getattr(openascent, 'llm')",
         "globals()['llm']",
-        "vars(skynet)['llm']",
-        "skynet.__dict__['llm']",
-        "skynet",
+        "vars(openascent)['llm']",
+        "openascent.__dict__['llm']",
+        "openascent",
     ],
 )
 def test_dynamic_helper_access_is_ambiguous(expr: str) -> None:
     """Reject dynamic access that can hide a helper call."""
-    scan = scan_metric_llm("import skynet\nx = " + expr)
+    scan = scan_metric_llm("import openascent\nx = " + expr)
     assert scan.uses_llm
     assert scan.non_literal
 
@@ -198,7 +198,7 @@ def test_dynamic_helper_access_is_ambiguous(expr: str) -> None:
 def test_llm_keyword_name_is_not_helper_use() -> None:
     """Ignore an unrelated keyword named llm."""
     scan = scan_metric_llm(
-        "from skynet import llm\ndef score(c):\n f(llm=1)\n return llm('x', model='openai/gpt-4.1-mini')"
+        "from openascent import llm\ndef score(c):\n f(llm=1)\n return llm('x', model='openai/gpt-4.1-mini')"
     )
     assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/gpt-4.1-mini"}, False)
 
@@ -206,11 +206,11 @@ def test_llm_keyword_name_is_not_helper_use() -> None:
 @pytest.mark.parametrize(
     "code",
     [
-        "from skynet import llm\nllm = partial(llm, model='a')\nllm('x')",
-        "from skynet import llm as judge\njudge = partial(judge, model='a')\njudge('x')",
-        "from skynet import *\nllm = partial(llm, model='a')\nllm('x')",
+        "from openascent import llm\nllm = partial(llm, model='a')\nllm('x')",
+        "from openascent import llm as judge\njudge = partial(judge, model='a')\njudge('x')",
+        "from openascent import *\nllm = partial(llm, model='a')\nllm('x')",
         "llm = partial(llm, model='a')\nllm('x')",
-        "from skynet import llm as judge\njudge = other\njudge('x')",
+        "from openascent import llm as judge\njudge = other\njudge('x')",
     ],
 )
 def test_rebound_helper_is_ambiguous(code: str) -> None:
@@ -227,13 +227,13 @@ def test_rebound_helper_is_ambiguous(code: str) -> None:
     [
         ("pass", False, set(), False),
         ("def broken(", False, set(), False),
-        ("from skynet import llm as ask", True, set(), False),
-        ("import skynet\nskynet.llm('x', model='openai/a')", True, {"openai/a"}, False),
-        ("from skynet import llm\nllm('x'); llm('y', model='openai/a')", True, {"openai/a"}, False),
-        ("from skynet import llm\nllm(model='a'); llm(model='b')", True, {"a", "b"}, False),
-        ("from skynet import llm\nllm(model=name)", True, set(), True),
-        ("from skynet import llm\nllm(model=f'{name}')", True, set(), True),
-        ("from skynet import llm\nllm(**options)", True, set(), True),
+        ("from openascent import llm as ask", True, set(), False),
+        ("import openascent\nopenascent.llm('x', model='openai/a')", True, {"openai/a"}, False),
+        ("from openascent import llm\nllm('x'); llm('y', model='openai/a')", True, {"openai/a"}, False),
+        ("from openascent import llm\nllm(model='a'); llm(model='b')", True, {"a", "b"}, False),
+        ("from openascent import llm\nllm(model=name)", True, set(), True),
+        ("from openascent import llm\nllm(model=f'{name}')", True, set(), True),
+        ("from openascent import llm\nllm(**options)", True, set(), True),
     ],
 )
 def test_scan(code: str, uses: bool, names: set[str], non_literal: bool) -> None:
@@ -259,8 +259,8 @@ def test_unrelated_llm_names_do_not_declare_a_model(code: str) -> None:
 @pytest.mark.parametrize(
     "code",
     [
-        "from skynet import *\nllm(model='openai/judge')",
-        "import skynet as s\ns.llm(model='openai/judge')",
+        "from openascent import *\nllm(model='openai/judge')",
+        "import openascent as s\ns.llm(model='openai/judge')",
     ],
 )
 def test_imported_helper_bindings_are_scanned(code: str) -> None:
@@ -282,7 +282,7 @@ def test_client_base_url_does_not_change_declared_provider() -> None:
                 }
             }
         )
-        assert resolve_metric_model(models, "from skynet import llm\nllm(model='openai/judge')") is None
+        assert resolve_metric_model(models, "from openascent import llm\nllm(model='openai/judge')") is None
         providers.append(models.metric_model.byok_provider)
     assert providers[0] == providers[1]
 
@@ -310,7 +310,7 @@ def test_declared_subscription_model_keeps_cli_on_worker_and_setup(monkeypatch: 
                 "cli_provider": "codex",
             },
         },
-        "workspace": {"metric_code": "from skynet import llm\nllm(model='subscription/codex/gpt-5')"},
+        "workspace": {"metric_code": "from openascent import llm\nllm(model='subscription/codex/gpt-5')"},
     }
     assert resolve_metric_model_dict(payload) is None
     assert payload["models"]["metric_model"]["token_source"] == "subscription"
@@ -321,7 +321,7 @@ def test_subscription_declaration_is_not_normalized_in_hosted_mode(monkeypatch: 
     """Only local mode recognizes a CLI subscription model identifier."""
     monkeypatch.setattr(settings, "local_mode", False)
     models = UnifiedModels.model_validate({"reflection_model": {"name": "r", "token_source": "managed"}})
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model='subscription/codex/gpt-5')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model='subscription/codex/gpt-5')") is None
     assert models.metric_model.token_source == "managed"
     assert models.metric_model.cli_provider is None
 
@@ -329,14 +329,14 @@ def test_subscription_declaration_is_not_normalized_in_hosted_mode(monkeypatch: 
 def test_resolution_copies_reflection_when_no_model_is_submitted() -> None:
     """Use reflection by default when no metric model is submitted."""
     models = UnifiedModels.model_validate({"reflection_model": {"name": "openrouter/r", "temperature": 0.2}})
-    assert resolve_metric_model(models, "from skynet import llm\nllm('x')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm('x')") is None
     assert models.metric_model == models.reflection_model
     assert models.metric_model is not models.reflection_model
     models.metric_model = None
     assert resolve_metric_model(models, "pass") is None
     assert models.metric_model is None
     assert (
-        resolve_metric_model(models, "from skynet import llm\nllm(model='a'); llm(model='b')")
+        resolve_metric_model(models, "from openascent import llm\nllm(model='a'); llm(model='b')")
         == "contract.metric_model_declaration"
     )
     assert models.metric_model is None
@@ -347,7 +347,7 @@ def test_declared_model_uses_custom_reflection_connection() -> None:
     models = UnifiedModels.model_validate(
         {"reflection_model": {"name": "openai/r", "token_source": "byok", "byok_provider": "custom"}}
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm('x', model='openai/judge')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm('x', model='openai/judge')") is None
     assert models.metric_model is not None
     assert models.metric_model.byok_provider == "custom"
 
@@ -357,7 +357,7 @@ def test_declared_model_inherits_custom_connection_on_native_provider() -> None:
     models = UnifiedModels.model_validate(
         {"reflection_model": {"name": "openai/r", "token_source": "byok", "byok_provider": "google"}}
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model='openai/judge')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model='openai/judge')") is None
     assert models.metric_model is not None
     assert models.metric_model.byok_provider == "google"
 
@@ -370,7 +370,7 @@ def test_no_declaration_reuses_reflection_even_when_task_name_matches() -> None:
             "reflection_model": {"name": "openai/a", "temperature": 0.9},
         }
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm('x')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm('x')") is None
     assert models.metric_model == models.reflection_model
 
 
@@ -380,7 +380,7 @@ def test_cross_provider_reflection_connection_matches_picked_model(provider: str
     models = UnifiedModels.model_validate(
         {"reflection_model": {"name": "openai/reflection", "token_source": "byok", "byok_provider": provider}}
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model='anthropic/judge')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model='anthropic/judge')") is None
     assert models.metric_model is not None
     picked = {"name": "anthropic/judge", "token_source": "byok"}
     payload = {"task_model_config": picked, "scorer": {"model": models.metric_model.model_dump()}}
@@ -398,7 +398,7 @@ def test_declared_task_model_reuses_task_config() -> None:
             "reflection_model": {"name": "openai/r", "token_source": "managed"},
         }
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model='openai/judge')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model='openai/judge')") is None
     assert models.metric_model == models.task_model
 
 
@@ -409,7 +409,7 @@ def test_distinct_declared_provider_uses_picked_provider(provider: str) -> None:
     models = UnifiedModels.model_validate(
         {"reflection_model": {"name": "openrouter/reflection", "token_source": "byok", "byok_provider": "openrouter"}}
     )
-    assert resolve_metric_model(models, f"from skynet import llm\nllm(model={name!r})") is None
+    assert resolve_metric_model(models, f"from openascent import llm\nllm(model={name!r})") is None
     assert models.metric_model is not None
     payload = {
         "task_model_config": {"name": name, "token_source": "byok"},
@@ -429,15 +429,15 @@ def test_matching_subscription_task_reuses_cli_provider() -> None:
             "reflection_model": {"name": "openai/r", "token_source": "managed"},
         }
     )
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model='subscription/codex/model')") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model='subscription/codex/model')") is None
     assert models.metric_model == models.task_model
 
 
 @pytest.mark.parametrize(
     ("code", "names", "non_literal"),
     [
-        ("from skynet import llm as judge\njudge('x', model='openai/judge')", {"openai/judge"}, False),
-        ("from skynet import llm as judge\njudge('x', model=choice)", set(), True),
+        ("from openascent import llm as judge\njudge('x', model='openai/judge')", {"openai/judge"}, False),
+        ("from openascent import llm as judge\njudge('x', model=choice)", set(), True),
     ],
 )
 def test_scan_alias_declarations(code: str, names: set[str], non_literal: bool) -> None:
@@ -449,13 +449,13 @@ def test_scan_alias_declarations(code: str, names: set[str], non_literal: bool) 
 @pytest.mark.parametrize(
     "code",
     [
-        "from skynet import llm\nx = llm",
-        "from skynet import llm\npartial(llm, model='a')",
-        "from skynet import llm\nf(llm)",
-        "import skynet\nx = skynet.llm",
-        "import skynet as s\nx = s.llm",
-        "from skynet import *\nx = llm",
-        "from skynet import llm as judge\nx = judge",
+        "from openascent import llm\nx = llm",
+        "from openascent import llm\npartial(llm, model='a')",
+        "from openascent import llm\nf(llm)",
+        "import openascent\nx = openascent.llm",
+        "import openascent as s\nx = s.llm",
+        "from openascent import *\nx = llm",
+        "from openascent import llm as judge\nx = judge",
         "x = llm",
         "partial(llm, model='a')",
     ],
@@ -476,9 +476,9 @@ def test_injected_llm_rejects_unsafe_declarations(code: str) -> None:
 def test_none_model_uses_reflection_and_does_not_conflict() -> None:
     """Treat an explicit None like an omitted model."""
     models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model=None)") is None
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model=None)") is None
     assert models.metric_model == models.reflection_model
     models.metric_model = None
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model=None); llm(model='a')") == (
+    assert resolve_metric_model(models, "from openascent import llm\nllm(model=None); llm(model='a')") == (
         "contract.metric_model_declaration"
     )

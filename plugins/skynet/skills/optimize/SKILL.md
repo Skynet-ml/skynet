@@ -60,7 +60,7 @@ change their plan. Then call `next_tool`.
    `score(repo_path, case, output=None)`. `output` is what the `[run]` entry
    of the repository's `optimize.toml` returned for the case. With
    `[target.<name>]` stages, the scorer calls each stage with
-   `call("<name>", input)`, imported by `from skynet import call, StageError`.
+   `call("<name>", input)`, imported by `from openascent import call, StageError`.
    The scorer runs in its own box that holds only the metric files and no
    version code, so it never imports the repository's code. With no cases, the entry runs once with no
    input. Return one object: `{"score": <number>, "feedback": "<short text>"}`.

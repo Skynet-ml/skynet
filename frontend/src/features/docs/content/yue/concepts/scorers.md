@@ -19,7 +19,7 @@ def score(repo_path, case, output=None):
 - 函數入口，例如 `entry = "serve.py:serve"`，會收到 `case["input"]` 做參數。`output` 係佢嘅回傳值。
 - 指令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，會由 stdin 收到 JSON 格式嘅輸入。`output` 係 `{"exit_code": ..., "stdout": "..."}`。
 
-評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案。評分器唔可以匯入或者運行版本嘅程式碼。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from skynet import call` 匯入 `call`。睇 [最佳化點樣運作](/docs/concepts/optimization)。
+評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案。評分器唔可以匯入或者運行版本嘅程式碼。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from openascent import call` 匯入 `call`。睇 [最佳化點樣運作](/docs/concepts/optimization)。
 
 ## 回傳值
 
@@ -109,7 +109,7 @@ def score(repo_path, case, output=None):
 
 ### 用模型做評判
 
-評分器可以呼叫模型。由 `skynet` 輔助模組匯入 `llm`。呼叫會經 Skynet 嘅模型閘道，去到今次運行嘅評分器模型。
+評分器可以呼叫模型。由 `openascent` 輔助模組匯入 `llm`。呼叫會經 Skynet 嘅模型閘道，去到今次運行嘅評分器模型。
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ def score(repo_path, case, output=None):
 ## 模型呼叫同密鑰
 
 - 用 Skynet 金鑰嘅呼叫會計入運行預算。用你自己嘅金鑰（BYOK）嘅話，呼叫會計落你嘅供應商金鑰，Skynet 唔收模型費用。睇 [預算同收費](/docs/concepts/billing)。
-- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表，或者 `[metric] mcp` 檔案入面嘅伺服器，去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `SKYNET_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
+- 評分器唔會以環境變數嘅形式收到運行密鑰。密鑰只可以經 `[metric] services` 列出嘅 `[services.<name>]` 表，或者 `[metric] mcp` 檔案入面嘅伺服器，去到評分器。將密鑰以 `${NAME}` 嘅形式寫喺個表嘅 `headers` 入面。評分器會將請求發去 `ASCENT_SERVICE_<NAME>_URL` 入面嘅 URL。Skynet 會喺沙盒外面加入密鑰。
 - Skynet 會喺評分器輸出同日誌入面隱藏密鑰嘅值。
 
 ## 限制

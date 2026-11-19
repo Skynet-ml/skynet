@@ -180,24 +180,24 @@ def test_load_scorer_ignores_imported_and_injected_functions() -> None:
 
 
 def test_load_scorer_lets_the_code_import_its_helpers() -> None:
-    """``from skynet import llm, Image`` binds the same helpers as the injected names."""
-    code = "from skynet import llm, Image\n\ndef score(c, x=None):\n    return (llm(c), Image.__name__)\n"
+    """``from openascent import llm, Image`` binds the same helpers as the injected names."""
+    code = "from openascent import llm, Image\n\ndef score(c, x=None):\n    return (llm(c), Image.__name__)\n"
 
     fn = load_scorer_from_code(code, helpers={"llm": lambda *a, **k: "ok", "Image": Image})
 
     assert fn("x") == ("ok", "Image")
 
 
-def test_load_scorer_ignores_helpers_imported_from_skynet() -> None:
+def test_load_scorer_ignores_helpers_imported_from_openascent() -> None:
     """A helper pulled in through the import is no more the user's function than an injected one."""
-    code = "from skynet import llm\ndef judge(c, x=None): return llm(c)\n"
+    code = "from openascent import llm\ndef judge(c, x=None): return llm(c)\n"
 
     assert load_scorer_from_code(code, helpers={"llm": lambda *a, **k: 1.0})("x") == 1.0
 
 
-def test_skynet_module_follows_the_helpers_of_the_latest_load() -> None:
+def test_openascent_module_follows_the_helpers_of_the_latest_load() -> None:
     """Each load rebuilds the module, so a scorer importing lazily sees the helpers of its own run."""
-    code = "def score(c, x=None):\n    from skynet import llm\n    return llm(c)\n"
+    code = "def score(c, x=None):\n    from openascent import llm\n    return llm(c)\n"
 
     load_scorer_from_code(code, helpers={"llm": lambda *a, **k: 0.25})
 
@@ -674,9 +674,9 @@ def test_log_rejects_a_missing_name_or_an_unknown_level(event: str, level: str) 
 
 
 def test_scorer_code_imports_log_from_skynet() -> None:
-    """``from skynet import log`` works in the box and in validation alike."""
+    """``from openascent import log`` works in the box and in validation alike."""
     fn = load_scorer_from_code(
-        "from skynet import log\ndef score(c, case=None):\n    return {'score': 1.0}\n", helpers={"log": log}
+        "from openascent import log\ndef score(c, case=None):\n    return {'score': 1.0}\n", helpers={"log": log}
     )
     assert fn("x") == {"score": 1.0}
 
@@ -838,7 +838,7 @@ def test_stage_call_raises_the_budget_control(tmp_path: Path, monkeypatch: pytes
 def test_a_run_without_stages_has_a_call_that_explains_itself() -> None:
     """Scorer code that imports ``call`` still loads; calling it says the run has no stages."""
     fn = load_scorer_from_code(
-        "from skynet import call, StageError\n"
+        "from openascent import call, StageError\n"
         "def score(c, case=None):\n"
         "    try:\n"
         "        call('x', 1)\n"
@@ -911,7 +911,7 @@ def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_
     (tree / "stage.py").write_text(
         "import os\n"
         "def run(value):\n"
-        "    return {key: os.environ[key] for key in ('SKYNET_MCP_SEARCH_URL', 'SKYNET_MCP_CONFIG')}\n"
+        "    return {key: os.environ[key] for key in ('ASCENT_MCP_SEARCH_URL', 'ASCENT_MCP_CONFIG')}\n"
     )
     completed = subprocess.run(
         [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
@@ -922,13 +922,13 @@ def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_
     )
     assert completed.returncode == 0, completed.stderr
     env = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"]
-    url = urllib.parse.urlsplit(env["SKYNET_MCP_SEARCH_URL"])
+    url = urllib.parse.urlsplit(env["ASCENT_MCP_SEARCH_URL"])
     assert url.hostname == "127.0.0.1"
     assert url.port
     assert url.path == "/mcp/search"
-    assert env["SKYNET_MCP_CONFIG"] == str((call_dir / "mcp.json").resolve())
+    assert env["ASCENT_MCP_CONFIG"] == str((call_dir / "mcp.json").resolve())
     assert json.loads((call_dir / "mcp.json").read_text()) == {
-        "mcpServers": {"search": {"type": "http", "url": env["SKYNET_MCP_SEARCH_URL"]}}
+        "mcpServers": {"search": {"type": "http", "url": env["ASCENT_MCP_SEARCH_URL"]}}
     }
 
 
@@ -938,8 +938,8 @@ def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_fil
         "import json, os, time\n"
         "def run(value):\n"
         "    time.sleep(1.0)\n"
-        "    path = os.environ['SKYNET_MCP_CONFIG']\n"
-        "    return {'url': os.environ['SKYNET_MCP_SEARCH_URL'], 'file': path, 'config': json.load(open(path))}\n"
+        "    path = os.environ['ASCENT_MCP_CONFIG']\n"
+        "    return {'url': os.environ['ASCENT_MCP_SEARCH_URL'], 'file': path, 'config': json.load(open(path))}\n"
     )
     calls = [_stage_call(tmp_path, 0, call) for call in ("one", "two")]
     tree = calls[0][0]
@@ -989,7 +989,7 @@ def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exi
     tree, call_dir = _stage_call(tmp_path, 0)
     script = (
         "import json, os, sys\n"
-        "print(json.dumps({'input': json.load(sys.stdin), 'url': os.environ['SKYNET_MCP_SEARCH_URL']}))\n"
+        "print(json.dumps({'input': json.load(sys.stdin), 'url': os.environ['ASCENT_MCP_SEARCH_URL']}))\n"
         "sys.exit(3)\n"
     )
     completed = subprocess.run(
@@ -1019,7 +1019,7 @@ def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_pa
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("{}")
-    script = "import json, os\nprint(json.dumps(sorted(k for k in os.environ if k.startswith('SKYNET_MCP'))))\n"
+    script = "import json, os\nprint(json.dumps(sorted(k for k in os.environ if k.startswith('ASCENT_MCP'))))\n"
     completed = subprocess.run(
         [
             sys.executable,
@@ -1034,7 +1034,7 @@ def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_pa
         capture_output=True,
         text=True,
         check=False,
-        env={key: value for key, value in os.environ.items() if not key.startswith("SKYNET_MCP")},
+        env={key: value for key, value in os.environ.items() if not key.startswith("ASCENT_MCP")},
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == []
@@ -1067,9 +1067,9 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
 
     client = Client()
     urls = runner.start_service_proxy(client, ["judge-api", "blocked one"])  # type: ignore[arg-type]
-    assert set(urls) == {"SKYNET_SERVICE_JUDGE_API_URL", "SKYNET_SERVICE_BLOCKED_ONE_URL"}
+    assert set(urls) == {"ASCENT_SERVICE_JUDGE_API_URL", "ASCENT_SERVICE_BLOCKED_ONE_URL"}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = urllib.request.Request(urls["SKYNET_SERVICE_JUDGE_API_URL"] + "v1/grade?x=1", data=b"hi", method="POST")
+    request = urllib.request.Request(urls["ASCENT_SERVICE_JUDGE_API_URL"] + "v1/grade?x=1", data=b"hi", method="POST")
     with opener.open(request) as response:
         assert response.status == 201
         assert response.headers["X-Upstream"] == "yes"
@@ -1080,7 +1080,7 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
     assert message["method"] == "POST"
     assert base64.b64decode(message["body"]) == b"hi"
     with pytest.raises(urllib.error.HTTPError) as refused:
-        opener.open(urls["SKYNET_SERVICE_BLOCKED_ONE_URL"] + "x")
+        opener.open(urls["ASCENT_SERVICE_BLOCKED_ONE_URL"] + "x")
     assert refused.value.code == 403
     assert b"not listed for the [run] role" in refused.value.read()
 
@@ -1109,7 +1109,7 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
             yield {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
 
     client = Client()
-    url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["SKYNET_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
+    url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["ASCENT_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
     connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
     connection.putrequest("POST", url.path + "v1/grade")
     connection.putheader("Transfer-Encoding", "chunked")
@@ -1147,7 +1147,7 @@ def test_mcp_proxy_passes_an_event_stream_on_part_by_part() -> None:
             yield {"body": base64.b64encode(b"data: two\n\n").decode(), "more": True}
             yield {"more": False}
 
-    url = runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"]  # type: ignore[arg-type]
+    url = runner.start_service_proxy(Client(), [], ["search"])["ASCENT_MCP_SEARCH_URL"]  # type: ignore[arg-type]
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(url) as response:
         assert response.status == 200
@@ -1182,7 +1182,7 @@ def test_mcp_proxy_closes_the_answers_when_the_client_leaves() -> None:
                 closed.set()
                 raise
 
-    url = urllib.parse.urlsplit(runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"])  # type: ignore[arg-type]
+    url = urllib.parse.urlsplit(runner.start_service_proxy(Client(), [], ["search"])["ASCENT_MCP_SEARCH_URL"])  # type: ignore[arg-type]
     connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
     connection.request("GET", url.path)
     response = connection.getresponse()
@@ -1221,8 +1221,8 @@ def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
 
     client = Client()
     env = runner.start_service_proxy(client, [], ["search tool"], mcp_file=".mcp.json")  # type: ignore[arg-type]
-    assert set(env) == {"SKYNET_MCP_SEARCH_TOOL_URL", runner.MCP_CONFIG_ENV}
-    url = env["SKYNET_MCP_SEARCH_TOOL_URL"]
+    assert set(env) == {"ASCENT_MCP_SEARCH_TOOL_URL", runner.MCP_CONFIG_ENV}
+    url = env["ASCENT_MCP_SEARCH_TOOL_URL"]
     assert url.startswith("http://127.0.0.1:")
     assert url.endswith("/mcp/search%20tool")
     assert env[runner.MCP_CONFIG_ENV] == str(Path(".mcp.json").resolve())
@@ -1250,6 +1250,42 @@ def test_relay_env_starts_no_proxy_when_the_role_reaches_nothing() -> None:
     """A role with no service and no MCP server gets no loopback variables."""
     assert runner._relay_env(object(), {"services": [], "mcp": []}) == {}  # type: ignore[arg-type]
     assert runner._relay_env(object(), {}) == {}  # type: ignore[arg-type]
+
+
+def test_box_gets_only_the_ascent_helper_names() -> None:
+    """The box env holds only ``ASCENT_*`` service and MCP names, and no old ``SKYNET_*`` name (SKY-768)."""
+
+    class Client:
+        """Answer nothing; the test only reads the env names."""
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Answer no message.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                Nothing.
+            """
+            yield from ()
+
+    env = runner.start_service_proxy(Client(), ["judge"], ["search"], mcp_file=".mcp.json")  # type: ignore[arg-type]
+    assert set(env) == {"ASCENT_SERVICE_JUDGE_URL", "ASCENT_MCP_SEARCH_URL", "ASCENT_MCP_CONFIG"}
+    assert runner.MCP_CONFIG_ENV == "ASCENT_MCP_CONFIG"
+    assert not [name for name in env if name.startswith("SKYNET_")]
+
+
+def test_metric_cannot_import_the_old_skynet_helper_module() -> None:
+    """An import of ``call`` from the old ``skynet`` module fails; the ``openascent`` import works (SKY-768)."""
+    helpers = {"call": lambda *a, **k: 1.0}
+    old_module = "skynet"
+    with pytest.raises(ScorerError, match="ModuleNotFoundError"):
+        load_scorer_from_code(f"from {old_module} import call\ndef score(c, x=None): return call()\n", helpers=helpers)
+    fn = load_scorer_from_code("from openascent import call\ndef score(c, x=None): return call()\n", helpers=helpers)
+    assert fn("x") == 1.0
+    assert runner.HELPER_MODULE_NAME == "openascent"
+    assert "openascent" in sys.modules
+    assert "skynet" not in sys.modules
 
 
 _CANDIDATE_CODE = """

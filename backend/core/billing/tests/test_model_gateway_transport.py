@@ -2962,7 +2962,7 @@ def test_a_box_calls_its_proposer_service_through_the_mailbox_relay(
         "    def redirect_request(self, *args, **kwargs):\n"
         "        return None\n"
         "opener=urllib.request.build_opener(Keep)\n"
-        "url=os.environ['SKYNET_SERVICE_ECHO_URL']\n"
+        "url=os.environ['ASCENT_SERVICE_ECHO_URL']\n"
         "def call(address, method='GET', data=None):\n"
         "    request=urllib.request.Request(address, data=data, method=method, headers={'X-Custom':'yes'})\n"
         "    try:\n"

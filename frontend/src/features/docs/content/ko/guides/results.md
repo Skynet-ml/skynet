@@ -64,7 +64,7 @@ def serve(input):
 
 - `input`은 요청의 입력 필드 dict입니다.
 - 반환값은 JSON으로 직렬화할 수 있어야 합니다. dict는 `outputs`가 됩니다. 다른 값은 `{"output": value}`가 됩니다.
-- `serve.py`는 `skynet` 도우미 모듈의 `llm`으로 모델을 호출할 수 있습니다. 실행의 시크릿은 받지 않습니다.
+- `serve.py`는 `openascent` 도우미 모듈의 `llm`으로 모델을 호출할 수 있습니다. 실행의 시크릿은 받지 않습니다.
 
 Skynet은 실행과 같은 보호된 샌드박스에서 최고 버전을 실행합니다. **사용량** 탭에는 두 부분이 있습니다.
 

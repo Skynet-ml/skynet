@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` 是请求中输入字段的 dict。
 - 返回值必须可以序列化为 JSON。dict 会成为 `outputs`。其他任何值会成为 `{"output": value}`。
-- `serve.py` 可以使用 `skynet` 辅助模块中的 `llm` 调用模型。它不会获得运行的密钥。
+- `serve.py` 可以使用 `openascent` 辅助模块中的 `llm` 调用模型。它不会获得运行的密钥。
 
 Skynet 在与运行相同的受保护沙箱中运行最佳版本。**用量** 标签页包含两个部分：
 

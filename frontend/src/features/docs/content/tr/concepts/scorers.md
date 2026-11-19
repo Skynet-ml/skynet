@@ -19,7 +19,7 @@ Deponun `optimize.toml` dosyasında bir `[run]` bölümü veya bir `[target.<nam
 - Bir fonksiyon giriş noktası, örneğin `entry = "serve.py:serve"`, `case["input"]` değerini argüman olarak alır. `output`, onun döndürdüğü değerdir.
 - Bir komut giriş noktası, örneğin `entry = ["python", "-m", "pytest", "-q"]`, girdiyi stdin üzerinden JSON olarak alır. `output`, `{"exit_code": ..., "stdout": "..."}` değeridir.
 
-Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar. Puanlayıcı sürümün kodunu içe aktaramaz veya çalıştıramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from openascent import call` ile içe aktarın. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
 ## Dönüş değeri
 
@@ -109,7 +109,7 @@ def score(repo_path, case, output=None):
 
 ### Hakem olarak model
 
-Puanlayıcı bir model çağırabilir. `skynet` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
+Puanlayıcı bir model çağırabilir. `openascent` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenle
 ## Model çağrıları ve gizli anahtarlar
 
 - Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
-- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu veya `[metric] mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `SKYNET_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
+- Puanlayıcı, çalıştırma gizli anahtarlarını ortam değişkenleri olarak almaz. Bir gizli anahtar puanlayıcıya yalnızca `[metric] services` listesindeki bir `[services.<name>]` tablosu veya `[metric] mcp` dosyasındaki bir sunucu üzerinden ulaşır. Gizli anahtarı tablonun `headers` alanına `${NAME}` olarak yazın. Puanlayıcı isteklerini `ASCENT_SERVICE_<NAME>_URL` içindeki URL'ye gönderir. Skynet gizli anahtarı sandbox'ın dışında ekler.
 - Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler

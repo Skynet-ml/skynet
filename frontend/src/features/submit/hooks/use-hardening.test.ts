@@ -369,7 +369,7 @@ if (!process.env.JITI_ALIAS) {
     };
     const repo = { ...emptyRepoDraft(), repository: "acme/widgets" };
     const llmMetric = (call: string) => ({
-      metricCode: `from skynet import llm\n\ndef score(repo_path, case=None):\n    return float(${call})`,
+      metricCode: `from openascent import llm\n\ndef score(repo_path, case=None):\n    return float(${call})`,
       metricModel: null,
       metricTimeoutSeconds: 60,
     });

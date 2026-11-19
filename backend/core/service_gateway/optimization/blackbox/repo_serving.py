@@ -44,7 +44,7 @@ _OUTPUT_KEY = "output"
 
 # Runs in a fresh child process so serve.py never sees the guest's event
 # nonce or writes into its framed stdout. The runner is loaded by path because
-# it is stdlib-only and gives serve.py the same ``skynet.llm`` helper scorers get.
+# it is stdlib-only and gives serve.py the same ``openascent.llm`` helper scorers get.
 _BOOTSTRAP = """
 import importlib.util, json, sys
 runner_path, request_path, output_path, checkout = sys.argv[1:5]

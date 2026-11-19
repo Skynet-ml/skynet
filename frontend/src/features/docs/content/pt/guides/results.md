@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` é o dict de campos de entrada da requisição.
 - O valor de retorno deve ser serializável em JSON. Um dict vira `outputs`. Qualquer outro valor vira `{"output": value}`.
-- `serve.py` pode chamar um modelo com `llm` do módulo auxiliar `skynet`. Ele não recebe os segredos da execução.
+- `serve.py` pode chamar um modelo com `llm` do módulo auxiliar `openascent`. Ele não recebe os segredos da execução.
 
 O Skynet executa a melhor versão na mesma sandbox protegida da execução. A aba **Utilização** tem duas partes:
 

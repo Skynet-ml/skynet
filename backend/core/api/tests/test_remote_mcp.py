@@ -325,7 +325,7 @@ def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
             "extra_reflection_model_configs": [
                 {"name": "anthropic/claude-x", "token_source": "byok", "byok_provider": "anthropic"}
             ],
-            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='anthropic/claude-x')"},
+            "scorer": {"kind": "python", "metric_code": "from openascent import llm\nllm(model='anthropic/claude-x')"},
         }
     )
     _, sources = normalize_model_token_sources(spec)
@@ -431,7 +431,7 @@ def test_unmatched_metric_model_is_managed_in_subscription_local_mode(monkeypatc
                 "token_source": "subscription",
                 "cli_provider": "codex",
             },
-            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='openai/judge')"},
+            "scorer": {"kind": "python", "metric_code": "from openascent import llm\nllm(model='openai/judge')"},
         }
     )
     configs, _ = normalize_model_token_sources(spec)

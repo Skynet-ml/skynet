@@ -19,7 +19,7 @@ El archivo `optimize.toml` del repositorio debe tener una sección `[run]` o una
 - Una entrada de función, por ejemplo `entry = "serve.py:serve"`, recibe `case["input"]` como argumento. `output` es su valor devuelto.
 - Una entrada de comando, por ejemplo `entry = ["python", "-m", "pytest", "-q"]`, recibe la entrada como JSON en stdin. `output` es `{"exit_code": ..., "stdout": "..."}`.
 
-El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica. El evaluador no puede importar ni ejecutar el código de la versión. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica. El evaluador no puede importar ni ejecutar el código de la versión. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from openascent import call`. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
 
 ## El valor devuelto
 
@@ -109,7 +109,7 @@ Cuando la entrada `[run]` falla en un caso, ese caso no tiene puntuación. Si la
 
 ### Modelo como juez
 
-El evaluador puede llamar a un modelo. Importa `llm` desde el módulo auxiliar `skynet`. La llamada pasa por la pasarela de modelos de Skynet y va al modelo evaluador de la ejecución.
+El evaluador puede llamar a un modelo. Importa `llm` desde el módulo auxiliar `openascent`. La llamada pasa por la pasarela de modelos de Skynet y va al modelo evaluador de la ejecución.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ El evaluador también puede usar cualquier cliente compatible con OpenAI con las
 ## Llamadas al modelo y secretos
 
 - Las llamadas con las claves de Skynet se miden contra el presupuesto de la ejecución. Con tu propia clave (BYOK), la llamada va a la clave de tu proveedor, sin tarifa de modelo de Skynet. Lee [Facturación](/docs/concepts/billing).
-- El evaluador no recibe los secretos de la ejecución como variables de entorno. Un secreto llega al evaluador solo a través de una tabla `[services.<name>]` que `[metric] services` incluye, o a través de un servidor del archivo `[metric] mcp`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El evaluador envía sus solicitudes a la URL de `SKYNET_SERVICE_<NAME>_URL`. Skynet añade el secreto fuera del sandbox.
+- El evaluador no recibe los secretos de la ejecución como variables de entorno. Un secreto llega al evaluador solo a través de una tabla `[services.<name>]` que `[metric] services` incluye, o a través de un servidor del archivo `[metric] mcp`. Escribe el secreto en los `headers` de la tabla como `${NAME}`. El evaluador envía sus solicitudes a la URL de `ASCENT_SERVICE_<NAME>_URL`. Skynet añade el secreto fuera del sandbox.
 - Skynet oculta los valores de los secretos en la salida del evaluador y en los registros.
 
 ## Límites

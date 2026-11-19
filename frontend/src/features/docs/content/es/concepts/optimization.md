@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 El repositorio tiene un archivo `serve.py` en su raíz con `def serve(input)`. La entrada `[run]` lo llama en su propia caja de sandbox. Skynet lo usa para servir la mejor versión después de la ejecución.
 
-El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica y ningún código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from skynet import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica y ningún código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from openascent import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
 
 > [!NOTE]
 > El agente de código que escribe las versiones no puede ver el código fuente del evaluador, los valores esperados ni los secretos de la ejecución.
