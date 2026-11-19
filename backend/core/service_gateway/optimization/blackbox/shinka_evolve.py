@@ -654,7 +654,8 @@ class _Proposer:
 
         Returns:
             ``{"files": ...}``, each text file of the command's tree that differs from the seed, or
-            ``{"error": ...}`` when the command failed or wrote a path it may not write.
+            ``{"error": ...}`` when the command failed, wrote a path it may not write, or added or changed
+            too many files.
 
         Raises:
             ServiceError: When the ``[proposer] setup`` command fails, or changes or removes a file of the seed.
@@ -689,7 +690,13 @@ class _Proposer:
             return {"error": f"The [proposer] entry command left no usable version: {exc}"}
         if result.timed_out or result.exit_code != 0:
             return {"error": _command_failure("[proposer] entry", result)}
-        return {"files": self._version(after, parent, files)}
+        version = self._version(after, parent, files)
+        if version is None:
+            return {
+                "error": f"The [proposer] entry command added or changed more than {shinka_bundle._MAX_TREE_ENTRIES}"
+                " files. Make it write its tools and caches outside the repository, or remove them before it exits."
+            }
+        return {"files": version}
 
     def _setup(self) -> str:
         """Run ``[proposer] setup`` once over the seed tree, before the first session, as SKY-753 does.
@@ -720,7 +727,7 @@ class _Proposer:
             )
         return tree
 
-    def _version(self, after: str, parent_tree: str, parent: dict[str, str]) -> dict[str, str]:
+    def _version(self, after: str, parent_tree: str, parent: dict[str, str]) -> dict[str, str] | None:
         """Read the files of the command's tree that make up the new version.
 
         Args:
@@ -729,9 +736,12 @@ class _Proposer:
             parent: The parent's files that differ from the seed.
 
         Returns:
-            The version's files by path.
+            The version's files by path, or ``None`` when the command added or changed more files than a tree
+            listing holds, before any read.
         """
-        return _tree_version(self.ctx, after, parent_tree, parent, self.seed_ids, self.base_ids)
+        return _tree_version(
+            self.ctx, after, parent_tree, parent, self.seed_ids, self.base_ids, shinka_bundle._MAX_TREE_ENTRIES
+        )
 
 
 def _tree_version(
@@ -741,7 +751,8 @@ def _tree_version(
     parent: dict[str, str],
     seed_ids: dict[str, str],
     base_ids: dict[str, str],
-) -> dict[str, str]:
+    max_files: int | None = None,
+) -> dict[str, str] | None:
     """Read the files of a tree that make up a new version.
 
     A version holds the text files that differ from the seed, as an agent session's workspace does. The
@@ -755,14 +766,17 @@ def _tree_version(
         parent: The parent's files that differ from the seed.
         seed_ids: The content id of each file of the seed.
         base_ids: The content id of each file of the tree every session starts from.
+        max_files: The most files the work may add or change, or ``None`` for no limit.
 
     Returns:
-        The version's files by path.
+        The version's files by path, or ``None`` when the work added or changed more than ``max_files`` files,
+        before any read.
     """
     assert ctx.file_ids is not None
     assert ctx.read_file is not None
     parent_ids = ctx.file_ids(parent_tree)
     version: dict[str, str] = {}
+    changed: list[str] = []
     for path, oid in ctx.file_ids(after).items():
         setup_output = path in base_ids and path not in seed_ids
         # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
@@ -774,6 +788,12 @@ def _tree_version(
             continue
         if path not in parent and base_ids.get(path) == oid:
             continue
+        changed.append(path)
+    # The editor drops ignored files only after it writes them, so a command that leaves an install
+    # (``node_modules``) would otherwise cost thousands of reads and a reply of many megabytes.
+    if max_files is not None and len(changed) > max_files:
+        return None
+    for path in changed:
         # The tree entry has no size, so the limit is checked on the bytes.
         data = ctx.read_file(after, path)
         if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:

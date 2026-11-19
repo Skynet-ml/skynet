@@ -2656,6 +2656,37 @@ def test_the_version_leaves_out_each_git_part_that_the_tree_holds(tmp_path: Path
     assert version == {"main.py": "text\n"}
 
 
+def test_a_command_that_leaves_too_many_files_is_a_failed_mutation_with_no_read(tmp_path: Path) -> None:
+    """Fail the mutation of a command that adds more files than a tree listing holds, before any read (SKY-815).
+
+    A command that runs ``npm install`` leaves thousands of ignored files; reading each would cost thousands of
+    reads and a reply of many megabytes.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}, "parent": {}}
+    reads: list[str] = []
+    options = _proposer_options("npm install")
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    ctx = _box_context(
+        options,
+        tmp_path,
+        run_command=lambda *args: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._Proposer(ctx, options).propose({}, "task")
+
+    assert reply == {
+        "error": f"The [proposer] entry command added or changed more than {shinka_bundle._MAX_TREE_ENTRIES} files."
+        " Make it write its tools and caches outside the repository, or remove them before it exits."
+    }
+    assert reads == []
+
+
 _BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
 
 
