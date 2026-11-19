@@ -549,6 +549,19 @@ def version_patch(checkout: Path) -> str:
     )
 
 
+def forget_file_stats(checkout: Path) -> None:
+    """Reload the index from the shipped tree so git hashes every file again.
+
+    Use it after files were replaced in place with the same mtime. Linux can
+    reuse the freed inode, so a same-size edit keeps the stat that git cached,
+    and ``git add`` skips it (SKY-843).
+
+    Args:
+        checkout: Folder made by :func:`unpack_tree`.
+    """
+    _git(["read-tree", BASE_REF], checkout)
+
+
 def reset_tree(checkout: Path) -> None:
     """Throw away every change in a checkout made by :func:`unpack_tree`.
 
