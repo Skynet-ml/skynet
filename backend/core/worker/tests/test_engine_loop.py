@@ -1637,6 +1637,29 @@ def test_a_reply_nested_past_the_bound_outside_tool_arguments_is_a_failed_model_
     assert resumed_model.prompts == []
 
 
+def test_a_reply_at_the_body_bound_outside_tool_arguments_commits_and_one_level_deeper_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A body that nests exactly 100 levels outside tool call arguments commits; 101 levels give a failed call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    # The step body, its tool call list and the call sit above the name: 97 levels there make 100 in the body.
+    # Literals, not the constants, so a change to the body bound fails this test.
+    at_bound = [{"id": "call_0", "name": _nested(97), "arguments": {}}]
+    model.reply_calls = at_bound  # type: ignore[assignment]
+    assert first.call_model("improve seed", _TOOLS).tool_calls == at_bound
+    model.reply_calls = [{"id": "call_0", "name": _nested(98), "arguments": {}}]  # type: ignore[typeddict-item]
+    with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError"):
+        first.call_model("improve other", _TOOLS)
+
+
 def _deep_tuple_keys(levels: int) -> dict[Any, int]:
     """Build an object whose two keys are different tuples nested to a depth, with no recursion.
 
