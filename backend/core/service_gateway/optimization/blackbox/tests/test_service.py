@@ -39,6 +39,7 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_BEST_OF_N,
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_HARNESSES,
+    BLACKBOX_REPO_ENGINES,
     BlackboxRepoSource,
     BlackboxRunRequest,
     BlackboxRunResponse,
@@ -349,9 +350,11 @@ def _run_native(
     return response
 
 
-# A native proposer needs a sandbox box and a model gateway. The engine, final-run and report checks do not
-# depend on the proposer, so they keep the in-process one, as an engine-loop run does.
-_run = mock.patch.object(service_mod, "uses_native_runtime", mock.Mock(return_value=False))(_run_native)
+# Every run builds its proposer options, which need a model gateway (SKY-728). The test deployment has none,
+# and these text runs make no gateway call: the fake reflection model answers each proposal.
+_TEST_GATEWAY = GatewayConfig(url="https://unused.example/v1", api_key="test-key")
+_with_gateway = mock.patch.object(service_mod, "gateway_from_settings", mock.Mock(return_value=_TEST_GATEWAY))
+_run = _with_gateway(_run_native)
 
 
 @pytest.mark.parametrize("target", [{"kind": "text"}, {"kind": "agent", "model": "m"}])
@@ -396,7 +399,7 @@ def fake_native_proposers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, En
     monkeypatch.setattr(
         service_mod,
         "gateway_from_settings",
-        lambda _settings: GatewayConfig(url="https://unused.example/v1", api_key="test-key"),
+        lambda _settings: _TEST_GATEWAY,
     )
 
     def run_native(engine: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
@@ -426,10 +429,16 @@ def fake_native_proposers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, En
             metadata={"engine": engine},
         )
 
-    monkeypatch.setattr(autoresearch_mod, "run_native_engine", run_native)
-    monkeypatch.setattr(meta_harness_mod, "run_native_engine", run_native)
-    monkeypatch.setattr(autosaddler_mod, "run_native_engine", run_native)
-    monkeypatch.setattr(shinka_evolve_mod, "run_native_engine", run_native)
+    # These engines run only on the worker engine loop (SKY-728), so each fake replaces the engine's whole run.
+    for engine_class in (
+        autoresearch_mod.AutoResearchEngine,
+        meta_harness_mod.MetaHarnessEngine,
+        autosaddler_mod.AutoSaddlerEngine,
+        shinka_evolve_mod.ShinkaEvolveEngine,
+    ):
+        monkeypatch.setattr(
+            engine_class, "run", lambda self, task, server, ctx: run_native(self.name, task, server, ctx)
+        )
     return invocations
 
 
@@ -2211,14 +2220,14 @@ class _AsRepositoryScorer:
         return score, side_info
 
 
-@mock.patch.object(service_mod, "uses_native_runtime", mock.Mock(return_value=False))
+@_with_gateway
 def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
     """Run ``payload`` with its python scorer in the place of the repository scorer.
 
     A real repository run needs a repository box and a native proposer. Here
     the python scorer stands in for the repository scorer's reply, so the run
     honors its ``run_failed`` status the way it honors the repository scorer's.
-    The run keeps the in-process proposer, as :func:`_run` does.
+    The run has the test gateway, as :func:`_run` does.
 
     Args:
         payload: The job; its python scorer returns what the repository scorer would.
@@ -2381,8 +2390,8 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
 ) -> None:
     """The stored result holds no guest-side contract source; the stored payload holds the true one (SKY-693)."""
     _winner_strategy(monkeypatch)
-    # The stubbed search never calls the native proposer, so the run needs no gateway.
-    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    # The stubbed search never calls the proposer, so the test gateway gets no call.
+    monkeypatch.setattr(service_mod, "gateway_from_settings", lambda settings: _TEST_GATEWAY)
     payload = _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)})
     # The parent strips the drafts before the guest gets them, so the guest's
     # validator sees no optimize.toml and resets the source to "repository".
@@ -2421,7 +2430,7 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
     Args:
         fake_lm: Fake reflection model for the run.
         tmp_path: Log folder for the run.
-        monkeypatch: Native runtime switch and the options capture.
+        monkeypatch: The options capture.
         fake_native_proposers: Fake native proposers, so no engine starts.
     """
     built: list[dict[str, Any]] = []
@@ -2438,7 +2447,6 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
         built.append(options)
         raise _NativeOptionsBuiltError
 
-    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: True)
     monkeypatch.setattr(service_mod, "NativeOptions", capture)
     payload = _payload(max_cost_cents=100)
     job = replace(
@@ -2644,7 +2652,7 @@ def test_a_repository_run_trusts_the_failed_run_status_of_its_scorer(
         monkeypatch: Sets the relay, the engine path and the winner strategy.
     """
     _winner_strategy(monkeypatch)
-    monkeypatch.setattr(service_mod, "uses_native_runtime", lambda job: False)
+    monkeypatch.setattr(service_mod, "gateway_from_settings", lambda settings: _TEST_GATEWAY)
     monkeypatch.setattr(scorer_mod, "RemoteEvaluatorClient", _FailedRunRelay)
     payload = _payload(
         max_cost_cents=100, target={"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}}
@@ -3145,40 +3153,32 @@ def test_a_budget_stop_keeps_the_case_positions(
     assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(len(_CASES)))
 
 
-def test_a_loop_route_moves_only_its_single_repo_engine_off_the_native_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A row in ``LOOP_ROUTES`` sends that engine's repository runs to the engine loop, and nothing else (SKY-829)."""
-    repo = BlackboxRunRequest.model_validate(_repo_request())
-    auto = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
-    assert not service_mod.LOOP_ROUTES
-    assert not service_mod.has_loop_route(repo)
-    assert service_mod.uses_native_runtime(repo)
-
-    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
-
-    assert service_mod.has_loop_route(repo)
-    assert not service_mod.uses_native_runtime(repo)
-    assert not service_mod.has_loop_route(auto)
-    assert service_mod.uses_native_runtime(auto)
-    # Auto composes many engines, so an Auto run stays native also when it names a routed engine.
-    auto_named = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto", "engine": "autoresearch"}))
-    assert not service_mod.has_loop_route(auto_named)
-    other = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "gepa"}))
-    assert not service_mod.has_loop_route(other)
+def test_every_engine_and_auto_run_on_the_engine_loop() -> None:
+    """Every engine has its ``LOOP_ROUTES`` row, so every run, Auto included, runs on the loop (SKY-728)."""
+    assert {(engine, "repo") for engine in BLACKBOX_REPO_ENGINES} == service_mod.LOOP_ROUTES
+    assert set(AUTO_ENGINES) <= set(BLACKBOX_REPO_ENGINES)
+    for engine in BLACKBOX_REPO_ENGINES:
+        payload = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": engine}))
+        assert service_mod.has_loop_route(payload)
+    for strategy in ({"mode": "auto"}, {"mode": "auto", "engine": "autoresearch"}):
+        assert service_mod.has_loop_route(BlackboxRunRequest.model_validate(_repo_request(strategy=strategy)))
 
 
 def test_an_auto_repo_run_uses_the_loop_only_when_every_auto_engine_has_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto composes all its engines, so its repository runs move to the loop only with all their rows (SKY-832)."""
+    """Auto composes all its engines, so its repository runs need the rows of all of them (SKY-832).
+
+    Args:
+        monkeypatch: Removes one row from ``LOOP_ROUTES``.
+    """
     auto = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
     rows = {(name, "repo") for name in AUTO_ENGINES}
     monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset(rows - {("shinka_evolve", "repo")}))
 
     assert not service_mod.has_loop_route(auto)
-    assert service_mod.uses_native_runtime(auto)
 
     monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset(rows))
 
     assert service_mod.has_loop_route(auto)
-    assert not service_mod.uses_native_runtime(auto)
 
 
 @pytest.mark.parametrize(
@@ -3199,7 +3199,6 @@ def test_a_loop_routed_run_keeps_the_proposer_model_and_budget_checks(
         message: The expected refusal.
         monkeypatch: Pytest monkeypatch.
     """
-    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
     # The test deployment has no model gateway; the engine's availability is not what this test checks.
     monkeypatch.setattr(service_mod, "get_engine", lambda name, caps: None)
     payload = BlackboxRunRequest.model_validate(_repo_request(**overrides))

@@ -1,6 +1,6 @@
 """Host a repository run on the worker's engine loop (SKY-829).
 
-A run whose engine has a row in :data:`LOOP_ROUTES` does not start a guest box for the whole job. The worker's
+Every run uses this host (SKY-728), so no run starts a guest box for the whole job. The worker's
 child process runs the job itself, and the job gets an :class:`EngineLoop` through a :class:`LoopBinding`:
 
 - The engine's model calls go through the loop. Each call is one step that the run's lease pays for, so the

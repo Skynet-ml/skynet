@@ -320,25 +320,26 @@ def case_split_positions(cases: list[Any], splits: CaseSplits, seed: int | None)
     }
 
 
-# The ``(engine, target kind)`` pairs that run on the worker's engine loop (SKY-829), not in the native runtime.
-# Each engine port adds its own row. An Auto repository run uses the loop once every Auto engine has a row.
-LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset()
+# The ``(engine, target kind)`` pairs that run on the worker's engine loop (SKY-829). Every run optimizes a
+# repository (SKY-834), and since the cutover (SKY-728) every engine has its row, so every run, Auto included,
+# runs on the loop.
+LOOP_ROUTES: frozenset[tuple[str, str]] = frozenset((engine, BLACKBOX_TARGET_REPO) for engine in BLACKBOX_REPO_ENGINES)
 
 
 def loop_route(engine: str | None, mode: str) -> bool:
     """Report whether a repository run of this engine and mode runs on the worker's engine loop.
 
-    It reads :data:`LOOP_ROUTES` at each call, so a route that a port adds, or a test patches, takes effect.
-    Staging uses it too, so it accepts ``[proposer] entry`` only for a run that goes to the engine loop (SKY-816).
+    It reads :data:`LOOP_ROUTES` at each call, so a test that patches the table takes effect.
 
     Args:
         engine: The strategy's engine, or ``None`` when the run names none.
         mode: The strategy's mode.
 
     Returns:
-        True for a single-engine run whose engine has a ``repo`` row in :data:`LOOP_ROUTES`.
+        True when the engine, or every Auto engine in auto mode, has a ``repo`` row in :data:`LOOP_ROUTES`.
     """
-    return mode == "single" and (str(engine), "repo") in LOOP_ROUTES
+    engines = AUTO_ENGINES if mode == BLACKBOX_STRATEGY_AUTO else (str(engine),)
+    return all((name, BLACKBOX_TARGET_REPO) in LOOP_ROUTES for name in engines)
 
 
 def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
@@ -348,23 +349,9 @@ def has_loop_route(payload: BlackboxRunRequest | JobSpec) -> bool:
         payload: The submitted or stored job.
 
     Returns:
-        True when the engine, or every Auto engine in auto mode, has a row in
-        :data:`LOOP_ROUTES`.
+        :func:`loop_route` for the job's strategy.
     """
-    engines = AUTO_ENGINES if payload.strategy.mode == "auto" else (str(payload.strategy.engine),)
-    return all((name, "repo") in LOOP_ROUTES for name in engines)
-
-
-def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
-    """Report whether a job runs a coding-agent proposer in the native runtime.
-
-    Args:
-        payload: The submitted or stored job.
-
-    Returns:
-        True unless the job runs on the engine loop.
-    """
-    return not has_loop_route(payload)
+    return loop_route(payload.strategy.engine, payload.strategy.mode)
 
 
 class LoopBinding(Protocol):
@@ -1276,48 +1263,46 @@ def _run_job(
     token_budget = None
     if job.max_cost_cents is not None and job.reflection_model_settings.token_source != "byok":
         token_budget = job.max_cost_cents * CENT_USD_VALUE / usage_markup()
-    native_options = None
-    # The engine loop's tool loop reads the same options: the contract file's command and the settings it refuses.
-    if uses_native_runtime(job) or has_loop_route(job):
-        budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
-        gateway = (
-            GatewayConfig(url=budget_route["url"], api_key=budget_route["token"])
-            if budget_route
-            else gateway_from_settings(settings)
-        )
-        if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
-            raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
-        active_runtime = current_sandbox_runtime()
-        effort = job.reflection_model_settings.extra.get("reasoning_effort")
-        native_options = NativeOptions(
-            shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
-            shinka_models=_shinka_models(job, gateway),
-            shinka_embedding=_shinka_embedding(job, gateway),
-            runtime=job.proposer_runtime,
-            sandbox_runtime=active_runtime,
-            model=budget_route["model"] if budget_route else job.reflection_model_settings.name,
-            gateway=gateway,
-            budget_route=budget_route,
-            max_token_cost=token_budget,
-            proposer=job.proposer,
-            reasoning_effort=effort if isinstance(effort, str) and effort else None,
-            repo=(
-                {
-                    # The engine loop reads the worker's archive, so its snapshot has no chunks.
-                    "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot.get("chunks") or ()],
-                    "editable_paths": list(target.repo.editable_paths),
-                    "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
-                    "constrained": bool(repo_snapshot.get("constrained")),
-                    "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
-                    "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
-                    "file_proposer": bool(repo_snapshot.get("file_proposer")),
-                    "proposer_setup": list(repo_snapshot.get("proposer_setup") or ()),
-                    "proposer_mcp": [dict(server) for server in repo_snapshot.get("proposer_mcp") or ()],
-                }
-                if target.repo is not None and repo_snapshot is not None
-                else None
-            ),
-        )
+    # The engine loop's tool loop reads these options: the contract file's command and the settings it refuses.
+    budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
+    gateway = (
+        GatewayConfig(url=budget_route["url"], api_key=budget_route["token"])
+        if budget_route
+        else gateway_from_settings(settings)
+    )
+    if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
+        raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
+    active_runtime = current_sandbox_runtime()
+    effort = job.reflection_model_settings.extra.get("reasoning_effort")
+    native_options = NativeOptions(
+        shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
+        shinka_models=_shinka_models(job, gateway),
+        shinka_embedding=_shinka_embedding(job, gateway),
+        runtime=job.proposer_runtime,
+        sandbox_runtime=active_runtime,
+        model=budget_route["model"] if budget_route else job.reflection_model_settings.name,
+        gateway=gateway,
+        budget_route=budget_route,
+        max_token_cost=token_budget,
+        proposer=job.proposer,
+        reasoning_effort=effort if isinstance(effort, str) and effort else None,
+        repo=(
+            {
+                # The engine loop reads the worker's archive, so its snapshot has no chunks.
+                "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot.get("chunks") or ()],
+                "editable_paths": list(target.repo.editable_paths),
+                "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
+                "constrained": bool(repo_snapshot.get("constrained")),
+                "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
+                "hidden_hashes": dict(repo_snapshot.get("hidden_hashes") or {}),
+                "file_proposer": bool(repo_snapshot.get("file_proposer")),
+                "proposer_setup": list(repo_snapshot.get("proposer_setup") or ()),
+                "proposer_mcp": [dict(server) for server in repo_snapshot.get("proposer_mcp") or ()],
+            }
+            if target.repo is not None and repo_snapshot is not None
+            else None
+        ),
+    )
 
     task = Task(
         seed_candidate=seed_candidate,

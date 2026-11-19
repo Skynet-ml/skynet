@@ -18,7 +18,7 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task
 
-from core.service_gateway.optimization.blackbox import native_engines, native_runner, repo_tree
+from core.service_gateway.optimization.blackbox import native_engines, repo_tree
 
 FAKE_HEADER = (
     f"#!{sys.executable}\n"
@@ -94,9 +94,8 @@ def server() -> Iterator[EvalServer]:
 
 def test_pinned_prompts_match_upstream_checksums() -> None:
     """Refuse to run on prompt files that differ from the pinned upstream revisions."""
-    assert native_engines.check_assets() == {
-        "meta_harness": native_engines.META_HARNESS_REVISION,
-    }
+    probe = OptimizeAnythingConfig(engine="meta_harness", engine_config={"model": "probe"})
+    assert native_engines.MetaHarnessEngine(probe).skill()
     for relative, digest in native_engines.ASSET_CHECKSUMS.items():
         text = (native_engines.PROMPTS_DIR / relative).read_text(encoding="utf-8")
         assert hashlib.sha256(text.encode("utf-8")).hexdigest() == digest
@@ -557,55 +556,6 @@ def _repo_config(tmp_path: Path, checkout: Path, **knobs: Any) -> OptimizeAnythi
     return config
 
 
-def test_gepa_drives_an_agent_proposer_over_repository_versions(tmp_path: Path, fake_home: Path) -> None:
-    """GEPA picks the parent and cases; the agent edits a checkout of it and the diff becomes the next version.
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-    """
-    task = Task(
-        name="repo",
-        seed_candidate="",
-        objective="make it better",
-        train_set=[{"id": "a"}, {"id": "b"}],
-    )
-    seen: list[str] = []
-
-    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-        """Score a patch that writes ``better`` into ``src/app.py`` highly."""
-        seen.append(candidate)
-        if "+better" in candidate:
-            return 1.0, {"feedback": f"case {example['id']} passes"}
-        return 0.25, {"feedback": f"case {example['id']} needs better code"}
-
-    dataset = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
-    dataset.start()
-    try:
-        _install_fake(
-            fake_home,
-            "prompt = args[-1]\n"
-            "assert 'needs better code' in prompt, prompt\n"
-            "assert '`src`' in prompt and 'vendor/lib' in prompt and 'make it better' in prompt, prompt\n"
-            "assert pathlib.Path('src/app.py').read_text() == 'x = 1\\n'\n"
-            "pathlib.Path('src/app.py').write_text('better\\n')\n",
-        )
-        checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n", "README.md": "hi\n"})
-        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, checkout))
-        result = engine.run(task, dataset)
-    finally:
-        dataset.stop()
-    assert seen[0] == ""
-    assert result.best_score == 1.0
-    assert repo_tree.patch_paths(result.best_candidate) == ["src/app.py"]
-    assert result.metadata["proposals"] >= 1
-    assert result.metadata["proposer_cost_usd"] == pytest.approx(0.01 * result.metadata["proposals"])
-    assert (checkout / "src" / "app.py").read_text() == "x = 1\n"
-    output = tmp_path / "out"
-    engine.process_result(result, output)
-    assert (output / "gepa_repo" / "best_candidate.patch").read_text() == result.best_candidate
-
-
 def _repo_task_server(seen: list[str], max_evals: int) -> EvalServer:
     """Serve a two-case repository task whose scorer rewards writing ``better`` into the code.
 
@@ -628,50 +578,6 @@ def _repo_task_server(seen: list[str], max_evals: int) -> EvalServer:
     instance = EvalServer(task, evaluate, BudgetTracker(max_evals=max_evals))
     instance.start()
     return instance
-
-
-def test_best_of_n_samples_independent_repository_versions(tmp_path: Path, fake_home: Path) -> None:
-    """Each sample is a fresh agent session on the starting checkout; every patch is scored and the best wins.
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-    """
-    seen: list[str] = []
-    server = _repo_task_server(seen, max_evals=5)
-    try:
-        _install_fake(
-            fake_home,
-            "prompt = args[-1]\n"
-            "assert 'needs better code' not in prompt and '`src`' in prompt and 'vendor/lib' in prompt, prompt\n"
-            "assert pathlib.Path('src/app.py').read_text() == 'x = 1\\n'\n"
-            "pathlib.Path('src/app.py').write_text('better\\n' if count == 2 else 'worse\\n')\n",
-        )
-        checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n", "README.md": "hi\n"})
-        config = _repo_config(tmp_path, checkout)
-        config.engine = "best_of_n_repo"
-        engine = native_engines.BestOfNRepoEngine(config)
-        result = engine.run(server.task, server)
-    finally:
-        server.stop()
-    assert len(_invocations(fake_home)) == 2
-    assert len(seen) == 4
-    assert all(repo_tree.patch_paths(patch) == ["src/app.py"] for patch in seen)
-    assert result.best_score == 1.0
-    assert "+better" in result.best_candidate
-    assert repo_tree.patch_paths(result.best_candidate) == ["src/app.py"]
-    assert [sample["score"] for sample in result.metadata["samples"]] == [0.25, 1.0]
-    assert engine.incumbent(server) == (result.best_candidate, 1.0)
-    assert (checkout / "src" / "app.py").read_text() == "x = 1\n"
-    output = tmp_path / "out"
-    engine.process_result(result, output)
-    assert (output / "best_of_n_repo" / "best_candidate.patch").read_text() == result.best_candidate
-
-
-def test_best_of_n_repo_engine_needs_a_checkout() -> None:
-    """Best-of-N's agent sampler has nothing to edit without a repository."""
-    with pytest.raises(ValueError, match="repository checkout"):
-        native_engines.BestOfNRepoEngine(_config("best_of_n_repo"))
 
 
 def test_meta_harness_proposes_repository_patches(tmp_path: Path, fake_home: Path) -> None:
@@ -851,33 +757,6 @@ def test_meta_harness_blocks_a_constrained_path_edit_with_the_illegal_action_mes
     blocks = _rule_blocks(caplog)
     assert len(blocks) == 2
     assert all(block["rule"] == repo_tree.PATH_RULE and "README.md" in block["reason"] for block in blocks)
-
-
-def test_agent_proposer_keeps_the_parent_when_its_diff_is_too_large(
-    tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A diff too large to ship as one sandbox file never becomes a version.
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-        monkeypatch: Pytest's monkeypatch.
-    """
-    _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('y' * 4096)\n")
-    checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n"})
-    engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, checkout))
-    monkeypatch.setattr(repo_tree, "MAX_PATCH_BYTES", 1024)
-    proposed = engine.proposer({"current_candidate": ""}, {"current_candidate": []}, ["current_candidate"])
-    assert proposed == {"current_candidate": ""}
-    assert engine.proposer.total_cost == pytest.approx(0.01)
-    assert "No feedback was recorded." in _invocations(fake_home)[0][-1]
-    assert (checkout / "src" / "app.py").read_text() == "x = 1\n"
-
-
-def test_gepa_repo_engine_needs_a_checkout() -> None:
-    """The agent-proposer GEPA engine has nothing to edit without a repository."""
-    with pytest.raises(ValueError, match="repository checkout"):
-        native_engines.GepaRepoEngine(_config("gepa_repo"))
 
 
 def test_single_candidate_tasks_use_the_whole_candidate_route(tmp_path: Path, fake_home: Path) -> None:
@@ -1113,46 +992,6 @@ def test_meta_harness_fails_when_its_cli_fails(tmp_path: Path, fake_home: Path, 
     assert len(_invocations(fake_home)) == 1
 
 
-def test_gepa_repo_fails_when_its_cli_fails_even_though_gepa_swallows_proposer_errors(
-    tmp_path: Path, fake_home: Path
-) -> None:
-    """GEPA keeps iterating past a proposer exception, so the engine stops it and re-raises.
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-    """
-    server = _repo_task_server([], max_evals=12)
-    try:
-        _install_fake(fake_home, _FAILING_CLI)
-        checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n"})
-        with pytest.raises(native_engines.ProposerFailedError, match="Invalid API key"):
-            native_engines.GepaRepoEngine(_repo_config(tmp_path, checkout)).run(server.task, server)
-    finally:
-        server.stop()
-    assert len(_invocations(fake_home)) == 1
-
-
-def test_best_of_n_repo_fails_when_its_cli_fails(tmp_path: Path, fake_home: Path) -> None:
-    """Best-of-N does not score an untouched checkout as a sample when the agent never ran.
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-    """
-    seen: list[str] = []
-    server = _repo_task_server(seen, max_evals=5)
-    try:
-        _install_fake(fake_home, _FAILING_CLI)
-        config = _repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x = 1\n"}))
-        config.engine = "best_of_n_repo"
-        with pytest.raises(native_engines.ProposerFailedError):
-            native_engines.BestOfNRepoEngine(config).run(server.task, server)
-    finally:
-        server.stop()
-    assert seen == []
-
-
 def test_a_budget_stop_is_not_a_cli_failure() -> None:
     """Sessions the engine stopped or that ran out of budget end the run normally."""
     for outcome in (
@@ -1181,86 +1020,3 @@ def test_proposer_refusals_reach_the_run_log_as_tool_and_kind_only(caplog: pytes
     ]
     assert all(event["source"] == "proposer" for event in refusals)
     assert {record.levelno for record in caplog.records} == {logging.WARNING}
-
-
-def test_every_native_engine_publishes_an_incumbent() -> None:
-    """The runner asks every engine for its incumbent when a budget stop or an error interrupts it."""
-    for engine in native_engines.ENGINES.values():
-        assert callable(getattr(engine, "incumbent", None)), engine.name
-
-
-@pytest.mark.parametrize(("stop_at_call", "expected"), [(2, None), (3, ("", 0.25))])
-def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
-    tmp_path: Path, fake_home: Path, stop_at_call: int, expected: tuple[str, float] | None
-) -> None:
-    """A parent budget stop mid-run leaves GEPA's best fully scored version, not an AttributeError (SKY-529).
-
-    Args:
-        tmp_path: Pytest's temporary folder.
-        fake_home: Fake home whose ``bin`` holds the fake ``claude``.
-        stop_at_call: The scorer call that the budget refuses.
-        expected: The incumbent and its score after the stop, or ``None``.
-    """
-    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
-    calls: list[str] = []
-
-    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-        """Score like the parent, then refuse the call the budget cannot cover."""
-        calls.append(candidate)
-        if len(calls) == stop_at_call:
-            raise native_runner.BudgetStopped("The approved budget has been reached.")
-        return 0.25, {"feedback": f"case {example['id']} needs better code"}
-
-    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
-    server.start()
-    try:
-        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
-        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
-        with pytest.raises(native_runner.BudgetStopped):
-            engine.run(task, server)
-        assert engine.incumbent(server) == expected
-        kept = native_runner._budget_incumbent(engine, task, server, tmp_path / "out")
-        assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
-    finally:
-        server.stop()
-
-
-def test_gepa_repo_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path, fake_home: Path) -> None:
-    """A repository version whose [run] fails on one case loses to the lower, fully scored seed (SKY-751).
-
-    Args:
-        tmp_path: Working folder for the repository and the engine.
-        fake_home: Home folder whose ``bin`` holds the fake agent command.
-    """
-    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
-    calls: list[str] = []
-
-    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-        """Score the seed 0.25; score a patch 0.9 on case ``a`` and fail its [run] entry on case ``b``.
-
-        Args:
-            candidate: The version's patch; empty for the seed.
-            example: The case to score.
-
-        Returns:
-            The case's score, negative infinity for a failed [run] entry, and its side info.
-        """
-        calls.append(candidate)
-        if not candidate:
-            return 0.25, {"feedback": "seed"}
-        if example["id"] == "b":
-            return float("-inf"), {"feedback": "Run failed: boom", "status": native_engines.RUN_FAILED_STATUS}
-        return 0.9, {"feedback": "patch"}
-
-    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
-    server.start()
-    try:
-        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
-        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
-        result = engine.run(task, server)
-    finally:
-        server.stop()
-
-    assert any(calls), "the patched version was never scored"
-    assert (result.best_candidate, result.best_score) == ("", 0.25)
-    assert engine.incumbent(server) == ("", 0.25)

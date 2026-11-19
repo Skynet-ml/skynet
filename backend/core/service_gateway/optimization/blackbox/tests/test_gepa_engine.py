@@ -531,31 +531,13 @@ def _repo_run(
     return result, model, counter, loop
 
 
-def _no_native(*args: Any, **kwargs: Any) -> Result:
-    """Fail when a repository run on the loop goes to the native runtime.
-
-    Args:
-        *args: Not used.
-        **kwargs: Not used.
-
-    Raises:
-        AssertionError: Always.
-    """
-    raise AssertionError("a repository GEPA run on the loop called run_native_engine")
-
-
-def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(
-    monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
-) -> None:
+def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(stores: _Stores, tmp_path: Path) -> None:
     """Run repository GEPA on the loop: no box for a model call or a file, and one step for each reply and command.
 
     Args:
-        monkeypatch: Pytest monkeypatch fixture.
         stores: The stores of the run.
         tmp_path: Pytest's temporary folder.
     """
-    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
-
     result, model, counter, loop = _repo_run(stores, tmp_path / "loop", generation=1)
 
     answer = loop.read_file(str(result.best_candidate), "answer.txt")
@@ -572,17 +554,13 @@ def test_a_repository_run_opens_boxes_only_for_commands_and_scoring(
     assert [seq for seq, _, _ in stores.steps()] == list(range(len(kinds)))
 
 
-def test_a_killed_repository_run_resumes_to_the_population_of_a_clean_run(
-    monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
-) -> None:
+def test_a_killed_repository_run_resumes_to_the_population_of_a_clean_run(stores: _Stores, tmp_path: Path) -> None:
     """Kill the worker in the middle of the second proposal, and resume it in the same folder.
 
     Args:
-        monkeypatch: Pytest monkeypatch fixture.
         stores: The stores of the run.
         tmp_path: Pytest's temporary folder.
     """
-    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
     clean_stores = _Stores(tmp_path / "clean")
     try:
         clean, clean_model, _, _ = _repo_run(clean_stores, tmp_path / "clean-loop", generation=1)
@@ -834,14 +812,12 @@ def test_the_proposer_lists_and_reads_with_no_box_and_gives_no_version_when_turn
     assert calls.writes == []
 
 
-def test_the_reflection_cost_cap_stops_the_repository_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_the_reflection_cost_cap_stops_the_repository_run(tmp_path: Path) -> None:
     """GEPA's cost stopper reads the committed cost of the proposer's replies.
 
     Args:
-        monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Pytest's temporary folder.
     """
-    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
     calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)], cents=5)
     server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=200)
 
@@ -879,23 +855,19 @@ def test_a_loop_stop_in_the_proposer_stops_the_repository_run(tmp_path: Path) ->
     assert server.used < 40
 
 
-def test_a_repository_run_with_no_loop_keeps_the_native_runtime(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Until the cutover (SKY-728), a repository run with no loop calls or no seed runs in the native runtime.
+def test_a_repository_run_with_no_loop_is_refused(tmp_path: Path) -> None:
+    """A repository run with no loop calls or no seed fails closed: no native runtime runs it (SKY-728).
 
     Args:
-        monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Pytest's temporary folder.
     """
-    native = Result(best_candidate="patch", best_score=1.0, total_evals=0)
-    monkeypatch.setattr(gepa_mod, "run_native_engine", lambda *args: native)
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=4)
     no_calls = _FakeCalls([]).ctx(tmp_path, native_options=_OPTIONS, put_files=None)
     no_seed = make_ctx(str(tmp_path), native_options=_OPTIONS)
 
-    assert GepaEngine().run(Task(""), server, no_calls) is native
-    assert GepaEngine().run(Task(""), server, no_seed) is native
+    for ctx in (no_calls, no_seed):
+        with pytest.raises(ServiceError, match="only on the worker engine loop"):
+            GepaEngine().run(Task(""), server, ctx)
 
 
 @pytest.mark.parametrize(
@@ -1848,7 +1820,6 @@ def test_the_eval_server_budget_stop_reaches_the_engine_budget_path_on_the_loop(
         monkeypatch: Pytest monkeypatch fixture.
         tmp_path: Pytest's temporary folder.
     """
-    monkeypatch.setattr(gepa_mod, "run_native_engine", _no_native)
     calls = _FakeCalls([_file("answer.txt", f"{'x' * n}\n") for n in range(1, 40)])
     server = EvalServer(lambda candidate, case: (float(len(str(candidate))), {}), max_evals=40)
     evaluate = server.evaluate

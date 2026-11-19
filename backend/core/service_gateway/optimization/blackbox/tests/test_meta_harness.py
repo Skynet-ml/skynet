@@ -289,50 +289,17 @@ def _options(
     )
 
 
-def test_the_loop_path_never_starts_the_native_runtime(
-    owner: tuple[User, int],
-    engine: Engine,
-    step_log: StepLogStore,
-    trees: TreeStore,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With the worker host, the engine runs the native loop in the worker, not through the box runtime.
-
-    Args:
-        owner: Alice and her budget generation.
-        engine: The database.
-        step_log: The step log.
-        trees: The tree store.
-        tmp_path: Pytest's temporary folder.
-        monkeypatch: Pytest's monkeypatch.
-    """
-    native = MagicMock(side_effect=AssertionError("the native runtime ran"))
-    monkeypatch.setattr(meta_mod, "run_native_engine", native)
-    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
-
-    assert _run(loop).best_candidate == "seedxx"
-    native.assert_not_called()
-
-
-def test_a_context_without_the_worker_host_runs_the_native_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
+def test_a_context_without_the_worker_host_is_refused(tmp_path: Path) -> None:
+    """A run outside the worker engine loop fails closed: no native box runs the engine (SKY-728).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Pytest's monkeypatch.
     """
-    incumbent = Result(best_candidate="native", best_score=0.5, total_evals=3)
-    native = MagicMock(return_value=incumbent)
-    monkeypatch.setattr(meta_mod, "run_native_engine", native)
-    task = Task("seed")
     server = EvalServer(lambda candidate, example: (1.0, {}), max_evals=5)
     ctx = EngineContext(reflection_lm=str, run_dir=str(tmp_path))
 
-    assert MetaHarnessEngine().run(task, server, ctx) is incumbent
-    native.assert_called_once_with("meta_harness", task, server, ctx)
+    with pytest.raises(ServiceError, match="only on the worker engine loop"):
+        MetaHarnessEngine().run(Task("seed"), server, ctx)
 
 
 def test_each_model_reply_and_each_command_commits_one_step(

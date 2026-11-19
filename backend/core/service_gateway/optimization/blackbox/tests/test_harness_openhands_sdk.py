@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import os
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 import pytest
@@ -28,7 +25,6 @@ from ..harnesses.openhands_sdk import (
     RUNNER_FILE,
     SPEC,
 )
-from ..native_runtime import _bootstrap_command
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -585,86 +581,6 @@ case " $* " in
 esac
 echo 1.61.0
 """
-
-
-def _native_workspace(tmp_path: Path) -> tuple[Path, Path]:
-    """Write the fake uv, node and python3 tools and an empty workspace with the source archive.
-
-    Args:
-        tmp_path: Test directory.
-
-    Returns:
-        ``(bin_dir, workspace)``: the tool directory for ``PATH`` and the bootstrap's working directory.
-    """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for name, content in {
-        "uv": _FAKE_UV,
-        "node": "#!/bin/sh\nexit 0\n",
-        "python3": f'#!/bin/sh\nexec {sys.executable} "$@"\n',
-    }.items():
-        tool = bin_dir / name
-        tool.write_text(content)
-        tool.chmod(0o755)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    archive = io.BytesIO()
-    with tarfile.open(fileobj=archive, mode="w:gz"):
-        pass
-    (workspace / "native_source.tar.gz.b64").write_text(base64.b64encode(archive.getvalue()).decode())
-    return bin_dir, workspace
-
-
-def _run_native_bootstrap(tmp_path: Path, *, protected: bool, warmed: bool) -> tuple[subprocess.CompletedProcess, Path]:
-    """Run the native proposer bootstrap for this harness against the fake tools.
-
-    Args:
-        tmp_path: Test directory.
-        protected: Whether to build the protected (offline image) bootstrap.
-        warmed: Whether the fake uv cache already holds the pinned SDK.
-
-    Returns:
-        The finished process and the fake uv cache marker.
-    """
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=protected)
-    bin_dir, workspace = _native_workspace(tmp_path)
-    cache = tmp_path / "uv-cache"
-    if warmed:
-        cache.touch()
-    command = _bootstrap_command(
-        "vercel", protected=protected, harness=HARNESS_ID, install_command=launch.install_command
-    )
-    result = subprocess.run(
-        ["sh", "-c", command],
-        cwd=workspace,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "FAKE_UV_CACHE": str(cache), **launch.env},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert not (workspace / RUNNER_FILE).exists()
-    return result, cache
-
-
-@pytest.mark.parametrize("protected", [False, True])
-def test_native_bootstrap_passes_before_the_launch_files_exist(tmp_path: Path, protected: bool) -> None:
-    """The native proposer bootstrap installs and checks the harness in a workspace without the runner."""
-    result, cache = _run_native_bootstrap(tmp_path, protected=protected, warmed=protected)
-
-    assert result.returncode == 0, result.stderr
-    assert cache.exists()
-
-
-def test_native_bootstrap_fails_when_the_protected_image_lacks_the_sdk(tmp_path: Path) -> None:
-    """Protected mode never downloads: an image without the warmed SDK fails the pinned check."""
-    result, cache = _run_native_bootstrap(tmp_path, protected=True, warmed=False)
-
-    assert result.returncode != 0
-    assert not cache.exists()
 
 
 def test_recorded_output_sample_parses_to_the_final_answer_and_usage() -> None:

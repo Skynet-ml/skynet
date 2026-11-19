@@ -34,7 +34,9 @@ from ..billing.runtime import BudgetRuntime, UsagePendingError
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
+from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
+from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
@@ -294,10 +296,47 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
         public = {key: value for key, value in payload.items() if not key.startswith("_")}
         # The request accepts only a repository run (SKY-834), and every
         # repository run calls its models through a native harness.
-        BlackboxRunRequest.model_validate(public)
+        typed = BlackboxRunRequest.model_validate(public)
         optimizer_index = next(index for index, check in enumerate(result["checks"]) if check.get("key") == "optimizer")
+        result["checks"][optimizer_index] = _engine_readiness(typed)
         result["checks"][optimizer_index:optimizer_index] = _verify_model_routes(gateway, native=True)
     return result
+
+
+# A single run of either engine has nothing left to do on an image without its interpreter;
+# Auto only loses that lane.
+_ENGINE_NOT_READY = {
+    "autosaddler": (
+        "autosaddler_ready",
+        "This runtime does not ship the pinned AutoSaddler package on Python 3.12; choose another engine or Auto.",
+    ),
+    "shinka_evolve": (
+        "shinka_ready",
+        "This runtime does not ship the pinned ShinkaEvolve package on Python 3.12; choose another engine or Auto.",
+    ),
+}
+
+
+def _engine_readiness(request: BlackboxRunRequest) -> dict[str, Any]:
+    """Check that the worker can run the request's engine.
+
+    The setup box is not the worker, so this check runs here: the API and the
+    worker run one backend image, and the engines run in the worker (SKY-728).
+
+    Args:
+        request: The run request.
+
+    Returns:
+        The ``optimizer`` check, failed when a single run's engine has no interpreter in the image.
+    """
+    try:
+        readiness = check_native_runtime()
+    except ServiceError as error:
+        return _check("optimizer", "failed", str(error))
+    refusal = _ENGINE_NOT_READY.get(str(request.strategy.engine)) if request.strategy.mode == "single" else None
+    if refusal is not None and not readiness[refusal[0]]:
+        return _check("optimizer", "failed", refusal[1])
+    return _check("optimizer", "succeeded")
 
 
 class _Events:

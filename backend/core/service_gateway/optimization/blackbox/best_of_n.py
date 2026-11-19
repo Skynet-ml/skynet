@@ -16,7 +16,6 @@ from ....exceptions import ServiceError
 from ..budget_stop import BudgetReached
 from .feedback import emit_candidate
 from .harness_bridge import hashed_kind
-from .native_runtime import run_native_engine
 from .protocol import EngineContext, EvalServer, RepoSeed, Result, Task
 from .upstream import local_result, reflection_endpoint, upstream_server
 
@@ -172,18 +171,17 @@ class BestOfNEngine:
             The fully evaluated winner, or an unscored seed if no candidate completes.
 
         Raises:
-            ServiceError: If given named components or a seedless run has no completed candidate.
+            ServiceError: If given named components, a repository run is off the worker engine loop, or a
+                seedless run has no completed candidate.
         """
         if not task.str_mode:
             raise ServiceError("Best-of-N supports text starting points only.")
         on_loop = ctx.repo_seed is not None and ctx.read_file is not None and ctx.list_files is not None
         if ctx.native_options is not None and ctx.native_options.repo is not None and not on_loop:
-            return run_native_engine("best_of_n_repo", task, server, ctx)
+            raise ServiceError("Best-of-N runs a repository only on the worker engine loop.")
         # SKY-721: on the worker engine loop a repository run samples here
         # too, so each sample is one model step with no box open, and only
         # the scorer's commands open boxes. Its candidate is the patch text.
-        # Until the cutover (SKY-728), production builds no loop context, so a
-        # repository run without it keeps the native coding-agent engine.
         if on_loop:
             brief = _repository_brief(ctx.repo_seed, ctx.read_file, ctx.list_files)
             task = replace(task, background="\n\n".join(part for part in (task.background, brief) if part))

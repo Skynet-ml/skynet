@@ -132,7 +132,6 @@ from .repo_staging import (
 from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
-from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
 
@@ -1081,28 +1080,30 @@ class BackgroundWorker:
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
-                loop_route = has_loop_route(execution_payload)
-                if loop_route:
-                    # After the exposure check: the worker's own child runs this run, not a guest box, so it may
-                    # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
-                    payload_dict[LOOP_HOST_KEY] = {
-                        "run_id": optimization_id,
-                        "username": execution_payload.username,
-                        "budget_id": job_data["execution_budget_id"],
-                        "budget_generation": job_data["execution_budget_generation"],
-                        "execution_generation": execution_generation,
-                        "worker_id": self._pod_name,
-                        "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
-                        "token_source": parent_payload.get("token_source"),
-                        # The child has no database for the owner's setting, so the parent reads it.
-                        "data_policy": data_policy_for(execution_payload.username),
-                    }
+                if not has_loop_route(execution_payload):
+                    # Every engine has a loop route since the cutover (SKY-728); a stored job of an engine
+                    # without one has no other place to run.
+                    raise ValueError("The stored job names an engine that the worker engine loop does not run.")
+                # After the exposure check: the worker's own child runs this run, not a guest box, so it may
+                # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
+                payload_dict[LOOP_HOST_KEY] = {
+                    "run_id": optimization_id,
+                    "username": execution_payload.username,
+                    "budget_id": job_data["execution_budget_id"],
+                    "budget_generation": job_data["execution_budget_generation"],
+                    "execution_generation": execution_generation,
+                    "worker_id": self._pod_name,
+                    "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
+                    "token_source": parent_payload.get("token_source"),
+                    # The child has no database for the owner's setting, so the parent reads it.
+                    "data_policy": data_policy_for(execution_payload.username),
+                }
 
                 execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
                 budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_loop_job if loop_route else run_vercel_dspy,
+                    target=run_loop_job,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"
@@ -2203,7 +2204,7 @@ class BackgroundWorker:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
         """Drain all pending events from the subprocess queue, routing each by type.
 
-        Handles the event types emitted by ``run_vercel_dspy``:
+        Handles the event types emitted by ``run_loop_job``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
         ``job_store.append_log``; ``EVENT_RESULT`` → captured as the return
         value; ``EVENT_ERROR`` → captured as the error return value.  Store

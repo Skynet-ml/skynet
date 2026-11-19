@@ -25,9 +25,8 @@ only with the agent editor; their grants let the provider edge add their headers
 so no secret enters a box. Novelty rejection embeds programs in the child with a
 fixed local embedder, and its judge's calls are model steps.
 
-Without the loop's context, the engine runs the runner in the managed sandbox, as
-before, until the cutover (SKY-728). On the loop, a worker image without the
-ShinkaEvolve interpreter fails the run.
+The engine runs only on the worker engine loop (SKY-728). A worker image
+without the ShinkaEvolve interpreter fails the run.
 """
 
 from __future__ import annotations
@@ -69,7 +68,6 @@ from .native_runtime import (
     _finite,
     assert_metric_absent,
     native_task_payload,
-    run_native_engine,
     sanitize_side_info,
 )
 from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, ToolDefinition, candidate_key
@@ -202,20 +200,16 @@ class ShinkaEvolveEngine:
             when the child ends cleanly on the seed and no version has a full score.
 
         Raises:
-            ServiceError: When the worker has no ShinkaEvolve interpreter, when the settings need a feature
-                the worker does not run yet, when the child sends a malformed request or candidate, or when
+            ServiceError: When the context is not the worker engine loop's, when the worker has no ShinkaEvolve
+                interpreter, when the settings need a feature the worker does not run yet, when the child sends a malformed request or candidate, or when
                 upstream fails, goes quiet or writes an overlong line before it scores a version.
             BudgetExhaustedError: When no scorer call remains, or the cap stops the run before a version is scored.
             BudgetReached: When the budget stops the run; it carries the best version scored so far.
         """
         options = ctx.native_options
         if ctx.call_model is None:
-            if options is not None and (options.repo or {}).get("file_proposer"):
-                # The sandbox runner has no command editor; it would mutate with the model and drop the command.
-                raise ServiceError("ShinkaEvolve runs the [proposer] entry command only on the worker's engine loop.")
-            return run_native_engine(self.name, task, server, ctx)
-        # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter. On the loop a worker without it
-        # fails the run: the sandbox path would run the features with other steps and no replay (SKY-830).
+            raise ServiceError("ShinkaEvolve runs only on the worker engine loop.")
+        # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter, so a worker without it fails the run.
         if not Path(self.python).exists():
             raise ServiceError(t("blackbox.shinka_interpreter_missing"))
         settings = dict((options.shinka if options is not None else None) or {})

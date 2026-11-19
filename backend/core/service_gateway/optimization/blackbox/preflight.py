@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ....billing.model_gateway import ROUTE_KEY
 from ....billing.runtime import UsagePendingError
 from ....exceptions import ServiceError
 from ....i18n_en import t_en
@@ -13,13 +12,11 @@ from ....models import BlackboxRunRequest
 from ....models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED, BlackboxScorer
 from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
-from .harness import GatewayConfig
-from .native_runtime import NativeOptions, check_native_runtime
 from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
 from .sandbox_contract import SandboxRuntime
 from .sandbox_runtime import sandbox_runtime_context
 from .scorer import RemoteScorer
-from .service import uses_native_runtime, validate_blackbox_payload
+from .service import validate_blackbox_payload
 
 
 def _reflection_bases(config: Any) -> dict[str, str | None]:
@@ -40,7 +37,7 @@ def _reflection_bases(config: Any) -> dict[str, str | None]:
 # What a scorer box needs around the evaluator's own timeout: booting and the install.
 _SCORER_BOX_OVERHEAD_SECONDS = 60.0
 # What the outer box spends around its inner boxes: booting, importing the
-# runner, the model route checks and the native runtime probe's three minutes.
+# runner and the model route checks.
 _PREFLIGHT_OVERHEAD_SECONDS = 600.0
 
 
@@ -178,39 +175,6 @@ def verify_anything_in_sandbox(
                 validate_blackbox_payload(
                     typed, verify_scorer=False, api_bases=_reflection_bases(typed.reflection_model_settings)
                 )
-                native = uses_native_runtime(typed)
-                if native:
-                    route = typed.reflection_model_settings.extra[ROUTE_KEY]
-                    readiness = check_native_runtime(
-                        NativeOptions(
-                            runtime=typed.proposer_runtime,
-                            model=route["model"],
-                            gateway=GatewayConfig(url=route["url"], api_key=route["token"]),
-                            max_token_cost=0,
-                            budget_route=route,
-                            sandbox_runtime=runtime,
-                        )
-                    )
-                    # Auto merely loses its AutoSaddler or ShinkaEvolve lane on such an image;
-                    # a single run of either has nothing left to do.
-                    if (
-                        typed.strategy.mode == "single"
-                        and typed.strategy.engine == "autosaddler"
-                        and not readiness.get("autosaddler_ready")
-                    ):
-                        raise ServiceError(
-                            "This runtime does not ship the pinned AutoSaddler package on Python 3.12; "
-                            "choose another engine or Auto."
-                        )
-                    if (
-                        typed.strategy.mode == "single"
-                        and typed.strategy.engine == "shinka_evolve"
-                        and not readiness.get("shinka_ready")
-                    ):
-                        raise ServiceError(
-                            "This runtime does not ship the pinned ShinkaEvolve package on Python 3.12; "
-                            "choose another engine or Auto."
-                        )
                 checks.append(_check("optimizer", "succeeded"))
         finally:
             try:

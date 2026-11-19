@@ -43,7 +43,6 @@ from core.service_gateway.optimization.blackbox.protocol import (
     EvalServer,
     ModelReply,
     RepoSeed,
-    Result,
     Task,
 )
 from core.service_gateway.optimization.blackbox.shinka_evolve import ShinkaEvolveEngine
@@ -273,25 +272,8 @@ def _fake_python(tmp_path: Path, fail_after: int | None = None, big_results: boo
     return str(python)
 
 
-def _no_sandbox(*args: object) -> None:
-    """Fail the test: the engine loop path must not start the sandbox runtime.
-
-    Args:
-        *args: ``run_native_engine``'s arguments.
-
-    Raises:
-        AssertionError: Always.
-    """
-    raise AssertionError("The engine loop path called run_native_engine.")
-
-
 def test_each_upstream_model_reply_and_scorer_command_is_one_loop_step(
-    owner: tuple[User, int],
-    engine: Engine,
-    step_log: StepLogStore,
-    trees: TreeStore,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """Run upstream in the child: the loop's model answers each call, and the loop's boxes score each version.
 
@@ -301,9 +283,7 @@ def test_each_upstream_model_reply_and_scorer_command_is_one_loop_step(
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Replaces ``run_native_engine``.
     """
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
 
@@ -340,9 +320,8 @@ def test_upstream_stdout_output_from_another_thread_cannot_break_a_frame(
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Replaces ``run_native_engine`` and records unparsed frames.
+        monkeypatch: Records unparsed frames.
     """
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     broken: list[str] = []
     monkeypatch.setattr(sandbox_log, "stream_line", lambda line, **kwargs: broken.append(line))
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
@@ -405,7 +384,6 @@ def test_novelty_rejection_and_the_agent_editor_run_on_the_engine_loop(
     step_log: StepLogStore,
     trees: TreeStore,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Run novelty rejection and the agent editor on the loop, with no refusal and no sandbox fallback (SKY-830).
 
@@ -416,9 +394,7 @@ def test_novelty_rejection_and_the_agent_editor_run_on_the_engine_loop(
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Fails the test on a sandbox run.
     """
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     options = SimpleNamespace(shinka=settings, budget_route=None, repo=None, shinka_models=None, model="m")
     scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
@@ -512,37 +488,17 @@ def test_the_repository_options_must_hide_the_same_paths_as_the_runs_repository_
     assert not (tmp_path / "shinka_evolve").exists()
 
 
-def test_with_no_engine_loop_context_the_engine_runs_in_the_sandbox_as_before(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Hand a run with no loop context to ``run_native_engine`` unchanged, until the cutover (SKY-728).
+def test_with_no_engine_loop_context_the_run_is_refused(tmp_path: Path) -> None:
+    """Refuse a run with no loop context: no sandbox runtime runs the engine (SKY-728).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Replaces ``run_native_engine``.
     """
-    calls: list[tuple[object, ...]] = []
-    expected = Result(best_candidate="sandbox", best_score=1.0, total_evals=1)
-
-    def native(*args: object) -> Result:
-        """Record the call and return the sandbox's result.
-
-        Args:
-            *args: ``run_native_engine``'s arguments.
-
-        Returns:
-            The sandbox's result.
-        """
-        calls.append(args)
-        return expected
-
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", native)
-    task = Task("seed")
     server = EvalServer(lambda candidate, case: (1.0, {}), max_evals=5)
     ctx = EngineContext(reflection_lm=lambda prompt: "", run_dir=str(tmp_path))
 
-    assert ShinkaEvolveEngine(_fake_python(tmp_path)).run(task, server, ctx) is expected
-    assert calls == [("shinka_evolve", task, server, ctx)]
+    with pytest.raises(ServiceError, match="only on the worker engine loop"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(Task("seed"), server, ctx)
     assert not (tmp_path / "shinka_evolve").exists()
 
 
@@ -775,16 +731,12 @@ def test_a_child_that_fails_before_any_scored_version_fails_the_run(
         )
 
 
-def test_a_worker_without_the_shinka_interpreter_fails_the_loop_run_with_a_clear_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_worker_without_the_shinka_interpreter_fails_the_loop_run_with_a_clear_error(tmp_path: Path) -> None:
     """Fail a loop run when the worker image holds no ``shinka-evolve`` interpreter, with no sandbox run (SKY-830).
 
     Args:
         tmp_path: Pytest's temporary folder.
-        monkeypatch: Fails the test on a sandbox run.
     """
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     calls: list[object] = []
     server = EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5)
     ctx = EngineContext(
@@ -2580,14 +2532,13 @@ def test_a_failed_command_keeps_the_end_of_a_long_stderr(tmp_path: Path) -> None
 def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse the command on the sandbox path and on the engine loop, and need the loop's boxes (SKY-815).
+    """Refuse a context with no loop, refuse the command on the loop, and need the loop's boxes (SKY-815).
 
     Args:
         tmp_path: Pytest's temporary folder.
         monkeypatch: Fails the test when the child starts.
     """
     monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
-    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
     options = _proposer_options("node agent.js")
     no_boxes = EngineContext(
         reflection_lm=lambda prompt: "",
@@ -2597,7 +2548,7 @@ def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
         repo_seed=RepoSeed("tree"),
     )
     sandbox = replace(no_boxes, call_model=None)
-    with pytest.raises(ServiceError, match="only on the worker's engine loop"):
+    with pytest.raises(ServiceError, match="only on the worker engine loop"):
         ShinkaEvolveEngine(_fake_python(tmp_path)).run(
             Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), sandbox
         )

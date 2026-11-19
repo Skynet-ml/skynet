@@ -13,23 +13,30 @@ import tarfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.exceptions import ServiceError
 from core.sandbox.providers import vercel
+from core.storage.models import Base, JobModel
+from core.storage.object_store import LocalObjectStore
+from core.storage.step_log_store import StepLogStore
+from core.storage.tree_store import TreeStore
 
 from .. import native_engines, native_runtime, runner
-from ..native_runtime import NATIVE_TASK_FIELDS, assert_metric_absent, native_task_payload, run_native_engine
-from ..protocol import EvalServer, Task
+from ..native_runtime import NATIVE_TASK_FIELDS, assert_metric_absent, native_task_payload
+from ..protocol import Task
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_workspace import METRIC_DIR, METRIC_REPO_DIR, RepoWorkspace
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
-from .test_native_runtime import FakeRuntime, FakeSession, _context
 from .test_repo_workspace import _archive
+from .test_tree_sandbox import RUN, _files, _Runtime, _sandbox, _step, _tree
 
 SENTINEL = "METRIC_SENTINEL_7f3a9c"
 VAL_SENTINEL = "VALSET_SENTINEL_51d0"
@@ -90,28 +97,45 @@ def test_error_side_info_is_one_line_without_source() -> None:
     assert native_runtime.sanitize_side_info({"feedback": "ok"}) == {"feedback": "ok"}
 
 
-def test_native_flow_never_writes_the_metric_into_the_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Grep every file a native engine's box receives, RPC answers included, for the metric.
+@pytest.fixture
+def tree_layer(tmp_path: Path) -> Iterator[tuple[TreeStore, StepLogStore]]:
+    """Yield a tree store and its step log over a scratch SQLite run.
 
     Args:
-        tmp_path: Artifact destination.
-        monkeypatch: Replaces the pinned source archive.
+        tmp_path: Scratch folder.
+
+    Yields:
+        The tree store and the step log; the log closes after the test.
     """
-    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
-    session = FakeSession()
+    engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id=RUN, username="ada", execution_generation=1))
+        session.commit()
+    log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "w1", flush_window_seconds=0.02)
+    yield TreeStore(log), log
+    log.close()
 
-    def score(candidate: str, example: Any) -> tuple[float, dict[str, Any]]:
-        """Fail the way a broken metric does, with its source in the error."""
-        return 0.0, {"error": TRACEBACK_ERROR}
 
-    run_native_engine("meta_harness", _task(), EvalServer(score, max_evals=3), _context(tmp_path, FakeRuntime(session)))
+def test_the_metric_tree_reaches_only_the_metric_box(tree_layer: tuple[TreeStore, StepLogStore]) -> None:
+    """Score on tree ids: the metric source enters the metric box only, with the outputs tree and nothing else.
 
-    assert session.files
-    for path, text in session.files.items():
-        assert SENTINEL not in text, path
-        assert VAL_SENTINEL not in text, path
-    [answer] = [text for path, text in session.files.items() if path.startswith("rpc/")]
-    assert json.loads(answer)["info"] == {"error": "ValueError: bad output"}
+    Args:
+        tree_layer: The tree store and the step log.
+    """
+    trees, log = tree_layer
+    runtime = _Runtime()
+    sandbox, candidates, metrics = _sandbox(trees, log, runtime)
+    probe = f"if grep -rq {SENTINEL} ..; then echo leak; else echo clean; fi > answer.txt"
+    _, outputs = sandbox.run(_step(1), _tree(trees, {"solver.py": "seed\n"}), probe, [])
+    metric = _tree(trees, {"score.py": METRIC_CODE + "print(1.0)\n"})
+
+    assert sandbox.score(_step(2), outputs, metric, "python3 metric/score.py") == 1.0
+    _, again = sandbox.run(_step(3), outputs, probe, [])
+
+    assert _files(trees, outputs)["answer.txt"] == _files(trees, again)["answer.txt"] == b"clean\n"
+    assert metrics.files == [["./metric/score.py", "./outputs/answer.txt", "./outputs/solver.py"]]
+    assert all(not name.startswith("./metric") for listing in candidates.files for name in listing)
 
 
 def test_proposer_environment_drops_scorer_variables() -> None:

@@ -23,8 +23,7 @@ contract file names ``[proposer] entry`` (SKY-816), that command makes the
 candidate in place of the tool loop, with the skill and the prompt in
 ``ASCENT_TASK``.
 
-A run outside the worker engine loop still uses the native box runtime until
-the SKY-728 cutover; the loop path never calls it.
+The engine runs only on the worker engine loop (SKY-728).
 """
 
 from __future__ import annotations
@@ -51,7 +50,6 @@ from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
 from .native_runtime import (
     assert_metric_absent,
     native_task_payload,
-    run_native_engine,
     sanitize_side_info,
 )
 from .protocol import (
@@ -757,23 +755,21 @@ class MetaHarnessEngine:
         Args:
             task: Optimization inputs.
             server: Skynet scorer and budget.
-            ctx: The engine context; ``native_options`` gives the optional proposer knobs. With no worker
-                host, the native box runtime runs the engine.
+            ctx: The engine loop's context; ``native_options`` gives the optional proposer knobs.
 
         Returns:
             The frontier's best candidate and the loop's evidence.
 
         Raises:
-            ServiceError: When a worker-loop run has a proposer setting that the tool loop does not run, would
-                expose the metric source, or the candidate is not one text; or when a repository has a file at the
-                workspace path.
+            ServiceError: When the context is not the worker engine loop's; when the run has a proposer setting
+                that the tool loop does not run, would expose the metric source, or the candidate is not one text;
+                or when a repository has a file at the workspace path.
             BudgetExhaustedError: When no scorer call is left.
             RuntimeError: When the budget cannot score the seed on every case.
         """
         missing = None in (ctx.call_model, ctx.run_command, ctx.put_files, ctx.read_file)
         if missing or (ctx.repo_seed is not None and ctx.list_files is None):
-            # Until the SKY-728 cutover, a run outside the worker engine loop keeps the native box runtime.
-            return run_native_engine(self.name, task, server, ctx)
+            raise ServiceError("Meta-Harness runs only on the worker engine loop.")
         options = ctx.native_options
         # The contract file's command makes a repository version; with no repository, it would edit nothing.
         file_proposer = bool(

@@ -38,7 +38,6 @@ from ..trajectory import capture_proposal_prompts, current_proposal_iteration, t
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
 from .harness_bridge import hashed_kind
 from .native_engines import ScoredThresholdStopper, record_text
-from .native_runtime import run_native_engine
 from .protocol import (
     UNSCORED,
     BudgetExhaustedError,
@@ -145,6 +144,9 @@ class GepaEngine:
         Returns:
             GEPA's validation-best version, or the server's best when the
             budget ran out before GEPA could report.
+
+        Raises:
+            ServiceError: When a repository run is off the worker engine loop.
         """
         proposer = _LoopRepoProposer.bind(ctx, task)
         # On the loop a version is a tree id, so GEPA starts from a tree.
@@ -152,9 +154,7 @@ class GepaEngine:
         if server.remaining <= 0:
             return Result(best_candidate=start or "", best_score=None, total_evals=0)
         if proposer is None and ctx.native_options is not None and ctx.native_options.repo is not None:
-            # Until the cutover (SKY-728) binds every run to a loop, a coding agent writes each
-            # version inside the native runtime's checkout, where GEPA runs with it as its proposer.
-            return run_native_engine("gepa_repo", task, server, ctx)
+            raise ServiceError("GEPA runs a repository only on the worker engine loop.")
         run_dir = str(Path(ctx.run_dir) / self.name)
         if proposer is not None:
             # GEPA resumes from a state file in its run folder. A loop resume replays every committed step

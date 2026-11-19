@@ -1352,7 +1352,7 @@ def _host(
 
 
 def _host_payload(owner: tuple[User, str, int], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Route the fake engine to the loop and return a repository job payload for the host.
+    """Return a repository job payload for the host that runs the fake engine.
 
     Args:
         owner: Alice, her budget id and the budget generation.
@@ -1362,7 +1362,6 @@ def _host_payload(owner: tuple[User, str, int], tmp_path: Path, monkeypatch: pyt
     Returns:
         The job payload.
     """
-    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
     monkeypatch.setattr(service, "run_strategy", _fake_strategy)
     monkeypatch.setattr(service, "RemoteScorer", _FakeRepoScorer)
     monkeypatch.setattr(_FakeRepoScorer, "calls", [])
@@ -1490,7 +1489,6 @@ def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
     The resume gets a larger scorer allowance, so only the committed lane plan keeps the lane allowances.
     """
     payload = {**_host_payload(owner, tmp_path, monkeypatch), "strategy": {"mode": "auto"}}
-    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset((name, "repo") for name in AUTO_ENGINES))
     monkeypatch.setattr(service, "run_strategy", auto.run_strategy)
     monkeypatch.setattr(auto, "get_engine", lambda name, caps: _RepoLane(name))
     assert service.has_loop_route(BlackboxRunRequest.model_validate(payload))
@@ -1706,7 +1704,6 @@ def test_a_loop_routed_run_with_an_entry_runs_the_contract_files_command(
     real_strategy = service.run_strategy
     payload = _host_payload(owner, tmp_path, monkeypatch)
     monkeypatch.setattr(service, "run_strategy", real_strategy)
-    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset({(engine_name, "repo")}))
     payload["strategy"] = {"mode": "single", "engine": engine_name}
     # Repository staging sets these from the contract file's ``[proposer] entry``.
     payload["proposer"] = {"harness": "custom", "run_command": "printf x >> src/app.py"}
@@ -1760,7 +1757,6 @@ def test_the_worker_starts_a_loop_routed_run_on_the_host_with_its_trusted_fields
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A routed run's child is the loop host, and the claimed job row, not the payload, names its run and budget."""
-    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset({("autoresearch", "repo")}))
     monkeypatch.setattr(
         process_job_tests,
         "BlackboxRunRequest",
