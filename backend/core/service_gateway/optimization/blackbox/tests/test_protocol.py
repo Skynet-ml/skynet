@@ -631,28 +631,30 @@ def test_tool_calls_from_openai_gives_too_deep_arguments_when_parsing_overflows_
         monkeypatch: Replaces the JSON reader with one that overflows, as a deep caller stack does.
     """
 
-    def overflow(text: str) -> Any:
-        """Raise as ``json.loads`` does when the caller's stack is already deep.
+    def overflow(value: Any, **_: Any) -> Any:
+        """Raise as ``json.loads`` and ``json.dumps`` do when the caller's stack is already deep.
 
         Args:
-            text: The arguments text.
+            value: The arguments text or value.
 
         Raises:
             RecursionError: Always.
         """
-        raise RecursionError(text[:10])
+        raise RecursionError(str(value)[:10])
 
-    monkeypatch.setattr(protocol, "json", SimpleNamespace(loads=overflow, dumps=json.dumps))
+    monkeypatch.setattr(protocol, "json", SimpleNamespace(loads=overflow, dumps=overflow))
     message = {
         "tool_calls": [
             {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
-            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": {"command": "pwd"}}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": [["ls"]]}},
+            {"id": "call_z", "type": "function", "function": {"name": "bash", "arguments": {"command": "pwd"}}},
         ]
     }
 
     assert tool_calls_from_openai(message) == [
         {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
-        {"id": "call_y", "name": "bash", "arguments": {"command": "pwd"}},
+        {"id": "call_y", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_z", "name": "bash", "arguments": {"command": "pwd"}},
     ]
 
 

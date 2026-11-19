@@ -419,7 +419,11 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
             # Some clients parse the arguments already.
             arguments = raw
         elif not isinstance(raw, str):
-            arguments = json.dumps(raw, default=str)
+            try:
+                arguments = json.dumps(raw, default=str)
+            except RecursionError:
+                # Same stack limit as the parse below: the depth check counts levels, not frames.
+                arguments = TOO_DEEP_ARGUMENTS
         else:
             try:
                 parsed = json.loads(raw)
