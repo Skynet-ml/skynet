@@ -839,6 +839,10 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
         try:
             if not server.task.has_dataset:
                 score, info = server.evaluate(candidate)
+                # The engine's wrapper logs a checkpoint only for a finite score, so a metric-error candidate still
+                # shows here, with no score, as a repository version does in ``_sweep``.
+                if not math.isfinite(score):
+                    server.log_progress(score, candidate=candidate)
                 body: dict[str, Any] = {"score": score, "info": info}
             else:
                 visible = set(self.example_ids)

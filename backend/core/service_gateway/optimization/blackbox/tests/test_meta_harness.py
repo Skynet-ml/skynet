@@ -2578,3 +2578,60 @@ def test_a_file_over_its_cap_in_one_pull_is_missing_in_the_next(
     worker._pull(loop.put_files({"logs/run/pending_eval.json": pending}))
 
     assert worker._validate({"name": "c0", "file": "agents/big.txt"}) == native_engines.CANDIDATE_MISSING
+
+
+def test_a_report_that_a_repository_session_deletes_does_not_come_back(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """An earlier session's report that is not in the session's tree is deleted from the local reports (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    reports = worker.logs_dir / "reports"
+    (reports / "old").mkdir(parents=True)
+    (reports / "old" / "iter1.md").write_text("old")
+    tree = _store(trees, {".meta-harness/logs/run/reports/iter2.md": b"new", "a.py": b"a"})
+
+    worker._repo_pull(2, tree, tree, "parent")
+
+    assert sorted(path.relative_to(reports).as_posix() for path in reports.rglob("*") if path.is_file()) == ["iter2.md"]
+
+
+def test_the_carried_reports_stop_at_the_total_cap_in_sorted_order(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+) -> None:
+    """A report that does not fit in the bytes left under the total cap stays behind, and a later small one fits.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch.
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    monkeypatch.setattr(meta_mod, "_MAX_REPORT_BYTES", 5)
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1)
+    worker = _worker(loop, tmp_path)
+    reports = worker.logs_dir / "reports"
+    reports.mkdir()
+    # A stale local copy of the report that no longer fits must not stay behind.
+    (reports / "b.md").write_text("old")
+    logs = ".meta-harness/logs/run/reports"
+    tree = _store(trees, {f"{logs}/a.md": b"aaa", f"{logs}/b.md": b"bbb", f"{logs}/c.md": b"cc"})
+
+    worker._repo_pull(1, tree, tree, "parent")
+
+    assert {path.name: path.read_bytes() for path in reports.iterdir()} == {"a.md": b"aaa", "c.md": b"cc"}

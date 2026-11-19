@@ -2945,3 +2945,118 @@ def test_an_evaluation_of_the_lab_parent_is_refused(
 
     assert boxes.opened == 0
     assert _tool_result(model, 1) == {"error": "Give `file` as a path inside the lab."}
+
+
+def test_a_lab_removal_that_fails_leaves_no_version_and_ends_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The ``rm`` of the lab exits with code 1, so the round leaves no version: nothing is swept (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher([_bash("printf %s {x} >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+    run = loop.run
+
+    def fail_removal(tree_id: str, command: str, grants: tuple[Any, ...]) -> Any:
+        """Run the command, and give the lab removal exit code 1 with the tree it left.
+
+        Args:
+            tree_id: The tree to run in.
+            command: The shell command.
+            grants: The command's grants.
+
+        Returns:
+            The command result and the tree it left.
+        """
+        result, tree = run(tree_id, command, grants)
+        if command.startswith("rm -rf "):
+            result = dataclasses.replace(result, exit_code=1)
+        return result, tree
+
+    loop.run = fail_removal  # type: ignore[method-assign]
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed))
+
+    assert (result.best_candidate, result.total_evals, result.metadata["rounds"]) == (seed, 2, 1)
+
+
+def test_a_repository_run_never_gets_the_combine_directive(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one's version beats the seed on one case and loses on the other, so the frontier holds two versions.
+
+    A text run would combine them in round two; a repository session sees only the leader's tree (SKY-825).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score case ``a`` by the length of ``a.py``, and case ``b`` by ten less half that length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        length, info = _score_a_py(loop, candidate, case)
+        return (length if case == _CASES[0] else 10.0 - length / 2), info
+
+    model = _Researcher([_bash("printf x >> a.py")])
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    result = _run(loop, stop_at_score=5.7, score=score, repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")))
+
+    assert loop.read_file(result.best_candidate, "a.py") == b"axx"
+    assert "combine" not in result.metadata["directives"]
+    assert result.metadata["directives"] == ["survey", "exploit"]
+
+
+def test_a_text_metric_error_with_no_cases_shows_as_a_candidate_with_no_score(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no cases, round one's file is a metric error: it shows, with no score, as a repository version does.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Give round one's file a metric error, and score any other by its length.
+
+        Args:
+            loop: The engine loop.
+            candidate: The candidate text.
+            case: Not used.
+
+        Returns:
+            The score, or ``None`` for the metric error, and no side information.
+        """
+        del loop, case
+        return (None if candidate == "seedx" else float(len(str(candidate)))), {}
+
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = _run(loop, events=events, cases=[], score=score)
+
+    assert [data["score"] for kind, data in events if kind == PROGRESS_CANDIDATE] == [None, 6.0]
+    assert (result.best_candidate, result.best_score) == ("seedxx", 6.0)

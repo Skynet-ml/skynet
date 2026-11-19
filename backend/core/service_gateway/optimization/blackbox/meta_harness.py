@@ -81,6 +81,9 @@ BASH_TOOL = {
 
 # The workspace folder of a repository run, relative to the repository root.
 _REPO_LAB = ".meta-harness"
+# The worker holds the carried reports in memory at each session's tree write, so a repository run carries at most
+# this many report bytes, as AutoResearch caps its carried lab.
+_MAX_REPORT_BYTES = 4 * native_engines.MAX_CANDIDATE_BYTES
 
 REPO_BASH_TOOL = {
     "name": "bash",
@@ -590,6 +593,7 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         The agent's ``pending_eval.json`` gives only the notes of the row (hypothesis, axis, components). The engine
         writes the version's tree id to ``agents/iter<N>.txt`` and a local ``pending_eval.json`` that lists it, so the
         native iteration benchmarks the tree. A version that is the parent or an earlier candidate gets no benchmark.
+        The reports in the tree, in sorted order up to ``_MAX_REPORT_BYTES``, replace the local reports.
 
         Args:
             iteration: One-based iteration number.
@@ -609,16 +613,29 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
         notes = next(iter(self._read_pending(pending)), {})
         # The reports carry over to the next session, which starts from the leader's tree with a fresh workspace.
         reports = f"{_REPO_LAB}/{logs}/reports/"
-        for path in self._ctx.list_files(tree, reports.rstrip("/")) or []:
+        listed = sorted(self._ctx.list_files(tree, reports.rstrip("/")) or [])
+        local_reports = self.logs_dir / "reports"
+        names = {posixpath.normpath(path.removeprefix(reports)) for path in listed}
+        # A report that the agent deleted must not come back from an earlier session.
+        for file in sorted(local_reports.rglob("*")):
+            if file.is_file() and file.relative_to(local_reports).as_posix() not in names:
+                file.unlink()
+        total = 0
+        # The tree's sorted listing decides which reports fit under the total cap, so a resume keeps the same ones.
+        for path in listed:
             local = posixpath.normpath(path.removeprefix(reports))
             if local.startswith(("..", "/")) or posixpath.basename(local) == ".keep":
                 continue
             try:
-                content = self._ctx.read_file(tree, path, native_engines.MAX_CANDIDATE_BYTES)
+                content = self._ctx.read_file(
+                    tree, path, min(native_engines.MAX_CANDIDATE_BYTES, _MAX_REPORT_BYTES - total)
+                )
             except FileTooLargeError:
                 content = None
+            # A report that the local file system refuses still counts, so the tree alone decides each skip.
+            total += len(content or b"")
             with contextlib.suppress(OSError):
-                target = self.logs_dir / "reports" / local
+                target = local_reports / local
                 if content is None:
                     target.unlink(missing_ok=True)
                 else:
