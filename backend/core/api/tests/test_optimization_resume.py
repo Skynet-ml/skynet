@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from ...config import settings
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_TAGGING, WORKER_RESTART_CAUSE
+from ...storage.tests import test_remote_jobstore
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint, _fund_without_checkpoint
 from ..auth import AuthenticatedUser
 from ..routers._helpers import is_pausable, is_resumable, pausable_id_flags, resumable_id_flags
@@ -567,3 +568,26 @@ def test_listings_never_offer_resume_for_a_stored_text_run() -> None:
         flags = {row["optimization_id"]: row["resumable"] for row in response.json()["items"]}
         assert flags == {"old_text": False, "repo_run": True}
     assert store.full_loads == []
+
+
+def test_the_detail_page_never_offers_resume_for_a_stored_text_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The detail page loads the row without the payload, yet a text run with a checkpoint shows no Resume (SKY-834).
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("old_text")
+    store.set_payload_overview("old_text", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+    store.update_job("old_text", status="running")
+    # The checkpoint pins the payload, so the text target must be stored before the checkpoint.
+    monkeypatch.setattr(test_remote_jobstore, "_REPO_TARGET", {"kind": "text"})
+    _fund_checkpoint(store, "old_text", monkeypatch)
+    store.update_job("old_text", status="failed")
+    assert store.has_compatible_gepa_checkpoint("old_text")
+    client = _owner_client(store, "resume-owner")
+
+    response = client.get("/optimizations/old_text")
+    assert response.status_code == 200, response.text
+    assert response.json()["resumable"] is False
+    assert client.post("/optimizations/old_text/resume").status_code == 409

@@ -660,7 +660,8 @@ def is_resumable(job_store: Any, job_data: dict) -> bool:
         ``True`` when the run should offer Resume rather than Restart.
     """
     optimization_id = _resume_candidate_id(job_data)
-    if not optimization_id:
+    # The detail page loads the row without the payload, so the target check reads it here (SKY-834).
+    if not optimization_id or optimization_id in _retired_list_ids(job_store, [job_data]):
         return False
     return _has_resumable_state(job_store, optimization_id) or _restarts_from_beginning(job_store, job_data)
 
@@ -749,7 +750,7 @@ def _resume_candidate_id(job_data: dict) -> str | None:
     Returns:
         The optimization id when the row is a resume candidate, else ``None``.
     """
-    # List rows load without the payload: resumable_id_flags reads their targets in one batch.
+    # Rows load without the payload: is_resumable and resumable_id_flags read their targets in one batch.
     if has_retired_target(job_data):
         return None
     status = status_to_job_status(job_data.get("status", "pending"))
@@ -781,9 +782,9 @@ def is_budget_stop(status: OptimizationStatus, job_data: dict) -> bool:
 
 
 def _retired_list_ids(job_store: Any, rows: list[dict]) -> set[str]:
-    """Return the ids of list rows that name a text or agent target.
+    """Return the ids of rows that name a text or agent target.
 
-    List rows load without the payload, so :func:`has_retired_target` cannot judge them alone (SKY-834).
+    List and detail rows load without the payload, so :func:`has_retired_target` cannot judge them alone (SKY-834).
     One query reads only the ``target`` and ``judge`` members of the payloads that the rows do not hold.
 
     Args:
