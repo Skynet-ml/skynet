@@ -664,3 +664,19 @@ def test_proposer_services_are_refused_only_when_the_file_command_runs(file_prop
     with pytest.raises(ServiceError) as error:
         loop_tools.refuse_unsupported_proposer(options, "AutoResearch", file_proposer=file_proposer)  # type: ignore[arg-type]
     assert "cannot apply these settings: services." in str(error.value)
+
+
+@pytest.mark.parametrize("engine", ["AutoResearch", "Meta-Harness"])
+def test_a_tool_loop_lane_accepts_the_loop_settings_of_the_other_lane(engine: str) -> None:
+    """Accept every Auto loop setting at engine start, because each Auto lane gets the whole proposer (SKY-728).
+
+    Args:
+        engine: The engine's display name.
+    """
+    options = SimpleNamespace(
+        proposer=BlackboxProposer(max_candidates_per_iter=5, ralph=False, max_no_eval_seconds=600),
+        budget_route=None,
+        reasoning_effort=None,
+    )
+
+    loop_tools.refuse_unsupported_proposer(options, engine)  # type: ignore[arg-type]

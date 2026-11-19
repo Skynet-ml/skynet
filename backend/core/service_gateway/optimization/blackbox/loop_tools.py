@@ -555,7 +555,8 @@ def unsupported_proposer_settings(
 def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_proposer: bool = False) -> None:
     """Refuse a proposer setting that the AutoResearch or Meta-Harness tool loop does not run, so the run fails.
 
-    Repository staging refuses the same settings before paid work; this check also covers a run with no staging.
+    Repository staging refuses each engine's own unsupported settings before paid work. This check accepts the Auto
+    set of settings, because each lane of an Auto run gets the whole proposer.
 
     Args:
         options: The run's native options.

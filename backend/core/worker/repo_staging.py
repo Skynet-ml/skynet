@@ -720,7 +720,7 @@ def _refuse_unsupported_proposer(environment: RepoEnvironment, payload: Mapping[
     if engine == BLACKBOX_ENGINE_SHINKA_EVOLVE and headed:
         raise ConstraintsError(
             "ShinkaEvolve does not support [proposer] mcp servers with headers yet: "
-            f"{', '.join(headed)}. Remove these servers or their headers, or choose another engine."
+            f"{', '.join(headed)}. Remove these servers or their headers."
             " MCP servers with no headers still work.",
             section="proposer",
             key="mcp",
