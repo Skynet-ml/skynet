@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from core.billing import mcp_broker
 from core.billing.budgets import AGENT_LEASE_COST_KIND, BudgetBoundExceededError, BudgetError, BudgetService
+from core.billing.model_gateway import ROUTE_KEY
 from core.billing.openrouter_quotes import price_text_request
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.runtime import UsagePendingError
@@ -1369,6 +1370,12 @@ def _host_payload(owner: tuple[User, str, int], tmp_path: Path, monkeypatch: pyt
     archive.write_bytes(_archive({"src/app.py": "x = 1\n"}))
     return {
         **_repo_request(execution_budget_id=owner[1]),
+        # The worker's budget gateway gives every protected run a model route and a spending ceiling.
+        "reflection_model_config": {
+            "name": "gpt-4o",
+            "extra": {ROUTE_KEY: {"url": "http://127.0.0.1:9/model", "token": "model-route", "model": "gpt-4o"}},
+        },
+        "max_cost_cents": 100,
         "_skynet_evaluator_route": {"url": "http://127.0.0.1:9/evaluate", "token": "route"},
         "_repo_snapshot": {"archive": str(archive), "hidden_hashes": {}, "readonly_paths": []},
         # The parent's box route: the job sees a sandbox runtime, so the engine passes its availability check.
@@ -1533,6 +1540,138 @@ def test_the_job_budget_pays_for_the_run_when_the_workspace_points_at_another_bu
     assert budgets.get(other.id, "alice").run_spent_cents == 0
 
 
+def test_a_command_with_a_long_limit_gets_a_box_that_outlives_it(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 30-minute file proposer command gets a box for its limit and the pack, and another command keeps 900 s."""
+    lifetimes: list[float] = []
+    real_open = LocalSubprocessRuntime.open
+
+    def record_open(self: LocalSubprocessRuntime, spec: SandboxSpec) -> Any:
+        """Record the box's lifetime, then open it.
+
+        Args:
+            self: The runtime.
+            spec: The box spec.
+
+        Returns:
+            The open box.
+        """
+        lifetimes.append(spec.lifetime_seconds)
+        return real_open(self, spec)
+
+    def strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
+        """Run one command with a 30-minute limit and one with the default limit.
+
+        Args:
+            strategy: The job's strategy.
+            task: The task.
+            server: The run's eval server.
+            ctx: The loop's context.
+            *_: The progress sink.
+            **__: The capabilities.
+
+        Returns:
+            The seed as the best version, and no lanes.
+        """
+        assert ctx.run_command is not None
+        assert ctx.repo_seed is not None
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800)
+        ctx.run_command(ctx.repo_seed.tree_id, "true")
+        return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
+
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "run_strategy", strategy)
+    monkeypatch.setattr(LocalSubprocessRuntime, "open", record_open)
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert lifetimes[:2] == [1800 + 300, loop_host.STEP_BOX_SECONDS]
+    assert loop_host.STEP_BOX_SECONDS == 900
+    assert loop_host.command_box_seconds(1800) <= 2700
+
+
+def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broker refuses a box past the run's deadline, so a 30-minute command in a 1000 s run gets a 1000 s box
+    and a 700 s limit, which leaves the pack room to end before the box dies. The command's own environment, such
+    as the file proposer's route key, reaches the loop.
+    """
+    lifetimes: list[float] = []
+    timeouts: list[float | None] = []
+    envs: list[Any] = []
+    real_open = LocalSubprocessRuntime.open
+    real_run = EngineLoop.run
+
+    def record_open(self: LocalSubprocessRuntime, spec: SandboxSpec) -> Any:
+        """Record the box's lifetime, then open it.
+
+        Args:
+            self: The runtime.
+            spec: The box spec.
+
+        Returns:
+            The open box.
+        """
+        lifetimes.append(spec.lifetime_seconds)
+        return real_open(self, spec)
+
+    def record_run(self: EngineLoop, *args: Any, timeout_seconds: float | None = None, **kwargs: Any) -> Any:
+        """Record the command's limit, then run it.
+
+        Args:
+            self: The engine loop.
+            *args: The command's tree, text and grants.
+            timeout_seconds: The command's limit.
+            **kwargs: Other options.
+
+        Returns:
+            The command's result and tree.
+        """
+        timeouts.append(timeout_seconds)
+        envs.append(kwargs.get("env"))
+        return real_run(self, *args, timeout_seconds=timeout_seconds, **kwargs)
+
+    def strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
+        """Run one command with a 30-minute limit.
+
+        Args:
+            strategy: The job's strategy.
+            task: The task.
+            server: The run's eval server.
+            ctx: The loop's context.
+            *_: The progress sink.
+            **__: The capabilities.
+
+        Returns:
+            The seed as the best version, and no lanes.
+        """
+        assert ctx.run_command is not None
+        assert ctx.repo_seed is not None
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"APP_API_KEY": "route-key"})
+        return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
+
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    payload["_budget_gateway_descriptor"]["lifetime_seconds"] = 1000
+    monkeypatch.setattr(service, "run_strategy", strategy)
+    monkeypatch.setattr(LocalSubprocessRuntime, "open", record_open)
+    monkeypatch.setattr(EngineLoop, "run", record_run)
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"APP_API_KEY": "route-key"})
+
+
+def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider refuses a longer box, so the configured sandbox lifetime caps a command box."""
+    monkeypatch.setattr(loop_host.settings, "vercel_sandbox_max_lifetime_seconds", 1000)
+
+    assert loop_host.command_box_seconds(1800) == 1000
+
+
 def test_the_host_checks_that_the_run_replayed_every_step(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1556,6 +1695,30 @@ def test_the_host_checks_that_the_run_replayed_every_step(
 
     assert [event["type"] for event in events][-1] == "result"
     assert len(finishes) == 1
+
+
+@pytest.mark.parametrize("engine_name", ["autoresearch", "meta_harness"])
+def test_a_loop_routed_run_with_an_entry_runs_the_contract_files_command(
+    engine_name: str, owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real engine on the loop runs the ``[proposer] entry`` command, not its built-in tool loop (SKY-816)."""
+    # The real engine, not the fake strategy of the other host tests.
+    real_strategy = service.run_strategy
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "run_strategy", real_strategy)
+    monkeypatch.setattr(service, "LOOP_ROUTES", frozenset({(engine_name, "repo")}))
+    payload["strategy"] = {"mode": "single", "engine": engine_name}
+    # Repository staging sets these from the contract file's ``[proposer] entry``.
+    payload["proposer"] = {"harness": "custom", "run_command": "printf x >> src/app.py"}
+    payload["_repo_snapshot"] = {**payload["_repo_snapshot"], "file_proposer": True}
+    model = _Model()
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=model)
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert model.prompts == []
+    # The entry appends to the seed's ``x = 1\n``, so the scored patch adds an ``x`` line.
+    assert any("\n+x\n" in patch for patch in _FakeRepoScorer.calls)
 
 
 def test_a_scorer_outage_in_the_final_run_requeues_the_run(

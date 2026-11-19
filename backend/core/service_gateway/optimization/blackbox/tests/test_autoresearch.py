@@ -43,10 +43,16 @@ from core.service_gateway.optimization.blackbox.protocol import (
     Result,
     Task,
 )
-from core.storage.step_log_store import StepLogStore
+from core.storage.step_log_store import StepLogStore, step_id_for
 from core.storage.tree_store import TreeStore
 from core.worker.actors import User
-from core.worker.engine_loop import EngineLoop, LoopStoppedError, ModelCallBilledError, ModelCallFailedError
+from core.worker.engine_loop import (
+    ROOT_AGENT_ID,
+    EngineLoop,
+    LoopStoppedError,
+    ModelCallBilledError,
+    ModelCallFailedError,
+)
 from core.worker.tests import test_engine_loop as loop_tests
 from core.worker.tests.test_engine_loop import (
     RUN_ID,
@@ -1225,7 +1231,8 @@ def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
 
 
 _ENTRY = (
-    'grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
+    '[ "$APP_PROMPT_FILE" = "$ASCENT_TASK" ] && [ "$APP_MODEL" = m ] '
+    '&& grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
     '&& [ "$(cat deps/lib.txt)" = lib ] && printf x >> a.py && printf n >> .autoresearch/notebook.md'
 )
 
@@ -1295,9 +1302,14 @@ def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_call
 
 
 def test_a_failed_files_proposer_command_leaves_no_version_and_does_not_crash_the_run(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A command that exits 1 is a failed mutation: the seed stays the best version and the run ends.
+    """A command that exits 1 leaves the seed best and ends the run, and one engine warning says why.
 
     Args:
         owner: Alice and her budget generation.
@@ -1305,18 +1317,22 @@ def test_a_failed_files_proposer_command_leaves_no_version_and_does_not_crash_th
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     seed = _tree(trees, "a.py", "a")
 
-    result = _run(
-        loop,
-        score=_score_a_py,
-        repo_seed=RepoSeed(tree_id=seed),
-        native_options=_command_options("printf x >> a.py; exit 1"),
-    )
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        result = _run(
+            loop,
+            score=_score_a_py,
+            repo_seed=RepoSeed(tree_id=seed),
+            native_options=_command_options("printf x >> a.py; exit 1"),
+        )
 
     assert result.best_candidate == seed
+    warnings = [record.getMessage() for record in caplog.records if record.name == "app.engine"]
+    assert warnings == ["Proposer session round1 failed: The [proposer] entry command failed with exit code 1."]
 
 
 def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(
@@ -1333,13 +1349,382 @@ def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
 
-    with pytest.raises(ServiceError, match="changed or removed files of the repository"):
+    with pytest.raises(ServiceError, match=r"changed or removed files of the repository: a\.py\. "):
         _run(
             loop,
             score=_score_a_py,
             repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
             native_options=_command_options(setup=["sh", "-c", "printf b >> a.py"]),
         )
+
+
+def test_a_files_proposer_setup_name_with_a_new_line_stays_out_of_every_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup listing is NUL-separated, so a folder name with a new line is one path, and no version holds it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    setup = ["sh", "-c", 'mkdir deps "$(printf "x\\ny")" && printf lib > deps/lib.txt && touch "$(printf "x\\ny")/f"']
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=2.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+        native_options=_command_options(setup=setup),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert len(versions) == 2
+    for version in versions:
+        assert loop.list_files(version, ".") == ["a.py"]
+
+
+def test_a_files_proposer_setup_lists_only_the_top_folder_of_its_output(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup box keeps only a new path whose folder existed before, so a nested output is one root to remove.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    ctx = loop.context(repo_seed=RepoSeed(tree_id=seed))
+    run = ctx.run_command
+    assert run is not None
+    commands: list[str] = []
+
+    def record(tree: str, command: str, *args: Any, **kwargs: Any) -> Any:
+        """Record the command, then run it in its box.
+
+        Args:
+            tree: The tree the command starts from.
+            command: The shell command.
+            *args: The grants.
+            **kwargs: The time limit.
+
+        Returns:
+            The command's result and tree.
+        """
+        commands.append(command)
+        return run(tree, command, *args, **kwargs)
+
+    ctx = dataclasses.replace(ctx, run_command=record)
+    setup = ["sh", "-c", "mkdir -p deps/sub && printf lib > deps/sub/lib.txt && printf x > deps/top.txt"]
+    proposer = loop_tools.FileProposer(ctx, _command_options(setup=setup), ".autoresearch")  # type: ignore[arg-type]
+
+    base = proposer.base(ctx.repo_seed.tree_id)  # type: ignore[union-attr]
+    proposer.version("start", base, base)
+
+    assert proposer._roots == ["deps"]
+    assert commands[-1] == "rm -rf -- .autoresearch deps"
+
+
+def test_a_files_proposer_setup_folder_inside_a_seed_folder_stays_out_of_every_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A new folder below a seed folder is a setup output, so the setup does not count as a seed change.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=2.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_store(trees, {"a.py": b"a", "src/a.py": b"s"})),
+        native_options=_command_options("printf x >> a.py", setup=["sh", "-c", "mkdir src/cache && touch src/cache/c"]),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert len(versions) == 2
+    for version in versions:
+        assert loop.list_files(version, "src") == ["src/a.py"]
+
+
+def test_a_files_proposer_notebook_line_reaches_the_next_round(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Round one's command writes a notebook line, and round two's task file and lab notebook hold it.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    entry = (
+        'if grep -q carried "$ASCENT_TASK" && grep -q carried .autoresearch/notebook.md; then printf y >> a.py; '
+        "else printf x >> a.py && printf 'carried\\n' >> .autoresearch/notebook.md; fi"
+    )
+    scored: list[str] = []
+
+    def score(loop: EngineLoop, candidate: Any, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Record the candidate and score it by the length of its ``a.py``.
+
+        Args:
+            loop: The engine loop.
+            candidate: The version's tree id.
+            case: The case.
+
+        Returns:
+            The score and no side information.
+        """
+        scored.append(candidate)
+        return _score_a_py(loop, candidate, case)
+
+    _run(
+        loop,
+        stop_at_score=3.0,
+        score=score,
+        repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+        native_options=_command_options(entry, setup=[]),
+    )
+
+    versions = list(dict.fromkeys(scored))
+    assert [loop.read_file(version, "a.py") for version in versions] == [b"a", b"ax", b"axy"]
+
+
+def test_a_files_proposer_setup_that_fails_stops_the_run_with_its_command_and_exit_code(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A setup that exits 3 stops the run before any entry command, and the error names the setup and the code.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+
+    with pytest.raises(ServiceError, match=r"\[proposer\] setup command .*sh -c 'exit 3'.* failed with exit code 3"):
+        _run(
+            loop,
+            score=_score_a_py,
+            repo_seed=RepoSeed(tree_id=_tree(trees, "a.py", "a")),
+            native_options=_command_options(setup=["sh", "-c", "exit 3"]),
+        )
+
+
+def test_a_files_proposer_version_past_the_evaluation_budget_ends_the_run_without_an_error(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The seed sweep takes two of three scorer calls, so round one's version cannot get its full sweep.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+
+    result = _run(
+        loop,
+        max_evals=3,
+        stop_at_score=None,
+        score=_score_a_py,
+        repo_seed=RepoSeed(tree_id=seed),
+        native_options=_command_options(),
+    )
+
+    # The sweep refuses the version whole, so the third scorer call stays unused.
+    assert result.best_candidate == seed
+    assert result.metadata["rounds"] == 1
+    assert result.total_evals == 2
+
+
+def test_a_files_proposer_run_replays_on_a_resume_with_no_box(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup and each entry command are committed steps, so a new generation replays the run with no box.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    seed = _tree(trees, "a.py", "a")
+    first, first_boxes = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    live = _run(
+        first, stop_at_score=4.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=_command_options()
+    )
+    assert first_boxes.opened > 0
+
+    _new_generation(engine)
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=2)
+    replayed = _run(
+        loop, stop_at_score=4.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=_command_options()
+    )
+    loop.finish()
+
+    assert (replayed.best_candidate, replayed.best_score) == (live.best_candidate, live.best_score)
+    assert loop.read_file(replayed.best_candidate, "a.py") == b"axxx"
+    assert boxes.opened == 0
+
+
+def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup and the entry boxes get the run's route key and model, so the command can reach the model relay.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    relay = '[ "$APP_API_KEY" = route-key ] && [ "$APP_MODEL" = m ]'
+    options = _command_options(
+        entry=f"{relay} && printf x >> a.py", setup=["sh", "-c", f"{relay} && mkdir deps && printf lib > deps/lib.txt"]
+    )
+    options.budget_route = {"url": "https://gw.example/v1", "token": "route-key"}
+    options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key="route-key")
+
+    result = _run(loop, stop_at_score=2.0, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert loop.read_file(result.best_candidate, "a.py") == b"ax"
+
+
+# Long enough that no other text of the run holds it by chance.
+_ROUTE_KEY = "scoped-route-key-of-this-test"
+
+
+def _protected_options(entry: str, setup: list[str]) -> SimpleNamespace:
+    """Build the native options of a protected run whose route key is ``_ROUTE_KEY``.
+
+    Args:
+        entry: The ``[proposer] entry`` command.
+        setup: The ``[proposer] setup`` argv.
+
+    Returns:
+        The options.
+    """
+    options = _command_options(entry=entry, setup=setup)
+    options.budget_route = {"url": "https://gw.example/v1", "token": _ROUTE_KEY}
+    options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key=_ROUTE_KEY)
+    return options
+
+
+def test_an_entry_that_prints_the_route_key_leaves_it_out_of_the_step_log_and_the_run_events(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The step log and the failure's run event keep the command's output, so the key shows as ``[redacted]``.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    events: list[tuple[str, dict[str, Any]]] = []
+    entry = 'echo "$APP_API_KEY"; echo "key $APP_API_KEY" >&2; exit 1'
+    options = _protected_options(entry, ["sh", "-c", "mkdir deps"])
+
+    with caplog.at_level(logging.WARNING):
+        _run(loop, events=events, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    bodies = [
+        json.dumps(step_log.get_step(step_id_for(RUN_ID, ROOT_AGENT_ID, seq)))
+        for seq, kind, _ in _steps(engine)
+        if kind == "command"
+    ]
+    assert any("key [redacted]" in body for body in bodies)
+    assert not any(_ROUTE_KEY in body for body in bodies)
+    assert "key [redacted]" in caplog.text
+    assert _ROUTE_KEY not in caplog.text
+    assert _ROUTE_KEY not in json.dumps(events, default=str)
+
+
+def test_a_setup_that_prints_the_route_key_fails_with_it_redacted(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup's error copies the end of its output, so the key shows as ``[redacted]`` there.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    options = _protected_options("true", ["sh", "-c", 'echo "key $APP_API_KEY" >&2; exit 3'])
+
+    with pytest.raises(ServiceError) as error:
+        _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+
+    assert "key [redacted]" in str(error.value)
+    assert _ROUTE_KEY not in str(error.value)
 
 
 @pytest.mark.parametrize("links", [{}, {".autoresearch": "a.py"}, {".autoresearch": "missing"}])
@@ -1445,6 +1830,29 @@ def test_a_proposer_setting_that_the_tool_loop_drops_is_refused(
 
     with pytest.raises(ServiceError, match=rf"AutoResearch .*cannot apply these settings: .*\b{field}\b"):
         _run(loop, native_options=options)
+    assert model.calls == []
+    assert boxes.opened == 0
+
+
+def test_a_files_proposer_with_no_repository_is_refused(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """With no repository the file's command would edit nothing, so its settings fail the run before any call.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    model = _Researcher()
+    loop, boxes = _loop(owner, engine, step_log, trees, tmp_path, model, generation=1)
+
+    with pytest.raises(
+        ServiceError, match=r"^AutoResearch in the worker engine loop runs only its built-in proposer, .*run_command"
+    ):
+        _run(loop, native_options=_command_options())
     assert model.calls == []
     assert boxes.opened == 0
 

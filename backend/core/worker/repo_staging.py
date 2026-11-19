@@ -62,6 +62,8 @@ from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
 from ..models.blackbox import (
+    BLACKBOX_ENGINE_AUTORESEARCH,
+    BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
     FILE_PROPOSER_REFUSED_ENGINES,
@@ -71,6 +73,7 @@ from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox import service as blackbox_service
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import RUN_FAILED_STATUS, STATUS_KEY, is_metric_error
@@ -436,6 +439,7 @@ def stage_repository(
         if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
             raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
         if environment.proposer_entry is not None:
+            _refuse_engine_loop_settings(environment, result)
             environment = _without_refused_engines(environment, result.get("strategy") or {})
         record = environment.record(
             repository=repo["repository"],
@@ -594,18 +598,73 @@ def stage_repository(
     )
 
 
+# The engines that run [proposer] entry in the worker engine loop (SKY-816).
+_ENGINE_LOOP_ENGINES = frozenset({BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS})
 # The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
 _FILE_PROPOSER_REFUSALS = {
+    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
+    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
     BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve cannot use the [proposer] entry command yet.",
 }
+
+
+def _on_engine_loop(strategy: Mapping[str, Any]) -> bool:
+    """Tell whether a run is a single AutoResearch or Meta-Harness run that the engine loop runs.
+
+    It uses the routing rule of the job itself, so staging and the worker agree on where the run goes.
+
+    Args:
+        strategy: The stored run request's ``strategy``.
+
+    Returns:
+        True when the engine loop runs the file's command for this run (SKY-816).
+    """
+    engine = strategy.get("engine")
+    return engine in _ENGINE_LOOP_ENGINES and blackbox_service.loop_route(engine, strategy.get("mode", "auto"))
+
+
+def _refuse_engine_loop_settings(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:
+    """Refuse the settings that the engine loop cannot give ``[proposer] entry``, before the engine starts.
+
+    AutoResearch and Meta-Harness run the file's command in the engine loop (SKY-816). That loop gives it no
+    relay for ``[proposer] services`` and no reasoning effort, so the engine would fail at start. Auto leaves
+    out these lanes, and the other engines run the command with both settings.
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        payload: The stored run request.
+
+    Raises:
+        ConstraintsError: When a run on the engine loop has one of the settings.
+    """
+    if not _on_engine_loop(payload.get("strategy") or {}):
+        return
+    fix = "Remove it, or choose a single run of another engine."
+    if environment.constraints is not None and environment.constraints.proposer.services:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give [proposer] services to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="services",
+        )
+    # The stored payload is saved by alias, so the model settings are under ``reflection_model_config``.
+    effort = ((payload.get("reflection_model_config") or {}).get("extra") or {}).get("reasoning_effort")
+    if effort:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give the reasoning_effort setting to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="entry",
+        )
 
 
 def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
     """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
 
-    AutoResearch and Meta-Harness run it in the engine loop (SKY-816). The
-    ShinkaEvolve engine refuses the command on every route. The check refuses it
-    here, before a paid box starts, and not at the engine's start (SKY-815).
+    AutoResearch and Meta-Harness run it only on the engine loop (SKY-816).
+    The native runtime, and so Auto, cannot run it for them. The ShinkaEvolve
+    engine refuses the command on every route. The check refuses it here,
+    before a paid box starts, and not at the engine's start (SKY-815).
     SKY-828 lifts this refusal: it wires the command after the SKY-728 cutover.
 
     Args:
@@ -616,11 +675,11 @@ def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str
         The environment, with a note for an Auto run.
 
     Raises:
-        ConstraintsError: When the run is a single run of a refused engine.
+        ConstraintsError: When the run is a single run of a refused engine, off the engine loop.
     """
     if strategy.get("mode", "auto") == "single":
         engine = strategy.get("engine")
-        if engine in FILE_PROPOSER_REFUSED_ENGINES:
+        if engine in FILE_PROPOSER_REFUSED_ENGINES and not _on_engine_loop(strategy):
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {_FILE_PROPOSER_REFUSALS[engine]} Remove [proposer] entry, or choose another"
                 " engine.",
@@ -632,7 +691,8 @@ def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str
         environment,
         notes=(
             *environment.notes,
-            "Auto leaves out the ShinkaEvolve lane, because it cannot use the proposer command in the contract file.",
+            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
+            " proposer command in the contract file.",
         ),
     )
 

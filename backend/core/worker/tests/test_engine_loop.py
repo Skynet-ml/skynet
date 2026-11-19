@@ -525,6 +525,42 @@ def test_a_model_call_has_no_box_open_and_each_call_commits_one_step(
     assert [seq for seq, _, _ in _steps(engine)] == list(range(len(_KINDS)))
 
 
+def test_a_command_time_limit_reaches_the_tree_sandbox(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop passes a command's limit to the tree sandbox, and no limit when the caller gives none (SKY-816)."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed_tree = _tree(trees, "README", "seed")
+    limits: list[float | None] = []
+    original = loop._sandbox.run
+
+    def run(*args: Any, timeout_seconds: float | None = None, **options: Any) -> Any:
+        """Record the limit, then run the command.
+
+        Args:
+            *args: The sandbox call's arguments.
+            timeout_seconds: The command's limit.
+            **options: The other options.
+
+        Returns:
+            The sandbox's result.
+        """
+        limits.append(timeout_seconds)
+        return original(*args, timeout_seconds=timeout_seconds, **options)
+
+    monkeypatch.setattr(loop._sandbox, "run", run)
+
+    loop.run(seed_tree, "true", timeout_seconds=1800)
+    loop.run(seed_tree, "echo other")
+
+    assert limits == [1800, None]
+
+
 def test_the_context_names_the_job_as_its_log_owner(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:

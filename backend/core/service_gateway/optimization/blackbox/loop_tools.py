@@ -17,6 +17,7 @@ keeps its own search and lab state; only the step that makes the version changes
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import time
 from collections.abc import Iterator, Mapping
@@ -27,11 +28,14 @@ from urllib.parse import urlsplit
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
 from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM
-from ....sandbox.grants import Grant, GrantError
+from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
+from .harness import ENV_API_KEY
+from .native_engines import log_event
 from .native_runtime import NativeOptions
 from .protocol import TOO_DEEP_ARGUMENTS, EngineContext, EvalServer, FileTooLargeError, ModelReply
+from .sandbox_contract import CommandResult
 
 # Each command output goes into every later prompt of the session, so a fixed cut keeps the prompts, and the
 # prompt hashes that a replay checks, bounded. The cut counts each stream's bytes in the prompt as the session
@@ -63,6 +67,22 @@ MAX_PROMPT_BYTES = 128_000
 TASK_FILE = "ascent-task.md"
 # The file in the lab folder where the setup box lists the paths that ``[proposer] setup`` added.
 _SETUP_ROOTS = "setup-roots"
+# The setup box's check: stdin and the file in argv[1] are NUL-separated listings after and before the setup, so a
+# name with a new line stays one path. It prints each new path whose folder existed before: a top path of the output.
+_NEW_ROOTS = r"""import sys
+seen = set(open(sys.argv[1], "rb").read().split(b"\0"))
+for path in sorted(set(sys.stdin.buffer.read().split(b"\0")) - seen):
+    if path and (path.rpartition(b"/")[0] == b"." or path.rpartition(b"/")[0] in seen):
+        sys.stdout.buffer.write(path + b"\0")
+"""
+# The limit of each ``[proposer] setup`` and ``[proposer] entry`` command, as docs/repository-constraints.md says.
+_COMMAND_TIMEOUT_SECONDS = 30 * 60
+# The error of a setup that changed the seed names at most this many files.
+_NAMED_FILES = 20
+# The error compares at most this many common files, each read up to this many bytes, so a large repository
+# cannot fill the worker's memory on that error path.
+_COMPARED_FILES = 200
+_COMPARED_BYTES = 1_000_000
 # A failed command's message keeps the end of its output, where the error usually is.
 _COMMAND_ERROR_CHARS = 2000
 
@@ -433,7 +453,8 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     """Refuse a proposer setting that the worker tool loop does not run, so the run fails and is not changed.
 
     A host CLI, ``[proposer] mcp`` servers and a reasoning effort would be silently dropped. A command is run only
-    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816).
+    when it is the contract file's ``[proposer] entry`` in a repository run (SKY-816). That command does not reach
+    ``[proposer] services``.
 
     Args:
         options: The run's native options.
@@ -456,14 +477,23 @@ def refuse_unsupported_proposer(options: NativeOptions, engine: str, *, file_pro
     # Repository staging sets the custom harness for the file's command.
     if proposer.harness != (BLACKBOX_HARNESS_CUSTOM if file_proposer else BLACKBOX_HARNESS_CODEX):
         refused.append("harness")
-    if ((options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}).get("servers"):
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    if mcp_route.get("servers"):
         refused.append("mcp")
+    # FileProposer gives the command no relay token and no service list, so the services would not answer.
+    if file_proposer and mcp_route.get("services"):
+        refused.append("services")
     if options.reasoning_effort:
         refused.append("reasoning_effort")
     if refused:
+        runs = (
+            "runs the [proposer] entry command of the contract file"
+            if file_proposer
+            else "in the worker engine loop runs only its built-in proposer"
+        )
         raise ServiceError(
-            f"{engine} in the worker engine loop runs only its built-in proposer, so it cannot apply these "
-            f"settings: {', '.join(refused)}. Remove them, or choose another engine."
+            f"{engine} {runs}, so it cannot apply these settings: {', '.join(refused)}. "
+            "Remove them, or choose another engine."
         )
 
 
@@ -563,7 +593,8 @@ class FileProposer:
     The command starts on the parent's tree with the engine's lab folder over it, and ``ASCENT_TASK`` names the
     task file there. The tree it leaves, without the lab folder and without the files that ``[proposer] setup``
     added, is the new version, so the command needs no ``eval.sh`` or ``save.sh``. Each command is one committed
-    ``command`` step, so a resume replays it. A failed command gives no version, so the run goes on.
+    ``command`` step, so a resume replays it. A failed command gives no version. Meta-Harness then goes on to
+    its next iteration; AutoResearch's native stop rule ends the run, because the round spent nothing.
     """
 
     def __init__(self, ctx: EngineContext, options: NativeOptions, lab: str) -> None:
@@ -580,15 +611,24 @@ class FileProposer:
         self._lab = lab
         self._entry = options.proposer.run_command or ""
         self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
-        # The run's gateway holds the deployment's managed key, so the box gets no grant for it, as in SKY-815.
+        self._setup_name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
+        # A protected run's boxes reach the model through the parent's mailbox, which sets APP_GATEWAY_URL and
+        # refuses a grant with headers, so the box gets no grant for the gateway. Without a budget route the
+        # gateway holds the deployment's managed key, so the box gets no grant and no key, as in SKY-815.
         model_host = urlsplit(options.gateway.url or "").hostname
         self._grants = tuple(
             Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host
         )
         self._exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        # The scoped route key goes in the box's environment, not in the script: the step log keeps the script.
+        protected = options.budget_route is not None and options.gateway.api_key
+        self._env = {ENV_API_KEY: options.gateway.api_key} if protected else None
         self._roots: list[str] | None = None
         # Each version's tree with the setup's output, so the next session from it gets that output back.
         self._full: dict[str, str] = {}
+        # The last tree of the session that left each version, with the lab still in it. Most versions never start
+        # a session, so ``base`` removes the lab from it only for a version that does.
+        self._last: dict[str, str] = {}
 
     def base(self, parent: str) -> str:
         """Return the tree that a session from a version starts on: the version with the setup's output.
@@ -602,10 +642,20 @@ class FileProposer:
             The tree to put the lab over.
 
         Raises:
-            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; or
+                when the box that removes the lab folder from the version's last tree fails.
         """
         if self._roots is None:
             self._roots = self._setup()
+        if parent not in self._full and parent in self._last:
+            full = drop_lab(self._ctx, "", self._last[parent], parent, self._lab)
+            if full is None:
+                # Without the setup's output every later session from this version would fail with no report. The
+                # box is a committed step, so a resume raises the same error.
+                raise ServiceError(
+                    "The removal of the lab folder for the next session could not run in a box. Start a new run."
+                )
+            self._full[parent] = full
         return self._full.get(parent, parent)
 
     def run(self, start: str) -> tuple[str, str | None]:
@@ -619,7 +669,8 @@ class FileProposer:
             the session leaves no version.
 
         Raises:
-            GrantError: When the grants cannot resolve; every command would fail the same way, so the run stops.
+            GrantDeniedError: When the grants do not resolve. Every command would fail the same way, so the run
+                stops; a resume replays the committed failure and raises it again.
         """
         assert self._ctx.run_command is not None
         task = f"{self._lab}/{TASK_FILE}"
@@ -627,10 +678,10 @@ class FileProposer:
             [*self._exports, f'export ASCENT_TASK="$PWD/{task}" APP_PROMPT_FILE="$PWD/{task}"', self._entry]
         )
         try:
-            result, tree = self._ctx.run_command(start, script, self._grants)
-        except GrantError:
-            raise
-        except (ValueError, TreeRejectedError, BoxFailureError) as error:
+            result, tree = self._ctx.run_command(
+                start, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS, env=self._env
+            )
+        except (TreeRejectedError, BoxFailureError) as error:
             # The step committed the failure, so a resume gets the same failed version.
             return start, f"The [proposer] entry command left no usable version: {error}"
         if result.timed_out or result.exit_code != 0:
@@ -646,27 +697,51 @@ class FileProposer:
             parent: The tree of the version that the session started from.
 
         Returns:
-            The version's tree id, or ``None`` when a box could not remove the paths.
+            The version's tree id, or ``None`` when a box could not remove the paths. The entry command can write
+            a path that ``rm`` cannot remove, so a warning names the failure and the run does not stop with an
+            error: Meta-Harness goes on to its next iteration, and AutoResearch ends the run as its stop rule says.
         """
         if tree == start:
             return parent
-        full = drop_lab(self._ctx, start, tree, parent, self._lab)
-        version = full if full is None or not self._roots else _remove(self._ctx, full, self._roots)
-        if version is not None and full is not None:
-            self._full.setdefault(version, full)
+        roots = self._roots or []
+        assert self._ctx.run_command is not None
+        name = "removal of the lab folder and any setup output after the [proposer] entry command"
+        try:
+            result, version = self._ctx.run_command(tree, f"rm -rf -- {shlex.join([self._lab, *roots])}", ())
+        except (TreeRejectedError, BoxFailureError) as error:
+            log_event(
+                "proposer.done", f"The {name} could not run in a box: {error}", level=logging.WARNING, source="proposer"
+            )
+            return None
+        if result.timed_out or result.exit_code != 0:
+            log_event(
+                "proposer.done",
+                _command_failure(name, result)
+                + " The version is lost. Make the command write only files it can remove.",
+                level=logging.WARNING,
+                source="proposer",
+            )
+            return None
+        # With no setup output the version is already a session's full tree, so ``base`` needs no lab removal for it.
+        if roots:
+            self._last.setdefault(version, tree)
         return version
 
     def _setup(self) -> list[str]:
         """Run ``[proposer] setup`` once over the seed tree, and list the top paths that it added.
 
         One box runs the setup and lists the new paths, so the list also holds links and empty folders, which no
-        tree read sees. Two more boxes check that only those paths changed.
+        tree read sees. Two more boxes check that only those paths changed: one removes the lab folder and the added
+        paths, and one gives the seed's own tree to compare with. ``base`` removes only the lab folder later, for
+        the first session's tree.
 
         Returns:
             The added paths that hold no seed path, relative to the repository root; empty with no setup.
 
         Raises:
-            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed.
+            ServiceError: When the setup fails, adds too many paths, or changes or removes a file of the seed; when
+                a box of the setup or of its check fails; or when the ``rm`` of its output fails.
+            GrantDeniedError: When the grants do not resolve.
         """
         assert self._ctx.repo_seed is not None
         assert self._ctx.run_command is not None
@@ -675,10 +750,9 @@ class FileProposer:
         self._full[seed] = seed
         if not self._setup_argv:
             return []
-        name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
-        listing = "find . -mindepth 1 -print | LC_ALL=C sort"
+        name = self._setup_name
+        listing = "find . -mindepth 1 -print0"
         lab = shlex.quote(self._lab)
-        # A new path whose folder existed before the setup is a top path of its output.
         script = "\n".join(
             [
                 *self._exports,
@@ -686,31 +760,49 @@ class FileProposer:
                 f'{listing} > "$paths"',
                 f"{shlex.join(self._setup_argv)} || exit $?",
                 f"mkdir -p {lab}",
-                f"{listing} | awk 'NR == FNR {{ seen[$0]; next }} !($0 in seen) {{ dir = $0; "
-                f'sub("/[^/]*$", "", dir); if (dir == "." || (dir in seen)) print }}\' "$paths" - '
-                f"> {lab}/{_SETUP_ROOTS}",
+                f'{listing} | python3 -I -c {shlex.quote(_NEW_ROOTS)} "$paths" > {lab}/{_SETUP_ROOTS}',
             ]
         )
-        result, tree = self._ctx.run_command(seed, script, self._grants)
+        try:
+            result, tree = self._ctx.run_command(
+                seed, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS, env=self._env
+            )
+        except BoxFailureError as error:
+            raise ServiceError(f"The {name} could not run in a box. Start a new run. {error}") from error
+        except TreeRejectedError as error:
+            raise ServiceError(f"The {name} left files that the run refuses. {error}") from error
         if result.timed_out or result.exit_code != 0:
             raise ServiceError(_command_failure(name, result))
         try:
             data = self._ctx.read_file(tree, f"{self._lab}/{_SETUP_ROOTS}", MAX_COMMAND_BYTES // 2)
         except FileTooLargeError:
             raise ServiceError(f"The {name} added too many top-level paths. Put its output in fewer folders.") from None
-        lines = (data or b"").decode("utf-8", "replace").splitlines()
+        names = (data or b"").decode("utf-8", "replace").split("\0")
         # The lab folder that the listing's own ``mkdir`` made is no setup output.
-        roots = [path for path in (line.removeprefix("./") for line in lines if line) if path != self._lab]
-        full = drop_lab(self._ctx, seed, tree, seed, self._lab)
-        stripped = full if full is None or not roots else _remove(self._ctx, full, roots)
+        roots = [path for path in (name.removeprefix("./") for name in names if name) if path != self._lab]
+        stripped = _remove(self._ctx, tree, [self._lab, *roots])
         # The same box round trip on the seed gives the tree to compare with, without the hidden paths.
-        same, untouched = self._ctx.run_command(seed, "true", ())
-        if full is None or stripped is None or same.exit_code != 0 or stripped != untouched:
+        untouched = None if stripped is None else _round_trip(self._ctx, seed)
+        if untouched is None:
+            raise ServiceError(f"The check of the {name} could not run in a box. Start a new run.")
+        if stripped != untouched:
+            changed, shortened = _changed_files(self._ctx, untouched, stripped)
+            if changed:
+                named = f": {', '.join(changed)}" + (" (list shortened)" if shortened else "") + "."
+            else:
+                named = (
+                    ". The check names no file: the change is in a link, an empty folder or a file that it did not"
+                    " read."
+                )
             raise ServiceError(
-                f"The {name} changed or removed files of the repository. Those changes would enter every version. "
-                "Make the setup write only new files."
+                f"The {name} changed or removed files of the repository{named}"
+                " Those changes would enter every version. Make the setup write only new files."
             )
-        self._full[seed] = full
+        if roots:
+            del self._full[seed]
+            self._last[seed] = tree
+        else:
+            self._full[seed] = stripped
         return roots
 
 
@@ -724,16 +816,94 @@ def _remove(ctx: EngineContext, tree: str, paths: list[str]) -> str | None:
 
     Returns:
         The tree without the paths, or ``None`` when the box failed.
+
+    Raises:
+        ServiceError: When ``rm`` fails or runs out of time, for example on a read-only folder of the setup.
     """
     assert ctx.run_command is not None
     try:
         result, after = ctx.run_command(tree, f"rm -rf -- {shlex.join(paths)}", ())
     except (TreeRejectedError, BoxFailureError):
         return None
+    if result.timed_out or result.exit_code != 0:
+        raise ServiceError(
+            _command_failure("removal of the files that [proposer] setup added", result)
+            + " Make the setup write only files that it can remove."
+        )
+    return after
+
+
+def _changed_files(ctx: EngineContext, seed: str, tree: str) -> tuple[list[str], bool]:
+    """Name the files that differ between the seed and a tree, for the error of a setup that changed the seed.
+
+    Args:
+        ctx: The engine context, with its file calls.
+        seed: The seed's tree.
+        tree: The setup's tree without the lab folder and the setup's output.
+
+    Returns:
+        The added, removed and changed files and the files whose executable mode changed, sorted, at most
+        ``_NAMED_FILES``. It compares the content of at most ``_COMPARED_FILES`` common files, and the size of a
+        file above ``_COMPARED_BYTES``. Empty when only a link or an empty folder differs. Then whether a cap
+        shortened the list.
+    """
+    assert ctx.list_files is not None
+    assert ctx.read_file is not None
+    before = set(ctx.list_files(seed) or ())
+    after = set(ctx.list_files(tree) or ())
+    modes = set(ctx.list_files(seed, executable=True) or ()) ^ set(ctx.list_files(tree, executable=True) or ())
+    changed = (before ^ after) | modes
+    common = sorted((before & after) - changed)
+    compared = 0
+    for path in common[:_COMPARED_FILES]:
+        if len(changed) >= _NAMED_FILES:
+            break
+        compared += 1
+        if _content(ctx, seed, path) != _content(ctx, tree, path):
+            changed.add(path)
+    return sorted(changed)[:_NAMED_FILES], len(changed) > _NAMED_FILES or compared < len(common)
+
+
+def _content(ctx: EngineContext, tree: str, path: str) -> bytes | int | None:
+    """Read a file to compare, or give its size when it is above ``_COMPARED_BYTES``.
+
+    The engine context gives no blob id, so the size is the only cheap sign that a large file changed. A large
+    file whose size stays the same counts as unchanged, so it cannot push a changed file out of the named files.
+
+    Args:
+        ctx: The engine context, with its file read.
+        tree: The tree.
+        path: The file.
+
+    Returns:
+        The file bytes, its size in bytes when it is above the cap, or ``None`` when it is missing.
+    """
+    assert ctx.read_file is not None
+    try:
+        return ctx.read_file(tree, path, _COMPARED_BYTES)
+    except FileTooLargeError as error:
+        return error.size
+
+
+def _round_trip(ctx: EngineContext, tree: str) -> str | None:
+    """Pass a tree through a box with no change, so it compares with a tree that a box command left.
+
+    Args:
+        ctx: The engine context, with its command call.
+        tree: The tree.
+
+    Returns:
+        The tree after the box, or ``None`` when the box failed.
+    """
+    assert ctx.run_command is not None
+    try:
+        result, after = ctx.run_command(tree, "true", ())
+    except (TreeRejectedError, BoxFailureError):
+        return None
     return after if result.exit_code == 0 and not result.timed_out else None
 
 
-def _command_failure(name: str, result: Any) -> str:
+def _command_failure(name: str, result: CommandResult) -> str:
     """Describe a failed box command for the run's log or error.
 
     Args:

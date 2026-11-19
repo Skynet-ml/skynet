@@ -359,6 +359,20 @@ def test_a_failing_command_is_output_not_an_error(trees: TreeStore, step_log: St
     assert _files(trees, new_tree) == {"out.txt": b"x\n"}
 
 
+def test_a_command_time_limit_replaces_the_layer_limit_for_that_command(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A call's limit reaches the box; a call with no limit keeps the layer's limit (SKY-816)."""
+    sandbox, _, _ = _sandbox(trees, step_log, _Runtime(), timeout_seconds=0.5)
+    start = _tree(trees, {})
+
+    kept, _ = sandbox.run(_step(1), start, "sleep 5", [])
+    longer, _ = sandbox.run(_step(2), start, "sleep 1", [], timeout_seconds=30)
+    shorter, _ = sandbox.run(_step(3), start, "sleep 5", [], timeout_seconds=0.5)
+
+    assert (kept.timed_out, longer.timed_out, shorter.timed_out) == (True, False, True)
+
+
 def test_each_run_gets_a_fresh_box(trees: TreeStore, step_log: StepLogStore) -> None:
     """Nothing one call writes outside the tree reaches the next call."""
     runtime = _Runtime()
@@ -1464,3 +1478,13 @@ def test_a_gpu_step_records_another_grant_list_id_than_a_cpu_step(trees: TreeSto
     assert cpu["grant_list_id"] == network_id
     assert a100["grant_list_id"] == json_fingerprint([network_id, "gpu:a100"])
     assert h100["grant_list_id"] != a100["grant_list_id"]
+
+
+def test_redaction_keeps_an_env_value_shorter_than_8_characters() -> None:
+    """A short value could be a common word, so only a value of 8 or more characters becomes ``[redacted]``."""
+    result = CommandResult(0, stdout="ok 1234567 abcdefgh", stderr="abcdefgh ok")
+
+    clean = tree_sandbox._redacted(result, {"SHORT": "1234567", "KEY": "abcdefgh", "EMPTY": ""})
+
+    assert clean.stdout == "ok 1234567 [redacted]"
+    assert clean.stderr == "[redacted] ok"

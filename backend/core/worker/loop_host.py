@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 import traceback
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -44,7 +45,7 @@ from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..exceptions import InfrastructureInterruptionError, ServiceError
-from ..sandbox.grants import resolve_grants
+from ..sandbox.grants import Grant, resolve_grants
 from ..sandbox.trees import tar_to_tree, tree_to_tar
 from ..service_gateway.optimization.blackbox.protocol import (
     Candidate,
@@ -65,7 +66,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     version_patch,
 )
 from ..service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS, side_info_json_default
-from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime, SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxRuntime, SandboxSpec
 from ..service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from ..storage import get_job_store
 from ..storage.base import ObjectStore
@@ -86,6 +87,8 @@ CHUNK_CENTS = 100
 MODEL_MAX_CENTS = 100
 # The longest that one command or metric box lives.
 STEP_BOX_SECONDS = 900
+# The time in a command's box for the tree's unpack before the command and its pack after it.
+_PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
@@ -370,7 +373,9 @@ def _retryable(error: ServiceError) -> bool:
 class _LoopBinding:
     """Give a job the engine loop's context and run its scorer calls as loop steps."""
 
-    def __init__(self, loop: EngineLoop, trees: TreeStore, run_id: str, seed: RepoSeed) -> None:
+    def __init__(
+        self, loop: EngineLoop, trees: TreeStore, run_id: str, seed: RepoSeed, lifetime_seconds: float | None = None
+    ) -> None:
         """Bind the job to the loop and the run's seed.
 
         Args:
@@ -378,8 +383,10 @@ class _LoopBinding:
             trees: The run's tree store.
             run_id: The run.
             seed: The run's seed tree and path rules.
+            lifetime_seconds: The longest box that the parent's broker opens for the run; ``None`` for no bound.
         """
         self._loop = loop
+        self._lifetime = lifetime_seconds
         self._trees = trees
         self._run_id = run_id
         self._seed = seed
@@ -393,9 +400,37 @@ class _LoopBinding:
             **fields: The job's own context fields.
 
         Returns:
-            The context.
+            The context; a command with its own limit gets at most what its box can hold.
         """
-        return self._loop.context(repo_seed=self._seed, **fields)
+        ctx = self._loop.context(repo_seed=self._seed, **fields)
+        run = ctx.run_command
+        assert run is not None
+
+        def run_command(
+            tree_id: str,
+            command: str,
+            grants: tuple[Grant, ...] = (),
+            *,
+            timeout_seconds: float | None = None,
+            env: Mapping[str, str] | None = None,
+        ) -> tuple[CommandResult, str]:
+            """Run one loop command, with its limit cut so that it times out before its box dies.
+
+            Args:
+                tree_id: The tree the command starts from.
+                command: The shell command.
+                grants: The box's network grants.
+                timeout_seconds: The command's limit; ``None`` keeps the sandbox's limit.
+                env: Extra environment for this command only.
+
+            Returns:
+                The command's result and the tree id after it.
+            """
+            if timeout_seconds is not None:
+                timeout_seconds = command_timeout_seconds(timeout_seconds, self._lifetime)
+            return run(tree_id, command, grants, timeout_seconds=timeout_seconds, env=env)
+
+        return replace(ctx, run_command=run_command)
 
     def finish(self) -> None:
         """Check that the run replayed every committed step of the loop."""
@@ -539,20 +574,24 @@ def host_loop_job(
                 hidden_hashes=hidden,
             )
             descriptor = payload.get("_budget_gateway_descriptor") or {}
+            # The broker refuses a box that outlives the run's deadline, so a command box must fit in it too.
+            lifetime = descriptor.get("lifetime_seconds")
             # No operation key: the box route makes each open its own request, so no two steps share a box.
             spec = SandboxSpec(lifetime_seconds=STEP_BOX_SECONDS, image=descriptor.get("image"))
             loop = EngineLoop(
                 run,
                 engine=engine,
                 trees=trees,
-                candidates=RuntimeBoxSource(runtime, spec),
+                candidates=RuntimeBoxSource(
+                    runtime, spec, command_lifetime=lambda timeout: command_box_seconds(timeout, lifetime)
+                ),
                 metrics=RuntimeBoxSource(runtime, spec),
                 model=model,
                 model_max_cents=MODEL_MAX_CENTS,
                 run_dir=folder,
                 hidden_hashes=hidden,
             )
-            binding = _LoopBinding(loop, trees, run_id, seed)
+            binding = _LoopBinding(loop, trees, run_id, seed, lifetime)
         except BaseException as error:
             safe_queue_put(event_queue, failure_event(error, traceback_text=traceback.format_exc()))
             return
@@ -562,6 +601,37 @@ def host_loop_job(
         _close(step_log.close, "step log")
         if own_dir:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def command_box_seconds(timeout_seconds: float, lifetime_seconds: float | None = None) -> float:
+    """Return the lifetime of the box of a command with its own limit, such as a file proposer command (SKY-816).
+
+    Args:
+        timeout_seconds: The command's limit.
+        lifetime_seconds: The longest box that the broker opens for the run, from its deadline; ``None`` for none.
+
+    Returns:
+        At least ``STEP_BOX_SECONDS``, and room for the command and the tree's unpack and pack, but never more
+        than the configured sandbox lifetime or the run's box bound.
+    """
+    ceiling = settings.vercel_sandbox_max_lifetime_seconds
+    if lifetime_seconds is not None:
+        ceiling = min(ceiling, lifetime_seconds)
+    return min(ceiling, max(STEP_BOX_SECONDS, timeout_seconds + _PACK_SECONDS))
+
+
+def command_timeout_seconds(timeout_seconds: float, lifetime_seconds: float | None = None) -> float:
+    """Return a command's limit cut to what its box holds after the tree's unpack and pack.
+
+    Args:
+        timeout_seconds: The command's own limit.
+        lifetime_seconds: The longest box that the broker opens for the run; ``None`` for none.
+
+    Returns:
+        The limit, so that a long command times out with a result and does not die with its box.
+    """
+    room = command_box_seconds(timeout_seconds, lifetime_seconds) - _PACK_SECONDS
+    return min(timeout_seconds, max(1.0, room))
 
 
 def _close(close: Callable[[], None] | None, label: str) -> None:

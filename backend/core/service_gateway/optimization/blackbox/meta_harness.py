@@ -570,9 +570,19 @@ class _WorkerMetaHarness(native_engines.MetaHarnessEngine):
             self._ctx, self._proposer.base(parent), _REPO_LAB, {**files, loop_tools.TASK_FILE: task}
         )
         tree, failure = self._proposer.run(start)
+        name = f"iter{iteration}"
+        if failure:
+            # The outcome is no error, so the native loop logs nothing; this line says why no version came.
+            native_engines.log_event(
+                "proposer.done",
+                f"Proposer session {name} failed: {failure}",
+                level=logging.WARNING,
+                source="proposer",
+                session=name,
+            )
         self._repo_pull(iteration, start, tree, parent)
         return native_engines.ProposerOutcome(
-            session_id=f"iter{iteration}",
+            session_id=name,
             cost_usd=0.0,
             is_error=False,
             text=failure or "",

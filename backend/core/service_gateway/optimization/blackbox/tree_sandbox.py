@@ -185,7 +185,14 @@ _Result = TypeVar("_Result")
 class RuntimeBoxSource:
     """Open a fresh box for each acquire and close it at release."""
 
-    def __init__(self, runtime: SandboxRuntime, spec: SandboxSpec, registry: HeaderRules | None = None) -> None:
+    def __init__(
+        self,
+        runtime: SandboxRuntime,
+        spec: SandboxSpec,
+        registry: HeaderRules | None = None,
+        *,
+        command_lifetime: Callable[[float], float] | None = None,
+    ) -> None:
         """Bind the source to a runtime and the spec of its boxes.
 
         Args:
@@ -193,15 +200,32 @@ class RuntimeBoxSource:
             spec: The box spec; the grants replace its network fields.
             registry: Maps each capability host and path prefix to the headers that
                 the edge injects under it; ``None`` holds no credential.
+            command_lifetime: Gives the box lifetime for a command with its own
+                limit, in seconds; ``None`` keeps the spec's lifetime.
         """
         self._runtime = runtime
         self._spec = spec
         self._registry = registry or {}
+        self._command_lifetime = command_lifetime
 
     @property
     def registry(self) -> HeaderRules:
         """Return the capability registry that this source resolves grants against."""
         return self._registry
+
+    def for_command(self, timeout_seconds: float) -> RuntimeBoxSource:
+        """Return a source whose boxes live long enough for a command with its own limit.
+
+        Args:
+            timeout_seconds: The command's limit.
+
+        Returns:
+            A source with the lifetime that ``command_lifetime`` gives; this source when it has none.
+        """
+        if self._command_lifetime is None:
+            return self
+        spec = replace(self._spec, lifetime_seconds=self._command_lifetime(timeout_seconds))
+        return RuntimeBoxSource(self._runtime, spec, self._registry)
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
         """Open a new box whose network is the grant list.
@@ -322,6 +346,35 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         spec = resolve_grants(network_grants(grants), self._registry).apply(self._spec)
         # Placement sends a GPU box to Modal; a runtime that cannot start the GPU refuses the spec (SKY-804).
         return runtime.open(replace(spec, gpu=placement.gpu))
+
+
+# A shorter value could be a common word, and replacing it would change unrelated output.
+_MIN_REDACTED_LEN = 8
+
+
+def _redacted(result: CommandResult, env: Mapping[str, str] | None) -> CommandResult:
+    """Replace each env value of 8 or more characters in a command's output with ``[redacted]``.
+
+    The step log keeps the output, and failure messages and run events copy its end, so a command that prints its
+    scoped model key must not put the key there.
+
+    Args:
+        result: The command's result.
+        env: The command's extra environment; ``None`` holds no secret.
+
+    Returns:
+        The result with clean output.
+    """
+    secrets = sorted(
+        {value for value in (env or {}).values() if len(value) >= _MIN_REDACTED_LEN}, key=len, reverse=True
+    )
+    if not secrets:
+        return result
+    stdout, stderr = result.stdout, result.stderr
+    for secret in secrets:
+        stdout = stdout.replace(secret, "[redacted]")
+        stderr = stderr.replace(secret, "[redacted]")
+    return replace(result, stdout=stdout, stderr=stderr)
 
 
 def _close_box(box: SandboxSession) -> None:
@@ -659,6 +712,8 @@ class TreeSandbox:
         grants: Sequence[Grant],
         *,
         refuse: Callable[[str], bool] | None = None,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
 
@@ -668,6 +723,9 @@ class TreeSandbox:
             command: The shell command; it runs in the tree's folder.
             grants: The box's network grants.
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
+            timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for the command only; ``None`` adds none. Each value is a secret, so the
+                result's output holds ``[redacted]`` in place of each value of 8 or more characters.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -686,6 +744,7 @@ class TreeSandbox:
         """
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
+        timeout = self._timeout if timeout_seconds is None else timeout_seconds
         # A fresh-box source closes every box at its release, so only another source needs the scans.
         fresh = isinstance(self._candidates, RuntimeBoxSource) or (
             isinstance(self._candidates, BoxLease) and not self._candidates.keeps_warm
@@ -704,7 +763,7 @@ class TreeSandbox:
             # Before the unpack, so nothing that the unpack starts can join the baseline.
             before = None if fresh else _processes(box)
             self._unpack(box, archive, TREE_DIR)
-            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=self._timeout)
+            result = _redacted(box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout, env=env), env)
             new_tree_id = self._pack(box, step.run_id, TREE_DIR)
             if result.timed_out:
                 # The kill reaches only the command's process group, so a process outside it can live on.
@@ -714,7 +773,10 @@ class TreeSandbox:
             after = _processes(box)
             return (result, new_tree_id), before is not None and after is not None and after <= before
 
-        result, new_tree_id = self._in_box(self._candidates, step, grants, work)
+        source = self._candidates
+        if timeout_seconds is not None and isinstance(source, RuntimeBoxSource):
+            source = source.for_command(timeout_seconds)
+        result, new_tree_id = self._in_box(source, step, grants, work)
         if refuse is not None and refuse(new_tree_id):
             # The message names no path, so it does not show which path is refused.
             raise TreeRejectedError(step.step_id, "The command wrote a path that it may not write.")
