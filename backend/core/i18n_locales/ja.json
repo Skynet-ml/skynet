@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "この Mac の {cli} エージェントはターンを完了できませんでした: {detail}",
     "blackbox.host_agent_rate_limited": "{cli} のサブスクリプションが使用上限に達しました。{reset_at} にリセットされます。その後に実行をもう一度開始してください。",
     "blackbox.repo_target_unavailable": "リポジトリの最適化はまだ利用できません。",
+    "blackbox.shinka_interpreter_missing": "この worker は ShinkaEvolve を実行できません。イメージに ShinkaEvolve のインタープリターが含まれていないためです。別のエンジンを選ぶか、ShinkaEvolve を含む worker イメージをデプロイするようオペレーターに依頼してください。",
     "secrets.invalid_name": "「{name}」はシークレット名として使えません。英字、数字、アンダースコアを使い、英字またはアンダースコアで始めてください。",
     "secrets.invalid_value": "シークレットの値は {limit} バイト以下にしてください。",
     "secrets.limit_reached": "保存できるシークレットは最大 {limit} 個です。追加するには1つ削除してください。",

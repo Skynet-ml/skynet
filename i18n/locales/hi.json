@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "इस Mac पर {cli} एजेंट अपना टर्न पूरा नहीं कर सका: {detail}",
     "blackbox.host_agent_rate_limited": "आपकी {cli} सदस्यता अपनी उपयोग सीमा तक पहुँच गई है। यह {reset_at} पर रीसेट होगी। उस समय के बाद रन फिर से शुरू करें।",
     "blackbox.repo_target_unavailable": "रिपॉज़िटरी को ऑप्टिमाइज़ करना अभी उपलब्ध नहीं है।",
+    "blackbox.shinka_interpreter_missing": "यह worker ShinkaEvolve नहीं चला सकता, क्योंकि इसकी इमेज में ShinkaEvolve इंटरप्रेटर शामिल नहीं है। कोई दूसरा इंजन चुनें, या ऑपरेटर से ऐसी worker इमेज डिप्लॉय करने को कहें जिसमें ShinkaEvolve शामिल हो।",
     "secrets.invalid_name": "\"{name}\" सीक्रेट का नाम नहीं हो सकता। अक्षर, अंक और अंडरस्कोर इस्तेमाल करें, और किसी अक्षर या अंडरस्कोर से शुरू करें।",
     "secrets.invalid_value": "सीक्रेट का मान अधिकतम {limit} बाइट का होना चाहिए।",
     "secrets.limit_reached": "आप अधिकतम {limit} सीक्रेट सहेज सकते हैं। नया जोड़ने के लिए एक हटाएँ।",

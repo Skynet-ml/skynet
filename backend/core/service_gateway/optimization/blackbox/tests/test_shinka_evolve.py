@@ -455,6 +455,30 @@ def test_proposer_mcp_servers_without_the_agent_editor_are_refused_before_any_st
     assert not (tmp_path / "shinka_evolve").exists()
 
 
+def test_proposer_services_with_the_agent_editor_are_refused_before_any_step(tmp_path: Path) -> None:
+    """Refuse ``[proposer] services`` with the agent editor, whose box cannot reach them (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    calls: list[object] = []
+    ctx = EngineContext(
+        reflection_lm=calls.append,
+        run_dir=str(tmp_path),
+        call_model=lambda prompt, tools: calls.append(prompt),  # type: ignore[arg-type,return-value]
+        native_options=SimpleNamespace(  # type: ignore[arg-type]
+            shinka={"editor": "agent"}, budget_route={MCP_RELAY_ROUTE_KEY: {"services": ["db"]}}, repo=None
+        ),
+    )
+
+    with pytest.raises(ServiceError, match=r"agent editor cannot give the \[proposer\] services"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda candidate, case: (calls.append(candidate), (1.0, {}))[1], max_evals=5), ctx
+        )
+    assert calls == []
+    assert not (tmp_path / "shinka_evolve").exists()
+
+
 @pytest.mark.parametrize(
     ("seed_hidden", "error"),
     [({"h1": "file"}, BudgetExhaustedError), ({"h2": "file"}, ServiceError), ({}, ServiceError), (None, ServiceError)],
@@ -3007,14 +3031,17 @@ def test_an_agent_session_ends_at_the_tool_call_limit(tmp_path: Path) -> None:
 
 
 def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gateway(tmp_path: Path) -> None:
-    """Grant each MCP host with ``credential=True``, so the edge adds its headers and no secret enters the box.
+    """Grant an MCP host with headers with ``credential=True``, so the edge adds them and no secret enters the box.
 
     Args:
         tmp_path: Pytest's temporary folder.
     """
     options = _agent_options(
         proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
-        proposer_mcp=[{"name": "docs", "url": "https://mcp.test/mcp"}, {"name": "unused", "url": "https://x.test"}],
+        proposer_mcp=[
+            {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
+            {"name": "unused", "url": "https://x.test", "has_headers": True},
+        ],
     )
     options.gateway = SimpleNamespace(url="https://gw.test/v1")
 
@@ -3025,6 +3052,44 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
     assert "unused" not in session._system()
     with pytest.raises(ServiceError, match="no address"):
         shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["missing"])
+
+
+def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(tmp_path: Path) -> None:
+    """Grant a public MCP server's host plainly, since a credential grant with no headers fails to resolve.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _agent_options(
+        proposer_hosts=["pypi.org"],
+        proposer_mcp=[
+            {"name": "public", "url": "https://open.test/mcp", "has_headers": False},
+            {"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True},
+        ],
+    )
+
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["public", "docs"])
+
+    assert session.grants == (Grant("open.test"), Grant("pypi.org"), Grant("mcp.test", credential=True))
+
+
+def test_read_file_marks_a_file_it_cuts_so_the_agent_does_not_write_back_a_part(tmp_path: Path) -> None:
+    """Say where and how much ``read_file`` cut, since ``write_file`` replaces the whole file (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    size = shinka_evolve._TOOL_OUTPUT_CHARS
+    files = {"long.py": b"a" * size + b"tail", "short.py": b"b" * size}
+    options = _agent_options()
+    ctx = _box_context(options, tmp_path, read_file=lambda tree, path: files.get(path))
+    session = shinka_evolve._AgentSession(ctx, options, [])
+
+    long_text, _ = session._tool(_call(0, "read_file", path="long.py"), "tree")
+    short_text, _ = session._tool(_call(1, "read_file", path="short.py"), "tree")
+
+    assert long_text == "a" * size + f"\n[cut at {size} of {size + 4} characters]"
+    assert short_text == "b" * size
 
 
 def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: Path) -> None:

@@ -102,10 +102,17 @@ _AGENT_TOOLS: list[ToolDefinition] = [
         "description": "List the files below a folder; an empty path is the root.",
         "input_schema": _PATH_SCHEMA,
     },
-    {"name": "read_file", "description": "Read a text file.", "input_schema": _PATH_SCHEMA},
+    {
+        "name": "read_file",
+        "description": (
+            f"Read a text file. A file over {_TOOL_OUTPUT_CHARS} characters is cut, with a note at the end; "
+            "read the rest with the run tool, for example with sed."
+        ),
+        "input_schema": _PATH_SCHEMA,
+    },
     {
         "name": "write_file",
-        "description": "Write a text file, in full.",
+        "description": "Write a text file, in full. It replaces the whole file.",
         "input_schema": {
             "type": "object",
             "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -216,6 +223,12 @@ class ShinkaEvolveEngine:
             raise ServiceError(
                 "ShinkaEvolve loads the [proposer] mcp servers only with its agent editor. "
                 "Set the agent editor, choose another engine, or remove [proposer] mcp from optimize.toml."
+            )
+        if route.get("services") and agent:
+            # The agent's box gets only the proposer's hosts and the mcp servers, so the services would go unused.
+            raise ServiceError(
+                "The ShinkaEvolve agent editor cannot give the [proposer] services to its agent yet. "
+                "Choose another engine, or remove [proposer] services from optimize.toml."
             )
         repo = options.repo if options is not None else None
         # The loop checks the seed's hidden paths against its own (SKY-719), so
@@ -793,19 +806,25 @@ class _AgentSession:
         self.ctx = ctx
         limit = getattr(getattr(options, "proposer", None), "max_tool_calls", None)
         self.max_tool_calls = int(limit) if limit else None
-        addresses = {str(server["name"]): str(server["url"]) for server in repo.get("proposer_mcp") or ()}
-        missing = sorted(set(servers) - set(addresses))
+        known = {str(server["name"]): server for server in repo.get("proposer_mcp") or ()}
+        missing = sorted(set(servers) - set(known))
         if missing:
             raise ServiceError(f"The [proposer] mcp servers have no address in the run's options: {missing}.")
-        self.servers = {name: addresses[name] for name in sorted(servers)}
+        self.servers = {name: str(known[name]["url"]) for name in sorted(servers)}
         mcp_hosts = {urlsplit(url).hostname or "" for url in self.servers.values()}
+        # A credential grant fails to resolve when the registry holds no headers for its host, so a server
+        # with no headers gets a plain grant.
+        credential_hosts = {
+            urlsplit(str(known[name]["url"])).hostname or "" for name in servers if known[name].get("has_headers")
+        }
         gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
         model_host = urlsplit(gateway).hostname
+        plain_hosts = {host for host in set(repo.get("proposer_hosts") or ()) - mcp_hosts if host != model_host}
         # The box never gets the gateway: the worker makes every model call. An MCP server's grant asks the
         # provider edge to add the server's headers, so its secrets never enter the box (SKY-714).
         self.grants = (
-            *(Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ()) - mcp_hosts) if host != model_host),
-            *(Grant(host, credential=True) for host in sorted(mcp_hosts)),
+            *(Grant(host) for host in sorted(plain_hosts | (mcp_hosts - credential_hosts))),
+            *(Grant(host, credential=True) for host in sorted(credential_hosts)),
         )
         self.seed = ctx.repo_seed.tree_id if ctx.repo_seed is not None else None
         self.seed_ids = ctx.file_ids(self.seed) if self.seed is not None and ctx.file_ids is not None else {}
@@ -939,7 +958,11 @@ class _AgentSession:
                 data = self.ctx.read_file(tree, value["path"])
                 if data is None:
                     return "No such file.", tree
-                return data.decode("utf-8", errors="replace")[:_TOOL_OUTPUT_CHARS], tree
+                text = data.decode("utf-8", errors="replace")
+                if len(text) <= _TOOL_OUTPUT_CHARS:
+                    return text, tree
+                # Without the note, the model could write back only the part it saw and drop the rest.
+                return f"{text[:_TOOL_OUTPUT_CHARS]}\n[cut at {_TOOL_OUTPUT_CHARS} of {len(text)} characters]", tree
             if name == "write_file" and isinstance(value["path"], str) and isinstance(value["content"], str):
                 return "Written.", self.ctx.put_files({value["path"]: value["content"].encode()}, tree)
             if name == "run" and isinstance(value["command"], str):

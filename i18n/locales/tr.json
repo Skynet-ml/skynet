@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "Bu Mac'teki {cli} ajanı turunu tamamlayamadı: {detail}",
     "blackbox.host_agent_rate_limited": "{cli} aboneliğiniz kullanım sınırına ulaştı. Sınır {reset_at} tarihinde sıfırlanır. Bu saatten sonra çalıştırmayı yeniden başlatın.",
     "blackbox.repo_target_unavailable": "Bir depoyu optimize etmek henüz kullanılamıyor.",
+    "blackbox.shinka_interpreter_missing": "Bu worker ShinkaEvolve'u çalıştıramıyor, çünkü imajı ShinkaEvolve yorumlayıcısını içermiyor. Başka bir motor seçin veya operatörden ShinkaEvolve içeren bir worker imajı dağıtmasını isteyin.",
     "secrets.invalid_name": "\"{name}\" bir gizli anahtar adı olamaz. Harf, rakam ve alt çizgi kullanın; bir harf veya alt çizgiyle başlayın.",
     "secrets.invalid_value": "Bir gizli anahtarın değeri en fazla {limit} bayt olmalıdır.",
     "secrets.limit_reached": "En fazla {limit} gizli anahtar kaydedebilirsiniz. Yenisini eklemek için birini silin.",

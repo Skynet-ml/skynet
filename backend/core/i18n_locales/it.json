@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "L'agente {cli} su questo Mac non è riuscito a completare il suo turno: {detail}",
     "blackbox.host_agent_rate_limited": "Il tuo abbonamento {cli} ha raggiunto il limite di utilizzo. Si azzera il {reset_at}. Riavvia l'esecuzione dopo quell'ora.",
     "blackbox.repo_target_unavailable": "L'ottimizzazione di un repository non è ancora disponibile.",
+    "blackbox.shinka_interpreter_missing": "Questo worker non può eseguire ShinkaEvolve, perché la sua immagine non include l'interprete di ShinkaEvolve. Scegli un altro motore, oppure chiedi all'operatore di distribuire un'immagine del worker che includa ShinkaEvolve.",
     "secrets.invalid_name": "\"{name}\" non può essere il nome di un segreto. Usa lettere, cifre e trattini bassi, iniziando con una lettera o un trattino basso.",
     "secrets.invalid_value": "Un segreto richiede un valore di al massimo {limit} byte.",
     "secrets.limit_reached": "Puoi salvare fino a {limit} segreti. Eliminane uno per aggiungerne un altro.",

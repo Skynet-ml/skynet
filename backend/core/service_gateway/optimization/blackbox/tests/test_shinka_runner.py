@@ -2667,6 +2667,19 @@ def test_the_local_embedder_gives_the_same_unit_vector_for_the_same_text() -> No
     assert embedder.embed("ab") == [0.0] * embedder.dimensions
 
 
+def test_the_local_embedder_gives_fixed_vectors_in_every_process() -> None:
+    """Pin one vector, so a per-process hash such as ``hash()`` cannot replace the stable digest (SKY-830).
+
+    A resume runs in a new process; with a salted hash, its vectors would differ from the archive's.
+    """
+    vector = shinka_runner.LocalEmbedder().embed("abcabc")
+
+    # Trigrams abc (twice), bca and cab, scaled to unit length.
+    assert {index: value for index, value in enumerate(vector) if value} == pytest.approx(
+        {72: 2 / np.sqrt(6), 400: 1 / np.sqrt(6), 459: 1 / np.sqrt(6)}
+    )
+
+
 @pytest.mark.parametrize("settings", [{"editor": "agent", "novelty": True}, {}])
 def test_on_the_engine_loop_execute_installs_the_loop_agent_editor_and_the_local_embedder(
     settings: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch

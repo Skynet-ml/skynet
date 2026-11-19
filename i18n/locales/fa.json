@@ -103,6 +103,7 @@
     "blackbox.host_agent_failed": "عامل {cli} روی این مک نتوانست نوبت خود را تمام کند: {detail}",
     "blackbox.host_agent_rate_limited": "اشتراک {cli} شما به سقف استفاده رسید. این سقف در {reset_at} بازنشانی می‌شود. پس از آن زمان اجرا را دوباره شروع کنید.",
     "blackbox.repo_target_unavailable": "بهینه‌سازی یک مخزن هنوز در دسترس نیست.",
+    "blackbox.shinka_interpreter_missing": "این worker نمی‌تواند ShinkaEvolve را اجرا کند، چون ایمیج آن مفسر ShinkaEvolve را ندارد. موتور دیگری انتخاب کنید، یا از اپراتور بخواهید یک ایمیج worker مستقر کند که ShinkaEvolve را داشته باشد.",
     "secrets.invalid_name": "\"{name}\" نمی‌تواند نام یک راز باشد. از حروف، ارقام و زیرخط استفاده کنید و با یک حرف یا زیرخط شروع کنید.",
     "secrets.invalid_value": "یک راز به مقداری حداکثر {limit} بایت نیاز دارد.",
     "secrets.limit_reached": "می‌توانید حداکثر {limit} راز ذخیره کنید. برای افزودن راز جدید، یکی را حذف کنید.",

@@ -1059,17 +1059,23 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
 
 
 def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The snapshot gives the engine each [proposer] mcp server's name and address, and no header (SKY-830)."""
+    """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830)."""
     files = {
         "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
-        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+        "agent.mcp.json": (
+            '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
+            ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}'
+        ),
     }
 
     result, staged = _stage_with(files, monkeypatch)
 
-    assert result[repo_staging.REPO_SNAPSHOT_KEY]["proposer_mcp"] == [
-        {"name": "web", "url": "https://web.example.com/mcp"}
+    servers = result[repo_staging.REPO_SNAPSHOT_KEY]["proposer_mcp"]
+    assert sorted(servers, key=lambda server: server["name"]) == [
+        {"name": "team", "url": "https://team.example.com/mcp", "has_headers": True},
+        {"name": "web", "url": "https://web.example.com/mcp", "has_headers": False},
     ]
+    assert "header-value-123" not in json.dumps(result)
     staged.cleanup()
 
 
