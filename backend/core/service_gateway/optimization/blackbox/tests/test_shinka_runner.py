@@ -2680,7 +2680,7 @@ def test_the_local_embedder_gives_fixed_vectors_in_every_process() -> None:
     )
 
 
-@pytest.mark.parametrize("settings", [{"editor": "agent", "novelty": True}, {}])
+@pytest.mark.parametrize("settings", [{"editor": "agent", "novelty": True}, {"novelty": True}, {"editor": "agent"}, {}])
 def test_on_the_engine_loop_execute_installs_the_loop_agent_editor_and_the_local_embedder(
     settings: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2725,11 +2725,13 @@ def test_on_the_engine_loop_execute_installs_the_loop_agent_editor_and_the_local
         )
     )
 
-    if settings:
+    if settings.get("editor") == "agent":
         assert [type(editor) for editor in editors] == [shinka_runner.LoopAgentEditor]
-        assert isinstance(runners[0].embedding_client, shinka_runner.LocalEmbedder)
     else:
         assert editors == []
+    if settings.get("novelty"):
+        assert isinstance(runners[0].embedding_client, shinka_runner.LocalEmbedder)
+    else:
         assert not hasattr(runners[0], "embedding_client")
 
 

@@ -3054,6 +3054,41 @@ def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gate
         shinka_evolve._AgentSession(_box_context(options, tmp_path), options, ["missing"])
 
 
+def test_the_agent_run_tool_sends_the_session_grants_to_the_box(tmp_path: Path) -> None:
+    """Send the session's grants with each ``run`` call, so the box reaches its hosts and never the gateway (SKY-830).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    sent: list[object] = []
+
+    def run_command(tree: str, script: str, grants: object) -> tuple[SimpleNamespace, str]:
+        """Record the grants and succeed.
+
+        Args:
+            tree: The session's tree.
+            script: The command.
+            grants: The box's grants.
+
+        Returns:
+            A clean result and the tree after the command.
+        """
+        sent.append(grants)
+        return SimpleNamespace(timed_out=False, exit_code=0, stdout="ok", stderr=""), "after"
+
+    options = _agent_options(
+        proposer_hosts=["pypi.org", "mcp.test", "gw.test"],
+        proposer_mcp=[{"name": "docs", "url": "https://mcp.test/mcp", "has_headers": True}],
+    )
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+    session = shinka_evolve._AgentSession(_box_context(options, tmp_path, run_command=run_command), options, ["docs"])
+
+    _, tree = session._tool(_call(0, "run", command="true"), "tree")
+
+    assert tree == "after"
+    assert sent == [(Grant("pypi.org"), Grant("mcp.test", credential=True))]
+
+
 def test_the_agent_box_grants_an_mcp_host_with_no_headers_without_a_credential(tmp_path: Path) -> None:
     """Grant a public MCP server's host plainly, since a credential grant with no headers fails to resolve.
 
