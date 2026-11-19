@@ -1049,8 +1049,15 @@ def test_a_custom_byok_call_goes_to_the_checked_address(monkeypatch: pytest.Monk
     }
 
 
-def test_close_closes_every_http_client_that_the_model_client_opened(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A custom BYOK client opens a default client and then its pinned client; close must close both."""
+def _record_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Client]:
+    """Record every HTTP client that the loop host opens.
+
+    Args:
+        monkeypatch: The test's patcher.
+
+    Returns:
+        The list that gets each opened client.
+    """
     opened: list[httpx.Client] = []
     real_client = httpx.Client
 
@@ -1067,15 +1074,81 @@ def test_close_closes_every_http_client_that_the_model_client_opened(monkeypatch
         opened.append(real_client(*args, **kwargs))
         return opened[-1]
 
+    monkeypatch.setattr(loop_host.httpx, "Client", record)
+    return opened
+
+
+def test_close_closes_the_pinned_http_client_that_the_model_client_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A custom BYOK client opens only its pinned client, and close closes it."""
+    opened = _record_clients(monkeypatch)
     monkeypatch.setattr(
         mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("93.184.216.34", 443))]
     )
-    monkeypatch.setattr(loop_host.httpx, "Client", record)
 
     _custom_byok().close()
 
-    assert len(opened) == 2
+    assert len(opened) == 1
+    assert opened[0].is_closed
+
+
+def test_a_refused_custom_byok_endpoint_leaves_no_http_client_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller gets no model client to close, so a refused endpoint must not leave an open client."""
+    opened = _record_clients(monkeypatch)
+    monkeypatch.setattr(
+        mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("10.0.0.5", 443))]
+    )
+
+    with pytest.raises(ValueError, match="private custom provider endpoint"):
+        _custom_byok()
+
     assert all(client.is_closed for client in opened)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["finished", "host-raised"])
+def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+    """The child process closes the model client when the loop ends, also when the loop raises."""
+    closed: list[bool] = []
+
+    class _Model:
+        """A model client that records its close."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            """Take the real client's arguments."""
+
+        def close(self) -> None:
+            """Record the close."""
+            closed.append(True)
+
+    def host(*args: Any, **kwargs: Any) -> None:
+        """Stand in for the loop; raise when the case asks for it.
+
+        Args:
+            *args: The loop's arguments.
+            **kwargs: The loop's keyword arguments.
+
+        Raises:
+            RuntimeError: When the case fails.
+        """
+        if fails:
+            raise RuntimeError("the loop broke")
+
+    monkeypatch.setattr(loop_host, "LeaseModelClient", _Model)
+    monkeypatch.setattr(loop_host, "RemoteSandboxRuntime", lambda *args: object())
+    monkeypatch.setattr(loop_host, "get_job_store", lambda: SimpleNamespace(engine=None))
+    monkeypatch.setattr(loop_host, "S3ObjectStore", object)
+    monkeypatch.setattr(loop_host, "host_loop_job", host)
+    payload = {
+        LOOP_HOST_KEY: {"reflection_model": {}},
+        "_budget_gateway_descriptor": {"url": "http://127.0.0.1:9", "control_token": "control"},
+    }
+
+    if fails:
+        with pytest.raises(RuntimeError, match="the loop broke"):
+            run_loop_job(payload, "artifact", queue.Queue(), "spawn")
+    else:
+        run_loop_job(payload, "artifact", queue.Queue(), "spawn")
+
+    assert closed == [True]
 
 
 def test_close_keeps_a_given_http_client_open() -> None:

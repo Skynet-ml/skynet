@@ -133,7 +133,6 @@ class LeaseModelClient:
         self._key = key
         self._data_policy = data_policy
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=MODEL_TIMEOUT_SECONDS)
         model = str(extra.get("model") or config.get("name") or "")
         self._api_base = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
         # A managed call's output limit comes from the price bound of each call, see _bounded.
@@ -145,16 +144,22 @@ class LeaseModelClient:
         # Only a custom BYOK endpoint goes through this URL; the other BYOK providers go through LiteLLM.
         self._custom_url: str | None = None
         if source == TOKEN_SOURCE_MANAGED:
-            # The price catalog names the model by its full slug.
-            self._model = resolve_model_slug(model, client=self._client)
+            self._client = client or httpx.Client(timeout=MODEL_TIMEOUT_SECONDS)
+            try:
+                # The price catalog names the model by its full slug.
+                self._model = resolve_model_slug(model, client=self._client)
+            except BaseException:
+                self.close()
+                raise
             return
         # LiteLLM needs the provider prefix to route a BYOK call.
         self._model = model
         upstream = resolve_upstream(config)
-        if upstream.slug == "custom":
+        if upstream.slug != "custom":
+            self._client = client or httpx.Client(timeout=MODEL_TIMEOUT_SECONDS)
+        else:
             # The user names this host, so each call goes to the one public address that the check accepted.
             address = _pinned_address(upstream.base_url, False, label="custom provider endpoint")
-            self.close()
             self._owns_client = True
             self._client = httpx.Client(
                 transport=_PinnedTransport(upstream.base_url, address),
