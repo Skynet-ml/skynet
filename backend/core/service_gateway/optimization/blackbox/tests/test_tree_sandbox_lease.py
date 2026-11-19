@@ -593,7 +593,7 @@ def test_a_step_that_leaves_a_background_job_gives_its_box_back_unhealthy(
     assert runtime.boxes[0].closed
 
 
-def _host_scan(box: Any) -> CommandResult:
+def _host_scan(box: SandboxSession) -> CommandResult:
     """Run the process scan on the host until one scan passes.
 
     The host /proc is shared with the other test workers. A process that starts or
@@ -609,6 +609,8 @@ def _host_scan(box: Any) -> CommandResult:
         scan = box.run(PROCESS_SCAN, timeout_seconds=30)
         if scan.ok:
             return scan
+        # A short pause lets a burst of process starts on the host end.
+        time.sleep(0.1)
     return scan
 
 
