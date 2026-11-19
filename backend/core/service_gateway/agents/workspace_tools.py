@@ -290,6 +290,8 @@ _RULE_STRING = re.compile(
     r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*"
     r"(?P<s>\"\"\"|'''|\"|')(?P<path>[^\"'\n]+)(?P=s)"
 )
+# The same key with any string value, to find a value that _RULE_STRING cannot read (one over many lines).
+_RULE_KEY = re.compile(r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*[\"']")
 
 
 def _clean_rule_path(path: str) -> str:
@@ -386,6 +388,13 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         named = [f"{path!r}" for path in raw_paths]
     else:
         named = [f"{setting} = {path!r}" for setting, path in before.items()]
+    if before is None and any(not _RULE_STRING.match(current, key.start()) for key in _RULE_KEY.finditer(current)):
+        # A rules path the raw search cannot read could be dropped unseen, so refuse (fail closed).
+        return (
+            "The current optimize.toml is not valid TOML and names an instructions or illegal rules file "
+            "that cannot be read, so a new optimize.toml could drop it. Ask the user to fix optimize.toml "
+            "in the editor."
+        )
     if not named:
         return None
     if after is None:

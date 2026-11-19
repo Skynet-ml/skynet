@@ -929,6 +929,15 @@ def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line
     assert "'rules.md'" in refusal
 
 
+@pytest.mark.parametrize("value", ['"""\nrules.md"""', '"rules\\\n.md"'])
+def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(value: str) -> None:
+    """A non-TOML current text whose rules path spans lines refuses any new text (fail closed)."""
+    refusal = workspace_tools.dropped_rule_files(f"version = 1\nillegal = {value}\n[broken\n", OPTIMIZE_TOML_EXAMPLE)
+
+    assert refusal is not None
+    assert "cannot be read" in refusal
+
+
 def test_the_raw_search_decodes_basic_string_escapes() -> None:
     """A backslash escape in a non-TOML current text decodes as TOML does, so a kept path matches."""
     current = 'instructions = "docs/intent.md"\n[proposer]\nillegal = "docs\\\\rules.md"\n[broken\n'
