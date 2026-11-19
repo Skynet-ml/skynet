@@ -34,6 +34,7 @@ from ...connectors.github_repo import RepoFetchError, RepoRateLimitError
 from ...exceptions import InfrastructureInterruptionError, ServiceError
 from ...models.blackbox import BlackboxNamedScore
 from ...sandbox.errors import SandboxTransientError
+from ...service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ...service_gateway.optimization.blackbox.service import FinalRun
 from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
@@ -2341,3 +2342,43 @@ def test_a_resume_of_a_running_opening_row_finishes_the_open(
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], USER)
     assert (budget.job_id, budget.state) == (session_id, "attached")
     assert _call(store, session_id)["status"] == "scored"
+
+
+@pytest.mark.parametrize(("direction", "winner"), [("minimize", "low"), ("maximize", "high"), (None, "high")])
+def test_the_end_picks_the_best_call_by_the_contracts_direction(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch, direction: str | None, winner: str
+) -> None:
+    """A judge session skips the eval server, so the end picks its best call by the direction itself (SKY-750)."""
+    session_id = _session(store, _cases(10))
+    patches = {"low": GOOD_PATCH, "high": GOOD_PATCH.replace("+b", "+high")}
+    boxes["score"] = {patches["low"]: 0.2, patches["high"]: 0.8}
+    fake = repo_judge.judge_scorer
+    outcome = (
+        {"target": None, "require": {}}
+        if direction is None
+        else {"target": None, "require": {}, "direction": direction}
+    )
+
+    @contextmanager
+    def with_outcome(*args: Any, **kwargs: Any) -> Iterator[tuple[dict[str, Any], Any, Any]]:
+        """Stage like the fake scorer, with the contract's outcome in the snapshot.
+
+        Args:
+            *args: The fake scorer's arguments.
+            **kwargs: The fake scorer's keyword arguments.
+
+        Yields:
+            The fake scorer's payload with the snapshot, the staged repository and no gateway.
+        """
+        with fake(*args, **kwargs) as (protected, staged, gateway):
+            yield {**protected, REPO_SNAPSHOT_KEY: {"outcome": outcome}}, staged, gateway
+
+    monkeypatch.setattr(repo_judge, "judge_scorer", with_outcome)
+    _call(store, session_id, patches["high"])
+    _call(store, session_id, patches["low"])
+
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "success"
+
+    result = store.get_job(session_id)["result"]
+    assert result["best_candidate"] == patches[winner]
+    assert result["direction"] == (direction or "maximize")

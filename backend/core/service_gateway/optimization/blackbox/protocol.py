@@ -766,6 +766,10 @@ class EvalServer:
     evaluations can never overspend, and the bookkeeping is locked.
     """
 
+    # SKY-750: every engine maximizes. A minimize run negates each score here,
+    # so the records, the means and the best version are all on the engines'
+    # scale; :meth:`raw_score` turns a value back into the metric's own score.
+
     def __init__(
         self,
         scorer: ScorerFn,
@@ -773,6 +777,7 @@ class EvalServer:
         max_evals: int,
         parent: EvalServer | None = None,
         on_eval: EvalListener | None = None,
+        direction: str = "maximize",
     ) -> None:
         """Create a server over ``scorer`` with a cap of ``max_evals`` calls.
 
@@ -780,9 +785,11 @@ class EvalServer:
             scorer: Callable scoring ``(candidate, case)`` → ``(score, side_info)``.
             max_evals: Maximum scorer calls this server will make.
             parent: Server whose budget this one is a slice of, if any.
-            on_eval: Listener called with ``(server, score)`` after each root eval.
+            on_eval: Listener called with ``(server, raw score)`` after each root eval.
+            direction: ``"maximize"`` or ``"minimize"``; a lane follows its root's direction.
         """
         self._scorer = scorer
+        self._sign = -1.0 if direction == "minimize" else 1.0
         self.max_evals = max_evals
         self._parent = parent
         self._on_eval = on_eval
@@ -809,6 +816,22 @@ class EvalServer:
             return own
         return min(own, self._parent.remaining)
 
+    @property
+    def minimizes(self) -> bool:
+        """Return whether the run wants the lowest score (``[metric] direction = "minimize"``)."""
+        return self._root._sign < 0
+
+    def raw_score(self, score: float | None) -> float | None:
+        """Turn an engine-scale score into the metric's own score; the same call turns it back.
+
+        Args:
+            score: A score from this server, or ``None``.
+
+        Returns:
+            The score with the run's sign: unchanged for a maximize run, negated for a minimize run.
+        """
+        return None if score is None else self._root._sign * score
+
     def lane(self, max_evals: int) -> EvalServer:
         """Open a sub-budget of at most ``max_evals`` calls against this server.
 
@@ -828,8 +851,9 @@ class EvalServer:
             example: The case to score it on, or ``None`` when there are no cases.
 
         Returns:
-            The score and the scorer's side information. A metric error case
-            returns ``None`` with ``status: metric_error``.
+            The engine-scale score (see :meth:`raw_score`) and the scorer's
+            side information. A metric error case returns ``None`` with
+            ``status: metric_error``.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
@@ -844,7 +868,7 @@ class EvalServer:
         if score is None:
             logger.debug("scorer eval %d/%d %s: %s", root.used, root.max_evals, METRIC_ERROR, side_info.get("error"))
         else:
-            logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, score)
+            logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, root.raw_score(score))
         self._account(candidate, score, side_info)
         return score, side_info
 
@@ -858,14 +882,14 @@ class EvalServer:
             candidate: The version that was scored, or ``None`` when the
                 caller cannot name it; an unnamed evaluation is counted but
                 not recorded in the version history.
-            score: The score it got, or ``None`` when the metric crashed.
+            score: The metric's own score, or ``None`` when the metric crashed.
             side_info: What the metric said about it.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
         """
         self._reserve()
-        self._account(candidate, score, side_info or {})
+        self._account(candidate, self.raw_score(score), side_info or {})
 
     def _account(self, candidate: Candidate | None, score: float | None, side_info: SideInfo) -> None:
         """Record a reserved evaluation in every server of the chain and notify the listener.
@@ -885,7 +909,7 @@ class EvalServer:
             server = server._parent
         if root._on_eval is not None:
             with root._lock:
-                root._on_eval(root, score)
+                root._on_eval(root, root.raw_score(score))
 
     def _reserve(self) -> None:
         """Claim one scorer call here and in every ancestor, or claim nothing.
@@ -940,7 +964,7 @@ class EvalServer:
         failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
         if score is None or is_metric_error(side_info) or failed_run:
             return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
-        return score, side_info
+        return self._sign * score, side_info
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
         """Fold ``score`` into the candidate's running mean and keep its latest side info.
@@ -990,8 +1014,8 @@ class EvalServer:
             candidate: The version to look up.
 
         Returns:
-            Its mean score across the cases scored so far, or ``None`` when it
-            was not scored or hit a metric error.
+            Its engine-scale mean across the cases scored so far, or ``None``
+            when it was not scored or hit a metric error.
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.mean_score
@@ -1024,7 +1048,10 @@ class EvalServer:
 
     @property
     def best_candidate(self) -> Candidate | None:
-        """Return the candidate with the highest mean score, if any was scored without a metric error."""
+        """Return the candidate with the highest engine-scale mean, if any was scored without a metric error.
+
+        For a minimize run that is the version with the lowest raw mean.
+        """
         scored = [record for record in self._records.values() if record.mean_score is not None]
         if not scored:
             return None
@@ -1032,6 +1059,6 @@ class EvalServer:
 
     @property
     def best_score(self) -> float | None:
-        """Return the highest mean score recorded, if any."""
+        """Return the highest engine-scale mean recorded, if any."""
         best = self.best_candidate
         return None if best is None else self.mean_score(best)

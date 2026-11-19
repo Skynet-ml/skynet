@@ -623,11 +623,15 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
 @pytest.mark.parametrize(
     ("raw", "outcome"),
     [
-        (None, {"target": None, "require": {}}),
-        (b'version = 1\n[run]\nentry = "run.py:main"\n', {"target": None, "require": {}}),
+        (None, {"target": None, "require": {}, "direction": "maximize"}),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n', {"target": None, "require": {}, "direction": "maximize"}),
         (
             b'version = 1\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.9\n[outcome.require]\nlatency = 0.5\n',
-            {"target": 0.9, "require": {"latency": 0.5}},
+            {"target": 0.9, "require": {"latency": 0.5}, "direction": "maximize"},
+        ),
+        (
+            b'version = 1\n[metric]\ndirection = "minimize"\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.2\n',
+            {"target": 0.2, "require": {}, "direction": "minimize"},
         ),
     ],
 )
@@ -2403,3 +2407,24 @@ def test_a_command_metric_entry_needs_a_run_section() -> None:
     with pytest.raises(ConstraintsError, match=re.escape("has no [run] section")) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("metric", "entry")
+
+
+@pytest.mark.parametrize(
+    ("line", "direction"),
+    [(b"", "maximize"), (b'direction = "maximize"\n', "maximize"), (b'direction = "minimize"\n', "minimize")],
+)
+def test_the_metric_direction_defaults_to_maximize(line: bytes, direction: str) -> None:
+    """A file without ``[metric] direction`` keeps the higher-is-better default (SKY-750)."""
+    constraints = parse_constraints(b"version = 1\n[metric]\n" + line + b'[run]\nentry = "src/app.py:run"\n')
+
+    assert constraints.metric.direction == direction
+
+
+@pytest.mark.parametrize("value", [b'"lower"', b'"Minimize"', b"1", b'["minimize"]'])
+def test_a_bad_metric_direction_names_both_values(value: bytes) -> None:
+    """Only the two values parse, and the message names both (SKY-750)."""
+    raw = b"version = 1\n[metric]\ndirection = " + value + b'\n[run]\nentry = "src/app.py:run"\n'
+
+    with pytest.raises(ConstraintsError, match=r'\[metric\] direction must be "maximize" or "minimize"') as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("metric", "direction")

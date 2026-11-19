@@ -8,7 +8,7 @@ bare ``python3 -c`` before it sends the image a request it might not understand.
 # carries the optimizer itself, so this is the only contract the two share; bump
 # it whenever either shape changes, even by an added field: the image silently
 # drops a field its models do not know (``test_sandbox_protocol`` pins the shapes).
-SANDBOX_PROTOCOL = 19
+SANDBOX_PROTOCOL = 20
 
 # Older image protocols that read this worker's guest request the same way, so a
 # deploy keeps its pinned image until the image is rebuilt. Protocol 13 added
@@ -38,8 +38,12 @@ SANDBOX_PROTOCOL = 19
 # older image. A command entry sends no metric code, and an older image refuses
 # that request at validation with an unclear error, so the worker refuses every
 # image before 19 for a run with ``scorer.command_metric``.
+# Protocol 20 (SKY-750) does not change the request shape. The image at 20
+# reads the staged snapshot's ``outcome.direction`` and negates a minimize
+# run's scores for the engines. An older image ignores the key and maximizes,
+# so the worker refuses every image before 20 for a minimize run.
 # The worker sends an older image the image's own protocol number.
-READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, 18, SANDBOX_PROTOCOL})
+READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, 18, 19, SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.
 # A later bump that keeps the verdict must not refuse the images at this one.
@@ -50,3 +54,6 @@ FILE_PROPOSER_PROTOCOL = 18
 
 # The first protocol whose image reads ``scorer.command_metric``.
 COMMAND_METRIC_PROTOCOL = 19
+
+# The first protocol whose image obeys ``[metric] direction = "minimize"``.
+DIRECTION_PROTOCOL = 20

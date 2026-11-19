@@ -101,19 +101,21 @@ def _emit(
     )
 
 
-def _score_facts(baseline: float | None, score: float | None) -> dict[str, Any]:
+def _score_facts(baseline: float | None, score: float | None, direction: str | None = None) -> dict[str, Any]:
     """Build the score and delta-vs-baseline facts.
 
     Args:
         baseline: The starting score, when known.
         score: The current or final score, when known.
+        direction: ``minimize`` when a lower score is better (SKY-750).
 
     Returns:
-        ``score`` and, when both are known, ``delta``.
+        ``score`` and, when both are known, ``delta``: positive when the run
+        got better, also for a minimize run.
     """
     facts: dict[str, Any] = {"score": score}
     if baseline is not None and score is not None:
-        facts["delta"] = score - baseline
+        facts["delta"] = baseline - score if direction == "minimize" else score - baseline
     return facts
 
 
@@ -124,6 +126,7 @@ def notify_job_completed(
     message: str | None = None,
     baseline_score: float | None = None,
     optimized_score: float | None = None,
+    direction: str | None = None,
 ) -> None:
     """Emit ``finished`` or ``failed`` for a run that reached a terminal status.
 
@@ -136,9 +139,10 @@ def notify_job_completed(
         message: Error message; shown (truncated) on ``failed``.
         baseline_score: Pre-optimization score.
         optimized_score: Final score.
+        direction: The result's ``direction``; ``minimize`` flips the delta.
     """
     if status in ("success", "stopped"):
-        facts = _score_facts(baseline_score, optimized_score)
+        facts = _score_facts(baseline_score, optimized_score, direction)
         # The inbox drops null facts, so a run whose final version has no
         # score (a failed [run] entry or a metric error) says so explicitly
         # and the notification shows "no score", never 0 (SKY-751). Only a
@@ -155,7 +159,9 @@ def notify_job_completed(
         logger.warning("Skipping notification for unknown job status: %s", status)
 
 
-def notify_run_new_best(optimization_id: str, username: str, score: float, baseline: float | None = None) -> None:
+def notify_run_new_best(
+    optimization_id: str, username: str, score: float, baseline: float | None = None, direction: str | None = None
+) -> None:
     """Emit ``new_best`` when a running optimization beats its starting score.
 
     Args:
@@ -163,8 +169,9 @@ def notify_run_new_best(optimization_id: str, username: str, score: float, basel
         username: Owner and recipient.
         score: The new best score.
         baseline: The score the run started from.
+        direction: ``minimize`` when a lower score is better (SKY-750).
     """
-    _emit(username, NEW_BEST, optimization_id, _score_facts(baseline, score))
+    _emit(username, NEW_BEST, optimization_id, _score_facts(baseline, score, direction))
 
 
 def notify_run_stuck(optimization_id: str, username: str, best_score: float | None, stuck_fraction: float) -> None:

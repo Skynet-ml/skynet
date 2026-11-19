@@ -586,6 +586,8 @@ def test_a_case_with_no_score_fails_the_program_with_its_run_failure(tmp_path: P
     assert answer["correct"] is False
     assert answer["error"] == "1 of 2 case(s) have no score."
     assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: Traceback: boom"
+    # A minimize run sends negated scores, so a 0.0 failure would beat every real version (SKY-750).
+    assert answer["metrics"]["combined_score"] == shinka_runner._NO_SCORE_FLOOR < -1e12
     assert scorer.best is None
     assert scorer.scored == {}
 
@@ -2396,6 +2398,7 @@ def test_execute_rejects_a_version_that_writes_through_a_shipped_symlink(
 
     assert answer["metrics"]["text_feedback"].startswith("Rejected without scoring")
     assert "crosses a symlink" in answer["error"]
+    assert answer["metrics"]["combined_score"] == shinka_runner._NO_SCORE_FLOOR
     checkout = tmp_path / "shinka-run" / "repo-checkout"
     assert (checkout / "scoring/metric.py").read_text() == "SCORE = 1\n"
 

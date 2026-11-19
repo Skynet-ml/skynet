@@ -1324,6 +1324,7 @@ class BackgroundWorker:
                             message=final_message,
                             baseline_score=_baseline,
                             optimized_score=_optimized,
+                            direction=result_dict.get("direction") if isinstance(result_dict, dict) else None,
                         )
                         self._record_run_outcome(
                             optimization_id,
@@ -2282,7 +2283,12 @@ class BackgroundWorker:
                         if incumbent is not None:
                             incumbents = checkpoint_tracker.setdefault("_incumbents", {})
                             previous = incumbents.get(-1)
-                            if previous is None or incumbent["selection_score"] > previous["selection_score"]:
+                            # A minimize run's candidate events say so, and its lowest score is the incumbent (SKY-750).
+                            sign = -1.0 if metrics.get("direction") == "minimize" else 1.0
+                            if (
+                                previous is None
+                                or sign * incumbent["selection_score"] > sign * previous["selection_score"]
+                            ):
                                 incumbents[-1] = incumbent
                     fenced_progress = getattr(self._job_store, "record_progress_for_generation", None)
                     if generation is not None and callable(fenced_progress):
