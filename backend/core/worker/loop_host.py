@@ -34,13 +34,16 @@ import httpx
 import litellm
 from sqlalchemy.engine import Engine
 
-from ..billing.budgets import BudgetError, BudgetService
-from ..billing.model_dispatch import usage_charge
+from ..billing.budgets import BudgetService
+from ..billing.byok_upstreams import resolve_upstream
+from ..billing.data_policy import DEFAULT_DATA_POLICY, DataPolicy, apply_data_policy
+from ..billing.mcp_broker import _pinned_address, _PinnedTransport
+from ..billing.model_dispatch import data_policy_refusal, usage_charge
+from ..billing.openrouter_quotes import fetch_endpoint_prices, price_text_request, resolve_model_slug
 from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError
-from ..billing.runtime import UsagePendingError
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
-from ..exceptions import ServiceError
+from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..sandbox.grants import resolve_grants
 from ..sandbox.trees import tar_to_tree, tree_to_tar
 from ..service_gateway.optimization.blackbox.protocol import (
@@ -48,7 +51,6 @@ from ..service_gateway.optimization.blackbox.protocol import (
     EngineContext,
     ModelReply,
     RepoSeed,
-    ScorerAbortError,
     ScorerFn,
     SideInfo,
     ToolDefinition,
@@ -57,7 +59,7 @@ from ..service_gateway.optimization.blackbox.protocol import (
 )
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, unpack_tree, version_patch
-from ..service_gateway.optimization.blackbox.runner import side_info_json_default
+from ..service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS, side_info_json_default
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime, SandboxSpec
 from ..service_gateway.optimization.blackbox.tree_sandbox import RuntimeBoxSource
 from ..storage import get_job_store
@@ -65,7 +67,7 @@ from ..storage.base import ObjectStore
 from ..storage.object_store import S3ObjectStore
 from ..storage.tree_store import TreeStore
 from .actors import User
-from .engine_loop import EngineLoop, ModelCall, Prompt
+from .engine_loop import EngineLoop, ModelCall, ModelCallBilledError, Prompt
 from .failure_events import failure_event
 from .step_recovery import open_step_log
 from .subprocess_runner import run_service_in_subprocess, safe_queue_put
@@ -83,8 +85,9 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
 _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
-# The engine loop stops on these; an evaluation must not commit them as a refused version.
-_STOP_ERRORS = (ScorerAbortError, BudgetError, UsagePendingError, UnpricedOperationError)
+_RETRYABLE_STATUSES = frozenset({408, 424, 429})
+# Only these answers say that the version itself is bad; any other failure says nothing of the version.
+_REFUSED_STATUSES = frozenset({400, 422})
 
 
 class LeaseModelClient:
@@ -96,6 +99,7 @@ class LeaseModelClient:
         *,
         payload_token_source: str | None,
         managed_key: str,
+        data_policy: DataPolicy = DEFAULT_DATA_POLICY,
         client: httpx.Client | None = None,
     ) -> None:
         """Bind the client to the run's resolved proposer model.
@@ -104,11 +108,13 @@ class LeaseModelClient:
             config: The run's ``reflection_model_config`` with its resolved credentials.
             payload_token_source: The run's own ``token_source``, for a model config that names none.
             managed_key: The worker's OpenRouter key, for a managed model.
+            data_policy: The owner's model data privacy setting, for a managed call.
             client: The HTTP client of managed calls; tests give a fake transport.
 
         Raises:
-            ValueError: When the source is not managed or BYOK, the model has no key, or a BYOK call would owe a
-                Skynet fee, which this client cannot measure.
+            ValueError: When the source is not managed or BYOK, the model has no key, a BYOK call would owe a
+                Skynet fee, which this client cannot measure, the BYOK provider is not supported, or a custom
+                endpoint is not a public HTTPS address.
         """
         source = config.get("token_source") or payload_token_source or TOKEN_SOURCE_MANAGED
         extra = dict(config.get("extra") or {})
@@ -125,12 +131,36 @@ class LeaseModelClient:
             raise ValueError("The engine loop's model has no provider credential.")
         self._source = source
         self._key = key
-        model = str(extra.get("model") or config.get("name") or "")
-        # OpenRouter takes its own slug; LiteLLM needs the provider prefix to route a BYOK call.
-        self._model = model.removeprefix("openrouter/") if source == TOKEN_SOURCE_MANAGED else model
-        self._api_base = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
-        self._options = {name: config[name] for name in ("temperature", "max_tokens") if config.get(name) is not None}
+        self._data_policy = data_policy
         self._client = client or httpx.Client(timeout=MODEL_TIMEOUT_SECONDS)
+        model = str(extra.get("model") or config.get("name") or "")
+        self._api_base = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
+        # A managed call's output limit comes from the price bound of each call, see _bounded.
+        self._max_tokens = int(config.get("max_tokens") or DEFAULT_MAX_TOKENS)
+        names = ("temperature",) if source == TOKEN_SOURCE_MANAGED else ("temperature", "max_tokens")
+        self._options = {name: config[name] for name in names if config.get(name) is not None}
+        if extra.get("reasoning_effort"):
+            self._options["reasoning_effort"] = extra["reasoning_effort"]
+        # Only a custom BYOK endpoint goes through this URL; the other BYOK providers go through LiteLLM.
+        self._custom_url: str | None = None
+        if source == TOKEN_SOURCE_MANAGED:
+            # The price catalog names the model by its full slug.
+            self._model = resolve_model_slug(model, client=self._client)
+            return
+        # LiteLLM needs the provider prefix to route a BYOK call.
+        self._model = model
+        upstream = resolve_upstream(config)
+        if upstream.slug == "custom":
+            # The user names this host, so each call goes to the one public address that the check accepted.
+            address = _pinned_address(upstream.base_url, False, label="custom provider endpoint")
+            self._client = httpx.Client(
+                transport=_PinnedTransport(upstream.base_url, address),
+                timeout=MODEL_TIMEOUT_SECONDS,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            self._custom_url = f"{upstream.base_url}/chat/completions"
+            self._model = model.removeprefix("openai/")
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
         """Call the model once.
@@ -143,23 +173,38 @@ class LeaseModelClient:
             The reply, with the provider's cost in ledger cents; 0 for a BYOK call.
 
         Raises:
-            ServiceError: When the provider fails or a managed reply gives no complete cost. The loop then records
-                a failed call with no cost.
+            ServiceError: When a managed or custom endpoint call fails, or a managed reply gives no complete cost.
+                The loop then records a failed call with no cost.
+            ModelCallBilledError: When a managed reply that gave its cost cannot be read. The loop records a
+                failed call with that cost.
+            UnpricedOperationError: When no provider meets the owner's data policy, the model has no verified
+                price, or the prompt alone can cost more than one call's bound. The loop stops.
+            Exception: LiteLLM's own errors for a BYOK call; the loop records a failed call with no cost.
         """
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else list(prompt)
         request: dict[str, Any] = {"model": self._model, "messages": messages, **self._options}
         if tools:
             request["tools"] = openai_tools(tools)
         if self._source == TOKEN_SOURCE_BYOK:
-            response = litellm.completion(api_key=self._key, api_base=self._api_base, **request)
-            message = response.choices[0].message.model_dump()
-            return ModelReply(str(message.get("content") or ""), Decimal(0), tool_calls_from_openai(message))
+            return self._byok(request)
+        try:
+            catalog = fetch_endpoint_prices(self._model, client=self._client)
+        except (httpx.HTTPError, json.JSONDecodeError) as error:
+            raise ServiceError(f"The model price read failed: {type(error).__name__}") from error
+        body = self._bounded(apply_data_policy(request, self._data_policy), catalog)
         try:
             answer = self._client.post(
                 OPENROUTER_CHAT_URL,
                 headers={"Authorization": f"Bearer {self._key}"},
-                json={**request, "usage": {"include": True}},
+                json={**body, "usage": {"include": True}},
             )
+        except httpx.HTTPError as error:
+            raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+        if answer.status_code == 404 and b"data policy" in answer.content.lower():
+            # No provider meets the setting, so every later call fails too: the loop stops with the reason.
+            refusal = json.loads(data_policy_refusal(self._model, self._data_policy))
+            raise UnpricedOperationError(refusal["error"]["message"])
+        try:
             answer.raise_for_status()
             body = answer.json()
         except (httpx.HTTPError, ValueError) as error:
@@ -167,12 +212,74 @@ class LeaseModelClient:
         usd = usage_charge(body.get("usage") or {})
         if usd is None:
             raise ServiceError("The model reply gave no complete cost.")
-        message = body["choices"][0]["message"]
-        return ModelReply(
-            str(message.get("content") or ""),
-            ChargePolicy("managed_model").convert(usd).total,
-            tool_calls_from_openai(message),
-        )
+        cents = ChargePolicy("managed_model").convert(usd).total
+        try:
+            message = body["choices"][0]["message"]
+            return ModelReply(str(message.get("content") or ""), cents, tool_calls_from_openai(message))
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
+            # The provider billed the call, so the lease pays its cost even with no reply to read.
+            raise ModelCallBilledError(cents) from error
+
+    def _bounded(self, request: Mapping[str, Any], catalog: Mapping[str, Any]) -> dict[str, Any]:
+        """Give the request the largest output limit whose price bound fits one call's bound.
+
+        A call that costs more than :data:`MODEL_MAX_CENTS` stops the loop, so the bound of each call must fit.
+
+        Args:
+            request: The routed request, without an output limit.
+            catalog: The model's current endpoint prices.
+
+        Returns:
+            The request with its output limit and the price caps that hold the provider to the bound.
+
+        Raises:
+            UnpricedOperationError: When the model has no verified price, or no output limit fits.
+        """
+        policy = ChargePolicy("managed_model")
+        low, high = 1, self._max_tokens
+        fitted: dict[str, Any] | None = None
+        refusal: UnpricedOperationError | None = None
+        # The run's own limit comes first, so a call that fits costs one price check.
+        tokens = high
+        while low <= high:
+            try:
+                priced = price_text_request({**request, "max_tokens": tokens}, catalog, policy)
+            except UnpricedOperationError as error:
+                priced, refusal = None, error
+            if priced is not None and priced.quote.maximum.total <= MODEL_MAX_CENTS:
+                fitted, low = priced.body, tokens + 1
+            else:
+                high = tokens - 1
+            tokens = (low + high) // 2
+        if fitted is None:
+            raise refusal or UnpricedOperationError("The prompt alone can cost more than one model call may.")
+        return fitted
+
+    def _byok(self, request: dict[str, Any]) -> ModelReply:
+        """Call the user's provider with the user's key.
+
+        Args:
+            request: The chat request.
+
+        Returns:
+            The reply, at no cost: the provider bills the user's key.
+
+        Raises:
+            ServiceError: When a custom endpoint call fails.
+        """
+        if self._custom_url is None:
+            response = litellm.completion(api_key=self._key, api_base=self._api_base, **request)
+            message = response.choices[0].message.model_dump()
+        else:
+            try:
+                answer = self._client.post(
+                    self._custom_url, headers={"Authorization": f"Bearer {self._key}"}, json=request
+                )
+                answer.raise_for_status()
+                message = answer.json()["choices"][0]["message"]
+            except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as error:
+                raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+        return ModelReply(str(message.get("content") or ""), Decimal(0), tool_calls_from_openai(message))
 
 
 def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: str) -> str:
@@ -209,19 +316,35 @@ def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: st
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def _retryable(error: ServiceError) -> bool:
-    """Report whether a scorer error can pass on a new try, so no step may record it.
+def _status(error: ServiceError) -> int | None:
+    """Return the HTTP status of a scorer error.
 
     Args:
         error: The scorer's error.
 
     Returns:
-        True for a transport error, a server error, a pending usage or a rate limit.
+        The status of the relay's answer, or ``None`` when no answer came.
     """
-    if isinstance(error.__cause__, httpx.HTTPError):
-        return True
-    status = _HTTP_STATUS.search(str(error))
-    return status is not None and (int(status.group(1)) >= 500 or int(status.group(1)) in {424, 429})
+    cause = error.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code
+    found = _HTTP_STATUS.search(str(error))
+    return int(found.group(1)) if found is not None else None
+
+
+def _retryable(error: ServiceError) -> bool:
+    """Report whether a scorer error can pass on a new try, so the run must requeue and not record it.
+
+    Args:
+        error: The scorer's error.
+
+    Returns:
+        True for a transport error, a server error, a timeout, a pending usage or a rate limit.
+    """
+    status = _status(error)
+    if status is None:
+        return isinstance(error.__cause__, httpx.HTTPError | OSError)
+    return status >= 500 or status in _RETRYABLE_STATUSES
 
 
 class _LoopBinding:
@@ -300,18 +423,21 @@ class _LoopBinding:
 
         Returns:
             ``{"score", "side_info"}``, or ``{"refused": <why>}`` when the scorer refused the version for good.
+
+        Raises:
+            InfrastructureInterruptionError: When the scorer failed in a way that can pass on a new try; the loop
+                stops, and the run requeues.
+            Exception: Any other scorer failure that is not a refusal; the loop stops.
         """
         patch = self._patch(candidate)
         try:
             score, side_info = base(patch, case)
-        except _STOP_ERRORS:
-            raise
         except ServiceError as error:
+            if _status(error) in _REFUSED_STATUSES:
+                return {"refused": str(error)}
             if _retryable(error):
-                raise
-            return {"refused": str(error)}
-        except Exception as error:
-            return {"refused": f"{type(error).__name__}: {error}"}
+                raise InfrastructureInterruptionError(f"The repository scorer failed: {error}") from error
+            raise
         # The replay gives the side info from JSON, so the live run uses the same JSON form.
         side_info = json.loads(json.dumps(side_info, default=side_info_json_default))
         return {"score": score, "side_info": side_info}
@@ -445,7 +571,10 @@ def run_loop_job(payload: dict[str, Any], artifact_id: str, event_queue: Any, _s
         runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
         managed_key = settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
         model = LeaseModelClient(
-            host["reflection_model"], payload_token_source=host.get("token_source"), managed_key=managed_key
+            host["reflection_model"],
+            payload_token_source=host.get("token_source"),
+            managed_key=managed_key,
+            data_policy=host.get("data_policy", DEFAULT_DATA_POLICY),
         )
         engine = get_job_store().engine
         objects = S3ObjectStore()

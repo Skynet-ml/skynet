@@ -96,7 +96,10 @@ the run's repository scorer, and commits its JSON result as a step with no
 cost. The evaluation's boxes bill through the run's budget runtime, not the
 lease. A replay gives the committed result, so a resume does not run or pay for
 the evaluation again. An error of the evaluation commits nothing and stops the
-loop; a result that the engine must see as a failure goes in the result.
+loop; a result that the engine must see as a failure goes in the result. An
+:class:`InfrastructureInterruptionError` or a pending usage of the evaluation,
+and a pending usage of any step, stops it with :class:`LoopInterruptedError`:
+the worker puts the run back in the queue, and the resume runs that work again.
 
 Each Auto lane is its own agent. The ``lane`` usage tag already follows a lane
 into the threads that it starts, so the tag names the agent: ``loop/<lane>``.
@@ -129,6 +132,7 @@ from ..billing.operation_pricing import UnpricedOperationError
 from ..billing.runtime import UsagePendingError
 from ..billing.usage_tags import LANE_KEY, current_tags
 from ..constants import HARDENING_EXPLOITS_DIR
+from ..exceptions import InfrastructureInterruptionError
 from ..sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
 from ..sandbox.trees import (
     BoxFailureError,
@@ -197,6 +201,13 @@ class LoopStoppedError(ScorerAbortError):
     Its replay diverged, its run lost the fence, no lease is left, the budget refused the work, a model call
     cost more than its bound, the run or the step log is closed, a step failed outside its own work, or an agent
     could not open because its committed log has a gap or the step log read fails.
+    """
+
+
+class LoopInterruptedError(LoopStoppedError, InfrastructureInterruptionError):
+    """The loop stopped on a failure that can pass, such as a scorer outage or a pending usage.
+
+    The worker marks it as an interruption, so the run goes back to the queue and its resume replays the log.
     """
 
 
@@ -763,6 +774,8 @@ class EngineLoop:
             StepDivergedError: When the committed step at this place is not an evaluation with this key.
             LoopStoppedError: When the loop stopped, the key or the result is not JSON, the run is fenced or
                 closed, the agent cannot open, ``work`` raises, or the commit fails.
+            LoopInterruptedError: When ``work`` raises an :class:`InfrastructureInterruptionError` or a
+                :class:`UsagePendingError`.
             BudgetReached: From ``work``, with no step: the run stops on the budget, and a resume runs it again.
         """
         with self._stops():
@@ -785,6 +798,11 @@ class EngineLoop:
                     json.dumps(result)
                 except LoopStoppedError:
                     raise
+                except (InfrastructureInterruptionError, UsagePendingError) as error:
+                    # The evaluation can pass on a new try, so the run requeues and the resume runs it again.
+                    raise LoopInterruptedError(
+                        f"The evaluation was interrupted: {type(error).__name__}: {error}"
+                    ) from error
                 except Exception as error:
                     raise LoopStoppedError(f"The evaluation failed: {type(error).__name__}: {error}") from error
                 if not isinstance(result, dict):
@@ -907,7 +925,8 @@ class EngineLoop:
 
         Raises:
             LoopStoppedError: The kept stop, with its own type, such as :class:`StepDivergedError`; or a new one
-                when the run lost the fence or the budget stopped it.
+                when the run lost the fence or the budget stopped it, a :class:`LoopInterruptedError` for a
+                pending usage.
         """
         stopped = self._stopped
         if stopped is not None:
@@ -919,6 +938,9 @@ class EngineLoop:
         except LoopStoppedError as error:
             self._stop(error)
             raise
+        except UsagePendingError as error:
+            # Pending usage settles later, so the run must go back to the queue, not end.
+            raise self._stop(LoopInterruptedError(f"{type(error).__name__}: {error}")) from error
         except _STOP_ERRORS as error:
             raise self._stop(LoopStoppedError(f"{type(error).__name__}: {error}")) from error
 

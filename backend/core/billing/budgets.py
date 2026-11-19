@@ -49,6 +49,9 @@ USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
+# The cost kind of a worker agent's lease slice (core/worker/actors.py). No provider reconciler reads it back, so
+# only the worker or a fence settles it (SKY-829).
+AGENT_LEASE_COST_KIND = "agent_lease"
 # A context variable, not a service field: concurrent calls on one service each see only their own settles.
 _SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)
 
@@ -1471,6 +1474,24 @@ class BudgetService:
                 budget.wallet_reserved_units -= operation.max_wallet_units
                 operation.state = "released"
                 operation.updated_at = datetime.now(UTC)
+            # A dead worker's lease slice has no provider record to reconcile, so recovery would wait for it
+            # forever. Its last settle holds all the work that the worker can still prove; the fence ends the
+            # slice there, and the old worker can settle it no more. A slice with a refused settle stays for review.
+            refused = select(ExecutionUsageEvidenceModel.operation_id).where(
+                ExecutionUsageEvidenceModel.issue.is_not(None)
+            )
+            for operation in session.scalars(
+                select(ExecutionOperationModel).where(
+                    ExecutionOperationModel.budget_id == budget_id,
+                    ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND,
+                    ExecutionOperationModel.state.in_(_DISPATCHED_STATES),
+                    ExecutionOperationModel.id.not_in(refused),
+                )
+            ):
+                budget.reserved_units -= operation.max_units - operation.actual_units
+                budget.wallet_reserved_units -= operation.max_wallet_units - operation.actual_wallet_units
+                operation.state = "settled"
+                operation.updated_at = datetime.now(UTC)
             budget.updated_at = datetime.now(UTC)
             return self._snapshot(session, budget, wallet)
 
@@ -1507,11 +1528,14 @@ class BudgetService:
                 return self._snapshot(session, budget, wallet)
             # Setup work ran before the budget joined the run, and no resume
             # repeats it, so only run work can be lost.
-            lost_operations = select(ExecutionOperationModel.id).where(
+            interrupted = (
                 ExecutionOperationModel.budget_id == budget_id,
                 ExecutionOperationModel.generation == generation,
                 ExecutionOperationModel.phase == "run",
                 ExecutionOperationModel.state == "settled",
+            )
+            lost_operations = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind != AGENT_LEASE_COST_KIND
             )
             if settled_after is not None:
                 lost_operations = lost_operations.where(ExecutionOperationModel.updated_at > settled_after)
@@ -1520,6 +1544,31 @@ class BudgetService:
                 func.coalesce(func.sum(ExecutionOperationModel.actual_wallet_units), 0),
             ).where(ExecutionOperationModel.id.in_(lost_operations))
             scope, charge = (int(value) for value in session.execute(lost).one())
+            # One lease slice pays for many steps, and its last settle can come after the steps that the resume
+            # keeps. So only a lease's usage that settled after the bound is lost: each settle is cumulative.
+            leases = select(ExecutionOperationModel.id).where(
+                *interrupted, ExecutionOperationModel.cost_kind == AGENT_LEASE_COST_KIND
+            )
+            lost_evidence = ExecutionUsageEvidenceModel.operation_id.in_(leases)
+            if settled_after is not None:
+                lost_evidence = lost_evidence & (ExecutionUsageEvidenceModel.created_at > settled_after)
+            for lease in session.scalars(select(ExecutionOperationModel).where(ExecutionOperationModel.id.in_(leases))):
+                kept = None
+                if settled_after is not None:
+                    kept = session.execute(
+                        select(
+                            ExecutionUsageEvidenceModel.actual_units, ExecutionUsageEvidenceModel.actual_wallet_units
+                        )
+                        .where(
+                            ExecutionUsageEvidenceModel.operation_id == lease.id,
+                            ExecutionUsageEvidenceModel.created_at <= settled_after,
+                            ExecutionUsageEvidenceModel.issue.is_(None),
+                        )
+                        .order_by(ExecutionUsageEvidenceModel.actual_units.desc())
+                        .limit(1)
+                    ).first()
+                scope += lease.actual_units - (kept.actual_units if kept else 0)
+                charge += lease.actual_wallet_units - (kept.actual_wallet_units if kept else 0)
             if not scope:
                 return self._snapshot(session, budget, wallet)
             budget.settled_units -= scope
@@ -1538,7 +1587,7 @@ class BudgetService:
                     WalletLedgerModel.delta_cents < 0,
                     WalletLedgerModel.settlement_key.in_(
                         select(ExecutionUsageEvidenceModel.id).where(
-                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations)
+                            ExecutionUsageEvidenceModel.operation_id.in_(lost_operations) | lost_evidence
                         )
                     ),
                 )
@@ -1824,7 +1873,14 @@ class BudgetService:
                     )
                 issue = prior.issue
             else:
-                if operation.state not in _DISPATCHED_STATES:
+                # The fence settles a lease slice while its old worker can still be alive. That worker's
+                # in-flight call and close still bill their usage, but the fence already released the coverage.
+                fenced = (
+                    operation.state == "settled"
+                    and operation.cost_kind == AGENT_LEASE_COST_KIND
+                    and operation.generation < budget.generation
+                )
+                if operation.state not in _DISPATCHED_STATES and not fenced:
                     raise BudgetConflictError("Usage may only settle a dispatched attempt.")
                 if scope < operation.actual_units or charge < operation.actual_wallet_units:
                     raise BudgetConflictError("Cumulative usage cannot decrease.")
@@ -1854,19 +1910,21 @@ class BudgetService:
                 if issue:
                     budget.state = "blocked"
                     budget.blocked_reason = issue
-                    operation.state = "pending"
+                    if not fenced:
+                        operation.state = "pending"
                 else:
                     budget.settled_units += scope_delta
                     budget.wallet_settled_units += wallet_delta
-                    budget.reserved_units -= scope_delta
-                    budget.wallet_reserved_units -= wallet_delta
+                    if not fenced:
+                        budget.reserved_units -= scope_delta
+                        budget.wallet_reserved_units -= wallet_delta
                     operation.actual_units = scope
                     operation.actual_wallet_units = charge
-                    if final:
+                    if final and not fenced:
                         budget.reserved_units -= operation.max_units - scope
                         budget.wallet_reserved_units -= operation.max_wallet_units - charge
                         operation.state = "settled"
-                    else:
+                    elif not fenced:
                         operation.state = "pending"
                     if billed:
                         from_grant = min(int(wallet.grant_remaining or 0), billed)

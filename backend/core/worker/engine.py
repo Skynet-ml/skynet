@@ -43,6 +43,7 @@ from ..billing import (
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
 from ..billing.byok_vault import byok_provider_for_litellm
+from ..billing.data_policy import data_policy_for
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
@@ -1092,6 +1093,8 @@ class BackgroundWorker:
                         "worker_id": self._pod_name,
                         "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
                         "token_source": parent_payload.get("token_source"),
+                        # The child has no database for the owner's setting, so the parent reads it.
+                        "data_policy": data_policy_for(execution_payload.username),
                     }
 
                 execution_context = mp.get_context("spawn")

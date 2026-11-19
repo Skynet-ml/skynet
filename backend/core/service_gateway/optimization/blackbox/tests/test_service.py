@@ -2911,6 +2911,9 @@ def test_a_loop_route_moves_only_its_single_repo_engine_off_the_native_runtime(m
     assert not service_mod.uses_native_runtime(repo)
     assert not service_mod.has_loop_route(auto)
     assert service_mod.uses_native_runtime(auto)
+    # Auto composes many engines, so an Auto run stays native also when it names a routed engine.
+    auto_named = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto", "engine": "autoresearch"}))
+    assert not service_mod.has_loop_route(auto_named)
     other = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "gepa"}))
     assert not service_mod.has_loop_route(other)
 

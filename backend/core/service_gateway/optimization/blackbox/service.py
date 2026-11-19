@@ -56,7 +56,7 @@ from ....constants import (
     TQDM_PERCENT_KEY,
     TQDM_TOTAL_KEY,
 )
-from ....exceptions import ServiceError
+from ....exceptions import InfrastructureInterruptionError, ServiceError
 from ....models.blackbox import (
     BLACKBOX_REPO_ENGINES,
     BLACKBOX_STRATEGY_AUTO,
@@ -746,7 +746,8 @@ def _final_run(
             [functools.partial(score_case, numbered) for numbered in enumerate(targets, start=1)],
             workers,
         )
-    except (BudgetError, UsagePendingError, UnpricedOperationError):
+    # An interruption, such as an engine loop's scorer outage, must reach the worker as one, so the run requeues.
+    except (BudgetError, UsagePendingError, UnpricedOperationError, InfrastructureInterruptionError):
         raise
     except ServiceError as exc:
         raise ServiceError(f"scorer failed on the {label}: {exc}") from exc
