@@ -305,26 +305,6 @@ def sandbox_runtime_from_settings(settings: Settings) -> SandboxRuntime | None:
     return AsyncBridgeRuntime("vercel")
 
 
-def scorer_runtime_from_settings(settings: Settings) -> SandboxRuntime:
-    """Return the current contained runtime, or the deployment's sandbox (Docker in local mode).
-
-    Args:
-        settings: The backend settings.
-
-    Returns:
-        The managed runtime scorers open their workspaces with.
-
-    Raises:
-        ServiceError: When the managed sandbox is not configured.
-    """
-    if current_sandbox_runtime() is not None:
-        return current_sandbox_runtime()
-    runtime = sandbox_runtime_from_settings(settings)
-    if runtime is not None:
-        return runtime
-    raise ServiceError(sandbox_unavailable_reason(settings) or _CREDENTIALS_MISSING)
-
-
 # SKY-486 moved the local and bridge runtimes to ``sandbox_runtime``. Tests still
 # patch names such as ``load_provider`` on this module, and that patch must reach
 # the moved code, as it did when both lived here.

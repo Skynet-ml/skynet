@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 import threading
 import time
 from dataclasses import replace
@@ -13,6 +14,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from gepa.image import Image
 
 from core.api.errors import DomainError
 from core.billing.signals import BudgetReached
@@ -49,12 +51,13 @@ from core.models.tests.test_blackbox import _repo_request
 from .. import autoresearch as autoresearch_mod
 from .. import autosaddler as autosaddler_mod
 from .. import meta_harness as meta_harness_mod
+from .. import runner, sandbox_log
 from .. import scorer as scorer_mod
 from .. import service as service_mod
 from .. import shinka_evolve as shinka_evolve_mod
 from ..agent_runs import PHASE_BASELINE, PHASE_FINAL
 from ..auto import LaneOutcome
-from ..harness import GatewayConfig
+from ..harness import ENV_API_KEY, GatewayConfig
 from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
 from ..protocol import (
@@ -69,8 +72,15 @@ from ..protocol import (
     Task,
     candidate_key,
 )
-from ..sandbox import LocalSubprocessSession, scorer_runtime_from_settings
-from ..sandbox_scorer import SandboxPythonScorer, ScorerGateway, ScorerUsage, scorer_gateway
+from ..sandbox import (
+    JOB_TAG,
+    LocalSubprocessSession,
+    SandboxRuntime,
+    SandboxSession,
+    SandboxSpec,
+    current_sandbox_runtime,
+)
+from ..sandbox_scorer import RUNNER_SOURCE, ScorerGateway, ScorerUsage, scorer_gateway
 from ..scorer import JobScorer, RemoteScorer
 from ..service import run_blackbox_optimization, validate_blackbox_payload
 from ..upstream import AUTO_ENGINES
@@ -107,30 +117,127 @@ def test_job_validation_rejects_saved_custom_base_as_service_error() -> None:
         service_mod.validate_job(payload, api_bases={"openai": "https://public.example/v1"})
 
 
+class _SandboxScorer:
+    """Score python scorer code through the runner's file contract, in one box per job.
+
+    Production repository runs score in the trusted parent's boxes, so only
+    these engine tests score python code directly (SKY-834).
+    """
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        runtime: SandboxRuntime,
+        gateway: ScorerGateway | None,
+        timeout_seconds: float,
+        job_id: str | None = None,
+    ) -> None:
+        """Bind scorer code to a runtime without opening a box yet.
+
+        Args:
+            code: The scorer source.
+            runtime: Where the box opens.
+            gateway: Where the scorer's ``llm()`` calls go, or ``None``.
+            timeout_seconds: Longest one call may run.
+            job_id: Tags the box with the job, when known.
+        """
+        self._code = code
+        self._runtime = runtime
+        self._gateway = gateway
+        self._timeout_seconds = timeout_seconds
+        injected = gateway.injected_headers() if gateway is not None and runtime.injects_headers else {}
+        self._env_key = gateway.api_key if gateway is not None and not injected else None
+        self._spec = SandboxSpec(
+            lifetime_seconds=settings.vercel_sandbox_max_lifetime_seconds,
+            tags={JOB_TAG: job_id} if job_id else {},
+            inject_headers=injected,
+            private=True,
+        )
+        self._session: SandboxSession | None = None
+        self._calls = 0
+        self._lock = threading.Lock()
+        self.usage: ScorerUsage | None = ScorerUsage(gateway.billing_model) if gateway is not None else None
+
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score ``candidate`` on ``case`` in the job's box.
+
+        Args:
+            candidate: The version to score.
+            case: The case, if any.
+
+        Returns:
+            The score and side information, with image data URLs as ``Image`` values.
+
+        Raises:
+            ServiceError: When the scorer failed, timed out or wrote no output.
+        """
+        with self._lock:
+            if self._session is None:
+                session = self._runtime.open(self._spec)
+                session.write_files({"app_runner.py": RUNNER_SOURCE, runner.CODE_FILE: self._code})
+                self._session = session
+            self._calls += 1
+            session, call_dir = self._session, f"calls/{self._calls:06d}"
+        payload = {
+            "candidate": candidate,
+            "case": case,
+            "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
+        }
+        session.write_files(
+            {f"{call_dir}/{runner.INPUT_FILE}": json.dumps(payload, default=runner.side_info_json_default)}
+        )
+        with sandbox_log.event_scope(source="scorer"):
+            result = session.run(
+                f"python3 app_runner.py {shlex.quote(call_dir)}",
+                env={ENV_API_KEY: self._env_key} if self._env_key else None,
+                timeout_seconds=self._timeout_seconds,
+                on_output=sandbox_log.ignore_output,
+            )
+        if result.timed_out:
+            raise ServiceError(f"scorer exceeded the {self._timeout_seconds:g}s timeout")
+        text = session.read_file(f"{call_dir}/{runner.OUTPUT_FILE}")
+        if text is None:
+            raise ServiceError(f"scorer sandbox failed (exit {result.exit_code}): {result.stderr or result.stdout}")
+        output = json.loads(text)
+        if self.usage is not None:
+            self.usage.record(output.get("usage") or [])
+        if output.get("error") is not None or output.get("score") is None:
+            raise ServiceError(output.get("error") or "scorer returned no score.")
+        side_info = {
+            key: Image(url=value) if isinstance(value, str) and value.startswith("data:image/") else value
+            for key, value in (output.get("side_info") or {}).items()
+        }
+        return float(output["score"]), side_info
+
+    def close(self) -> None:
+        """Close the box, if one is open."""
+        with self._lock:
+            if self._session is not None:
+                self._session.close()
+                self._session = None
+
+
 def _build_scorer(spec: BlackboxScorer, *, job_id: str | None = None) -> JobScorer:
     """Build the scorer that a direct test run of ``run_job`` scores with.
 
-    Production repository runs score only through the parent's relay, so this
-    test helper keeps the direct remote and sandboxed python scorers for the
-    engine tests (SKY-834).
-
     Args:
         spec: The test payload's scorer definition.
-        job_id: Names the python scorer's sandbox after the job.
+        job_id: Tags the python scorer's box with the job.
 
     Returns:
         A scorer over ``(candidate, case)``.
     """
     if spec.kind == "remote":
         return RemoteScorer(str(spec.url), secret=spec.secret, timeout_seconds=spec.timeout_seconds)
-    return SandboxPythonScorer(
+    runtime = current_sandbox_runtime()
+    assert runtime is not None, "the package conftest binds a local sandbox runtime"
+    return _SandboxScorer(
         str(spec.metric_code),
-        runtime=scorer_runtime_from_settings(settings),
+        runtime=runtime,
         gateway=scorer_gateway(spec.model, settings) if spec.model is not None else None,
         timeout_seconds=spec.timeout_seconds,
         job_id=job_id,
-        install_command=spec.install_command,
-        dependency_lock=spec.dependency_lock.model_dump(mode="json") if spec.dependency_lock else None,
     )
 
 
