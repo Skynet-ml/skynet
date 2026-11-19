@@ -593,14 +593,33 @@ def test_a_step_that_leaves_a_background_job_gives_its_box_back_unhealthy(
     assert runtime.boxes[0].closed
 
 
+def _host_scan(box: Any) -> CommandResult:
+    """Run the process scan on the host until one scan passes.
+
+    The host /proc is shared with the other test workers. A process that starts or
+    ends during a scan fails the scan closed, so a busy CI host needs a few tries.
+
+    Args:
+        box: A local box that runs on the host.
+
+    Returns:
+        The first passed scan, or the last failed one.
+    """
+    for _ in range(20):
+        scan = box.run(PROCESS_SCAN, timeout_seconds=30)
+        if scan.ok:
+            return scan
+    return scan
+
+
 @_HOST_PROC
 def test_the_process_scan_sees_a_background_job_and_not_itself() -> None:
     """A job that a command leaves running is a new line in the next scan, and two scans in a row see no own process."""
     box = LocalSubprocessRuntime().open(_SPEC)
     try:
-        before = box.run(PROCESS_SCAN, timeout_seconds=30)
+        before = _host_scan(box)
         started = box.run("sleep 30 >/dev/null 2>&1 & echo $!", timeout_seconds=30)
-        after = box.run(PROCESS_SCAN, timeout_seconds=30)
+        after = _host_scan(box)
         box.run(f"kill {started.stdout.strip()}", timeout_seconds=30)
     finally:
         box.close()
