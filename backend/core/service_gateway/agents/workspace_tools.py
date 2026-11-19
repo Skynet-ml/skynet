@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tomllib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -283,8 +284,44 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _rule_settings(text: str) -> dict[str, str] | None:
+    """Read each setting that names an intent or rules file, with the path it names.
+
+    Args:
+        text: An ``optimize.toml`` text.
+
+    Returns:
+        Setting to path, such as ``{"[proposer] illegal": "docs/rules.md"}``; the
+        raw TOML values when the run's parser refuses the file; ``None`` when the
+        text is not TOML.
+    """
+    try:
+        parsed = parse_constraints(text.encode("utf-8", "surrogatepass"))
+    except ConstraintsError:
+        pass
+    else:
+        roles = {"[proposer] illegal": parsed.proposer, "[run] illegal": parsed.run_role}
+        roles["[metric] illegal"] = parsed.metric_role
+        roles |= {f"[target.{name}] illegal": stage for name, stage in parsed.targets.items()}
+        settings = {"instructions": parsed.instructions_file}
+        settings |= {setting: role.illegal_file for setting, role in roles.items()}
+        return {setting: path for setting, path in settings.items() if path is not None}
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    # A file the parser refuses can still name rules files; read them raw so the guard does not fail open.
+    tables = {f"[{name}] illegal": document.get(name) for name in ("proposer", "run", "metric")}
+    targets = document.get("target")
+    if isinstance(targets, dict):
+        tables |= {f"[target.{name}] illegal": stage for name, stage in targets.items()}
+    raw = {"instructions": document.get("instructions")}
+    raw |= {setting: table.get("illegal") for setting, table in tables.items() if isinstance(table, dict)}
+    return {setting: value.strip() for setting, value in raw.items() if isinstance(value, str)}
+
+
 def dropped_rule_files(current: str, text: str) -> str | None:
-    """Refuse an ``optimize.toml`` text that stops naming an intent or rules file the current text names.
+    """Refuse an ``optimize.toml`` text that drops or moves an intent or rules file the current text names.
 
     The rules files hold the illegal actions that stop reward hacking, so a
     whole-file rewrite must not lose them silently (SKY-794).
@@ -294,21 +331,26 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         text: The new text.
 
     Returns:
-        The refusal that names the dropped paths, or ``None`` when nothing is
-        dropped or either text does not parse.
+        The refusal that names each dropped setting and path, or ``None`` when
+        nothing is dropped or the current text names no rules file.
     """
-    try:
-        before = parse_constraints(current.encode("utf-8", "surrogatepass")).rule_files
-        after = parse_constraints(text.encode("utf-8", "surrogatepass")).rule_files
-    except ConstraintsError:
+    before = _rule_settings(current)
+    if not before:
         return None
-    dropped = [path for path in before if path not in after]
+    after = _rule_settings(text)
+    named = [f"{setting} = {path!r}" for setting, path in before.items()]
+    if after is None:
+        return (
+            f"The new optimize.toml is not valid TOML, so it cannot keep {', '.join(named)}. "
+            "Send a valid file that keeps these settings."
+        )
+    dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
     if not dropped:
         return None
     return (
         f"The new optimize.toml drops {', '.join(dropped)}, which the current optimize.toml names as its "
-        "instructions or illegal rules file. Keep these references. If the user wants one removed, ask them "
-        "to remove it in the editor."
+        "instructions or illegal rules file. Keep each setting with its path. If the user wants one removed, "
+        "ask them to remove it in the editor."
     )
 
 

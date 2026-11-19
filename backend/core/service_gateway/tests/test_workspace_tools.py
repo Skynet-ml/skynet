@@ -687,10 +687,42 @@ async def test_write_and_edit_refuse_an_optimize_toml_that_drops_the_intent_or_r
     )
 
     assert list(written) == ["error"]
-    assert "drops docs/intent.md, docs/rules.md" in written["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in written["error"]
     assert list(edited) == ["error"]
-    assert "drops docs/rules.md," in edited["error"]
+    assert "drops [proposer] illegal = 'docs/rules.md'," in edited["error"]
     assert "docs/intent.md" not in edited["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_an_optimize_toml_that_moves_a_rules_file_or_cannot_be_checked() -> None:
+    """Moving a rules file to another setting, or sending text that is not TOML, is refused (fail closed)."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}, turn)
+    moved = OPTIMIZE_TOML_EXAMPLE.replace('illegal = "docs/rules.md"\n', "").replace(
+        "timeout = 300\n", 'timeout = 300\nillegal = "docs/rules.md"\n'
+    )
+
+    moved_result = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=moved)
+    broken = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text="version = 1\n[run\n")
+
+    assert "drops [proposer] illegal = 'docs/rules.md'" in moved_result["error"]
+    assert "instructions" not in moved_result["error"].split(", which")[0]
+    assert broken["error"].startswith("The new optimize.toml is not valid TOML")
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_the_guard_reads_the_rules_files_of_a_current_file_the_parser_refuses() -> None:
+    """A current optimize.toml with a parser error still guards the rules files it names."""
+    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["pytest", "-q"]\n', "")
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "optimize_toml": current}, turn)[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_VALID_TOML
+    )
+
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
     assert turn.wizard_patch == {}
 
 
@@ -737,7 +769,7 @@ async def test_write_refuses_dropping_the_rules_file_that_the_repository_optimiz
     )
 
     assert list(result) == ["error"]
-    assert "drops docs/intent.md, docs/rules.md" in result["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
     assert turn.wizard_patch == {}
 
 
