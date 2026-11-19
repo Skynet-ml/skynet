@@ -540,6 +540,7 @@ class EngineLoop:
                 list_files=self.list_files,
                 log_owner=self._run.run_id,
                 file_ids=self.file_ids,
+                record_step=self.evaluate,
                 **fields,
             )
 
@@ -689,9 +690,10 @@ class EngineLoop:
                     # Model output is untrusted: a lone surrogate in it would fail the UTF-8 commit and stop the
                     # run (SKY-821).
                     body: dict[str, Any] = {"prompt_sha256": digest, "text": escape_surrogates(reply.text or "")}
-                    if reply.tool_calls:
-                        body["tool_calls"] = [safe_tool_call(_bounded_call(call)) for call in reply.tool_calls]
                     try:
+                        if reply.tool_calls:
+                            # safe_tool_call recurses, so the depth bound runs first (SKY-817).
+                            body["tool_calls"] = [safe_tool_call(_bounded_call(call)) for call in reply.tool_calls]
                         _check_reply(body, reply.cost_cents)
                     except (ModelReplyTooDeepError, ModelReplyTooLargeError, ModelReplyNotJSONError) as error:
                         failures.append(error)

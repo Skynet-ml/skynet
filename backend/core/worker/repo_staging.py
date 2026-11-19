@@ -62,8 +62,6 @@ from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
 from ..models.blackbox import (
-    BLACKBOX_ENGINE_AUTORESEARCH,
-    BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
     FILE_PROPOSER_REFUSED_ENGINES,
@@ -598,8 +596,6 @@ def stage_repository(
 
 # The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
 _FILE_PROPOSER_REFUSALS = {
-    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
-    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
     BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve cannot use the [proposer] entry command yet.",
 }
 
@@ -607,12 +603,10 @@ _FILE_PROPOSER_REFUSALS = {
 def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
     """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
 
-    AutoResearch and Meta-Harness call the proposer from their lab folder and
-    read their own protocol files there, so the files the command changes do
-    not become their versions (SKY-753; Gilad, 2026-11-18). The ShinkaEvolve
-    engine refuses the command on every route. The check refuses it here,
-    before a paid box starts, and not at the engine's start (SKY-815). SKY-828
-    lifts this refusal: it wires the command after the SKY-728 cutover.
+    AutoResearch and Meta-Harness run it in the engine loop (SKY-816). The
+    ShinkaEvolve engine refuses the command on every route. The check refuses it
+    here, before a paid box starts, and not at the engine's start (SKY-815).
+    SKY-828 lifts this refusal: it wires the command after the SKY-728 cutover.
 
     Args:
         environment: The run's rules, with the file's proposer command.
@@ -638,8 +632,7 @@ def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str
         environment,
         notes=(
             *environment.notes,
-            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-            " proposer command in the contract file.",
+            "Auto leaves out the ShinkaEvolve lane, because it cannot use the proposer command in the contract file.",
         ),
     )
 

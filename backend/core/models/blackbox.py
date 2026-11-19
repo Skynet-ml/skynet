@@ -117,16 +117,12 @@ BLACKBOX_REPO_ENGINES = frozenset(
         BLACKBOX_ENGINE_SHINKA_EVOLVE,
     }
 )
-# Engines that cannot use the contract file's [proposer] entry: AutoResearch and
-# Meta-Harness call the proposer from their lab folder, so its changed files are
-# not their versions (SKY-753; Gilad, 2026-11-18). The ShinkaEvolve engine refuses
-# the command on every route, because no production run builds the worker's engine
-# loop and no relay meters the command's calls yet. So the setup check refuses it
-# before a paid box starts, and Auto leaves out its lane (SKY-815). SKY-828 lifts
-# this refusal: it wires the command after the SKY-728 cutover.
-FILE_PROPOSER_REFUSED_ENGINES = frozenset(
-    {BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_SHINKA_EVOLVE}
-)
+# Engines that cannot use the contract file's [proposer] entry. AutoResearch and
+# Meta-Harness run it in the engine loop (SKY-816). The ShinkaEvolve engine refuses
+# the command on every route, because no relay meters the command's calls yet. So
+# the setup check refuses it before a paid box starts, and Auto leaves out its lane
+# (SKY-815). SKY-828 lifts this refusal: it wires the command after the SKY-728 cutover.
+FILE_PROPOSER_REFUSED_ENGINES = frozenset({BLACKBOX_ENGINE_SHINKA_EVOLVE})
 # Single-mode engines that honor an explicit iteration cap.
 BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
     {BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTOSADDLER, BLACKBOX_ENGINE_SHINKA_EVOLVE}

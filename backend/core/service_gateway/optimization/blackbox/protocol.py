@@ -421,8 +421,8 @@ class ToolCall(TypedDict):
 
     ``id`` is the provider's call id; the engine sends it back with the tool result. ``arguments`` is the
     parsed JSON object, or the raw text when the model sent text that is not a JSON object or that holds a lone
-    surrogate, or :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for raw text, so the
-    model can correct its call.
+    surrogate, or :data:`TOO_DEEP_ARGUMENTS`. The engine gives the model an error tool result for text, so the model
+    can correct its call.
     """
 
     id: str
@@ -513,14 +513,14 @@ def tool_calls_from_openai(message: Mapping[str, Any]) -> list[ToolCall]:
     """Convert the ``tool_calls`` of an OpenAI-shaped assistant message to the flat form.
 
     Bad JSON in ``arguments`` does not raise: a model can send it, and a raise would lose the whole reply. The
-    call keeps the raw text instead. ``arguments`` that are already a dict stay as they are. Missing or empty
-    ``arguments`` become ``{}``. Any other value, such as a list or a number, becomes its JSON text, so the call
-    keeps the value and the arguments stay a dict or text. Text or a value, a dict included, that nests more than
-    ``MAX_ARGUMENTS_DEPTH`` levels becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses
-    only that call. Deep text must not reach the transcript: a later call would read it again, raise
-    :class:`RecursionError` and fail every later model call in the session. The bound is a fixed count, not the
-    stack, so the same reply always gives the same calls. JSON whose parsed object holds a lone surrogate keeps
-    its raw text, and :func:`safe_tool_call` makes each call safe for the step log.
+    call keeps the raw text instead, so the same reply always gives the same calls. ``arguments`` that are
+    already a dict stay as they are. Missing or empty ``arguments`` become ``{}``. Any other value, such as a
+    list or a number, becomes its JSON text, so the call keeps the value and the arguments stay a dict or text.
+    JSON whose parsed object holds a lone surrogate keeps its raw text, and :func:`safe_tool_call` makes each call
+    safe for the step log. Text or a value, a dict included, that nests more than ``MAX_ARGUMENTS_DEPTH`` levels
+    becomes :data:`TOO_DEEP_ARGUMENTS`, valid JSON or not, so the engine refuses only that call. Deep text must not
+    reach the transcript: a later call would read it again, raise :class:`RecursionError` and fail every later model
+    call in the session. The bound is a fixed count, not the stack, so the same reply always gives the same calls.
 
     Args:
         message: The assistant message, for example ``response.choices[0].message.model_dump()``.
@@ -725,6 +725,8 @@ class EngineContext:
     # The job id a child engine's forwarded log records carry as ``sandbox_owner``; the worker's log router
     # keeps only its own job's records.
     log_owner: str | None = None
+    # Commits ``work()``'s JSON object as one step under ``key``; a resume gives the committed object back.
+    record_step: Callable[[Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None
 
 
 class Engine(Protocol):

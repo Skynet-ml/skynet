@@ -69,6 +69,7 @@ from ..protocol import (
 from ..sandbox import LocalSubprocessSession
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
+from ..upstream import AUTO_ENGINES
 from .mocks import (
     AGENT_OUTPUT_SCORER_CODE,
     VOWEL_SCORER_CODE,
@@ -3032,6 +3033,24 @@ def test_a_loop_route_moves_only_its_single_repo_engine_off_the_native_runtime(m
     assert not service_mod.has_loop_route(auto_named)
     other = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "gepa"}))
     assert not service_mod.has_loop_route(other)
+
+
+def test_an_auto_repo_run_uses_the_loop_only_when_every_auto_engine_has_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto composes all its engines, so its repository runs move to the loop only with all their rows (SKY-832)."""
+    auto = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
+    text_auto = _payload(strategy={"mode": "auto"})
+    rows = {(name, "repo") for name in AUTO_ENGINES}
+    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset(rows - {("shinka_evolve", "repo")}))
+
+    assert not service_mod.has_loop_route(auto)
+    assert service_mod.uses_native_runtime(auto)
+
+    monkeypatch.setattr(service_mod, "LOOP_ROUTES", frozenset(rows))
+
+    assert service_mod.has_loop_route(auto)
+    assert not service_mod.uses_native_runtime(auto)
+    # The loop builds a run only from a repository snapshot, so a text Auto run keeps its route.
+    assert not service_mod.has_loop_route(text_auto)
 
 
 @pytest.mark.parametrize(
