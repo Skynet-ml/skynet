@@ -614,6 +614,36 @@ def test_the_shinka_agent_editor_refuses_services_but_runs_mcp(monkeypatch: pyte
     assert caught.value.key == "services"
 
 
+_PROPOSER_HEADED_MCP = {
+    "optimize.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
+    "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
+    ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}',
+}
+
+
+@pytest.mark.parametrize(
+    ("strategy", "message"),
+    [
+        (_SHINKA_AGENT, "^ShinkaEvolve does not support \\[proposer\\] mcp servers with headers yet: team\\."),
+        ({"strategy": {"mode": "auto"}}, "^Auto runs only its built-in proposer"),
+    ],
+)
+def test_a_headed_proposer_mcp_server_fails_the_setup_check(
+    strategy: dict[str, Any], message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a [proposer] mcp server with headers before paid work, for ShinkaEvolve and Auto (SKY-728, SKY-840).
+
+    Args:
+        strategy: The run's strategy and ShinkaEvolve settings.
+        message: The start of the refusal.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    with pytest.raises(ConstraintsError, match=message) as caught:
+        _stage_with(_PROPOSER_HEADED_MCP, monkeypatch, {**_payload("c" * 40), **strategy})
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "mcp")
+
+
 @pytest.mark.parametrize("strategy", [{"mode": "single", "engine": "autoresearch"}, {"mode": "auto"}])
 def test_a_tool_loop_proposer_runs_its_tool_budget_and_services(
     strategy: dict[str, str], monkeypatch: pytest.MonkeyPatch
@@ -1171,6 +1201,8 @@ def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(m
             ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}'
         ),
     }
+    # No engine takes a headed [proposer] mcp server until SKY-840, but the staged secrets must stay safe then too.
+    monkeypatch.setattr(repo_staging, "_refuse_unsupported_proposer", lambda *_: None)
 
     result, staged = _stage_with(files, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
 
@@ -1568,6 +1600,8 @@ def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: 
     }
     payload = {**_payload("c" * 40), **_SHINKA_AGENT}
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["web.example.com"]
+    # No engine takes a headed [proposer] mcp server until SKY-840, but the staged secrets must stay safe then too.
+    monkeypatch.setattr(repo_staging, "_refuse_unsupported_proposer", lambda *_: None)
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload)
 

@@ -676,7 +676,9 @@ catch the failure in the program, as above, and let the metric score it.
     true`, `max_no_eval_seconds = 1800`, `max_candidates_per_iter = 3`).
   - ShinkaEvolve refuses the same settings as GEPA. With the `agent`
     editor, it applies `max_tool_calls`, `[proposer] mcp` and the reasoning
-    effort, and it refuses `[proposer] services`.
+    effort, and it refuses `[proposer] services`. It does not support a
+    `[proposer] mcp` server with `headers` yet, so it refuses one. MCP
+    servers with no headers still work. SKY-840 lifts this limit.
   - AutoResearch and Meta-Harness, and Auto, which runs their lanes, apply
     `max_tool_calls` and `[proposer] services`. They refuse `[proposer] mcp`
     and a reasoning effort.

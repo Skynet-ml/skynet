@@ -64,6 +64,7 @@ from ..exceptions import ServiceError
 from ..models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
     BLACKBOX_ENGINE_META_HARNESS,
+    BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
     BlackboxProposer,
@@ -686,7 +687,8 @@ def _refuse_unsupported_proposer(environment: RepoEnvironment, payload: Mapping[
         payload: The stored run request.
 
     Raises:
-        ConstraintsError: When the run names a proposer setting that its engine does not run.
+        ConstraintsError: When the run names a proposer setting that its engine does not run, or gives a
+            ShinkaEvolve run a [proposer] mcp server with headers.
     """
     strategy = payload.get("strategy") or {}
     engine = strategy.get("engine") if strategy.get("mode", "auto") == "single" else None
@@ -710,6 +712,18 @@ def _refuse_unsupported_proposer(environment: RepoEnvironment, payload: Mapping[
             " Remove them, or choose another engine.",
             section="proposer",
             key=refused[0],
+        )
+    # A protected box cannot add the headers, and the loop has no MCP relay yet, so the run would fail at its first
+    # MCP call after paid work starts. An Auto run already refuses every [proposer] mcp server. SKY-840 (an outbound
+    # proxy that adds the headers) lifts this refusal.
+    headed = [server.name for server in proposer_role.mcp_servers if server.headers] if proposer_role else []
+    if engine == BLACKBOX_ENGINE_SHINKA_EVOLVE and headed:
+        raise ConstraintsError(
+            "ShinkaEvolve does not support [proposer] mcp servers with headers yet: "
+            f"{', '.join(headed)}. Remove these servers or their headers, or choose another engine."
+            " MCP servers with no headers still work.",
+            section="proposer",
+            key="mcp",
         )
 
 
