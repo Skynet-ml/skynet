@@ -36,6 +36,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
     TOO_DEEP_ARGUMENTS,
     EngineContext,
     EvalServer,
+    FileTooLargeError,
     ModelReply,
     RepoSeed,
     Result,
@@ -522,6 +523,42 @@ def test_a_model_call_has_no_box_open_and_each_call_commits_one_step(
     assert not +boxes.open
     assert [kind for _, kind, _ in _steps(engine)] == _KINDS
     assert [seq for seq, _, _ in _steps(engine)] == list(range(len(_KINDS)))
+
+
+def test_a_command_time_limit_reaches_the_tree_sandbox(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop passes a command's limit to the tree sandbox, and no limit when the caller gives none (SKY-816)."""
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed_tree = _tree(trees, "README", "seed")
+    limits: list[float | None] = []
+    original = loop._sandbox.run
+
+    def run(*args: Any, timeout_seconds: float | None = None, **options: Any) -> Any:
+        """Record the limit, then run the command.
+
+        Args:
+            *args: The sandbox call's arguments.
+            timeout_seconds: The command's limit.
+            **options: The other options.
+
+        Returns:
+            The sandbox's result.
+        """
+        limits.append(timeout_seconds)
+        return original(*args, timeout_seconds=timeout_seconds, **options)
+
+    monkeypatch.setattr(loop._sandbox, "run", run)
+
+    loop.run(seed_tree, "true", timeout_seconds=1800)
+    loop.run(seed_tree, "echo other")
+
+    assert limits == [1800, None]
 
 
 def test_the_context_names_the_job_as_its_log_owner(
@@ -1235,6 +1272,207 @@ def test_a_fenced_lane_scorer_stops_the_auto_run(
     assert boxes.opened == 0
 
 
+class _FailingLaneEngine:
+    """An Auto lane fixture that fails before its first step, as an engine that cannot score its seed does."""
+
+    name = "meta_harness"
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Fail at once.
+
+        Args:
+            task: Not used.
+            server: Not used.
+            ctx: Not used.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("the lane cannot score its seed")
+
+
+class _BelowZeroLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but reports a score below 0."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and report a score of -1.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            The reply with a score of -1.
+        """
+        result = super().run(task, server, ctx)
+        return Result(result.best_candidate, -1.0, result.total_evals)
+
+
+@pytest.mark.parametrize(
+    ("failing", "lane"),
+    [(None, _LaneEngine), ("meta_harness", _LaneEngine), ("meta_harness", _BelowZeroLaneEngine)],
+    ids=["all-lanes", "one-lane-fails", "one-lane-fails-and-the-others-score-below-zero"],
+)
+def test_an_auto_resume_replays_the_plan_the_lanes_and_the_handoff_with_no_new_call(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str | None,
+    lane: type[_LaneEngine],
+) -> None:
+    """The Auto parent commits its plan and lane results; a resume replays every agent with no model call or box.
+
+    A lane that fails loses at -inf, also to lanes that score below 0, and the run goes on. The resume gets a
+    larger allowance, so only the committed plan keeps its lane and continuation allowances (SKY-832).
+    """
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: _FailingLaneEngine() if name == failing else lane(name))
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    def run(loop: EngineLoop, max_evals: int) -> tuple[Result, list[auto.LaneOutcome]]:
+        """Run Auto on the loop and check that every committed step replayed.
+
+        Args:
+            loop: The engine loop.
+            max_evals: The run's evaluation allowance.
+
+        Returns:
+            The Auto result and its lanes.
+        """
+        outcome = auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            loop.server(scorer, max_evals=max_evals),
+            loop.context(),
+            caps=EngineCapabilities(proposer_available=True),
+        )
+        loop.finish()
+        return outcome
+
+    first, first_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    result, lanes = run(first, 2 * (len(AUTO_ENGINES) + 1))
+
+    # The root agent holds only the parent's plan and its lane results.
+    assert len(_steps(engine)) == 2
+    statuses = {lane.engine: lane.status for lane in lanes if lane.phase == "explore"}
+    assert statuses == {name: "failed" if name == failing else "completed" for name in AUTO_ENGINES}
+    assert len(first_model.prompts) == len(AUTO_ENGINES) + 1 - (failing is not None)
+    assert result.metadata["explore_engine"] != failing
+    runs = {(lane.phase, lane.engine): lane.scorer_runs for lane in lanes}
+    assert runs[("continue", "gepa")] == 2
+    assert {runs[("explore", name)] for name in AUTO_ENGINES if name != failing} == {2}
+
+    _new_generation(engine)
+    loop, model, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    resumed, resumed_lanes = run(loop, 5 * (len(AUTO_ENGINES) + 1))
+
+    assert (resumed.best_candidate, resumed.best_score) == (result.best_candidate, result.best_score)
+    assert resumed.metadata["explore_engine"] == result.metadata["explore_engine"]
+    assert {(lane.phase, lane.engine): lane.scorer_runs for lane in resumed_lanes} == runs
+    assert model.prompts == []
+    assert boxes.opened == 0
+
+
+class _OtherCandidateLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but hands off another version."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and change its best version.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            Another version with the lane's score.
+        """
+        result = super().run(task, server, ctx)
+        return Result(f"{result.best_candidate} changed", result.best_score, result.total_evals)
+
+
+class _OtherScoreLaneEngine(_LaneEngine):
+    """An Auto lane fixture that makes the same calls as :class:`_LaneEngine` but reports another score."""
+
+    def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
+        """Run the lane and change only its score.
+
+        Args:
+            task: The task with the lane's seed.
+            server: The lane's eval server.
+            ctx: The lane's context.
+
+        Returns:
+            The lane's version with a score 1 higher.
+        """
+        result = super().run(task, server, ctx)
+        return Result(result.best_candidate, result.best_score + 1.0, result.total_evals)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [("lane-candidate", "lane results"), ("lane-score", "lane results"), ("plan-engines", "lane plan")],
+)
+def test_an_auto_resume_that_gives_other_lanes_or_another_plan_stops_as_diverged(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    message: str,
+) -> None:
+    """A resume whose lane hands off another version or score, or that explores other engines, stops (SKY-832)."""
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: _LaneEngine(name))
+    scorer = _scorer(_tree(trees, "README", "seed"), _tree(trees, "metric.txt", "len"))
+
+    def run(loop: EngineLoop) -> tuple[Result, list[auto.LaneOutcome]]:
+        """Run Auto on the loop.
+
+        Args:
+            loop: The engine loop.
+
+        Returns:
+            The Auto result and its lanes.
+        """
+        return auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            loop.server(scorer, max_evals=2 * (len(AUTO_ENGINES) + 1)),
+            loop.context(),
+            caps=EngineCapabilities(proposer_available=True),
+        )
+
+    first, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    run(first)
+    first.finish()
+
+    if change == "lane-candidate":
+        changed = AUTO_ENGINES[0]
+        monkeypatch.setattr(
+            auto,
+            "get_engine",
+            lambda name, caps: _OtherCandidateLaneEngine(name) if name == changed else _LaneEngine(name),
+        )
+    elif change == "lane-score":
+        changed = AUTO_ENGINES[0]
+        monkeypatch.setattr(
+            auto,
+            "get_engine",
+            lambda name, caps: _OtherScoreLaneEngine(name) if name == changed else _LaneEngine(name),
+        )
+    else:
+        monkeypatch.setattr(auto, "AUTO_ENGINES", AUTO_ENGINES[:-1])
+    _new_generation(engine)
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    with pytest.raises(StepDivergedError, match=f"committed {message}"):
+        run(loop)
+
+
 def test_a_settle_failure_after_the_commit_stops_the_loop_and_the_resume_replays_the_reply(
     owner: tuple[User, int],
     engine: Engine,
@@ -1854,9 +2092,9 @@ def test_the_size_bound_measures_the_bytes_that_the_commit_writes(
 
 @pytest.mark.parametrize(
     "arguments",
-    # json.loads accepts the escape of a lone surrogate, but UTF-8 cannot hold it; a set is no JSON value at all.
-    [json.loads('{"text": "\\ud800"}'), {"items": {1, 2}}],
-    ids=["lone-surrogate", "set"],
+    # A set is no JSON value at all. A lone surrogate is escaped before the check (SKY-821), so it is not here.
+    [{"items": {1, 2}}],
+    ids=["set"],
 )
 def test_a_reply_that_is_not_utf8_json_is_a_failed_model_call_with_its_cost_and_a_resume_replays_it(
     owner: tuple[User, int],
@@ -1938,6 +2176,71 @@ def test_a_tool_only_reply_with_no_text_gives_an_empty_text_live_and_on_a_resume
     _new_generation(engine)
     resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
     assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed_model.prompts == []
+
+
+def test_a_reply_with_lone_surrogates_commits_and_the_run_goes_on_and_a_resume_replays_it(
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lone surrogate is no UTF-8, so a reply that holds one must not stop the run at its commit (SKY-821).
+
+    Arguments that parse to a surrogate keep their raw text, so the engine refuses only that call. Surrogates in
+    the text, the tool name and arguments that a client already parsed become escapes.
+
+    Args:
+        monkeypatch: Replaces the loop's model with one that gives the bad reply first.
+    """
+    first, model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    calls = tool_calls_from_openai(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_a", "type": "function", "function": {"name": "edit", "arguments": '{"text":"\\ud800"}'}},
+                {"id": "call_b", "type": "function", "function": {"name": "ed\udfffit", "arguments": "{}"}},
+            ],
+        }
+    )
+
+    def bad(prompt: str | list[dict[str, Any]], tools: list[ToolDefinition] | None) -> ModelReply:
+        """Give a reply with lone surrogates in its text and in a parsed argument key, then answer as the fake.
+
+        Args:
+            prompt: The prompt.
+            tools: The tool definitions.
+
+        Returns:
+            The bad reply for the first prompt; the fake model's reply after it.
+        """
+        if prompt != "improve seed":
+            return model(prompt, tools)
+        parsed: ToolCall = {"id": "call_c", "name": "edit", "arguments": {"k\ud83d": ["\udc00"]}}
+        return ModelReply("bad \ud800 text", Decimal(1), [*calls, parsed])
+
+    monkeypatch.setattr(first, "_model", bad)
+    reply = first.call_model("improve seed", _TOOLS)
+    after = first.call_model("go on", _TOOLS)
+
+    assert reply == ModelReply(
+        "bad \\ud800 text",
+        Decimal(1),
+        [
+            {"id": "call_a", "name": "edit", "arguments": '{"text":"\\ud800"}'},
+            {"id": "call_b", "name": "ed\\udfffit", "arguments": {}},
+            {"id": "call_c", "name": "edit", "arguments": '{"k\\ud83d": ["\\udc00"]}'},
+        ],
+    )
+    assert after.text == "onx"
+    assert [kind for _, kind, _ in _steps(engine)] == ["model", "model"]
+    _new_generation(engine)
+    resumed, resumed_model, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2)
+    assert resumed.call_model("improve seed", _TOOLS) == reply
+    assert resumed.call_model("go on", _TOOLS) == after
     assert resumed_model.prompts == []
 
 
@@ -2184,10 +2487,12 @@ def test_no_context_call_can_pass_its_own_hidden_paths(
     assert ctx.read_file is not None
     assert ctx.list_files is not None
     assert ctx.run_command is not None
+    assert ctx.file_ids is not None
     for call, args in [
         (ctx.read_file, (tree, "eval/metric.py")),
         (ctx.list_files, (tree, "eval")),
         (ctx.run_command, (tree, "cat eval/metric.py", ())),
+        (ctx.file_ids, (tree,)),
     ]:
         with pytest.raises(TypeError):
             call(*args, hidden_hashes={})
@@ -2210,6 +2515,25 @@ def test_list_files_lists_a_folder_and_gives_none_for_a_path_that_is_not_a_folde
     assert ctx.list_files(tree, "README") is None
     assert ctx.list_files(tree, "README/x") is None
     assert ctx.list_files(tree, "missing") is None
+    assert _steps(engine) == []
+    assert boxes.opened == 0
+
+
+def test_file_ids_give_equal_ids_for_equal_bytes_and_leave_out_hidden_paths(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The content ids tell changed files apart with no read, no step and no box, and hide what the loop hides."""
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval/"]))
+    tree = _store(trees, {"eval/metric.py": b"m", "src/a.py": b"a", "src/lib/b.py": b"b", ".optimize/exploits/x": b"x"})
+    ctx = loop.context()
+    assert ctx.file_ids is not None
+    after = loop.put_files({"src/a.py": b"changed"}, tree)
+
+    before_ids, after_ids = ctx.file_ids(tree), ctx.file_ids(after)
+
+    assert sorted(before_ids) == sorted(after_ids) == ["src/a.py", "src/lib/b.py"]
+    assert before_ids["src/lib/b.py"] == after_ids["src/lib/b.py"]
+    assert before_ids["src/a.py"] != after_ids["src/a.py"]
     assert _steps(engine) == []
     assert boxes.opened == 0
 
@@ -2383,15 +2707,22 @@ def test_a_symlink_at_or_above_a_hidden_path_stops_the_loop(
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(hidden))
     tree = _store(trees, {secret: b"secret", "README": b"r"}, links)
 
-    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
-        loop.read_file(tree, secret)
-    assert "data" not in str(stopped.value)
-    assert "eval" not in str(stopped.value)
+    # A box step needs the run's active generation, so ``run`` goes first, on the first loop.
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
         loop.run(tree, f"cat {secret}")
     assert boxes.opened == 0
+    # The loop keeps its first stop and raises it on each later call, so a fresh loop checks each other path.
+    reader, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=2, hidden=hidden_hashes(hidden))
+    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path") as stopped:
+        reader.read_file(tree, secret)
+    assert "data" not in str(stopped.value)
+    assert "eval" not in str(stopped.value)
+    lister, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=3, hidden=hidden_hashes(hidden))
     with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
-        loop.list_files(tree)
+        lister.list_files(tree)
+    fresh, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=4, hidden=hidden_hashes(hidden))
+    with pytest.raises(LoopStoppedError, match="symlink at, below or above a hidden path"):
+        fresh.file_ids(tree)
 
 
 def test_links_inside_a_hidden_folder_that_no_box_gets_do_not_stop_the_loop(
@@ -3414,3 +3745,170 @@ def test_put_files_walks_an_unchanged_folder_once_for_each_loop(
 
     assert first != second
     assert reads.count(sub) == 1
+
+
+class _Loads:
+    """Record the blob, object, pack-lookup and range loads of a capped read.
+
+    A test uses the record to show that a large file never loads and that a read finds its object once.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wrap the blob read, the step log's object read and pack lookup, and the object store's range read.
+
+        Args:
+            monkeypatch: Pytest's patcher; it undoes the wraps after the test.
+        """
+        self.blobs: list[str] = []
+        self.objects: list[str] = []
+        self.locations: list[str] = []
+        self.ranges: list[int | None] = []
+        get_blob, get_object, get = TreeStore.get_blob, StepLogStore.get_object, LocalObjectStore.get
+        locate = StepLogStore._object_location
+
+        def blob(store: TreeStore, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
+            """Record a blob that loads; a refused blob raises before the record.
+
+            Args:
+                store: The tree store.
+                run_id: The job that reads.
+                object_id: The blob's id.
+                max_bytes: The cap of the read.
+
+            Returns:
+                The blob's bytes.
+            """
+            data = get_blob(store, run_id, object_id, max_bytes)
+            self.blobs.append(object_id)
+            return data
+
+        def stored(store: StepLogStore, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
+            """Record an object that loads; a refused object raises before the record.
+
+            Args:
+                store: The step log.
+                run_id: The job that reads.
+                object_id: The object's id.
+                max_bytes: The cap of the read.
+
+            Returns:
+                The object's stored bytes.
+            """
+            data = get_object(store, run_id, object_id, max_bytes)
+            self.objects.append(object_id)
+            return data
+
+        def located(store: StepLogStore, run_id: str, object_id: str) -> tuple[str, int, int] | None:
+            """Record a pack lookup.
+
+            Args:
+                store: The step log.
+                run_id: The job that reads.
+                object_id: The object's id.
+
+            Returns:
+                The object's pack key, offset and length.
+            """
+            self.locations.append(object_id)
+            return locate(store, run_id, object_id)
+
+        def ranged(store: LocalObjectStore, key: str, offset: int = 0, length: int | None = None) -> bytes:
+            """Record the length of a range read.
+
+            Args:
+                store: The object store.
+                key: The pack key.
+                offset: The first byte.
+                length: The bytes to read; ``None`` reads to the end.
+
+            Returns:
+                The bytes of the range.
+            """
+            self.ranges.append(length)
+            return get(store, key, offset, length)
+
+        monkeypatch.setattr(TreeStore, "get_blob", blob)
+        monkeypatch.setattr(StepLogStore, "get_object", stored)
+        monkeypatch.setattr(StepLogStore, "_object_location", located)
+        monkeypatch.setattr(LocalObjectStore, "get", ranged)
+
+
+def test_a_capped_read_refuses_a_larger_file_before_it_loads_from_the_buffer_or_a_pack(
+    owner: tuple[User, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file above the cap never loads, before or after its flush; a resume on another worker gets the same answer.
+
+    Before the flush the file is in the buffer; after it, a second worker at the next generation reads the tree
+    from its pack, as a resume does. The step logs have a long window, so only the explicit flush writes. After
+    the flush, a capped read that passes the cap finds its object in one pack lookup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder; it holds the shared object store.
+        monkeypatch: Pytest's patcher, for the load records.
+    """
+    big = b"\0" * (1 << 20)
+    first_log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "worker-1", flush_window_seconds=60.0)
+    second_log = StepLogStore(engine, LocalObjectStore(tmp_path / "objects"), "worker-2", flush_window_seconds=60.0)
+    try:
+        first_trees = TreeStore(first_log)
+        tree = _store(first_trees, {"big.bin": big, "src/a.py": b"abcd"})
+        big_id = first_trees.put_blob(RUN_ID, big)
+        small_id = first_trees.put_blob(RUN_ID, b"abcd")
+        first, _, _ = _loop(owner, engine, first_log, first_trees, tmp_path, generation=1)
+        ctx = first.context()
+        assert ctx.read_file is not None
+        loads = _Loads(monkeypatch)
+
+        with pytest.raises(FileTooLargeError, match=f"^file big.bin has {len(big)} bytes, more than the cap of 4$"):
+            ctx.read_file(tree, "big.bin", max_bytes=4)
+        assert ctx.read_file(tree, "src/a.py", max_bytes=4) == b"abcd"
+        with pytest.raises(FileTooLargeError) as small:
+            ctx.read_file(tree, "src/a.py", max_bytes=3)
+        assert (small.value.size, small.value.max_bytes) == (4, 3)
+        assert big_id not in loads.blobs + loads.objects
+        assert loads.ranges == []
+
+        first_log.flush()
+        _new_generation(engine)
+        resumed, _, _ = _loop(owner, engine, second_log, TreeStore(second_log), tmp_path, generation=2)
+        with pytest.raises(FileTooLargeError) as again:
+            resumed.read_file(tree, "big.bin", max_bytes=len(big) - 1)
+        assert (again.value.size, again.value.max_bytes) == (len(big), len(big) - 1)
+        loads.locations.clear()
+        assert resumed.read_file(tree, "src/a.py", max_bytes=4) == b"abcd"
+        assert loads.locations.count(small_id) == 1
+        assert big_id not in loads.blobs + loads.objects
+        # The tree reads come from the pack, and none of them is as long as the large file.
+        assert loads.ranges
+        assert all(length is not None and length < len(big) for length in loads.ranges)
+        assert resumed.read_file(tree, "big.bin", max_bytes=len(big)) == big
+    finally:
+        first_log.close()
+        second_log.close()
+
+
+def test_a_capped_read_gives_none_for_a_hidden_missing_or_folder_path(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A capped read keeps the rules of a read: a hidden path gives ``None`` like a missing one, and tells no size.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log of the loop.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden_hashes(["eval"]))
+    tree = _store(trees, {"eval/metric.py": b"secret", "src/a.py": b"a", "empty.txt": b""})
+
+    for path in ["eval/metric.py", "eval", "missing.py", "src", "src/a.py/x"]:
+        assert loop.read_file(tree, path, max_bytes=0) is None
+    assert loop.read_file(tree, "empty.txt", max_bytes=0) == b""
+    with pytest.raises(FileTooLargeError):
+        loop.read_file(tree, "src/a.py", max_bytes=0)
+    assert loop.read_file(tree, "src/a.py") == b"a"
+    assert boxes.opened == 0
+    assert _steps(engine) == []

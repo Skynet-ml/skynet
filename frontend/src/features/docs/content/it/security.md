@@ -49,9 +49,9 @@ Skynet ti fornisce anche dei codici di recupero. Conservali in un luogo sicuro. 
 
 ## Dove gira il tuo codice
 
-I carichi di lavoro degli utenti girano in sandbox isolate. Nel prodotto ospitato, Vercel Sandbox è il confine di esecuzione. Questo vale per i controlli della configurazione, le esecuzioni di ottimizzazione, il ripristino e il lavoro sulle esecuzioni completate.
+Il tuo codice gira solo in sandbox isolate. La sandbox è il confine di esecuzione. Oggi il prodotto ospitato usa Vercel Sandbox. Altri provider si collegano tramite un'interfaccia sandbox condivisa. Ogni candidato gira nella propria sandbox. La metrica lo valuta in una sandbox separata. Questo vale per i controlli della configurazione, le esecuzioni di ottimizzazione, il ripristino e il lavoro sulle esecuzioni completate.
 
-I worker di Skynet non eseguono il tuo codice. Sono il piano di controllo. Avviano i job, riservano e regolano i budget, forniscono credenziali con ambito limitato alle sandbox e salvano i checkpoint.
+I worker di Skynet non eseguono il tuo codice. Sono il piano di controllo. Avviano i job, riservano e regolano i budget, forniscono credenziali con ambito limitato alle sandbox e salvano ogni passo dell'esecuzione.
 
 Prima di avviare un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
 

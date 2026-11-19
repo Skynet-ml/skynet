@@ -1,7 +1,6 @@
 """Publish pinned engine contracts and managed execution availability.
 
-Every production proposer runs inside Vercel independently of whether a
-candidate is scored directly or executed by a task harness.
+Every production proposer runs inside Vercel.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from ....models.blackbox import (
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
-    BLACKBOX_MULTI_PART_ENGINES,
 )
 from .autoresearch import AutoResearchEngine
 from .autosaddler import AutoSaddlerEngine
@@ -27,7 +25,6 @@ from .meta_harness import MetaHarnessEngine
 from .protocol import Engine
 from .shinka_evolve import ShinkaEvolveEngine
 
-_AGENT_TARGET_REASON = "Meta-Harness optimizes a coding agent's harness; the job's target must be an agent."
 _NO_SANDBOX_REASON = "Agent sandboxes are not configured on this deployment."
 
 
@@ -36,12 +33,10 @@ class EngineCapabilities:
     """What the deployment and the job offer the engines.
 
     ``sandbox`` says whether agent sandboxes can be created here (with
-    ``sandbox_reason`` explaining why not); ``agent_target`` says whether
-    the job's versions drive a coding agent.
+    ``sandbox_reason`` explaining why not).
     """
 
     sandbox: bool = False
-    agent_target: bool = False
     sandbox_reason: str | None = None
     proposer_available: bool = False
     proposer_reason: str | None = None
@@ -60,21 +55,8 @@ class EngineSpec:
     factory: Callable[[], Engine] | None = None
     unavailable_reason: str | None = None
     requires_sandbox: bool = False
-    requires_agent_target: bool = False
     requires_proposer: bool = False
     checkpoint_recovery_supported: bool = False
-
-    @property
-    def supports_parts(self) -> bool:
-        """Return whether the engine accepts a multi-part starting point.
-
-        Derived from ``BLACKBOX_MULTI_PART_ENGINES`` so the catalog the UI reads
-        can never advertise parts the submit validator rejects.
-
-        Returns:
-            ``True`` when the engine is in the validator's multi-part set.
-        """
-        return self.id in BLACKBOX_MULTI_PART_ENGINES
 
     def unavailable_reason_for(self, caps: EngineCapabilities) -> str | None:
         """Explain why the engine cannot run for ``caps``, or return ``None`` when it can.
@@ -91,8 +73,6 @@ class EngineSpec:
             return caps.proposer_reason or "The upstream proposer runtime is not configured on this deployment."
         if self.requires_sandbox and not caps.sandbox:
             return caps.sandbox_reason or _NO_SANDBOX_REASON
-        if self.requires_agent_target and not caps.agent_target:
-            return _AGENT_TARGET_REASON
         return None
 
     def available_for(self, caps: EngineCapabilities) -> bool:
@@ -155,17 +135,16 @@ ENGINES: dict[str, EngineSpec] = {
 }
 
 
-def available_engine_ids(caps: EngineCapabilities = NO_CAPABILITIES, *, parts: bool = False) -> list[str]:
+def available_engine_ids(caps: EngineCapabilities = NO_CAPABILITIES) -> list[str]:
     """Return the ids of engines that can run for ``caps``, in catalog order.
 
     Args:
         caps: What the deployment and the job offer.
-        parts: When True, keep only engines that take a multi-part starting point.
 
     Returns:
         Runnable engine ids.
     """
-    return [spec.id for spec in ENGINES.values() if spec.available_for(caps) and (spec.supports_parts or not parts)]
+    return [spec.id for spec in ENGINES.values() if spec.available_for(caps)]
 
 
 def get_engine(engine_id: str, caps: EngineCapabilities = NO_CAPABILITIES) -> Engine:

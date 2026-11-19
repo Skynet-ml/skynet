@@ -70,17 +70,18 @@ import shlex
 import tarfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, TypeVar
 
 from ....billing.budgets import BudgetError
-from ....billing.operation_pricing import UnpricedOperationError
+from ....billing.operation_pricing import UnpricedOperationError, json_fingerprint
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....sandbox.box_lease import BoxLease
-from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, resolve_grants
-from ....sandbox.placement import VERCEL, Placement, gpu_type, network_grants
+from ....sandbox.capabilities import MODAL_GPU_TYPES, modal_gpu_name
+from ....sandbox.grants import METRIC_BOX_GRANTS, Grant, GrantError, HeaderRules, resolve_grants
+from ....sandbox.placement import MODAL, VERCEL, Placement, gpu_type, network_grants
 from ....sandbox.trees import (
     MAX_ARCHIVE_BYTES,
     BadArchiveError,
@@ -185,24 +186,46 @@ class RuntimeBoxSource:
     """Open a fresh box for each acquire and close it at release."""
 
     def __init__(
-        self, runtime: SandboxRuntime, spec: SandboxSpec, registry: Mapping[str, Mapping[str, str]] | None = None
+        self,
+        runtime: SandboxRuntime,
+        spec: SandboxSpec,
+        registry: HeaderRules | None = None,
+        *,
+        command_lifetime: Callable[[float], float] | None = None,
     ) -> None:
         """Bind the source to a runtime and the spec of its boxes.
 
         Args:
             runtime: Opens the boxes.
             spec: The box spec; the grants replace its network fields.
-            registry: Maps each capability host to the headers that the edge
-                injects for it; ``None`` holds no credential.
+            registry: Maps each capability host and path prefix to the headers that
+                the edge injects under it; ``None`` holds no credential.
+            command_lifetime: Gives the box lifetime for a command with its own
+                limit, in seconds; ``None`` keeps the spec's lifetime.
         """
         self._runtime = runtime
         self._spec = spec
         self._registry = registry or {}
+        self._command_lifetime = command_lifetime
 
     @property
-    def registry(self) -> Mapping[str, Mapping[str, str]]:
+    def registry(self) -> HeaderRules:
         """Return the capability registry that this source resolves grants against."""
         return self._registry
+
+    def for_command(self, timeout_seconds: float) -> RuntimeBoxSource:
+        """Return a source whose boxes live long enough for a command with its own limit.
+
+        Args:
+            timeout_seconds: The command's limit.
+
+        Returns:
+            A source with the lifetime that ``command_lifetime`` gives; this source when it has none.
+        """
+        if self._command_lifetime is None:
+            return self
+        spec = replace(self._spec, lifetime_seconds=self._command_lifetime(timeout_seconds))
+        return RuntimeBoxSource(self._runtime, spec, self._registry)
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
         """Open a new box whose network is the grant list.
@@ -215,8 +238,12 @@ class RuntimeBoxSource:
             The open box.
 
         Raises:
-            GrantError: When the grant list does not resolve.
+            GrantError: When the grant list does not resolve or asks for a GPU.
         """
+        gpu = gpu_type(grants)
+        if gpu is not None:
+            # Refused before any box opens: this source opens CPU boxes only, and a GPU step must not run without it.
+            raise GrantError(f"This box source cannot start a box with GPU type {gpu!r}; only the warm box lease can.")
         return self._runtime.open(resolve_grants(grants, self._registry).apply(self._spec))
 
     def release(self, box: SandboxSession, healthy: bool) -> None:
@@ -242,7 +269,7 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         self,
         runtimes: Mapping[str, SandboxRuntime],
         spec: SandboxSpec,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         **options: Any,
     ) -> None:
         """Bind the lease to one runtime for each provider and the spec of its boxes.
@@ -250,8 +277,8 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         Args:
             runtimes: Maps each provider name that placement can pick to the runtime that opens its boxes.
             spec: The box spec; the network grants replace its network fields.
-            registry: Maps each capability host to the headers that the edge
-                injects for it; ``None`` holds no credential.
+            registry: Maps each capability host and path prefix to the headers that
+                the edge injects under it; ``None`` holds no credential.
             **options: The :class:`BoxLease` options, such as ``vercel_cap`` and ``keep_warm``.
 
         Raises:
@@ -271,12 +298,12 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
             raise ValueError(f"The lease needs a runtime for each provider it can place on: {', '.join(missing)}.")
 
     @property
-    def registry(self) -> Mapping[str, Mapping[str, str]]:
+    def registry(self) -> HeaderRules:
         """Return the capability registry that this lease resolves grants against."""
         return self._registry
 
     def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
-        """Return the agent's warm box, or open a new one; refuse a GPU box or a denied grant first.
+        """Return the agent's warm box, or open a new one; refuse a GPU that cannot start or a denied grant first.
 
         Args:
             agent_id: The box key (``run_id:agent_id``).
@@ -286,13 +313,18 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
             The box.
 
         Raises:
-            GrantError: When the box needs a GPU, or the network grants do not resolve.
+            GrantError: When the GPU grants or the network grants do not resolve, Modal has no GPU of the
+                asked type, or no runtime here starts a Modal box with a GPU.
         """
-        # Both refusals come before the claim, so the agent keeps its warm box and no start is spent.
+        # These refusals can never succeed on a retry, so they come before the claim: the agent keeps
+        # its warm box and no start is spent, like a Cloudflare instance type checked before start.
         gpu = gpu_type(grants)
         if gpu is not None:
-            # The blackbox spec has no GPU field, so a runtime here would open the box without the GPU.
-            raise GrantError(f"No tree sandbox runtime opens a box with a {gpu} GPU.")
+            if modal_gpu_name(gpu) is None:
+                raise GrantError(f"Modal has no {gpu!r} GPU. Use one of: {', '.join(sorted(MODAL_GPU_TYPES))}.")
+            # Placement sends every GPU box to Modal (placement.choose).
+            if not getattr(self._runtimes.get(MODAL), "gpu_types", False):
+                raise GrantError(f"No runtime here starts a Modal box with GPU type {gpu!r}.")
         resolve_grants(network_grants(grants), self._registry)
         return super().acquire(agent_id, grants)
 
@@ -300,20 +332,49 @@ class RuntimeBoxLease(BoxLease[SandboxSession]):
         """Open a new box on the placed provider's runtime.
 
         Args:
-            placement: The provider of the box; :meth:`acquire` refuses a GPU first.
+            placement: The provider of the box and its GPU type, if any.
             grants: The box's grants.
 
         Returns:
             The open box.
 
         Raises:
-            GrantError: When the network grants do not resolve.
-            LookupError: When no runtime opens the placed provider's boxes.
+            Exception: The runtime's open error, raw. :meth:`acquire` and the constructor first refuse the
+                grants, GPUs and providers that no runtime here can open.
         """
-        runtime = self._runtimes.get(placement.provider)
-        if runtime is None:
-            raise LookupError(f"No runtime opens {placement.provider} boxes.")
-        return runtime.open(resolve_grants(network_grants(grants), self._registry).apply(self._spec))
+        runtime = self._runtimes[placement.provider]
+        spec = resolve_grants(network_grants(grants), self._registry).apply(self._spec)
+        # Placement sends a GPU box to Modal; a runtime that cannot start the GPU refuses the spec (SKY-804).
+        return runtime.open(replace(spec, gpu=placement.gpu))
+
+
+# A shorter value could be a common word, and replacing it would change unrelated output.
+_MIN_REDACTED_LEN = 8
+
+
+def _redacted(result: CommandResult, env: Mapping[str, str] | None) -> CommandResult:
+    """Replace each env value of 8 or more characters in a command's output with ``[redacted]``.
+
+    The step log keeps the output, and failure messages and run events copy its end, so a command that prints its
+    scoped model key must not put the key there.
+
+    Args:
+        result: The command's result.
+        env: The command's extra environment; ``None`` holds no secret.
+
+    Returns:
+        The result with clean output.
+    """
+    secrets = sorted(
+        {value for value in (env or {}).values() if len(value) >= _MIN_REDACTED_LEN}, key=len, reverse=True
+    )
+    if not secrets:
+        return result
+    stdout, stderr = result.stdout, result.stderr
+    for secret in secrets:
+        stdout = stdout.replace(secret, "[redacted]")
+        stderr = stderr.replace(secret, "[redacted]")
+    return replace(result, stdout=stdout, stderr=stderr)
 
 
 def _close_box(box: SandboxSession) -> None:
@@ -565,7 +626,7 @@ class TreeSandbox:
         candidates: BoxSource[SandboxSession],
         metrics: BoxSource[SandboxSession],
         *,
-        registry: Mapping[str, Mapping[str, str]] | None = None,
+        registry: HeaderRules | None = None,
         timeout_seconds: float = 600,
     ) -> None:
         """Bind the layer to its stores and box sources.
@@ -651,6 +712,8 @@ class TreeSandbox:
         grants: Sequence[Grant],
         *,
         refuse: Callable[[str], bool] | None = None,
+        timeout_seconds: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[CommandResult, str]:
         """Run one command in a candidate box over a tree.
 
@@ -660,6 +723,9 @@ class TreeSandbox:
             command: The shell command; it runs in the tree's folder.
             grants: The box's network grants.
             refuse: Tells, before the step commits, whether the tree after the command must not be kept.
+            timeout_seconds: The limit of this command; ``None`` keeps the sandbox's limit.
+            env: Extra environment for the command only; ``None`` adds none. Each value is a secret, so the
+                result's output holds ``[redacted]`` in place of each value of 8 or more characters.
 
         Returns:
             The command's result and the tree id after the command. A
@@ -678,6 +744,7 @@ class TreeSandbox:
         """
         grant_list_id = self._grant_list_id(step, grants)
         archive = tree_to_tar(self._trees, step.run_id, tree_id)
+        timeout = self._timeout if timeout_seconds is None else timeout_seconds
         # A fresh-box source closes every box at its release, so only another source needs the scans.
         fresh = isinstance(self._candidates, RuntimeBoxSource) or (
             isinstance(self._candidates, BoxLease) and not self._candidates.keeps_warm
@@ -696,7 +763,7 @@ class TreeSandbox:
             # Before the unpack, so nothing that the unpack starts can join the baseline.
             before = None if fresh else _processes(box)
             self._unpack(box, archive, TREE_DIR)
-            result = box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=self._timeout)
+            result = _redacted(box.run(f"cd {TREE_DIR} && {command}", timeout_seconds=timeout, env=env), env)
             new_tree_id = self._pack(box, step.run_id, TREE_DIR)
             if result.timed_out:
                 # The kill reaches only the command's process group, so a process outside it can live on.
@@ -706,7 +773,10 @@ class TreeSandbox:
             after = _processes(box)
             return (result, new_tree_id), before is not None and after is not None and after <= before
 
-        result, new_tree_id = self._in_box(self._candidates, step, grants, work)
+        source = self._candidates
+        if timeout_seconds is not None and isinstance(source, RuntimeBoxSource):
+            source = source.for_command(timeout_seconds)
+        result, new_tree_id = self._in_box(source, step, grants, work)
         if refuse is not None and refuse(new_tree_id):
             # The message names no path, so it does not show which path is refused.
             raise TreeRejectedError(step.step_id, "The command wrote a path that it may not write.")
@@ -801,16 +871,19 @@ class TreeSandbox:
             grants: The grants.
 
         Returns:
-            The grant-list id the step records.
+            The grant-list id the step records; it names the GPU type when a grant asks for one.
 
         Raises:
             GrantDeniedError: When the grants do not resolve.
         """
         try:
             # A gpu:<type> grant places the box; it is not a network grant.
-            return resolve_grants(network_grants(grants), self._registry).grant_list_id
+            network_id = resolve_grants(network_grants(grants), self._registry).grant_list_id
+            gpu = gpu_type(grants)
         except GrantError as error:
             raise GrantDeniedError(step.step_id, str(error)) from error
+        # The step log is the record, so it shows the hardware; a CPU step keeps its network-only id.
+        return network_id if gpu is None else json_fingerprint([network_id, f"gpu:{gpu}"])
 
     def _in_box(
         self,

@@ -114,6 +114,14 @@ class FakeJobStore:
         """Return a ``{id: status}`` mapping for the IDs that exist."""
         return {oid: self._jobs[oid]["status"] for oid in optimization_ids if oid in self._jobs}
 
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Return only the ``target`` and ``judge`` members of each stored payload, ``None`` without one."""
+        found = {oid: self._jobs[oid].get("payload") for oid in optimization_ids if oid in self._jobs}
+        return {
+            oid: None if payload is None else {key: payload[key] for key in ("target", "judge") if key in payload}
+            for oid, payload in found.items()
+        }
+
     def delete_jobs(self, optimization_ids: list[str]) -> int:
         """Bulk-delete jobs and return the number of rows actually removed."""
         removed = 0

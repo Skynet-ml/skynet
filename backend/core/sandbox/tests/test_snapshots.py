@@ -112,7 +112,7 @@ def test_lock_key_is_a_signed_bigint_scoped_to_the_run() -> None:
 
 @pytest.mark.parametrize(
     "fields",
-    [{"env": {"API_KEY": "fixture"}}, {"inject_headers": {"api.example.com": {"Authorization": "fixture"}}}],
+    [{"env": {"API_KEY": "fixture"}}, {"inject_headers": {"api.example.com": {"/": {"Authorization": "fixture"}}}}],
 )
 def test_box_with_secrets_is_refused(fields: dict[str, Any]) -> None:
     """Check that env values and injected headers block a snapshot.

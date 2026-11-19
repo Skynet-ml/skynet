@@ -19,7 +19,7 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,16 +66,17 @@ from ..models.blackbox import (
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_HARNESS_CUSTOM,
-    FILE_PROPOSER_REFUSED_ENGINES,
     HOST_CLI_AUTO_KEY,
+    BlackboxProposer,
 )
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
-from ..service_gateway.optimization.blackbox import runner, sandbox_log
+from ..service_gateway.optimization.blackbox import loop_tools, runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import RUN_FAILED_STATUS, STATUS_KEY, is_metric_error
+from ..service_gateway.optimization.blackbox.registry import ENGINES
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
@@ -438,7 +439,10 @@ def stage_repository(
         if environment.proposer_entry is not None and environment.constraints.proposer.mcp_servers:
             raise ConstraintsError(mcp_unsupported(BLACKBOX_HARNESS_CUSTOM), section="proposer", key="mcp")
         if environment.proposer_entry is not None:
-            environment = _without_refused_engines(environment, result.get("strategy") or {})
+            _refuse_other_runs(result.get("strategy") or {})
+            _refuse_engine_loop_settings(environment, result)
+        else:
+            _refuse_unsupported_proposer(environment, result)
         record = environment.record(
             repository=repo["repository"],
             commit=commit,
@@ -544,6 +548,12 @@ def stage_repository(
         "outcome": record["outcome"],
         "file_proposer": environment.proposer_entry is not None,
         "proposer_setup": list(environment.proposer_setup or ()),
+        # Names, addresses and a has-headers flag only: an engine that calls the servers from a box grants their
+        # hosts, and the provider edge adds the headers, so their secrets stay out of the run's options (SKY-830).
+        "proposer_mcp": [
+            {"name": server.name, "url": server.url, "has_headers": bool(server.headers)}
+            for server in (environment.constraints.proposer.mcp_servers if environment.constraints is not None else ())
+        ],
     }
     return result, StagedRepository(
         snapshot=snapshot,
@@ -590,50 +600,131 @@ def stage_repository(
     )
 
 
-# The reason each engine in FILE_PROPOSER_REFUSED_ENGINES gives a single run (SKY-753).
-_FILE_PROPOSER_REFUSALS = {
-    BLACKBOX_ENGINE_AUTORESEARCH: "AutoResearch cannot use the [proposer] entry command yet.",
-    BLACKBOX_ENGINE_META_HARNESS: "Meta-Harness cannot use the [proposer] entry command yet.",
-    BLACKBOX_ENGINE_SHINKA_EVOLVE: "ShinkaEvolve never runs the [proposer] entry command.",
-}
+# The engines that run [proposer] entry in the worker engine loop (SKY-816).
+_ENGINE_LOOP_ENGINES = frozenset({BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS})
 
 
-def _without_refused_engines(environment: RepoEnvironment, strategy: Mapping[str, Any]) -> RepoEnvironment:
-    """Refuse an engine that cannot use ``[proposer] entry``, and say Auto leaves its lanes out.
+def runs_proposer_entry(strategy: Mapping[str, Any]) -> bool:
+    """Tell whether a run is a single AutoResearch or Meta-Harness run, which runs the file's command.
 
-    ShinkaEvolve writes versions with its own editor and never runs the file's
-    command. AutoResearch and Meta-Harness call the proposer from their lab
-    folder and read their own protocol files there, so the files the command
-    changes do not become their versions (SKY-753; Gilad, 2026-11-18).
+    Every run is on the engine loop since the cutover (SKY-728), but only these single runs give the
+    command to the engine's tool loop.
 
     Args:
-        environment: The run's rules, with the file's proposer command.
         strategy: The stored run request's ``strategy``.
 
     Returns:
-        The environment, with a note for an Auto run.
+        True when the engine loop runs the file's command for this run (SKY-816).
+    """
+    return strategy.get("mode", "auto") == "single" and strategy.get("engine") in _ENGINE_LOOP_ENGINES
+
+
+def _refuse_engine_loop_settings(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:
+    """Refuse the settings that the engine loop cannot give ``[proposer] entry``, before the engine starts.
+
+    AutoResearch and Meta-Harness run the file's command in the engine loop (SKY-816). That loop gives it no
+    relay for ``[proposer] services`` and no reasoning effort, so the engine would fail at start.
+
+    Args:
+        environment: The run's rules, with the file's proposer command.
+        payload: The stored run request.
 
     Raises:
-        ConstraintsError: When the run is a single run of a refused engine.
+        ConstraintsError: When the run has one of the settings.
     """
-    if strategy.get("mode", "auto") == "single":
-        engine = strategy.get("engine")
-        if engine in FILE_PROPOSER_REFUSED_ENGINES:
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {_FILE_PROPOSER_REFUSALS[engine]} Remove [proposer] entry, or choose another"
-                " engine.",
-                section="proposer",
-                key="entry",
-            )
-        return environment
-    return replace(
-        environment,
-        notes=(
-            *environment.notes,
-            "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-            " proposer command in the contract file.",
-        ),
+    fix = "Remove it, or remove [proposer] entry."
+    if environment.constraints is not None and environment.constraints.proposer.services:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give [proposer] services to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="services",
+        )
+    # The stored payload is saved by alias, so the model settings are under ``reflection_model_config``.
+    effort = ((payload.get("reflection_model_config") or {}).get("extra") or {}).get("reasoning_effort")
+    if effort:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: AutoResearch and Meta-Harness cannot give the reasoning_effort setting to the"
+            f" [proposer] entry command. {fix}",
+            section="proposer",
+            key="entry",
+        )
+
+
+def _refuse_other_runs(strategy: Mapping[str, Any]) -> None:
+    """Refuse ``[proposer] entry`` for every run but a single AutoResearch or Meta-Harness run.
+
+    Only those two loop engines give the file's command to their tool loop (SKY-816). GEPA, Best-of-N and
+    AutoSaddler ran it in the native box, which the cutover removed (SKY-728); on the loop they would use the
+    built-in proposer in silence. ShinkaEvolve never runs it (SKY-753), and an Auto run would keep only lanes
+    that ignore it. The check refuses the run here, before a paid box starts (SKY-815). SKY-828 lifts it.
+
+    Args:
+        strategy: The stored run request's ``strategy``.
+
+    Raises:
+        ConstraintsError: When the run is not a single AutoResearch or Meta-Harness run.
+    """
+    if not runs_proposer_entry(strategy):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: Only a single AutoResearch or Meta-Harness run can use the [proposer] entry"
+            " command yet. Remove [proposer] entry, or choose one of those engines.",
+            section="proposer",
+            key="entry",
+        )
+
+
+def _refuse_unsupported_proposer(environment: RepoEnvironment, payload: Mapping[str, Any]) -> None:
+    """Refuse the proposer settings that the run's engine does not run on the engine loop, before paid work.
+
+    Every engine runs on the worker engine loop since the cutover (SKY-728), and the built-in proposer of most
+    engines reads few of the proposer settings, so the run would drop the others in silence. The rules are the
+    engines' own (``loop_tools.unsupported_proposer_settings``). A host CLI that local mode filled in is not the
+    user's choice, so it is not refused here.
+
+    Args:
+        environment: The run's rules, with no ``[proposer] entry`` command.
+        payload: The stored run request.
+
+    Raises:
+        ConstraintsError: When the run names a proposer setting that its engine does not run, or gives a
+            ShinkaEvolve run a [proposer] mcp server with headers.
+    """
+    strategy = payload.get("strategy") or {}
+    engine = strategy.get("engine") if strategy.get("mode", "auto") == "single" else None
+    stored = dict(payload.get("proposer") or {})
+    if stored.get(HOST_CLI_AUTO_KEY):
+        stored["host_cli"] = None
+    proposer_role = environment.constraints.proposer if environment.constraints is not None else None
+    # The stored payload is saved by alias, so the model settings are under ``reflection_model_config``.
+    effort = ((payload.get("reflection_model_config") or {}).get("extra") or {}).get("reasoning_effort")
+    refused = loop_tools.unsupported_proposer_settings(
+        BlackboxProposer.model_validate(stored),
+        supports=loop_tools.proposer_support(engine, (payload.get("shinka") or {}).get("editor")),
+        mcp_servers=bool(proposer_role is not None and proposer_role.mcp_servers),
+        services=bool(proposer_role is not None and proposer_role.services),
+        reasoning_effort=bool(effort),
     )
+    if refused:
+        name = ENGINES[engine].label if engine in ENGINES else "Auto"
+        raise ConstraintsError(
+            f"{name} runs only its built-in proposer, so it cannot apply these proposer settings: {', '.join(refused)}."
+            " Remove them, or choose another engine.",
+            section="proposer",
+            key=refused[0],
+        )
+    # A protected box cannot add the headers, and the loop has no MCP relay yet, so the run would fail at its first
+    # MCP call after paid work starts. An Auto run already refuses every [proposer] mcp server. SKY-840 (an outbound
+    # proxy that adds the headers) lifts this refusal.
+    headed = [server.name for server in proposer_role.mcp_servers if server.headers] if proposer_role else []
+    if engine == BLACKBOX_ENGINE_SHINKA_EVOLVE and headed:
+        raise ConstraintsError(
+            "ShinkaEvolve does not support [proposer] mcp servers with headers yet: "
+            f"{', '.join(headed)}. Remove these servers or their headers."
+            " MCP servers with no headers still work.",
+            section="proposer",
+            key="mcp",
+        )
 
 
 def _names_proposer(payload: Mapping[str, Any]) -> bool:

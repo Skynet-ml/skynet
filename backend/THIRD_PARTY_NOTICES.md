@@ -34,10 +34,12 @@ license files in their `*.dist-info/` directories inside the image.
 ShinkaEvolve (`shinka-evolve==0.0.7`, Apache-2.0, Copyright Sakana AI) is
 installed unmodified from PyPI, with the pinned dependencies in
 `core/service_gateway/optimization/blackbox/shinka_requirements.txt`, into its
-own virtual environment at `/opt/shinka/venv` only in sandbox images built with
-`--build-arg INCLUDE_SHINKA_EVOLVE=1` (off by default, so backend/worker
-images do not contain it); outside such an image, a run installs it into
-a private virtual environment inside the run's sandbox.
+own virtual environment at `/opt/shinka/venv` only in images built with
+`--build-arg INCLUDE_SHINKA_EVOLVE=1`. The switch is off by default. The
+sandbox image and the deployed backend image, which the API and the worker
+share, turn it on, because the worker runs the engine (SKY-728). A local
+image built without the switch does not contain it, and a ShinkaEvolve run
+on such a worker fails.
 When bundled, each package's license text is in its `dist-info` folder. Most are MIT, BSD or
 Apache-2.0; certifi and tqdm are MPL-2.0, and `Levenshtein` and
 `python-Levenshtein` 0.27.5 are GPL-2.0-or-later

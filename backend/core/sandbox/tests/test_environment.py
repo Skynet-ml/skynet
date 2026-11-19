@@ -258,8 +258,8 @@ def test_rejects_a_lifetime_that_is_not_finite_and_positive(lifetime: object) ->
     ("spec_fields", "message"),
     [
         ({"network_disabled": True, "allowed_hosts": ("a.example",)}, "no network"),
-        ({"network_disabled": True, "inject_headers": {"a.example": {"x": "1"}}}, "no network"),
-        ({"allowed_hosts": ("a.example",), "inject_headers": {"b.example": {"x": "1"}}}, "only for hosts"),
+        ({"network_disabled": True, "inject_headers": {"a.example": {"/": {"x": "1"}}}}, "no network"),
+        ({"allowed_hosts": ("a.example",), "inject_headers": {"b.example": {"/": {"x": "1"}}}}, "only for hosts"),
     ],
 )
 def test_rejects_contradictory_network_specs(spec_fields: dict, message: str) -> None:
@@ -270,7 +270,9 @@ def test_rejects_contradictory_network_specs(spec_fields: dict, message: str) ->
 
 def test_open_egress_allows_header_injection() -> None:
     """Accept header injection when an empty allowlist leaves egress open."""
-    validate_spec(SandboxSpec(lifetime_seconds=60, inject_headers={"a.example": {"x": "1"}}), VERCEL_CAPABILITIES)
+    validate_spec(
+        SandboxSpec(lifetime_seconds=60, inject_headers={"a.example": {"/": {"x": "1"}}}), VERCEL_CAPABILITIES
+    )
 
 
 def test_rejects_unsupported_network_features() -> None:
@@ -278,7 +280,9 @@ def test_rejects_unsupported_network_features() -> None:
     caps = EnvironmentCapabilities(name="plain")
     with pytest.raises(SandboxSpecError, match="inject egress headers"):
         validate_spec(
-            SandboxSpec(lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"x": "1"}}),
+            SandboxSpec(
+                lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"/": {"x": "1"}}}
+            ),
             caps,
         )
     with pytest.raises(SandboxSpecError, match="deny_all"):
@@ -492,7 +496,9 @@ async def test_set_network_policy_applies_once_and_skips_no_change() -> None:
 
 async def test_set_network_policy_keeps_header_injection_hosts() -> None:
     """Reject an allowlist that drops a host which receives injected headers."""
-    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"x": "1"}})
+    spec = SandboxSpec(
+        lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"/": {"x": "1"}}}
+    )
     async with InMemorySandbox(spec) as env:
         with pytest.raises(SandboxSpecError, match="injected headers"):
             await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example",)))
@@ -502,7 +508,9 @@ async def test_set_network_policy_keeps_header_injection_hosts() -> None:
 
 async def test_set_network_policy_allows_open_egress_with_header_injection() -> None:
     """Accept an open-egress policy on a sandbox that injects headers."""
-    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"x": "1"}})
+    spec = SandboxSpec(
+        lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"/": {"x": "1"}}}
+    )
     async with InMemorySandbox(spec) as env:
         await env.set_network_policy(NetworkPolicy())
         assert env.network_policy == NetworkPolicy()

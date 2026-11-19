@@ -22,7 +22,6 @@ from ..sandbox import (
     docker_sandbox_unavailable_reason,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
-    scorer_runtime_from_settings,
 )
 
 _IMAGE = "sha256:" + "a" * 64
@@ -199,7 +198,6 @@ def test_local_mode_settings_build_docker_and_never_vercel(
         runtime = sandbox_runtime_from_settings(settings)
         assert isinstance(runtime, AsyncBridgeRuntime)
         assert runtime.provider == "docker"
-        assert isinstance(scorer_runtime_from_settings(settings), AsyncBridgeRuntime)
         assert sandbox_unavailable_reason(settings) is None
     finally:
         _RUNTIME_OVERRIDE.reset(token)

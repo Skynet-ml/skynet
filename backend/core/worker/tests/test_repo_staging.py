@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -46,15 +45,13 @@ from core.models.blackbox import (
     BLACKBOX_HARNESS_CUSTOM,
     HOST_CLI_AUTO_KEY,
     BlackboxProposer,
-    BlackboxRunRequest,
-    BlackboxTarget,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import harness_bridge, runner
-from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
+from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
+from core.service_gateway.optimization.blackbox.registry import ENGINES
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_REQUIRED,
     ConstraintsError,
@@ -392,95 +389,6 @@ def test_staging_refuses_a_file_that_asks_for_more(
     assert not workdirs[0].exists()
 
 
-# The fake proposer writes the task file path, the task and its own arguments
-# where a version change would go; its setup appends one line each time it runs.
-_FAKE_AGENT = """
-import os, pathlib, sys
-pathlib.Path("src").mkdir(exist_ok=True)
-task = pathlib.Path(os.environ["ASCENT_TASK"])
-pathlib.Path("src/proposed.txt").write_text("\\n".join([str(task), task.read_text(), *sys.argv[1:]]))
-"""
-_FAKE_SETUP = 'import pathlib; open(pathlib.Path("setup-ran"), "a").write("ran\\n")'
-
-
-def test_a_run_without_its_own_proposer_runs_the_files_proposer_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A request with no proposer runs the file's setup once in the checkout, then its entry (SKY-753).
-
-    The run is protected, as every hosted run is: its bootstrap installs
-    nothing, so the setup reaches the guest through the repository payload.
-
-    Args:
-        tmp_path: The checkout and the session folder.
-        monkeypatch: Pytest fixture for the fake fetch and the relay key.
-    """
-    files = {
-        "optimize.toml": (
-            'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n'
-            f'setup = [{json.dumps(sys.executable)}, "-c", {json.dumps(_FAKE_SETUP)}]\n'
-            f'entry = [{json.dumps(sys.executable)}, "agent/fake.py", "{{model}}"]\n'
-        ),
-        "agent/fake.py": _FAKE_AGENT,
-    }
-    payload = BlackboxRunRequest.model_validate(
-        {
-            **_payload("c" * 40),
-            "objective": "o",
-            "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
-            "cases": [{"input": "x"}],
-            "reflection_model_config": {"name": "openai/reflect"},
-        }
-    ).model_dump(mode="json", by_alias=True)
-    assert "harness" not in payload["proposer"]
-
-    staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
-    staged.cleanup()
-
-    proposer = BlackboxRunRequest.model_validate(staged_payload).proposer
-    snapshot = staged_payload[repo_staging.REPO_SNAPSHOT_KEY]
-    assert proposer.harness == BLACKBOX_HARNESS_CUSTOM
-    assert proposer.install_command is None
-    assert staged_payload["target"]["repo"]["environment"]["notes"] == [
-        f"The run uses the proposer command in the contract file: {sys.executable} agent/fake.py '{{model}}'",
-        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-        " proposer command in the contract file.",
-    ]
-    # The launch as native_runtime builds it for a protected run.
-    launch = build_launch(
-        BlackboxTarget(
-            kind="agent",
-            harness=proposer.harness,
-            model="openai/task",
-            install_command=proposer.install_command,
-            run_command=proposer.run_command,
-        ),
-        GatewayConfig(url="https://gw.example/v1", api_key=harness_bridge.KEY_TOKEN),
-        protected=True,
-        exact_commands=snapshot["file_proposer"],
-    )
-    checkout = tmp_path / "repo-checkout"
-    (checkout / "agent").mkdir(parents=True)
-    (checkout / "agent/fake.py").write_text(_FAKE_AGENT)
-    harness_bridge.run_setup(snapshot["proposer_setup"], checkout)
-    monkeypatch.setenv(harness_bridge.KEY_ENV, "k")
-    outcome = harness_bridge.run_session(
-        launch_payload(launch),
-        workspace=checkout,
-        prompt="Make it faster.",
-        model="openai/task",
-        session_dir=tmp_path / "session",
-    )
-
-    assert outcome.returncode == 0, outcome.stderr
-    assert (checkout / "setup-ran").read_text() == "ran\n"
-    task_file, task, *arguments = (checkout / "src/proposed.txt").read_text().split("\n")
-    assert Path(task_file).is_absolute()
-    assert Path(task_file).is_file()
-    assert task == "Make it faster."
-    assert arguments == ["{model}"]
-
-
 def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.MonkeyPatch) -> None:
     """A request that names a proposer keeps it, and the run record notes the replacement.
 
@@ -488,12 +396,12 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
         monkeypatch: Pytest fixture for the fake fetch.
     """
     files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
-    payload = {**_payload("c" * 40), "proposer": {"harness": "pi"}}
+    payload = {**_payload("c" * 40), "proposer": {"harness": "codex"}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
     staged.cleanup()
 
-    assert staged_payload["proposer"] == {"harness": "pi"}
+    assert staged_payload["proposer"] == {"harness": "codex"}
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run's own proposer replaces the one in the contract file."
     ]
@@ -518,10 +426,10 @@ def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_defa
 
 
 @pytest.mark.parametrize("proposer", [{"run_command": "my-agent"}, {"install_command": "npm ci"}])
-def test_a_run_command_or_install_command_is_the_runs_own_proposer(
+def test_a_run_command_or_install_command_fails_the_setup_check(
     proposer: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A request with its own run or install command but no harness keeps it over the file's command.
+    """Refuse a request's own run or install command: the engine loop runs only built-in proposers (SKY-728).
 
     Args:
         proposer: The request's proposer, without a harness.
@@ -529,59 +437,63 @@ def test_a_run_command_or_install_command_is_the_runs_own_proposer(
     """
     files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
-    staged_payload, staged = _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
-    staged.cleanup()
+    with pytest.raises(ConstraintsError, match="built-in proposer") as caught:
+        _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
 
-    assert staged_payload["proposer"] == proposer
-    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
+    assert caught.value.key == next(iter(proposer))
 
+
+# The one engine-loop proposer that reads [proposer] mcp (SKY-728).
+_SHINKA_AGENT = {"strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}, "shinka": {"editor": "agent"}}
 
 _ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
 @pytest.mark.parametrize(
-    ("engine", "message"),
+    "strategy",
     [
-        (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
-        (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
-        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve never runs the [proposer] entry command."),
+        {"mode": "single", "engine": "gepa"},
+        {"mode": "single", "engine": "best_of_n"},
+        {"mode": "single", "engine": "autosaddler"},
+        {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE},
+        {"mode": "auto"},
     ],
 )
-def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(
-    engine: str, message: str, monkeypatch: pytest.MonkeyPatch
+def test_a_run_that_cannot_use_a_files_proposer_fails_the_setup_check(
+    strategy: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A single run of a refused engine names ``[proposer] entry`` and the engine (SKY-753).
+    """Only a single AutoResearch or Meta-Harness run on the engine loop runs the file's command (SKY-728).
 
     Args:
-        engine: An engine that cannot use the file's proposer command.
-        message: The reason the setup check gives for it.
+        strategy: A run strategy that cannot use the file's proposer command.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}}
+    payload = {**_payload("c" * 40), "strategy": strategy}
 
-    with pytest.raises(ConstraintsError, match=re.escape(message)) as caught:
+    with pytest.raises(ConstraintsError, match=re.escape("Only a single AutoResearch or Meta-Harness run")) as caught:
         _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     assert (caught.value.section, caught.value.key) == ("proposer", "entry")
 
 
-def test_an_auto_run_with_a_files_proposer_notes_the_lanes_it_leaves_out(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("engine", [BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS])
+def test_a_single_run_on_the_engine_loop_with_a_files_proposer_passes_the_setup_check(
+    engine: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An Auto run uses the file's command, and its record says why it has fewer lanes (SKY-753).
+    """The engine loop runs the file's command for AutoResearch and Meta-Harness, so the check passes (SKY-816).
 
     Args:
+        engine: An engine that runs the file's command.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    payload = {**_payload("c" * 40), "strategy": {"mode": "auto"}}
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}}
 
     staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     staged.cleanup()
 
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is True
+    assert staged_payload["proposer"]["run_command"] == "node agent.js"
     assert staged_payload["target"]["repo"]["environment"]["notes"] == [
         "The run uses the proposer command in the contract file: node agent.js",
-        "Auto leaves out the AutoResearch, Meta-Harness and ShinkaEvolve lanes, because they cannot use the"
-        " proposer command in the contract file.",
     ]
 
 
@@ -596,7 +508,11 @@ def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypat
     proposer.model_fields_set.discard("host_cli")
     stored = proposer.model_dump(mode="json")
     assert stored[HOST_CLI_AUTO_KEY] is True
-    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": "gepa"}, "proposer": stored}
+    payload = {
+        **_payload("c" * 40),
+        "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH},
+        "proposer": stored,
+    }
 
     staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     staged.cleanup()
@@ -607,19 +523,234 @@ def test_a_host_cli_that_local_mode_filled_in_keeps_the_files_proposer(monkeypat
     assert HOST_CLI_AUTO_KEY not in staged_payload["proposer"]
 
 
-def test_a_host_cli_the_client_picked_replaces_the_files_proposer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A host CLI in the request, with no marker, is the run's own proposer (SKY-753).
+def test_a_host_cli_the_client_picked_fails_the_setup_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a host CLI in the request, with no marker: the engine loop runs no host CLI (SKY-753, SKY-728).
 
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
     payload = {**_payload("c" * 40), "proposer": {"host_cli": "codex"}}
 
-    staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+    with pytest.raises(ConstraintsError, match="host_cli") as caught:
+        _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "host_cli")
+
+
+_RUN_ONLY = 'version = 1\n[run]\nentry = "run.py:main"\n'
+_PROPOSER_MCP = {
+    "optimize.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
+    "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+}
+_PROPOSER_SERVICES = {
+    "optimize.toml": _RUN_ONLY
+    + '[proposer]\nservices = ["maps"]\n[services.maps]\nurl = "https://api.example.com/v1"\n'
+}
+_MODEL_ONLY_REFUSALS = [
+    ({"harness": "pi"}, {}, "harness"),
+    ({"install_command": "npm ci"}, {}, "install_command"),
+    ({"host_cli": "codex"}, {}, "host_cli"),
+    ({"max_tool_calls": 5}, {}, "max_tool_calls"),
+    ({}, _PROPOSER_MCP, "mcp"),
+    ({}, _PROPOSER_SERVICES, "services"),
+]
+
+
+@pytest.mark.parametrize("engine", ["gepa", "best_of_n", "autosaddler", BLACKBOX_ENGINE_SHINKA_EVOLVE])
+@pytest.mark.parametrize(("proposer", "files", "setting"), _MODEL_ONLY_REFUSALS)
+def test_an_engine_with_a_model_only_proposer_refuses_each_tool_setting_at_staging(
+    engine: str, proposer: dict[str, Any], files: dict[str, str], setting: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse every proposer setting that a single-call proposer does not run, before paid work (SKY-728).
+
+    Args:
+        engine: A single engine whose built-in proposer makes model calls only.
+        proposer: The request's proposer settings.
+        files: The fetched tree, or the default tree when empty.
+        setting: The name that the refusal must give.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}, "proposer": proposer}
+
+    with pytest.raises(ConstraintsError, match=f"{ENGINES[engine].label} runs only its built-in proposer") as caught:
+        _stage_with(files or {"optimize.toml": _RUN_ONLY}, monkeypatch, payload=payload)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", setting)
+
+
+@pytest.mark.parametrize("engine", ["gepa", "best_of_n", "autosaddler"])
+def test_an_engine_with_a_model_only_proposer_applies_the_reasoning_effort(
+    engine: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stage a reasoning effort and the default tool budget, which the loop's model calls apply (SKY-829).
+
+    Args:
+        engine: A single engine whose built-in proposer makes model calls only.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {
+        **_payload("c" * 40),
+        "strategy": {"mode": "single", "engine": engine},
+        "proposer": {"max_tool_calls": BlackboxProposer().max_tool_calls},
+        "reflection_model_config": {"name": "vendor/m", "extra": {"reasoning_effort": "high"}},
+    }
+
+    _, staged = _stage_with({"optimize.toml": _RUN_ONLY}, monkeypatch, payload=payload)
     staged.cleanup()
 
-    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["file_proposer"] is False
-    assert staged_payload["proposer"] == {"host_cli": "codex"}
+
+def test_the_shinka_agent_editor_refuses_services_but_runs_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stage [proposer] mcp for a ShinkaEvolve agent run, and refuse its [proposer] services (SKY-728).
+
+    Args:
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    _, staged = _stage_with(_PROPOSER_MCP, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
+    staged.cleanup()
+
+    with pytest.raises(ConstraintsError, match="ShinkaEvolve runs only its built-in proposer") as caught:
+        _stage_with(_PROPOSER_SERVICES, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
+
+    assert caught.value.key == "services"
+
+
+_PROPOSER_HEADED_MCP = {
+    "optimize.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
+    "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
+    ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}',
+}
+
+
+@pytest.mark.parametrize(
+    ("strategy", "message"),
+    [
+        (_SHINKA_AGENT, "^ShinkaEvolve does not support \\[proposer\\] mcp servers with headers yet: team\\."),
+        ({"strategy": {"mode": "auto"}}, "^Auto runs only its built-in proposer"),
+    ],
+)
+def test_a_headed_proposer_mcp_server_fails_the_setup_check(
+    strategy: dict[str, Any], message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a [proposer] mcp server with headers before paid work, for ShinkaEvolve and Auto (SKY-728, SKY-840).
+
+    Args:
+        strategy: The run's strategy and ShinkaEvolve settings.
+        message: The start of the refusal.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    with pytest.raises(ConstraintsError, match=message) as caught:
+        _stage_with(_PROPOSER_HEADED_MCP, monkeypatch, {**_payload("c" * 40), **strategy})
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "mcp")
+
+
+@pytest.mark.parametrize("strategy", [{"mode": "single", "engine": "autoresearch"}, {"mode": "auto"}])
+def test_a_tool_loop_proposer_runs_its_tool_budget_and_services(
+    strategy: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stage a tool budget and [proposer] services for the AutoResearch tool loop, which Auto also runs (SKY-728).
+
+    Args:
+        strategy: A run strategy whose proposer is the tool loop.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), "strategy": strategy, "proposer": {"max_tool_calls": 5}}
+
+    _, staged = _stage_with(_PROPOSER_SERVICES, monkeypatch, payload=payload)
+    staged.cleanup()
+
+    with pytest.raises(ConstraintsError, match="cannot apply these proposer settings: harness") as caught:
+        _stage_with(_PROPOSER_SERVICES, monkeypatch, {**payload, "proposer": {"harness": "pi"}})
+
+    assert caught.value.key == "harness"
+
+
+_TOOL_LOOP_RUNS = [
+    ({"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH}, "AutoResearch"),
+    ({"mode": "single", "engine": BLACKBOX_ENGINE_META_HARNESS}, "Meta-Harness"),
+    ({"mode": "auto"}, "Auto"),
+]
+
+
+@pytest.mark.parametrize(("strategy", "label"), _TOOL_LOOP_RUNS)
+@pytest.mark.parametrize(
+    ("files", "extra", "setting"),
+    [(_PROPOSER_MCP, {}, "mcp"), ({"optimize.toml": _RUN_ONLY}, {"reasoning_effort": "high"}, "reasoning_effort")],
+)
+def test_a_tool_loop_proposer_refuses_mcp_and_a_reasoning_effort_at_staging(
+    strategy: dict[str, str],
+    label: str,
+    files: dict[str, str],
+    extra: dict[str, str],
+    setting: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse [proposer] mcp and a reasoning effort for AutoResearch, Meta-Harness and Auto (SKY-728).
+
+    Args:
+        strategy: A run strategy whose proposer is the tool loop.
+        label: The engine name that the message gives.
+        files: The fetched tree.
+        extra: The reflection model's extra settings.
+        setting: The name that the refusal must give.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {
+        **_payload("c" * 40),
+        "strategy": strategy,
+        "reflection_model_config": {"name": "vendor/m", "extra": extra},
+    }
+
+    with pytest.raises(ConstraintsError, match=f"^{label} runs only its built-in proposer") as caught:
+        _stage_with(files, monkeypatch, payload=payload)
+
+    assert (caught.value.section, caught.value.key) == ("proposer", setting)
+
+
+@pytest.mark.parametrize(
+    ("setting", "default", "choice", "runs_it", "drops_it"),
+    [
+        ("max_candidates_per_iter", 3, 5, BLACKBOX_ENGINE_META_HARNESS, BLACKBOX_ENGINE_AUTORESEARCH),
+        ("ralph", True, False, BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS),
+        ("max_no_eval_seconds", 1_800, 600, BLACKBOX_ENGINE_AUTORESEARCH, "gepa"),
+    ],
+)
+def test_an_engine_refuses_a_loop_setting_that_only_another_engine_reads(
+    setting: str, default: Any, choice: Any, runs_it: str, drops_it: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a non-default loop setting that the engine drops, and keep the wizard's default (SKY-728).
+
+    Args:
+        setting: The proposer setting.
+        default: The value that the submit wizard sends.
+        choice: Another value.
+        runs_it: A single engine that reads the setting.
+        drops_it: A single engine that does not read it.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    files = {"optimize.toml": _RUN_ONLY}
+
+    def payload(engine: str | None, value: Any) -> dict[str, Any]:
+        """Build a run request with the setting.
+
+        Args:
+            engine: The single engine, or ``None`` for Auto.
+            value: The setting's value.
+
+        Returns:
+            The payload.
+        """
+        strategy = {"mode": "auto"} if engine is None else {"mode": "single", "engine": engine}
+        return {**_payload("c" * 40), "strategy": strategy, "proposer": {setting: value}}
+
+    for engine, value in ((drops_it, default), (runs_it, choice), (None, choice)):
+        _, staged = _stage_with(files, monkeypatch, payload=payload(engine, value))
+        staged.cleanup()
+
+    with pytest.raises(ConstraintsError, match=f"^{ENGINES[drops_it].label} runs only its built-in proposer") as caught:
+        _stage_with(files, monkeypatch, payload=payload(drops_it, choice))
+
+    assert (caught.value.section, caught.value.key) == ("proposer", setting)
 
 
 def test_the_files_proposer_clears_an_empty_install_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -630,7 +761,11 @@ def test_the_files_proposer_clears_an_empty_install_command(monkeypatch: pytest.
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    payload = {**_payload("c" * 40), "proposer": {"install_command": ""}}
+    payload = {
+        **_payload("c" * 40),
+        "strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_AUTORESEARCH},
+        "proposer": {"install_command": ""},
+    }
 
     staged_payload, staged = _stage_with(_ENTRY_ONLY, monkeypatch, payload=payload)
     staged.cleanup()
@@ -1057,6 +1192,29 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
     staged.cleanup()
 
 
+def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830)."""
+    files = {
+        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
+        "agent.mcp.json": (
+            '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
+            ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}'
+        ),
+    }
+    # No engine takes a headed [proposer] mcp server until SKY-840, but the staged secrets must stay safe then too.
+    monkeypatch.setattr(repo_staging, "_refuse_unsupported_proposer", lambda *_: None)
+
+    result, staged = _stage_with(files, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
+
+    servers = result[repo_staging.REPO_SNAPSHOT_KEY]["proposer_mcp"]
+    assert sorted(servers, key=lambda server: server["name"]) == [
+        {"name": "team", "url": "https://team.example.com/mcp", "has_headers": True},
+        {"name": "web", "url": "https://web.example.com/mcp", "has_headers": False},
+    ]
+    assert "header-value-123" not in json.dumps(result)
+    staged.cleanup()
+
+
 def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
     files = {
@@ -1110,7 +1268,7 @@ def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
         "a.py": "def f(x):\n    return x\n",
     }
 
-    _, staged = _stage_with(files, monkeypatch)
+    _, staged = _stage_with(files, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
 
     assert staged.scorer_archive is not None
     with tarfile.open(staged.scorer_archive) as packed:
@@ -1440,8 +1598,10 @@ def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: 
         ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
         "a.py": "def f(x):\n    return x\n",
     }
-    payload = _payload("c" * 40)
+    payload = {**_payload("c" * 40), **_SHINKA_AGENT}
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["web.example.com"]
+    # No engine takes a headed [proposer] mcp server until SKY-840, but the staged secrets must stay safe then too.
+    monkeypatch.setattr(repo_staging, "_refuse_unsupported_proposer", lambda *_: None)
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload)
 
@@ -1471,7 +1631,7 @@ def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeyp
         "a.py": "def f(x):\n    return x\n",
     }
 
-    _, staged = _stage_with(files, monkeypatch)
+    _, staged = _stage_with(files, monkeypatch, {**_payload("c" * 40), **_SHINKA_AGENT})
 
     assert staged.agent_archive is not None
     assert staged.scorer_archive is not None
@@ -4500,3 +4660,45 @@ def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monk
     with pytest.raises(subprocess.CalledProcessError) as refused:
         repo_staging._git(bare, "rev-parse", "--git-dir")
     assert "safe.bareRepository" in refused.value.stderr
+
+
+_ENTRY_WITH_SERVICES = {
+    "optimize.toml": (
+        'version = 1\n[services.judge]\nurl = "https://judge.example.com/v1"\n'
+        '[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\nservices = ["judge"]\n'
+    )
+}
+_EFFORT = {"reflection_model_config": {"name": "m", "extra": {"reasoning_effort": "high"}}}
+
+
+@pytest.mark.parametrize("engine", [BLACKBOX_ENGINE_AUTORESEARCH, BLACKBOX_ENGINE_META_HARNESS])
+@pytest.mark.parametrize(
+    ("files", "extra", "setting", "key"),
+    [
+        (_ENTRY_WITH_SERVICES, {}, "[proposer] services", "services"),
+        (_ENTRY_ONLY, _EFFORT, "the reasoning_effort setting", "entry"),
+    ],
+)
+def test_a_setting_the_engine_loop_cannot_give_the_files_proposer_fails_the_setup_check(
+    engine: str,
+    files: dict[str, str],
+    extra: dict[str, Any],
+    setting: str,
+    key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single run on the engine loop would fail at start, so staging refuses the setting first (SKY-816).
+
+    Args:
+        engine: An engine that runs the file's command.
+        files: The repository files.
+        extra: The request fields that set the setting.
+        setting: The setting's name in the message.
+        key: The constraints key that the error names.
+        monkeypatch: Pytest fixture for the fake fetch.
+    """
+    payload = {**_payload("c" * 40), **extra, "strategy": {"mode": "single", "engine": engine}}
+
+    with pytest.raises(ConstraintsError, match=re.escape(f"cannot give {setting} to the [proposer] entry")) as caught:
+        _stage_with(files, monkeypatch, payload=payload)
+    assert (caught.value.section, caught.value.key) == ("proposer", key)

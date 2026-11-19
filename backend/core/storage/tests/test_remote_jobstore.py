@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -47,6 +47,7 @@ from core.storage.models import (
     AgentStepModel,
     Base,
     BillingCustomerModel,
+    BlackboxAgentRunModel,
     ExecutionBudgetModel,
     ExecutionOperationModel,
     GepaCheckpointModel,
@@ -89,6 +90,10 @@ class SQLiteJobStore(RemoteDBJobStore):
 _RECOVERY_IMAGE = "fixture@sha256:" + "a" * 64
 
 
+# Resume and restart refuse a stored text or agent run (SKY-834), so a funded run is a repository run.
+_REPO_TARGET = {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["src"]}}
+
+
 def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: pytest.MonkeyPatch) -> BudgetService:
     """Attach reconciled funding and a real pinned checkpoint to an existing test run.
 
@@ -112,6 +117,7 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
     budget = service.create("resume-owner", 20, idempotency_key=optimization_id)
     service.attach_to_job(budget.id, "resume-owner", optimization_id, expected_revision=budget.revision)
     payload = {
+        "target": _REPO_TARGET,
         "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
@@ -403,8 +409,13 @@ def test_delete_job_cascades_agent_runs(store: SQLiteJobStore) -> None:
         store: Disposable job store.
     """
     store.create_job("job-del-runs")
-    store.save_agent_run("job-del-runs", {"run_id": 1, "phase": "version", "status": "running"})
-    store.append_agent_run_transcript("job-del-runs", 1, "hi\n")
+    with Session(store._engine) as session:
+        session.add(
+            BlackboxAgentRunModel(
+                optimization_id="job-del-runs", run_id=1, phase="version", status="running", transcript="hi\n"
+            )
+        )
+        session.commit()
     before = store.get_agent_run("job-del-runs", 1)
     assert before is not None
     assert before["transcript"] == "hi\n"
@@ -2060,7 +2071,7 @@ def _fund_without_checkpoint(store: SQLiteJobStore, optimization_id: str) -> Bud
     store.update_job(
         optimization_id,
         username="restart-owner",
-        payload={"execution_budget_id": budget.id, "execution_budget_generation": 0},
+        payload={"target": _REPO_TARGET, "execution_budget_id": budget.id, "execution_budget_generation": 0},
         execution_budget_id=budget.id,
         execution_budget_generation=0,
     )
@@ -2940,6 +2951,45 @@ def test_immutable_columns_include_notification_and_idempotency_fields() -> None
     assert "notified_at" in remote_mod._IMMUTABLE_JOB_COLUMNS
     assert "notification_claims" in remote_mod._IMMUTABLE_JOB_COLUMNS
     assert "idempotency_key" in remote_mod._IMMUTABLE_JOB_COLUMNS
+
+
+def test_payload_targets_read_only_the_target_and_judge_members(store: SQLiteJobStore) -> None:
+    """The batch read returns each payload's target and judge, and nothing else (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    for oid in ("repo", "text", "judge", "empty"):
+        store.create_job(oid)
+    store.update_job("repo", payload={"target": {"kind": "repo", "repo": {}}, "rows": [1, 2]})
+    store.update_job("text", payload={"target": {"kind": "text"}, "rows": [1]})
+    store.update_job("judge", payload={"judge": {"opening": True}})
+
+    assert store.payload_targets(["repo", "text", "judge", "empty", "missing"]) == {
+        "repo": {"target": {"kind": "repo", "repo": {}}},
+        "text": {"target": {"kind": "text"}},
+        "judge": {"judge": {"opening": True}},
+        "empty": None,
+    }
+    assert store.payload_targets([]) == {}
+
+
+def test_payload_targets_read_a_json_null_payload_as_no_payload(store: SQLiteJobStore) -> None:
+    """A JSON ``null`` payload reads as ``None``, as the full row reads it (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("nulled")
+    store.update_job("nulled", payload=None)
+    with Session(store._engine) as session:
+        stored = session.execute(
+            text("SELECT json_type(payload) FROM jobs WHERE optimization_id = 'nulled'")
+        ).scalar_one()
+
+    assert stored == "null"
+    assert store.get_job("nulled")["payload"] is None
+    assert store.payload_targets(["nulled"]) == {"nulled": None}
 
 
 def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> None:

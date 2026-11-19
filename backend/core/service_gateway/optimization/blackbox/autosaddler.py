@@ -18,8 +18,7 @@ code runs again from the top. So the child must ask the same calls in the
 same order; the runner keeps its prompts free of clocks, random ids and set
 order.
 
-A context with no worker host still runs the native box until the SKY-728
-cutover.
+The engine runs only on the worker engine loop (SKY-728).
 """
 
 from __future__ import annotations
@@ -45,7 +44,6 @@ from .native_runtime import (
     _candidate_shape_ok,
     assert_metric_absent,
     native_task_payload,
-    run_native_engine,
     sanitize_side_info,
 )
 from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task
@@ -87,14 +85,15 @@ class AutoSaddlerEngine:
         Args:
             task: Seed candidate, objective and visible examples.
             server: Skynet evaluator and shared evaluation budget.
-            ctx: The engine loop's context; with no model, command or tree call it is a native-box context.
+            ctx: The engine loop's context.
 
         Returns:
             The best development-confirmed candidate upstream selected.
 
         Raises:
             BudgetExhaustedError: When no evaluation is left before the child starts.
-            ServiceError: When the child fails or stops with no result.
+            ServiceError: When the context is not the worker engine loop's, or the child fails or stops with
+                no result.
         """
         if (
             ctx.call_model is None
@@ -103,7 +102,7 @@ class AutoSaddlerEngine:
             or ctx.read_file is None
             or ctx.list_files is None
         ):
-            return run_native_engine(self.name, task, server, ctx)
+            raise ServiceError("AutoSaddler runs only on the worker engine loop.")
         # Upstream refuses an evaluation budget of 0, so a spent budget would fail as a crash.
         if server.remaining <= 0:
             raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")

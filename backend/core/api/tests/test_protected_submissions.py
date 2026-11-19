@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_billing import normalize_model_token_sources
-from core.api.routers import submissions
+from core.api.routers import submissions, wizard_preflight
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.api.routers.optimizations_meta import create_optimizations_meta_router
 from core.api.routers.wizard_preflight import create_wizard_preflight_router
@@ -42,6 +42,7 @@ from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
 from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
+from core.models.blackbox import TARGET_RETIRED
 from core.storage.models import (
     Base,
     BillingCustomerModel,
@@ -382,6 +383,7 @@ def test_anything_evaluation_protects_the_declared_scorer_model(
     payload = {
         "reflection_model_config": {"name": "openai/reflection"},
         "scorer": {"kind": "python", "metric_code": "llm(model='openai/judge')"},
+        "target": _payload()["target"],
     }
     response = harness.client.post(
         "/wizard/preflight",
@@ -410,6 +412,7 @@ def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> Non
             "payload": {
                 "reflection_model_config": {"name": "openai/reflection"},
                 "scorer": {"kind": "python", "metric_code": "llm(model=choice)"},
+                "target": _payload()["target"],
             },
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -419,6 +422,44 @@ def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> Non
     assert response.json()["status"] == "failed"
     assert response.json()["checks"][0]["key"] == "setup"
     assert not harness.calls
+
+
+@pytest.mark.parametrize("scope", ["evaluation", "execution"])
+@pytest.mark.parametrize("target", [None, {"kind": "text"}, {"kind": "agent", "model": "openai/agent"}])
+def test_the_setup_check_refuses_a_text_or_agent_target(
+    harness: _Harness, scope: str, target: dict[str, Any] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a retired target in every scope before any paid check runs or a rate-limit slot is used (SKY-834).
+
+    Args:
+        harness: Funded real API fixture.
+        scope: The setup check scope.
+        target: The retired target, or none, which means a text run.
+        monkeypatch: Records each use of the submission rate limit.
+    """
+    rate_checks: list[str] = []
+    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", rate_checks.append)
+    budget = harness.budgets.create(harness.username, 20, idempotency_key=f"retired-{scope}")
+    payload: dict[str, Any] = {
+        "reflection_model_config": {"name": "openai/reflection"},
+        "scorer": {"kind": "python", "metric_code": "def score(candidate, case=None):\n    return 1.0"},
+    }
+    if target is not None:
+        payload["target"] = target
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": scope,
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert TARGET_RETIRED in response.text
+    assert not harness.calls
+    assert rate_checks == []
 
 
 def test_legacy_submission_attaches_paid_setup_once(harness: _Harness) -> None:

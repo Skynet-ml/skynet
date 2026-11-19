@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from core.billing.budgets import BudgetError
 from core.billing.signals import BudgetReached
 from core.sandbox.box_lease import BoxLease
+from core.sandbox.capabilities import MODAL_GPU_TYPES
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.grants import Grant, GrantError
 from core.sandbox.placement import MODAL, VERCEL, Placement
@@ -1643,7 +1644,7 @@ def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLog
         trees: The tree store.
         step_log: The step log.
     """
-    registry = {"api.example.com": {"Authorization": "x"}}
+    registry = {"api.example.com": {"/": {"Authorization": "x"}}}
 
     with pytest.raises(ValueError, match="registry"):
         TreeSandbox(
@@ -1654,8 +1655,51 @@ def test_a_lease_must_use_the_layer_registry(trees: TreeStore, step_log: StepLog
         )
 
 
-def test_a_gpu_step_is_refused_before_any_box_opens(trees: TreeStore, step_log: StepLogStore) -> None:
-    """No runtime here opens a GPU box, so a GPU grant is a denied grant, not a box without its GPU.
+@dataclass
+class _GpuRuntime(_Runtime):
+    """Stand in for the Modal runtime: record each spec's GPU, then open a local box without it."""
+
+    gpus: list[str | None] = field(default_factory=list)
+    gpu_types: bool = True
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Record the GPU type and open one local box.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The box.
+        """
+        self.gpus.append(spec.gpu)
+        return super().open(replace(spec, gpu=None))
+
+
+def test_a_gpu_step_runs_on_the_modal_runtime_with_its_gpu(trees: TreeStore, step_log: StepLogStore) -> None:
+    """Placement sends a GPU step to Modal, and the Modal runtime gets the GPU type in the spec.
+
+    Args:
+        trees: The tree store.
+        step_log: The step log.
+    """
+    vercel, modal = _Runtime(), _GpuRuntime()
+    candidates = RuntimeBoxLease({VERCEL: vercel, MODAL: modal}, _SPEC, **_LIMITS)
+    metrics = RuntimeBoxLease(_on_both(_Runtime()), _SPEC, keep_warm=False, **_LIMITS)
+    sandbox = TreeSandbox(trees, step_log, candidates, metrics)
+    try:
+        sandbox.run(_step(1), _tree(trees, {}), "true", [Grant("gpu:a100")])
+    finally:
+        candidates.close()
+        metrics.close()
+
+    assert modal.gpus == ["a100"]
+    assert vercel.boxes == []
+
+
+def test_a_gpu_step_on_a_runtime_without_gpus_fails_before_a_box_opens(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A Modal slot whose runtime cannot start a GPU is a denied grant, which no retry repeats.
 
     Args:
         trees: The tree store.
@@ -1663,13 +1707,71 @@ def test_a_gpu_step_is_refused_before_any_box_opens(trees: TreeStore, step_log: 
     """
     sandbox, runtime, _, candidates, metrics = _sandbox(trees, step_log)
     try:
-        with pytest.raises(GrantDeniedError, match="GPU"):
+        with pytest.raises(GrantDeniedError, match="No runtime here starts a Modal box with GPU type 'a100'"):
             sandbox.run(_step(1), _tree(trees, {}), "true", [Grant("gpu:a100")])
     finally:
         candidates.close()
         metrics.close()
 
     assert runtime.boxes == []
+
+
+@pytest.mark.parametrize(
+    ("modal", "spill", "grant", "error"),
+    [
+        (_GpuRuntime(), MODAL, "gpu:rtx4090", "Modal has no 'rtx4090' GPU"),
+        (_GpuRuntime(), MODAL, "gpu:a100:2", "Modal has no 'a100:2' GPU"),
+        (_Runtime(), MODAL, "gpu:a100", "No runtime here starts a Modal box"),
+        (None, "e2b", "gpu:a100", "No runtime here starts a Modal box"),
+    ],
+    ids=["unknown-type", "type-with-count", "modal-runtime-without-gpus", "no-modal-runtime"],
+)
+def test_a_gpu_that_cannot_start_keeps_the_warm_box_and_uses_no_start(
+    modal: _Runtime | None, spill: str, grant: str, error: str
+) -> None:
+    """Refuse a GPU that can never start before the claim, so the warm box stays and no start is counted.
+
+    Args:
+        modal: The Modal runtime, or ``None`` for a lease with no Modal runtime.
+        spill: The spill provider.
+        grant: The GPU grant.
+        error: The expected refusal.
+    """
+    vercel, clock = _Runtime(), _Clock()
+    runtimes: dict[str, _Runtime] = {VERCEL: vercel, spill: vercel}
+    if modal is not None:
+        runtimes[MODAL] = modal
+    lease = RuntimeBoxLease(
+        runtimes, _SPEC, vercel_cap=100, spill=spill, starts_per_minute=2, clock=clock, sleep=clock.sleep
+    )
+    try:
+        box = lease.acquire("agent-1", [])
+        lease.release(box, healthy=True)
+        with pytest.raises(GrantError, match=error):
+            lease.acquire("agent-1", [Grant(grant)])
+        again = lease.acquire("agent-1", [])
+        lease.release(again, healthy=True)
+        # The budget holds two starts: the first box and this one, with no wait.
+        lease.release(lease.acquire("agent-2", []), healthy=True)
+    finally:
+        lease.close()
+
+    assert again is box
+    assert len(vercel.boxes) == 2
+    assert clock.sleeps == []
+    assert modal is None or modal.boxes == []
+
+
+def test_an_unknown_gpu_refusal_names_every_modal_gpu() -> None:
+    """Name every Modal GPU in the refusal, as the Modal provider does."""
+    lease = RuntimeBoxLease({VERCEL: _Runtime(), MODAL: _GpuRuntime()}, _SPEC, **_LIMITS)
+    try:
+        with pytest.raises(GrantError) as refused:
+            lease.acquire("agent-1", [Grant("gpu:rtx4090")])
+    finally:
+        lease.close()
+
+    assert str(refused.value) == f"Modal has no 'rtx4090' GPU. Use one of: {', '.join(sorted(MODAL_GPU_TYPES))}."
 
 
 def test_a_step_with_a_host_that_is_not_text_is_a_denied_grant(trees: TreeStore, step_log: StepLogStore) -> None:
@@ -1690,27 +1792,21 @@ def test_a_step_with_a_host_that_is_not_text_is_a_denied_grant(trees: TreeStore,
     assert runtime.boxes == []
 
 
-def test_a_refused_gpu_step_keeps_the_warm_box_and_uses_no_start() -> None:
-    """The GPU refusal comes before the claim, so the agent's warm box stays and no start is counted."""
-    runtime, clock = _Runtime(), _Clock()
-    lease = RuntimeBoxLease(
-        _on_both(runtime), _SPEC, vercel_cap=100, starts_per_minute=2, clock=clock, sleep=clock.sleep
-    )
+def test_a_gpu_grant_opens_a_modal_box_with_the_gpu_and_keeps_it_warm() -> None:
+    """The lease opens the GPU box on the Modal runtime with its type, and the agent's next GPU step reuses it."""
+    vercel, modal = _Runtime(), _GpuRuntime()
+    lease = RuntimeBoxLease({VERCEL: vercel, MODAL: modal}, _SPEC, **_LIMITS)
     try:
-        box = lease.acquire("agent-1", [])
+        box = lease.acquire("agent-1", [Grant("gpu:A100")])
         lease.release(box, healthy=True)
-        with pytest.raises(GrantError, match="GPU"):
-            lease.acquire("agent-1", [Grant("gpu:a100")])
-        again = lease.acquire("agent-1", [])
+        again = lease.acquire("agent-1", [Grant("gpu:a100")])
         lease.release(again, healthy=True)
-        # The budget holds two starts: the first box and this one, with no wait.
-        lease.release(lease.acquire("agent-2", []), healthy=True)
     finally:
         lease.close()
 
     assert again is box
-    assert len(runtime.boxes) == 2
-    assert clock.sleeps == []
+    assert modal.gpus == ["a100"]
+    assert vercel.boxes == []
 
 
 def test_a_denied_grant_list_keeps_the_warm_box_and_uses_no_start() -> None:

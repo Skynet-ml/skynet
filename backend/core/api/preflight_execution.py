@@ -34,9 +34,9 @@ from ..billing.runtime import BudgetRuntime, UsagePendingError
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
+from ..exceptions import ServiceError
 from ..models import BlackboxRunRequest
-from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE
-from ..service_gateway.optimization.blackbox.native_runtime import NATIVE_ENGINES
+from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
@@ -294,17 +294,49 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
     optimizer_ready = any(check.get("key") == "optimizer" for check in result["checks"])
     if scope == "execution" and optimizer_ready:
         public = {key: value for key, value in payload.items() if not key.startswith("_")}
+        # The request accepts only a repository run (SKY-834), and every
+        # repository run calls its models through a native harness.
         typed = BlackboxRunRequest.model_validate(public)
-        # ShinkaEvolve calls its optimization models over chat completions, not
-        # through a native harness on the Anthropic protocol.
-        native = (
-            typed.strategy.mode != "single"
-            or typed.strategy.engine in NATIVE_ENGINES - {BLACKBOX_ENGINE_SHINKA_EVOLVE}
-            or typed.target.kind == "repo"
-        )
         optimizer_index = next(index for index, check in enumerate(result["checks"]) if check.get("key") == "optimizer")
-        result["checks"][optimizer_index:optimizer_index] = _verify_model_routes(gateway, native=native)
+        result["checks"][optimizer_index] = _engine_readiness(typed)
+        result["checks"][optimizer_index:optimizer_index] = _verify_model_routes(gateway, native=True)
     return result
+
+
+# A single run of either engine has nothing left to do on an image without its interpreter;
+# Auto only loses that lane.
+_ENGINE_NOT_READY = {
+    "autosaddler": (
+        "autosaddler_ready",
+        "This runtime does not ship the pinned AutoSaddler package on Python 3.12; choose another engine or Auto.",
+    ),
+    "shinka_evolve": (
+        "shinka_ready",
+        "This runtime does not ship the pinned ShinkaEvolve package on Python 3.12; choose another engine or Auto.",
+    ),
+}
+
+
+def _engine_readiness(request: BlackboxRunRequest) -> dict[str, Any]:
+    """Check that the worker can run the request's engine.
+
+    The setup box is not the worker, so this check runs here: the API and the
+    worker run one backend image, and the engines run in the worker (SKY-728).
+
+    Args:
+        request: The run request.
+
+    Returns:
+        The ``optimizer`` check, failed when a single run's engine has no interpreter in the image.
+    """
+    try:
+        readiness = check_native_runtime()
+    except ServiceError as error:
+        return _check("optimizer", "failed", str(error))
+    refusal = _ENGINE_NOT_READY.get(str(request.strategy.engine)) if request.strategy.mode == "single" else None
+    if refusal is not None and not readiness[refusal[0]]:
+        return _check("optimizer", "failed", refusal[1])
+    return _check("optimizer", "succeeded")
 
 
 class _Events:
@@ -510,17 +542,12 @@ def _perform_preflight(
     status = "failed"
     result: dict[str, Any] = {}
     try:
-        remote_evaluation = (
-            request.scope == "evaluation"
-            and payload.get("scorer", {}).get("kind") == "remote"
-            and payload.get("target", {}).get("kind") != "agent"
-        )
         uses_managed_models = payload_uses_token_source(
             payload,
             TOKEN_SOURCE_MANAGED,
             default_token_source=str(payload.get("token_source") or TOKEN_SOURCE_MANAGED),
         )
-        if settings.openrouter_api_key is None and uses_managed_models and not remote_evaluation:
+        if settings.openrouter_api_key is None and uses_managed_models:
             raise ValueError("Managed model routing is not configured.")
         gateway = ModelGateway(
             BudgetRuntime(

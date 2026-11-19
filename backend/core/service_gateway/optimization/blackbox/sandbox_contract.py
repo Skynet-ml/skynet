@@ -39,9 +39,10 @@ class SandboxSpec:
     tags: Mapping[str, str] = field(default_factory=dict)
     # Container image; the runtime's default when unset.
     image: str | None = None
-    # Host → headers the network edge adds to the box's requests to that host, so a
-    # secret reaches a service without ever entering the box.
-    inject_headers: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # Host → path prefix → headers the network edge adds to the box's requests to that host
+    # under that prefix ("/" is the whole host), so a secret reaches a service without ever
+    # entering the box.
+    inject_headers: Mapping[str, Mapping[str, Mapping[str, str]]] = field(default_factory=dict)
     network_disabled: bool = False
     # When set, the box reaches only these hosts; every other destination is denied.
     allowed_hosts: tuple[str, ...] = ()
@@ -61,6 +62,9 @@ class SandboxSpec:
     # ``docker commit``). Runtimes ignore it: the opener unpacks the archive
     # and checks its digest, because the broker rebuilds the spec (SKY-398).
     snapshot_archive: str | None = None
+    # The box's GPU type, such as ``a100``, from a ``gpu:<type>`` grant. Only the Modal
+    # provider starts such a box; every other runtime refuses the spec (SKY-804).
+    gpu: str | None = None
 
 
 @dataclass(frozen=True)

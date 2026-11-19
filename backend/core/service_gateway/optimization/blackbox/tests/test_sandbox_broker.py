@@ -101,7 +101,7 @@ def test_broker_keeps_profile_and_ownership_in_parent() -> None:
         {"image": "mutable:latest"},
         {"vcpus": 8},
         {"lifetime_seconds": 121},
-        {"inject_headers": {"host": {"key": "secret"}}},
+        {"inject_headers": {"host": {"/": {"key": "secret"}}}},
     ):
         with pytest.raises(ServiceError):
             broker.handle("open", _open_payload(**changes))
@@ -361,6 +361,23 @@ def test_remote_round_trip_streams_output_and_supports_callback_file_actions() -
     assert runtime.sessions[0].files["mailbox/response.json"] == "done"
     assert runtime.sessions[0].close_calls == 1
     assert len([request for request in requests if request["action"] == "close"]) == 1
+
+
+def test_remote_open_refuses_injected_headers_before_any_request() -> None:
+    """Refuse a credential grant in the guest, so its headers never cross the relay to the parent (SKY-833)."""
+    requests: list[httpx.Request] = []
+
+    def parent(request: httpx.Request) -> httpx.Response:
+        """Record a request that must not happen."""
+        requests.append(request)
+        return httpx.Response(500)
+
+    spec = SandboxSpec(lifetime_seconds=60, inject_headers={"mcp.test": {"/mcp": {"Authorization": "Bearer fake"}}})
+    with httpx.Client(transport=httpx.MockTransport(parent)) as client:
+        remote = RemoteSandboxRuntime("http://127.0.0.1:9000", "opaque-control", client=client)
+        with pytest.raises(ServiceError, match="cannot add egress headers"):
+            remote.open(spec)
+    assert requests == []
 
 
 @pytest.mark.parametrize("stream", [True, False])

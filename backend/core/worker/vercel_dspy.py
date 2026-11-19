@@ -84,7 +84,7 @@ def _starts_codex(payload: dict[str, Any]) -> bool:
         return False
     staged = payload.get(REPO_SNAPSHOT_KEY)
     strategy = payload.get("strategy") or {}
-    # native_runtime gives such a run the default agent as its fallback (SKY-753).
+    # A run stored before SKY-728 can hold this payload: its AutoSaddler sessions fell back to the default agent (SKY-753).
     if (
         isinstance(staged, dict)
         and staged.get("file_proposer")

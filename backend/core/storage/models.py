@@ -1460,13 +1460,11 @@ class GepaCheckpointModel(Base):
 
 
 class BlackboxAgentRunModel(Base):
-    """One sandboxed agent run of a black-box job: its answer, transcript and outcome.
+    """One stored agent run of a black-box job: its answer, transcript and outcome.
 
-    An agent target evaluates every ``(version, case)`` pair in its own
-    sandbox. The worker writes the row when the run starts, appends the
-    transcript as the box streams it, and rewrites the row with the answer
-    and outcome when the run ends, so the run view can show what each
-    version did on each case, live or after the fact. ``phase``/``trial``/
+    Only jobs from the retired agent target have these rows. No worker
+    writes new rows (SKY-834). The run view still reads the stored rows, so
+    it can show what each version did on each case. ``phase``/``trial``/
     ``example_id`` tie the row to the progress events that name the same
     run. ``stored_bytes`` folds into the owner's "optimizations" footprint;
     rows go with their job via the cascading foreign key.

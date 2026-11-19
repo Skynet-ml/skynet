@@ -170,27 +170,6 @@ class _BaseFakeJobStore:
         """Return one page of the run's candidate summaries through the real store."""
         return self._run_call_store().list_candidates(optimization_id, limit=limit, offset=offset)
 
-    def save_agent_run(self, optimization_id: str, run: dict) -> None:
-        """Store one agent run record under its ``run_id``.
-
-        Args:
-            optimization_id: Owning job id.
-            run: The record, keyed by ``run_id``.
-        """
-        self._agent_runs.setdefault(optimization_id, {})[int(run["run_id"])] = dict(run)
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Extend a stored run's transcript, ignoring unknown runs.
-
-        Args:
-            optimization_id: Owning job id.
-            run_id: The run's ordinal.
-            text: The transcript piece to add.
-        """
-        run = self._agent_runs.get(optimization_id, {}).get(run_id)
-        if run is not None:
-            run["transcript"] = run.get("transcript", "") + text
-
     def get_agent_run(self, optimization_id: str, run_id: int) -> dict | None:
         """Return a stored run record, or ``None``.
 
@@ -285,6 +264,21 @@ class _BaseFakeJobStore:
         if optimization_id not in self._jobs:
             raise KeyError(optimization_id)
         return dict(self._jobs[optimization_id])
+
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict | None]:
+        """Return only the ``target`` and ``judge`` members of each stored payload.
+
+        Args:
+            optimization_ids: Jobs to read.
+
+        Returns:
+            For each id found, the two members, or ``None`` when the job has no payload.
+        """
+        found = {oid: self._jobs[oid].get("payload") for oid in optimization_ids if oid in self._jobs}
+        return {
+            oid: None if payload is None else {key: payload[key] for key in ("target", "judge") if key in payload}
+            for oid, payload in found.items()
+        }
 
     def job_exists(self, optimization_id: str) -> bool:
         """Report whether a job with the given identifier is stored.

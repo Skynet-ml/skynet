@@ -19,12 +19,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetError
-from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.operation_pricing import UnpricedOperationError, json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.sandbox import trees as tree_helpers
 from core.sandbox.errors import SandboxInfraError
-from core.sandbox.grants import Grant
+from core.sandbox.grants import Grant, resolve_grants
 from core.sandbox.trees import (
     BoxFailureError,
     FenceLostError,
@@ -195,7 +195,9 @@ class _Runtime:
 class _Source(RuntimeBoxSource):
     """A fresh-box source that records each release and the files of the box at release."""
 
-    def __init__(self, runtime: _Runtime, registry: Mapping[str, Mapping[str, str]] | None = None) -> None:
+    def __init__(
+        self, runtime: _Runtime, registry: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None
+    ) -> None:
         """Bind the source to the recording runtime.
 
         Args:
@@ -355,6 +357,20 @@ def test_a_failing_command_is_output_not_an_error(trees: TreeStore, step_log: St
 
     assert result.exit_code == 3
     assert _files(trees, new_tree) == {"out.txt": b"x\n"}
+
+
+def test_a_command_time_limit_replaces_the_layer_limit_for_that_command(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A call's limit reaches the box; a call with no limit keeps the layer's limit (SKY-816)."""
+    sandbox, _, _ = _sandbox(trees, step_log, _Runtime(), timeout_seconds=0.5)
+    start = _tree(trees, {})
+
+    kept, _ = sandbox.run(_step(1), start, "sleep 5", [])
+    longer, _ = sandbox.run(_step(2), start, "sleep 1", [], timeout_seconds=30)
+    shorter, _ = sandbox.run(_step(3), start, "sleep 5", [], timeout_seconds=0.5)
+
+    assert (kept.timed_out, longer.timed_out, shorter.timed_out) == (True, False, True)
 
 
 def test_each_run_gets_a_fresh_box(trees: TreeStore, step_log: StepLogStore) -> None:
@@ -897,7 +913,7 @@ def test_a_stale_file_in_a_used_box_does_not_join_the_new_tree(trees: TreeStore,
 
 def test_a_runtime_box_source_with_another_registry_is_refused(trees: TreeStore, step_log: StepLogStore) -> None:
     """The layer and its runtime sources resolve grants against one registry, so a mismatch fails at build."""
-    registry = {"api.example.com": {"Authorization": "Bearer test"}}
+    registry = {"api.example.com": {"/": {"Authorization": "Bearer test"}}}
     runtime = _Runtime()
 
     with pytest.raises(ValueError, match="same capability registry"):
@@ -1427,3 +1443,48 @@ def test_a_release_that_raises_does_not_release_the_box_again() -> None:
     session.release(healthy=True)
 
     assert source.released == [True]
+
+
+def test_a_runtime_box_source_refuses_a_gpu_grant_before_any_box_opens(
+    trees: TreeStore, step_log: StepLogStore
+) -> None:
+    """A fresh-box source opens no box for a GPU grant and says why, so the step never runs on a CPU (SKY-804)."""
+    runtime = _Runtime()
+    sandbox, candidates, _ = _sandbox(trees, step_log, runtime)
+
+    with pytest.raises(GrantDeniedError, match="cannot start a box with GPU type 'a100'"):
+        sandbox.run(_step(), _tree(trees, {}), "true", [Grant("api.example.com"), Grant("gpu:a100")])
+
+    assert runtime.specs == []
+    assert candidates.released == []
+    assert step_log.get_step(f"{RUN}:agent-1:1") is None
+
+
+def test_a_gpu_step_records_another_grant_list_id_than_a_cpu_step(trees: TreeStore, step_log: StepLogStore) -> None:
+    """The step log shows the hardware: the id names the GPU type, and a CPU step keeps its network-only id."""
+    sandbox, _ = _fake_sandbox(trees, step_log, _FakeBox())
+    empty = _tree(trees, {})
+    hosts = [Grant("api.example.com")]
+
+    sandbox.score(_step(1), empty, empty, "echo 1.0", hosts)
+    sandbox.score(_step(2), empty, empty, "echo 1.0", [*hosts, Grant("gpu:a100")])
+    sandbox.score(_step(3), empty, empty, "echo 1.0", [*hosts, Grant("gpu:h100")])
+
+    cpu, a100, h100 = (step_log.get_step(f"{RUN}:agent-1:{index}") for index in (1, 2, 3))
+    assert cpu is not None
+    assert a100 is not None
+    assert h100 is not None
+    network_id = resolve_grants(hosts, {}).grant_list_id
+    assert cpu["grant_list_id"] == network_id
+    assert a100["grant_list_id"] == json_fingerprint([network_id, "gpu:a100"])
+    assert h100["grant_list_id"] != a100["grant_list_id"]
+
+
+def test_redaction_keeps_an_env_value_shorter_than_8_characters() -> None:
+    """A short value could be a common word, so only a value of 8 or more characters becomes ``[redacted]``."""
+    result = CommandResult(0, stdout="ok 1234567 abcdefgh", stderr="abcdefgh ok")
+
+    clean = tree_sandbox._redacted(result, {"SHORT": "1234567", "KEY": "abcdefgh", "EMPTY": ""})
+
+    assert clean.stdout == "ok 1234567 [redacted]"
+    assert clean.stderr == "[redacted] ok"
