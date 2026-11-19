@@ -12,6 +12,12 @@ line, and this engine answers them with the run's eval server and the loop's
 so a resumed run replays the upstream run from its step log (SKY-724). The
 child runs no candidate or repository code: the loop's boxes score every version.
 
+When the contract file names a ``[proposer] entry`` (SKY-815), ShinkaEvolve keeps
+its search, but the child asks this engine for each new version instead of its
+model. The engine runs the command once in a proposer box over the parent's tree,
+with ShinkaEvolve's mutation prompt in the ``ASCENT_TASK`` file, and the tree the
+command leaves is the new version.
+
 Without that context, the engine runs the runner in the managed sandbox, as
 before, until the cutover (SKY-728).
 """
@@ -23,6 +29,7 @@ import json
 import logging
 import math
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -33,12 +40,15 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import IO, Any
+from urllib.parse import urlsplit
 
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from ....exceptions import ServiceError
+from ....sandbox.grants import Grant, GrantError
+from ....sandbox.trees import TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
 from ..budget_stop import BudgetReached
-from . import sandbox_log
+from . import sandbox_log, shinka_bundle
 from .feedback import emit_candidate, emit_case_scored, emit_scorer_feedback
 from .native_runtime import (
     SHINKA_IMAGE_PYTHON,
@@ -66,6 +76,10 @@ _INPUT_FILE = "native_input.json"
 _RESULT_FILE = "native_result.json"
 _REPO_CHUNK_DIR = "repo-tree"
 _WORKDIR = "shinka_evolve"
+# The proposer box reads the task from this file of the parent's tree. It is never part of a version.
+_TASK_PATH = ".ascent/task.md"
+# Only the end of a failed command's stderr goes back to upstream as the mutation's error.
+_COMMAND_ERROR_CHARS = 2000
 # The runner never calls this URL: its model calls come back to the worker. Upstream
 # still needs a well-formed ``local/<model>@<url>`` name for its bandit.
 _ROUTE_URL = "http://engine-loop.invalid/v1"
@@ -146,9 +160,12 @@ class ShinkaEvolveEngine:
         """
         # Only images built with INCLUDE_SHINKA_EVOLVE=1 hold the interpreter; a
         # worker without it keeps the sandbox path instead of failing the run.
-        if ctx.call_model is None or not Path(self.python).exists():
-            return run_native_engine(self.name, task, server, ctx)
         options = ctx.native_options
+        if ctx.call_model is None or not Path(self.python).exists():
+            if options is not None and (options.repo or {}).get("file_proposer"):
+                # The sandbox runner has no command editor; it would mutate with the model and drop the command.
+                raise ServiceError("ShinkaEvolve runs the [proposer] entry command only on the worker's engine loop.")
+            return run_native_engine(self.name, task, server, ctx)
         settings = dict((options.shinka if options is not None else None) or {})
         route = ((options.budget_route if options is not None else None) or {}).get(MCP_RELAY_ROUTE_KEY) or {}
         if settings.get("editor") == "agent":
@@ -170,6 +187,19 @@ class ShinkaEvolveEngine:
                 )
             if dict(repo.get("hidden_hashes") or {}) != dict(ctx.repo_seed.hidden_hashes):
                 raise ServiceError("The repository options hide other paths than the run's repository seed.")
+        if repo is not None and repo.get("file_proposer"):
+            if route.get("services"):
+                raise ServiceError(
+                    "ShinkaEvolve cannot give the [proposer] services to the [proposer] entry command yet. "
+                    "Choose another engine, or remove [proposer] services from optimize.toml."
+                )
+            # The box may reach only a model route on the user's own key (BYOK), never the deployment's key. A
+            # BYOK budget route listens on the worker's loopback gateway, which no box reaches, and the route
+            # does not name its charge policy. So every run refuses; SKY-828 lifts this after SKY-728 (SKY-815).
+            raise ServiceError(
+                "ShinkaEvolve cannot give the [proposer] entry command a model route on your own key yet. "
+                "Choose another engine, or remove [proposer] entry from optimize.toml."
+            )
         if repo is None and task.seed_candidate is None:
             # A blank run evolves an empty starting text rather than refusing.
             task = replace(task, seed_candidate="")
@@ -523,10 +553,194 @@ class _GroupKiller:
             os.killpg(self.pid, signal.SIGKILL)
 
 
+class _Proposer:
+    """Run the contract file's ``[proposer] entry`` in a proposer box for each new version (SKY-815).
+
+    Each run is one committed ``command`` step of the loop, so a resume replays it.
+    """
+
+    def __init__(self, ctx: EngineContext, options: Any) -> None:
+        """Bind the proposer to the run's boxes and the contract file's commands.
+
+        Args:
+            ctx: The run context; its ``repo_seed`` names the visible seed tree.
+            options: The run's native options, with the file's commands and the proposer's hosts.
+
+        Raises:
+            ServiceError: When the context has no boxes or the options name no command.
+        """
+        repo = options.repo
+        entry = (getattr(options.proposer, "run_command", None) or "").strip()
+        if None in (ctx.run_command, ctx.put_files, ctx.read_file, ctx.file_ids) or not entry:
+            raise ServiceError("ShinkaEvolve needs the engine loop's boxes and a command to run [proposer] entry.")
+        assert ctx.repo_seed is not None
+        self.ctx = ctx
+        self.entry = entry
+        self.setup = [str(part) for part in repo.get("proposer_setup") or ()]
+        gateway = getattr(getattr(options, "gateway", None), "url", None) or ""
+        model_host = urlsplit(gateway).hostname
+        # The run's gateway holds the deployment's managed key, so the box gets no grant or address for it. A
+        # model route on the user's own key needs a metered relay; the engine refuses the command until SKY-828.
+        self.grants = tuple(Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host)
+        # The same name the managed proposer box sets (docs/repository-constraints.md).
+        self.exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        self.seed = ctx.repo_seed.tree_id
+        self.base: str | None = None
+        self.seed_ids: dict[str, str] = {}
+        self.base_ids: dict[str, str] = {}
+
+    def propose(self, files: dict[str, str], task: str) -> dict[str, Any]:
+        """Run the command once over the parent's tree, and return the version it leaves.
+
+        Args:
+            files: The parent's files that differ from the seed, by path.
+            task: ShinkaEvolve's mutation prompt, which the command reads from ``ASCENT_TASK``.
+
+        Returns:
+            ``{"files": ...}``, each text file of the command's tree that differs from the seed, or
+            ``{"error": ...}`` when the command failed, wrote a path it may not write, or added or changed
+            too many files.
+
+        Raises:
+            ServiceError: When the ``[proposer] setup`` command fails, or changes or removes a file of the seed.
+            GrantDeniedError: When the engine loop cannot resolve the grants. A ``run_command`` that resolves the
+                grants itself raises ``GrantError`` instead, a ``ValueError``; the method passes it on too, so it
+                stops the run and does not become a failed mutation.
+        """
+        assert self.ctx.run_command is not None
+        assert self.ctx.put_files is not None
+        if self.base is None:
+            self.base = self._setup()
+        try:
+            parent = self.ctx.put_files(
+                {**{path: text.encode() for path, text in files.items()}, _TASK_PATH: task.encode()}, self.base
+            )
+            result, after = self.ctx.run_command(
+                parent,
+                "\n".join(
+                    [
+                        *self.exports,
+                        f'export ASCENT_TASK="$PWD/{_TASK_PATH}" APP_PROMPT_FILE="$PWD/{_TASK_PATH}"',
+                        self.entry,
+                    ]
+                ),
+                self.grants,
+            )
+        except GrantError:
+            # A grant the registry cannot resolve fails every mutation the same way, so it stops the run.
+            raise
+        except (ValueError, TreeRejectedError) as exc:
+            # The version would hold a path that a box may not write; upstream counts a failed mutation.
+            return {"error": f"The [proposer] entry command left no usable version: {exc}"}
+        if result.timed_out or result.exit_code != 0:
+            return {"error": _command_failure("[proposer] entry", result)}
+        version = self._version(after, parent, files)
+        if version is None:
+            return {
+                "error": f"The [proposer] entry command added or changed more than {shinka_bundle._MAX_TREE_ENTRIES}"
+                " files. Make it write its tools and caches outside the repository, or remove them before it exits."
+            }
+        return {"files": version}
+
+    def _setup(self) -> str:
+        """Run ``[proposer] setup`` once over the seed tree, before the first session, as SKY-753 does.
+
+        Returns:
+            The tree every session starts from: the seed, with the setup's output when the file names a setup.
+
+        Raises:
+            ServiceError: When the setup command fails, or changes or removes a file of the seed.
+        """
+        assert self.ctx.run_command is not None
+        assert self.ctx.file_ids is not None
+        self.seed_ids = self.ctx.file_ids(self.seed)
+        if not self.setup:
+            self.base_ids = self.seed_ids
+            return self.seed
+        name = f"[proposer] setup command in optimize.toml ({shlex.join(self.setup)})"
+        result, tree = self.ctx.run_command(self.seed, "\n".join([*self.exports, shlex.join(self.setup)]), self.grants)
+        if result.timed_out or result.exit_code != 0:
+            raise ServiceError(_command_failure(name, result))
+        self.base_ids = self.ctx.file_ids(tree)
+        # Every session starts from the setup's tree, so a seed file it changed would enter every version.
+        changed = sorted(path for path, oid in self.seed_ids.items() if self.base_ids.get(path) != oid)
+        if changed:
+            raise ServiceError(
+                f"The {name} changed or removed files of the repository: {', '.join(changed)}."
+                " Those changes would enter every version. Make the setup write only new files."
+            )
+        return tree
+
+    def _version(self, after: str, parent_tree: str, parent: dict[str, str]) -> dict[str, str] | None:
+        """Read the files of the command's tree that make up the new version.
+
+        A version holds the text files that differ from the seed, as an agent session's workspace does. The
+        setup's own output and the task file are not part of it. The content ids tell which files the command
+        changed, so only those are read.
+
+        Args:
+            after: The tree the command left.
+            parent_tree: The tree the command started from.
+            parent: The parent's files that differ from the seed.
+
+        Returns:
+            The version's files by path, or ``None`` when the command added or changed more files than a tree
+            listing holds, before any read.
+        """
+        assert self.ctx.file_ids is not None
+        assert self.ctx.read_file is not None
+        parent_ids = self.ctx.file_ids(parent_tree)
+        version: dict[str, str] = {}
+        changed: list[str] = []
+        for path, oid in self.ctx.file_ids(after).items():
+            setup_output = path in self.base_ids and path not in self.seed_ids
+            # A ``.git`` part in any letter case is Git metadata, never a version file (SKY-810).
+            git_part = any(part.lower() == ".git" for part in path.split("/"))
+            if git_part or path == _TASK_PATH or (setup_output and path not in parent):
+                continue
+            if path in parent and parent_ids.get(path) == oid:
+                version[path] = parent[path]
+                continue
+            if path not in parent and self.base_ids.get(path) == oid:
+                continue
+            changed.append(path)
+        # The editor drops ignored files only after it writes them, so a command that leaves an install
+        # (``node_modules``) would otherwise cost thousands of reads and a reply of many megabytes.
+        if len(changed) > shinka_bundle._MAX_TREE_ENTRIES:
+            return None
+        for path in changed:
+            # The tree entry has no size, so the limit is checked on the bytes.
+            data = self.ctx.read_file(after, path)
+            if data is None or len(data) > shinka_bundle.MAX_FILE_BYTES or b"\0" in data:
+                continue
+            try:
+                version[path] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return version
+
+
+def _command_failure(name: str, result: Any) -> str:
+    """Describe a failed box command for the run's error.
+
+    Args:
+        name: The command's name in the message.
+        result: The command's result.
+
+    Returns:
+        The message, with the end of the command's stderr.
+    """
+    how = "ran out of time" if result.timed_out else f"failed with exit code {result.exit_code}"
+    detail = (result.stderr or result.stdout or "").strip()[-_COMMAND_ERROR_CHARS:]
+    return f"The {name} {how}." + (f" {detail}" if detail else "")
+
+
 class _Requests:
     """Answer the child's framed lines: evaluations and model calls, progress and logs."""
 
-    def __init__(self, task: Task, server: EvalServer, ctx: EngineContext, nonce: str) -> None:
+    def __init__(
+        self, task: Task, server: EvalServer, ctx: EngineContext, nonce: str, proposer: _Proposer | None = None
+    ) -> None:
         """Bind the answers to the run.
 
         Args:
@@ -534,8 +748,10 @@ class _Requests:
             server: The eval server.
             ctx: The run context.
             nonce: The framing token of the child's lines.
+            proposer: Runs the contract file's ``[proposer] entry`` for each new version, or ``None``.
         """
         self.task = task
+        self.proposer = proposer
         self.server = server
         self.ctx = ctx
         self.nonce = nonce
@@ -664,6 +880,18 @@ class _Requests:
             return {"id": request.get("id"), **self._model(request.get("messages"))}
         if request.get("kind") == "evaluate":
             return {"id": request.get("id"), **self._evaluate(request)}
+        if request.get("kind") == "propose" and self.proposer is not None:
+            files = request.get("files")
+            task = request.get("task")
+            if (
+                not isinstance(files, dict)
+                or not isinstance(task, str)
+                or not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items())
+            ):
+                raise ServiceError("ShinkaEvolve sent a malformed proposal.")
+            if self.ctx.check_budget is not None:
+                self.ctx.check_budget()
+            return {"id": request.get("id"), **self.proposer.propose(files, task)}
         raise ServiceError("ShinkaEvolve sent an unknown request.")
 
     def _model(self, messages: Any) -> dict[str, Any]:

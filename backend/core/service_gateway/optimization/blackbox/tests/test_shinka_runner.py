@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -496,11 +497,12 @@ class _RepoScorer:
         """
 
 
-def _repo(tmp_path: Path) -> tuple[list[str], shinka_bundle.RepoBundle]:
+def _repo(tmp_path: Path, ignore: str = "") -> tuple[list[str], shinka_bundle.RepoBundle]:
     """Ship a two-file repository and bind a bundle to its checkout.
 
     Args:
         tmp_path: Scratch folder.
+        ignore: The repository's ``.gitignore``, or no file when empty.
 
     Returns:
         The snapshot chunks and the bundle rules.
@@ -509,6 +511,8 @@ def _repo(tmp_path: Path) -> tuple[list[str], shinka_bundle.RepoBundle]:
     (source / "src").mkdir(parents=True)
     (source / "src/app.py").write_text("from util import SCALE\n")
     (source / "src/util.py").write_text("SCALE = 2\n")
+    if ignore:
+        (source / ".gitignore").write_text(ignore)
     archive = tmp_path / "tree.tgz"
     subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
     chunks = []
@@ -1482,6 +1486,14 @@ def test_an_evaluation_waits_for_the_worker_reply_on_stdin() -> None:
     assert mailbox.total_evals == 1
 
 
+def test_an_evaluation_on_stdin_turns_a_null_score_into_negative_infinity() -> None:
+    """Read a worker reply with no score as a case with no score, as the file transport does (SKY-751)."""
+    mailbox, _ = _connected_mailbox(lambda request: {"score": None, "info": {"error": "KeyError: 'x'"}})
+
+    assert mailbox.evaluate("text", {"id": 0}, candidate_id=3) == (float("-inf"), {"error": "KeyError: 'x'"})
+    assert mailbox.total_evals == 1
+
+
 def test_a_null_score_on_the_reply_stream_fails_the_program_with_its_run_failure(tmp_path: Path) -> None:
     """Fail the program on a worker's null score, and still ask for its later cases (SKY-751).
 
@@ -1559,8 +1571,8 @@ def test_a_failed_case_ends_its_version_before_the_next_request_so_a_replay_keep
         """
         if request["kind"] == "model":
             return {"text": "next version"}
-        # A null score is a case with no score (SKY-751), so a non-numeric one crashes the case.
-        return {"score": "crash"} if request["example"]["id"] == 1 else {"score": 1.0}
+        # A null score is a scored failure since SKY-751; a non-numeric one still crashes the case.
+        return {"score": "boom"} if request["example"]["id"] == 1 else {"score": 1.0}
 
     mailbox, sent = _connected_mailbox(reply)
     send = mailbox.emit
@@ -2516,3 +2528,254 @@ def test_runner_git_refuses_a_bare_repository_layout(
         shinka_runner._git(repo, "rev-parse", "--git-dir")
     monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
     assert shinka_runner._git(repo, "rev-parse", "--git-dir").strip() == "."
+
+
+class _ProposalMailbox:
+    """Answer each ``propose`` request as the worker does after it runs the ``[proposer] entry`` command."""
+
+    def __init__(self, reply: dict[str, Any]) -> None:
+        """Set the worker's reply.
+
+        Args:
+            reply: The reply to each request.
+        """
+        self.reply = reply
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def ask(self, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Record one request and answer it.
+
+        Args:
+            kind: The request kind.
+            fields: The request fields.
+
+        Returns:
+            The set reply.
+        """
+        self.requests.append((kind, fields))
+        return self.reply
+
+
+def _install_command_editor(tmp_path: Path, mailbox: _ProposalMailbox, ignore: str = "") -> Any:
+    """Make a stand-in upstream runner write each version with the command editor.
+
+    Args:
+        tmp_path: Run folder.
+        mailbox: The fake worker.
+        ignore: The repository's ``.gitignore``, or no file when empty.
+
+    Returns:
+        The runner.
+    """
+    _, bundle = _repo(tmp_path, ignore)
+    editor = shinka_runner.CommandEditor(mailbox, tmp_path, ledger=shinka_runner.UsageLedger(None), bundle=bundle)
+    sampler = SimpleNamespace(task_sys_msg="TASK", use_text_feedback=True)
+    runner = SimpleNamespace(
+        llm=SimpleNamespace(get_kwargs=lambda model_sample_probs=None: {"model_name": _EDITOR_MODEL}),
+        llm_selection=_Selection(),
+        prompt_sampler=sampler,
+        results_dir=str(tmp_path / "results"),
+    )
+    shinka_runner.install_agent_editor(editor, runner)
+    return runner
+
+
+def test_the_command_editor_files_the_tree_the_command_leaves_as_the_child(tmp_path: Path) -> None:
+    """Send the parent's files and the mutation task to the worker, and file the files it sends back (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    mailbox = _ProposalMailbox({"files": {"src/util.py": "SCALE = 5\n", "src/new.py": "NEW = 1\n"}})
+    runner = _install_command_editor(tmp_path, mailbox)
+    parent = SimpleNamespace(code=shinka_bundle.encode_bundle({"src/util.py": "SCALE = 3\n"}))
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(parent, [], [], 2))
+
+    assert success is True
+    [(kind, fields)] = mailbox.requests
+    assert kind == "propose"
+    assert fields["files"] == {"src/util.py": "SCALE = 3\n"}
+    assert "SCALE = 3" in fields["task"]
+    assert "+SCALE = 5" in patch
+    written = (tmp_path / "results" / "gen_2" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == {"src/util.py": "SCALE = 5\n", "src/new.py": "NEW = 1\n"}
+    assert (meta["api_costs"], meta["tool_calls"], meta["num_applied"]) == (0.0, 0, 2)
+    assert not list((tmp_path / "command-edits").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"error": "The [proposer] entry command failed with exit code 3."}, "exit code 3"),
+        ({"files": {"src/util.py": 7}}, "malformed version"),
+        ({"files": {"../escape.py": "x"}}, "'../escape.py' is outside the repository"),
+        ({"files": {"/abs/x": "x"}}, "'/abs/x' is outside the repository"),
+        ({"files": {"src/util.py/x.py": "x"}}, "'src/util.py/x.py' is below a file"),
+        ({"files": {}}, ""),
+    ],
+)
+def test_the_command_editor_reports_a_failed_attempt_for_a_failed_or_bad_version(
+    reply: dict[str, Any], error: str, tmp_path: Path
+) -> None:
+    """Hand upstream a failed attempt for a failed command, no change, a malformed version or a path it may not write.
+
+    Args:
+        reply: The worker's reply.
+        error: Words the attempt's error holds.
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox(reply))
+    parent = SimpleNamespace(code=shinka_bundle.encode_bundle({}))
+
+    patch, meta, success = asyncio.run(runner._run_patch_async(parent, [], [], 1))
+
+    assert (patch, success) == (None, False)
+    assert error in str(meta["last_error_msg"])
+    assert meta["last_error_msg"]
+    assert str(tmp_path) not in str(meta["last_error_msg"])
+    assert not (tmp_path / "results" / "gen_1").exists()
+
+
+@pytest.mark.parametrize("path", [".git/config", "a/.GIT/hooks/x", "src/.Git/hooks/post-commit"])
+def test_the_command_editor_refuses_git_metadata_and_writes_nothing(path: str, tmp_path: Path) -> None:
+    """Refuse a version that writes a ``.git`` part in any letter case, before any file is written (SKY-815).
+
+    Args:
+        path: The Git metadata path the command sends back.
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": {"src/new.py": "x\n", path: "[core]\n"}}))
+    writes: list[Path] = []
+    real_write = Path.write_text
+
+    def spy(self: Path, *args: Any, **kwargs: Any) -> int:
+        """Record each write into a scratch worktree.
+
+        Args:
+            self: The file.
+            *args: The text and its encoding.
+            **kwargs: The write options.
+
+        Returns:
+            The written length.
+        """
+        if "command-edits" in self.parts:
+            writes.append(self)
+        return real_write(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(Path, "write_text", spy)
+        patch, meta, success = asyncio.run(
+            runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+        )
+
+    assert (patch, success, writes) == (None, False, [])
+    assert "may not write Git metadata" in str(meta["last_error_msg"])
+
+
+def test_the_command_editor_refuses_a_path_the_rules_forbid(tmp_path: Path) -> None:
+    """Hand upstream a failed attempt for a path outside the editable paths (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": {"src/new.py": "x\n", "docs/x.md": "x\n"}}))
+
+    patch, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert (patch, success) == (None, False)
+    assert "Cannot change 'docs/x.md': it is outside the editable paths." in str(meta["last_error_msg"])
+
+
+def test_the_command_editor_leaves_out_ignored_output_before_the_rules_check(tmp_path: Path) -> None:
+    """File the version when the command also leaves git-ignored output outside the editable paths (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"src/util.py": "SCALE = 5\n", ".pytest_cache/README.md": "cache\n", "src/x.pyc": "x"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore=".pytest_cache/\n*.pyc\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True, meta.get("last_error_msg")
+    written = (tmp_path / "results" / "gen_1" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == {"src/util.py": "SCALE = 5\n"}
+
+
+def test_the_command_editor_reads_the_ignore_rules_of_the_version(tmp_path: Path) -> None:
+    """Check ignored paths with the version's own ``.gitignore`` files, as ``git add --all`` does (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"src/.gitignore": "!keep.log\n", "src/keep.log": "kept\n", "src/util.py": "SCALE = 5\n"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore="*.log\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True, meta.get("last_error_msg")
+    written = (tmp_path / "results" / "gen_1" / "main.md").read_text()
+    assert shinka_bundle.decode_bundle(written) == files
+
+
+def test_the_command_editor_writes_the_files_before_the_ignore_check(tmp_path: Path) -> None:
+    """Refuse a file that the version's own ``.gitignore`` un-ignores, so no check reads stale rules (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    files = {"other/.gitignore": "!secret.log\n", "other/secret.log": "s\n", "src/util.py": "SCALE = 5\n"}
+    runner = _install_command_editor(tmp_path, _ProposalMailbox({"files": files}), ignore=".*\n*.log\n")
+
+    _, meta, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is False
+    assert "Cannot change 'other/secret.log': it is outside the editable paths." in str(meta["last_error_msg"])
+
+
+def test_the_ignore_check_raises_when_git_fails(tmp_path: Path) -> None:
+    """Raise on a ``git check-ignore`` failure, such as a folder that is no checkout (SKY-815).
+
+    Args:
+        tmp_path: A folder that is no checkout.
+    """
+    with pytest.raises(RuntimeError, match="git check-ignore failed"):
+        shinka_runner._ignored_paths(tmp_path, ["a.py"])
+
+
+def test_the_command_editors_git_runs_no_hook_and_no_fsmonitor(tmp_path: Path) -> None:
+    """Run git for the command editor with hooks and fsmonitor off, so no planted script runs (SKY-815).
+
+    Args:
+        tmp_path: Run folder.
+    """
+    mailbox = _ProposalMailbox({"files": {"src/util.py": "SCALE = 5\n"}})
+    runner = _install_command_editor(tmp_path, mailbox)
+    checkout = tmp_path / "checkout"
+    marker = tmp_path / "ran.txt"
+    script = tmp_path / "plant.sh"
+    script.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+    script.chmod(0o755)
+    hooks = checkout / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    for hook in ("post-checkout", "pre-commit", "post-index-change"):
+        shutil.copyfile(script, hooks / hook)
+        (hooks / hook).chmod(0o755)
+    subprocess.run(["git", "config", "core.fsmonitor", str(script)], cwd=checkout, check=True)
+
+    _, _, success = asyncio.run(
+        runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1)
+    )
+
+    assert success is True
+    assert not marker.exists()

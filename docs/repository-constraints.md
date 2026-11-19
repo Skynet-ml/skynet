@@ -138,6 +138,14 @@ U+2066 to U+2069), because they can hide what a command does.
   `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
+- ShinkaEvolve refuses `entry` today. The command may reach a model only on
+  your own model key, never on Skynet's key, and its box has no such model
+  route until a metered relay lands. Its command support also runs only on
+  the worker's engine loop, which runs no run yet. In that support, `setup`
+  runs once, in its own box. Only the files that it writes into the
+  repository carry over to each command box: the box is disposable, and the
+  tree is the truth. If `setup` changes or removes a file of the repository,
+  the run stops, and the message names the files.
 - The command runs only in a repository checkout. AutoSaddler also starts
   reflect sessions in a plain folder, which edit no repository. The default
   proposer agent answers those sessions, without `setup`, and the box
@@ -145,13 +153,12 @@ U+2066 to U+2069), because they can hide what a command does.
 - The run record names the command in a note: "The run uses the proposer
   command in the contract file: ...". The run page shows the command as the
   proposer.
-- AutoResearch, Meta-Harness and ShinkaEvolve cannot use the command.
-  ShinkaEvolve writes versions with its own editor. AutoResearch and
-  Meta-Harness call the proposer from their own lab folder, so the files the
-  command changes are not their versions. A single run of one of these
-  engines with `entry` fails the setup check, and the message names
-  `[proposer] entry` and the engine. Auto leaves out their lanes, and the run
-  record says so in a note.
+- AutoResearch and Meta-Harness cannot use the command. They call the
+  proposer from their own lab folder, so the files the command changes are
+  not their versions. A single run of AutoResearch, Meta-Harness or
+  ShinkaEvolve with `entry` fails the setup check, and the message names
+  `[proposer] entry` and the engine. Auto leaves out the lanes of these three
+  engines, and the run record says so in a note.
 - Every repository file or folder that `entry` or `setup` names by its
   exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
   `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.

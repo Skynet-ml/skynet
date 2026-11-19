@@ -14,6 +14,7 @@ import io
 import json
 import os
 import resource
+import shlex
 import signal
 import stat
 import sys
@@ -24,13 +25,17 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy.engine import Engine
 
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
-from core.service_gateway.optimization.blackbox import sandbox_log, shinka_evolve
+from core.sandbox.grants import Grant, UnknownCapabilityError
+from core.sandbox.trees import GrantDeniedError
+from core.service_gateway.optimization.blackbox import sandbox_log, shinka_bundle, shinka_evolve
 from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
     EngineContext,
@@ -2245,3 +2250,591 @@ def test_an_evaluation_with_no_case_in_a_task_with_cases_is_refused_to_the_child
 
     assert json.loads(replies.getvalue()) == {"id": "0", "error": "The evaluation names no case."}
     assert (requests.server.used, requests.evals) == (0, 0)
+
+
+def _proposer_options(entry: str, setup: list[str] | None = None) -> SimpleNamespace:
+    """Build native options whose contract file names a ``[proposer] entry`` (SKY-815).
+
+    Args:
+        entry: The ``[proposer] entry`` command line.
+        setup: The ``[proposer] setup`` argv, or None.
+
+    Returns:
+        The options; the run has no model gateway, so the command gets no network grant.
+    """
+    repo = {
+        "chunks": [],
+        "editable_paths": [],
+        "readonly_paths": [],
+        "hidden_hashes": {},
+        "file_proposer": True,
+        "proposer_setup": setup or [],
+        "proposer_hosts": [],
+    }
+    return SimpleNamespace(
+        shinka={},
+        shinka_models=None,
+        budget_route=None,
+        max_token_cost=None,
+        repo=repo,
+        proposer=SimpleNamespace(run_command=entry),
+        gateway=None,
+        model="test-model",
+    )
+
+
+def _propose(requests: shinka_evolve._Requests, request_id: str, files: dict[str, str], task: str) -> dict:
+    """Send one ``propose`` request as the child does, and read the reply.
+
+    Args:
+        requests: The engine's request handler.
+        request_id: The request id.
+        files: The parent's files.
+        task: The mutation task.
+
+    Returns:
+        The reply.
+    """
+    replies = io.StringIO()
+    body = json.dumps({"id": request_id, "kind": "propose", "files": files, "task": task})
+    assert requests.line(f"APP_NATIVE_RPC n {body}", replies) is True
+    return json.loads(replies.getvalue())
+
+
+def test_each_proposal_runs_the_file_command_on_the_parents_tree_and_files_the_tree_it_leaves(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Run ``[proposer] entry`` once for each mutation, after ``[proposer] setup`` runs once (SKY-815).
+
+    The command sees the parent's files and the task in ``ASCENT_TASK``. The child version is the text files of
+    the tree the command leaves, without the setup's output and the task file.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    options = _proposer_options(
+        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$APP_MODEL" > model.txt'
+        " && printf 'child\\n' > main.py",
+        setup=["sh", "-c", "printf built > .cache.txt"],
+    )
+    proposer = shinka_evolve._Proposer(ctx, options)
+    requests = shinka_evolve._Requests(
+        Task("seed"), loop.server(lambda *args: (1.0, {}), max_evals=5), ctx, "n", proposer
+    )
+
+    first = _propose(requests, "1", {"main.py": "parent\n"}, "Improve this program:\nparent\n")
+    second = _propose(requests, "2", {"main.py": "child\n"}, "Improve this program:\nchild\n")
+
+    assert first == {
+        "id": "1",
+        "files": {
+            "main.py": "child\n",
+            "model.txt": "test-model",
+            "parent.txt": "parent\n",
+            "seen.md": "Improve this program:\nparent\n",
+        },
+    }
+    assert second["files"]["parent.txt"] == "child\n"
+    assert second["files"]["seen.md"] == "Improve this program:\nchild\n"
+    # One setup command and one command for each proposal.
+    assert [kind for _, kind, _ in _steps(engine)].count("command") == 3
+    assert not any(boxes.open.values())
+
+
+def test_a_version_leaves_out_unchanged_seed_files_setup_output_and_large_files(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Keep only the text files that differ from the seed, within the size limit, and no setup output (SKY-815).
+
+    A file with a NUL byte or with bytes that are not UTF-8 is not text, so it stays out too. A setup output
+    that the parent holds stays, since it came from an earlier version and not from the setup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    limit = shinka_bundle.MAX_FILE_BYTES
+    options = _proposer_options(
+        "printf edited > .cache.txt && printf mine > gen.txt && printf 'child\\n' > main.py"
+        f" && head -c {limit} /dev/zero | tr '\\0' a > edge.txt"
+        f" && head -c {limit + 1} /dev/zero | tr '\\0' a > big.txt"
+        " && printf 'a\\000b' > binary.dat && printf '\\377\\376' > latin.txt",
+        setup=["sh", "-c", "printf built > .cache.txt && printf built > gen.txt"],
+    )
+    requests = shinka_evolve._Requests(
+        Task("seed"),
+        loop.server(lambda *args: (1.0, {}), max_evals=5),
+        ctx,
+        "n",
+        shinka_evolve._Proposer(ctx, options),
+    )
+
+    reply = _propose(requests, "1", {"main.py": "parent\n", "gen.txt": "old"}, "task")
+
+    assert reply == {"id": "1", "files": {"main.py": "child\n", "gen.txt": "mine", "edge.txt": "a" * limit}}
+
+
+def test_a_failed_proposer_command_is_a_failed_mutation_and_a_failed_setup_stops_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Send a failed command's exit code and stderr back as the mutation's error, and stop on a failed setup.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    server = loop.server(lambda *args: (1.0, {}), max_evals=5)
+    failing = shinka_evolve._Proposer(ctx, _proposer_options("echo no model >&2; exit 3"))
+    requests = shinka_evolve._Requests(Task("seed"), server, ctx, "n", failing)
+
+    reply = _propose(requests, "1", {"main.py": "parent\n"}, "task")
+
+    assert reply == {"id": "1", "error": "The [proposer] entry failed with exit code 3. no model"}
+    broken = shinka_evolve._Proposer(ctx, _proposer_options("true", setup=["sh", "-c", "exit 4"]))
+    with pytest.raises(ServiceError, match=r"\[proposer\] setup .* exit code 4"):
+        broken.propose({}, "task")
+    with pytest.raises(ServiceError, match="malformed proposal"):
+        requests.line('APP_NATIVE_RPC n {"id": "2", "kind": "propose", "files": {"a": 1}, "task": "t"}', io.StringIO())
+
+
+def test_a_setup_that_changes_or_removes_a_seed_file_stops_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Stop the run and name the files when ``[proposer] setup`` changes or removes a seed file (SKY-815).
+
+    Every session starts from the setup's tree, so the change would enter every version.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n", "kept.py": b"k\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    setup = ["sh", "-c", "printf x > main.py && rm other.py && printf new > new.txt"]
+    proposer = shinka_evolve._Proposer(ctx, _proposer_options("true", setup=setup))
+
+    with pytest.raises(ServiceError) as stopped:
+        proposer.propose({}, "task")
+
+    assert str(stopped.value) == (
+        f"The [proposer] setup command in optimize.toml ({shlex.join(setup)}) changed or removed files of the"
+        " repository: main.py, other.py. Those changes would enter every version. Make the setup write only new"
+        " files."
+    )
+
+
+def test_a_version_reads_only_the_files_the_command_changed(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Compare content ids, and read no file that the command left as the parent or the setup had it (SKY-815).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    seed = loop_tests._store(trees, {"main.py": b"seed\n", "other.py": b"same\n"})
+    ctx = loop.context(repo_seed=RepoSeed(seed))
+    assert ctx.read_file is not None
+    real_read = ctx.read_file
+    reads: list[str] = []
+
+    def read_file(tree_id: str, path: str) -> bytes | None:
+        """Record each read and pass it on.
+
+        Args:
+            tree_id: The tree.
+            path: The file.
+
+        Returns:
+            The file bytes.
+        """
+        reads.append(path)
+        return real_read(tree_id, path)
+
+    ctx = replace(ctx, read_file=read_file)
+    options = _proposer_options("printf 'new\\n' > new.py", setup=["sh", "-c", "printf built > .cache.txt"])
+    proposer = shinka_evolve._Proposer(ctx, options)
+
+    files = proposer.propose({"main.py": "parent\n", "kept.py": "k\n"}, "task")
+
+    assert files == {"files": {"main.py": "parent\n", "kept.py": "k\n", "new.py": "new\n"}}
+    assert reads == ["new.py"]
+
+
+def _failed_command(tmp_path: Path, result: SimpleNamespace) -> dict[str, Any]:
+    """Run one proposal whose fake command gives the result.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        result: The command's result.
+
+    Returns:
+        The proposal's reply.
+    """
+    options = _proposer_options("node agent.js")
+    ctx = _box_context(options, tmp_path, run_command=lambda *args: (result, "after"))
+    return shinka_evolve._Proposer(ctx, options).propose({"main.py": "parent\n"}, "task")
+
+
+def test_a_command_that_runs_out_of_time_is_a_failed_mutation_also_with_exit_code_0(tmp_path: Path) -> None:
+    """Fail the mutation of a command that ran out of time, whatever its exit code (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    result = SimpleNamespace(timed_out=True, exit_code=0, stderr="", stdout="")
+
+    assert _failed_command(tmp_path, result) == {"error": "The [proposer] entry ran out of time."}
+
+
+def test_a_failed_command_keeps_the_end_of_a_long_stderr(tmp_path: Path) -> None:
+    """Keep the end of the command's stderr, where the error is, in the mutation's error (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    stderr = "START" + "x" * (shinka_evolve._COMMAND_ERROR_CHARS * 2) + "END"
+    result = SimpleNamespace(timed_out=False, exit_code=1, stderr=stderr, stdout="")
+
+    error = _failed_command(tmp_path, result)["error"]
+
+    assert error.endswith("xEND")
+    assert "START" not in error
+
+
+def test_a_run_with_a_file_proposer_is_refused_before_the_child_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the command on the sandbox path and on the engine loop, and need the loop's boxes (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Fails the test when the child starts.
+    """
+    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
+    monkeypatch.setattr(shinka_evolve, "run_native_engine", _no_sandbox)
+    options = _proposer_options("node agent.js")
+    no_boxes = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path / "a"),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=options,  # type: ignore[arg-type]
+        repo_seed=RepoSeed("tree"),
+    )
+    sandbox = replace(no_boxes, call_model=None)
+    with pytest.raises(ServiceError, match="only on the worker's engine loop"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), sandbox
+        )
+    with pytest.raises(ServiceError, match="model route on your own key"):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), _box_context(options, tmp_path)
+        )
+    with pytest.raises(ServiceError, match="engine loop's boxes"):
+        shinka_evolve._Proposer(no_boxes, options)
+
+
+def test_a_proposal_leaves_git_metadata_out_of_the_version(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Leave a ``.git`` folder that the command writes out of the version, because the box does not keep it (SKY-815).
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+    options = _proposer_options(
+        "mkdir -p sub/.GIT/hooks && printf x > sub/.GIT/hooks/post-commit && printf 'child\\n' > main.py"
+    )
+    requests = shinka_evolve._Requests(
+        Task("seed"),
+        loop.server(lambda *args: (1.0, {}), max_evals=5),
+        ctx,
+        "n",
+        shinka_evolve._Proposer(ctx, options),
+    )
+
+    assert _propose(requests, "1", {"main.py": "parent\n"}, "task") == {"id": "1", "files": {"main.py": "child\n"}}
+
+
+def test_the_version_leaves_out_each_git_part_that_the_tree_holds(tmp_path: Path) -> None:
+    """Leave ``.git`` parts, in any letter case, out of a version even when the tree holds them (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    trees = {"after": {"main.py": "a", "sub/.GIT/x": "b", ".git/config": "c"}, "parent": {}}
+    ctx = _box_context(
+        _proposer_options("node agent.js"),
+        tmp_path,
+        file_ids=lambda tree: trees[tree],
+        read_file=lambda tree, path: b"text\n",
+    )
+
+    version = shinka_evolve._Proposer(ctx, _proposer_options("node agent.js"))._version("after", "parent", {})
+
+    assert version == {"main.py": "text\n"}
+
+
+def test_a_command_that_leaves_too_many_files_is_a_failed_mutation_with_no_read(tmp_path: Path) -> None:
+    """Fail the mutation of a command that adds more files than a tree listing holds, before any read (SKY-815).
+
+    A command that runs ``npm install`` leaves thousands of ignored files; reading each would cost thousands of
+    reads and a reply of many megabytes.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}, "parent": {}}
+    reads: list[str] = []
+    options = _proposer_options("npm install")
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    ctx = _box_context(
+        options,
+        tmp_path,
+        run_command=lambda *args: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._Proposer(ctx, options).propose({}, "task")
+
+    assert reply == {
+        "error": f"The [proposer] entry command added or changed more than {shinka_bundle._MAX_TREE_ENTRIES} files."
+        " Make it write its tools and caches outside the repository, or remove them before it exits."
+    }
+    assert reads == []
+
+
+def test_a_command_that_leaves_exactly_the_file_cap_is_read_in_full(tmp_path: Path) -> None:
+    """Read every file of a command that changes exactly as many files as a tree listing holds (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    paths = [f"gen/m{index}.js" for index in range(shinka_bundle._MAX_TREE_ENTRIES)]
+    trees = {"after": {path: path for path in paths}, "parent": {}}
+    reads: list[str] = []
+    options = _proposer_options("node gen.js")
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    ctx = _box_context(
+        options,
+        tmp_path,
+        run_command=lambda *args: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._Proposer(ctx, options).propose({}, "task")
+
+    assert reply == {"files": dict.fromkeys(paths, "text\n")}
+    assert sorted(reads) == sorted(paths)
+
+
+_BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
+
+
+@pytest.mark.parametrize(
+    ("route", "token_cost", "message"),
+    [
+        ({MCP_RELAY_ROUTE_KEY: {"servers": [{"name": "docs"}]}}, None, r"\[proposer\] mcp servers"),
+        ({MCP_RELAY_ROUTE_KEY: {"services": {"api": {}}}}, None, r"\[proposer\] services"),
+        # A BYOK route has no token budget; a managed route has one. Neither is a route a box can reach.
+        (_BYOK_ROUTE, None, "model route on your own key"),
+        (_BYOK_ROUTE, 1.5, "model route on your own key"),
+        # With no route, the run's gateway is the deployment's, with its managed key.
+        (None, None, "model route on your own key"),
+        (None, 1.5, "model route on your own key"),
+    ],
+)
+def test_a_file_proposer_is_refused_on_every_route(
+    route: dict[str, object] | None,
+    token_cost: float | None,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse the ``[proposer] entry`` command on BYOK, managed and routeless runs alike (SKY-815).
+
+    No run can give the box a model route on the user's own key until a metered relay (SKY-828), and the box must
+    never reach the deployment's key.
+
+    Args:
+        route: The run's budget route.
+        token_cost: The run's token budget, which only a managed run has.
+        message: Words the refusal holds.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Fails the test when the child starts.
+    """
+    monkeypatch.setattr(ShinkaEvolveEngine, "_drive", lambda *args: pytest.fail("the child started"))
+    options = _proposer_options("node agent.js")
+    options.budget_route = route
+    options.max_token_cost = token_cost
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=options,  # type: ignore[arg-type]
+        run_command=lambda *args: None,  # type: ignore[arg-type,return-value]
+        put_files=lambda *args: None,  # type: ignore[arg-type,return-value]
+        read_file=lambda *args: None,
+        list_files=lambda *args: None,
+        repo_seed=RepoSeed("tree"),
+    )
+
+    with pytest.raises(ServiceError, match=message):
+        ShinkaEvolveEngine(_fake_python(tmp_path)).run(
+            Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), ctx
+        )
+
+
+def _box_context(options: SimpleNamespace, tmp_path: Path, **fields: object) -> EngineContext:
+    """Build a loop context whose boxes are fakes, for the checks before and around a command.
+
+    Args:
+        options: The run's native options.
+        tmp_path: Pytest's temporary folder.
+        fields: Context fields that replace the fakes.
+
+    Returns:
+        The context.
+    """
+    ctx = EngineContext(
+        reflection_lm=lambda prompt: "",
+        run_dir=str(tmp_path),
+        call_model=lambda messages, tools: None,  # type: ignore[arg-type,return-value]
+        native_options=options,  # type: ignore[arg-type]
+        run_command=lambda *args: None,  # type: ignore[arg-type,return-value]
+        put_files=lambda *args: "parent",  # type: ignore[arg-type,return-value]
+        read_file=lambda *args: None,
+        list_files=lambda *args: [],
+        file_ids=lambda *args: {},
+        repo_seed=RepoSeed("tree"),
+    )
+    return replace(ctx, **fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("route", [_BYOK_ROUTE, None])
+def test_the_proposer_box_gets_each_host_once_and_never_the_gateway(
+    route: dict[str, object] | None, tmp_path: Path
+) -> None:
+    """Grant each ``proposer_hosts`` host once, with no credential, and never name the run's gateway (SKY-815).
+
+    Args:
+        route: The run's budget route.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _proposer_options("node agent.js")
+    options.budget_route = route
+    options.gateway = SimpleNamespace(url="https://gw.test/v1")
+    options.repo["proposer_hosts"] = ["pypi.org", "gw.test", "docs.test", "pypi.org"]
+
+    proposer = shinka_evolve._Proposer(_box_context(options, tmp_path), options)
+
+    assert proposer.grants == (Grant("docs.test"), Grant("pypi.org"))
+    assert proposer.exports == ["export APP_MODEL=test-model"]
+
+
+def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """Stop the run when the loop cannot resolve the proposer box's grants (SKY-815).
+
+    Each mutation would fail the same way, so the error must not become a failed mutation.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    options = _proposer_options("printf 'child\\n' > main.py")
+    options.repo["proposer_hosts"] = ["bad host"]
+    loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
+    ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
+
+    with pytest.raises(GrantDeniedError, match="bad host"):
+        shinka_evolve._Proposer(ctx, options).propose({"main.py": "parent\n"}, "task")
+
+    def refuse(*args: object) -> None:
+        """Refuse the grants as a run command that resolves them itself does.
+
+        Args:
+            args: The command's tree, script and grants.
+
+        Raises:
+            UnknownCapabilityError: Always.
+        """
+        raise UnknownCapabilityError("gw.test")
+
+    fake = _box_context(options, tmp_path, run_command=refuse)
+    with pytest.raises(UnknownCapabilityError):
+        shinka_evolve._Proposer(fake, options).propose({"main.py": "parent\n"}, "task")
+
+
+def test_a_proposal_checks_the_budget_before_the_command_runs(tmp_path: Path) -> None:
+    """Stop at the budget check, before the proposer box starts (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    commands: list[object] = []
+
+    def run_command(*args: object) -> None:
+        """Record a command that must not run.
+
+        Args:
+            args: The command's tree, script and grants.
+        """
+        commands.append(args)
+
+    def check_budget() -> None:
+        """Refuse the run's next paid step.
+
+        Raises:
+            BudgetReached: Always.
+        """
+        raise BudgetReached()
+
+    options = _proposer_options("node agent.js")
+    ctx = _box_context(options, tmp_path, run_command=run_command, check_budget=check_budget)
+    requests = shinka_evolve._Requests(
+        Task("seed"), EvalServer(lambda c, e: (1.0, {}), max_evals=5), ctx, "n", shinka_evolve._Proposer(ctx, options)
+    )
+
+    with pytest.raises(BudgetReached):
+        _propose(requests, "1", {"main.py": "parent\n"}, "task")
+    assert commands == []

@@ -544,7 +544,8 @@ _ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[pro
     [
         (BLACKBOX_ENGINE_AUTORESEARCH, "AutoResearch cannot use the [proposer] entry command yet."),
         (BLACKBOX_ENGINE_META_HARNESS, "Meta-Harness cannot use the [proposer] entry command yet."),
-        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve never runs the [proposer] entry command."),
+        # The engine refuses the command on every route until SKY-828 wires it after SKY-728 (SKY-815).
+        (BLACKBOX_ENGINE_SHINKA_EVOLVE, "ShinkaEvolve cannot use the [proposer] entry command yet."),
     ],
 )
 def test_a_single_run_of_an_engine_that_cannot_use_a_files_proposer_fails_the_setup_check(

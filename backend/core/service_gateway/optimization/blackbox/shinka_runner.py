@@ -28,7 +28,10 @@ unchanged. Skynet contributes only:
   kept inside it;
 * optionally, an agent editor: each new version is written by a Pi coding
   agent (file tools only) editing the parent's files in a scratch directory,
-  instead of upstream's single model call answering with a patch.
+  instead of upstream's single model call answering with a patch;
+* or, on the engine loop, a command editor: the worker runs the contract
+  file's ``[proposer] entry`` command on the parent's tree, and the tree it
+  leaves is the new version (SKY-815).
 """
 
 from __future__ import annotations
@@ -129,6 +132,8 @@ _KIND_EMBEDDING = "embedding"
 _AGENT_PROGRAM_FILE = "program.md"
 # Where the launch writes Pi's config inside a scratch directory; never part of a version.
 _AGENT_CONFIG_DIR = ".app"
+# Git in a scratch worktree runs no hook and no fsmonitor, so files a version writes cannot run code (SKY-815).
+_HOOKLESS_GIT = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 _AGENT_KEY_ENV = re.compile(r"[?&]api_key_env=([A-Za-z0-9_]+)$")
 _AGENT_NAME = re.compile(r"^\W*NAME\W*:[\s*_]*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
 _AGENT_DESCRIPTION = re.compile(r"^\W*DESCRIPTION\W*:[\s*_]*(.+)", re.MULTILINE | re.IGNORECASE | re.DOTALL)
@@ -282,8 +287,8 @@ class EvaluatorMailbox:
         """Send one request to the worker and wait for its reply.
 
         Args:
-            kind: ``evaluate`` or ``model``. Only the stdin transport carries it,
-                because the sandbox runtime answers evaluations only.
+            kind: ``evaluate``, ``model`` or ``propose``. Only the stdin transport carries
+                it, because the sandbox runtime answers evaluations only.
             fields: The request fields; the mailbox adds the id.
 
         Returns:
@@ -1207,17 +1212,21 @@ def checked_target(checkout: Path, path: str) -> Path:
         The target file.
 
     Raises:
-        ValueError: When the path leaves the checkout, crosses a symlink, or names a non-file.
+        ValueError: When the path leaves the checkout, crosses a symlink, lies below a file, or names a non-file.
     """
     root = checkout.resolve()
     target = root / path
     if not target.resolve().is_relative_to(root):
         raise ValueError(f"'{path}' is outside the repository.")
     current = root
-    for part in Path(path).parts:
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
         current = current / part
         if current.is_symlink():
             raise ValueError(f"'{path}' crosses a symlink.")
+        # Creating the parent folders would raise an OSError whose message names the worker's scratch folder.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise ValueError(f"'{path}' is below a file.")
     if target.exists() and not target.is_file():
         raise ValueError(f"'{path}' is not a regular file.")
     return target
@@ -1436,11 +1445,38 @@ def _git(cwd: Path, *arguments: str) -> str:
         RuntimeError: When git exits non-zero.
     """
     result = subprocess.run(
-        ["git", *repo_tree.SAFE_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, *arguments], cwd=cwd, capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-500:]}")
     return result.stdout
+
+
+def _ignored_paths(cwd: Path, paths: list[str]) -> set[str]:
+    """Return the paths that the checkout's ``.gitignore`` rules leave out, as ``git add --all`` does.
+
+    Args:
+        cwd: The checkout to read the ignore rules in.
+        paths: Paths relative to the checkout.
+
+    Returns:
+        The ignored paths. A tracked path is never ignored.
+
+    Raises:
+        RuntimeError: When git fails.
+    """
+    result = subprocess.run(
+        ["git", *repo_tree.SAFE_GIT, *_HOOKLESS_GIT, "check-ignore", "-z", "--stdin"],
+        cwd=cwd,
+        input="".join(f"{path}\0" for path in paths),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Exit code 1 means that no path is ignored.
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"git check-ignore failed: {(result.stderr or result.stdout).strip()[-500:]}")
+    return set(filter(None, result.stdout.split("\0")))
 
 
 class AgentEditor:
@@ -1632,6 +1668,25 @@ class AgentEditor:
                 return report
         finally:
             self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
+
+    @staticmethod
+    def _save_version(
+        report: dict[str, Any], parent_code: str, code: str, patch: str, changed: int, patch_dir: Path
+    ) -> dict[str, Any]:
+        """Write a new version where upstream reads it, and add it to the session report.
+
+        Args:
+            report: The session report.
+            parent_code: The parent's program text or bundle.
+            code: The new version's program text or bundle.
+            patch: The unified diff from the parent.
+            changed: How many files the version changes.
+            patch_dir: Upstream's generation folder.
+
+        Returns:
+            The report with ``code``, ``patch``, ``patch_path`` and ``changed``.
+        """
         patch_dir.mkdir(parents=True, exist_ok=True)
         (patch_dir / f"original.{_LANGUAGE_EXT}").write_text(parent_code, encoding="utf-8")
         (patch_dir / f"main.{_LANGUAGE_EXT}").write_text(code, encoding="utf-8")
@@ -1713,7 +1768,7 @@ class AgentEditor:
                 continue
         files = bundle.normalize(files)
         if files == bundle.normalize(parent):
-            raise ValueError("The agent left every file as it was.")
+            raise ValueError("The proposer left every file as it was.")
         touched = sorted(set(parent) | set(files))
         patch = "".join(
             shinka_bundle.file_diff(path, bundle.current(parent, path), bundle.current(files, path)) for path in touched
@@ -1734,6 +1789,92 @@ class AgentEditor:
         if self.bundle is not None:
             with self._git_lock, contextlib.suppress(RuntimeError):
                 _git(self.bundle.checkout, "worktree", "prune")
+
+
+class CommandEditor(AgentEditor):
+    """Write a new version by running the contract file's ``[proposer] entry`` command (SKY-815).
+
+    The worker runs the command once in a proposer box over the parent's tree, with this editor's task in the
+    ``ASCENT_TASK`` file, and sends back the files of the tree the command leaves. That tree is the new version:
+    it goes through the same path rules and bundle limits as an agent session's workspace.
+    """
+
+    def __init__(self, mailbox: EvaluatorMailbox, workdir: Path, *, ledger: UsageLedger, bundle: Any) -> None:
+        """Bind the editor to the worker.
+
+        Args:
+            mailbox: Sends each proposal to the worker.
+            workdir: Run folder the scratch directories go under.
+            ledger: Usage ledger; the command's own model use is not in it.
+            bundle: ``shinka_bundle.RepoBundle`` of the run; the command works only on a repository.
+        """
+        super().__init__({}, workdir, ledger=ledger, deadline=math.inf, bundle=bundle)
+        self.mailbox = mailbox
+
+    def edit(self, parent_code: str, prompt: str, model_name: str, patch_dir: Path) -> dict[str, Any]:
+        """Have the worker run the command on the parent's files, and read back the version it leaves.
+
+        Args:
+            parent_code: The parent's bundle.
+            prompt: The task, which the command reads from ``ASCENT_TASK``.
+            model_name: Upstream model name the bandit picked; the command picks its own model.
+            patch_dir: Upstream's generation folder; the new version is written there.
+
+        Returns:
+            The report of :meth:`AgentEditor.edit`, with no cost and no tool calls.
+
+        Raises:
+            EvaluationStopped: When the run stopped or the worker did not reply.
+        """
+        report: dict[str, Any] = {
+            "cost": 0.0,
+            "tool_calls": 0,
+            "tool_cap_reached": False,
+            "name": None,
+            "description": None,
+        }
+        reply = self.mailbox.ask("propose", {"files": shinka_bundle.decode_bundle(parent_code), "task": prompt})
+        files = reply.get("files")
+        if "error" in reply or not isinstance(files, dict):
+            report["error"] = str(reply.get("error") or "The worker sent no new version.")
+            return report
+        if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
+            report["error"] = "The worker sent a malformed version."
+            return report
+        # The proposer box is untrusted: check every path before anything is written.
+        for path in files:
+            if any(part.lower() == ".git" for part in path.split("/")):
+                # A case-insensitive file system reads ``.GIT`` as ``.git`` (SKY-810).
+                report["error"] = f"The [proposer] entry command may not write Git metadata: '{path}'."
+                return report
+        workspace = self.workdir / "command-edits" / uuid.uuid4().hex[:12]
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        with self._git_lock:
+            _git(self.bundle.checkout, "worktree", "add", "--quiet", "--detach", str(workspace), self.bundle.start)
+        try:
+            # git check-ignore fails on a path outside the checkout, and its message names the worker's scratch
+            # folder. Refuse such paths first, with a message that names only the path.
+            targets = {path: checked_target(workspace, path) for path in files}
+            # The version's own ``.gitignore`` files decide what ``git add --all`` keeps, so the files are written
+            # before the ignore check, and the check and ``_collect`` read the same rules.
+            for path, text in files.items():
+                targets[path].parent.mkdir(parents=True, exist_ok=True)
+                targets[path].write_text(text, encoding="utf-8")
+            # The command's tree holds its ignored output too, such as ``.pytest_cache``. An agent session's
+            # ``git add`` leaves those out, so the rules must not refuse the version for them.
+            ignored = _ignored_paths(workspace, list(files))
+            for path in files:
+                problem = None if path in ignored else self.bundle.rule_problem(path)
+                if problem is not None:
+                    report["error"] = self.bundle.refusal(path, problem)
+                    return report
+            code, patch, changed = self._collect(parent_code, workspace)
+        except ValueError as exc:
+            report["error"] = str(exc)
+            return report
+        finally:
+            self._discard(workspace)
+        return self._save_version(report, parent_code, code, patch, changed, patch_dir)
 
 
 def install_agent_editor(editor: AgentEditor, runner: Any) -> None:
