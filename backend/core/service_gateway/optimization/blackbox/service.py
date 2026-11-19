@@ -98,7 +98,7 @@ from .auto import LaneOutcome, run_strategy
 from .feedback import FEEDBACK_KEY, named_scores, without_images
 from .harness import GatewayConfig
 from .harnesses import REGISTRY
-from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
+from .native_runtime import NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
     RUN_FAILED_STATUS,
@@ -346,13 +346,9 @@ def uses_native_runtime(payload: BlackboxRunRequest | JobSpec) -> bool:
         payload: The submitted or stored job.
 
     Returns:
-        True for auto mode, a native engine, or any repository run, unless the job runs on the engine loop.
+        True unless the job runs on the engine loop.
     """
-    return (
-        payload.strategy.mode != "single"
-        or payload.strategy.engine in NATIVE_ENGINES
-        or payload.target.kind == BLACKBOX_TARGET_REPO
-    ) and not has_loop_route(payload)
+    return not has_loop_route(payload)
 
 
 class LoopBinding(Protocol):

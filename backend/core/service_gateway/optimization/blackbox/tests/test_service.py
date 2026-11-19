@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -160,7 +161,7 @@ def _payload(**overrides: Any) -> BlackboxRunRequest:
     return BlackboxRunRequest.model_validate(data, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
 
 
-def _run(
+def _run_native(
     payload: BlackboxRunRequest,
     *,
     artifact_id: str,
@@ -207,6 +208,11 @@ def _run(
         raise
     response.details.update(case_split)
     return response
+
+
+# A native proposer needs a sandbox box and a model gateway. The engine, final-run and report checks do not
+# depend on the proposer, so they keep the in-process one, as an engine-loop run does.
+_run = mock.patch.object(service_mod, "uses_native_runtime", mock.Mock(return_value=False))(_run_native)
 
 
 @pytest.mark.parametrize("target", [{"kind": "text"}, {"kind": "agent", "model": "m"}])
@@ -412,7 +418,7 @@ def test_auto_run_hands_off_between_engines(
     """
     sink: list[tuple[str, dict[str, Any]]] = []
 
-    response = _run(
+    response = _run_native(
         _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
         artifact_id="job-2",
         progress_callback=lambda e, m: sink.append((e, m)),
@@ -458,7 +464,7 @@ def test_native_proposers_stop_at_the_outcome_target(
     stop_at: float | None,
 ) -> None:
     """The snapshot's ``[outcome] target`` is every engine's stop score; with no target there is none (SKY-691)."""
-    _run(
+    _run_native(
         _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
         artifact_id="job-target",
         gepa_log_dir_path=str(tmp_path),
@@ -485,7 +491,7 @@ def test_a_stored_run_keeps_its_retired_stop_score_unless_the_file_sets_a_target
     stored["budget"]["stop_at_score"] = 0.9
     payload = BlackboxRunRequest.model_validate(stored, context=blackbox_models.STORED_PAYLOAD_CONTEXT)
 
-    _run(
+    _run_native(
         payload,
         artifact_id="job-legacy-stop",
         gepa_log_dir_path=str(tmp_path),
@@ -513,7 +519,7 @@ def test_byok_reflection_budget_does_not_limit_model_calls(
     fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
 ) -> None:
     """Allow BYOK reflection with a spending limit without a fee-based model cap."""
-    _run(
+    _run_native(
         _payload(
             strategy={"mode": "auto"},
             budget={"max_scorer_runs": 24},
@@ -532,7 +538,7 @@ def test_native_proposers_receive_the_reflection_reasoning_effort(
     fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
 ) -> None:
     """The effort chosen for the optimization model passes validation and reaches every native proposer."""
-    _run(
+    _run_native(
         _payload(
             strategy={"mode": "auto"},
             budget={"max_scorer_runs": 24},
@@ -550,7 +556,7 @@ def test_native_proposers_keep_the_default_effort_without_a_choice(
     fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
 ) -> None:
     """A run with no chosen effort hands the native proposers none."""
-    _run(
+    _run_native(
         _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
         artifact_id="job-no-effort",
         gepa_log_dir_path=str(tmp_path),
@@ -570,7 +576,7 @@ def test_legacy_auto_byok_reflection_with_cost_limit(
         reflection_model_config={"name": "fake/model", "token_source": "byok"},
     )
     assert not payload.execution_budget_id
-    response = _run(payload, artifact_id="legacy-auto-byok", gepa_log_dir_path=str(tmp_path))
+    response = _run_native(payload, artifact_id="legacy-auto-byok", gepa_log_dir_path=str(tmp_path))
     assert response.strategy_mode == "auto"
     assert fake_native_proposers
     assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
@@ -698,7 +704,7 @@ def test_legacy_byok_reflection_counts_managed_native_model(
         return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
 
     monkeypatch.setattr(service_mod, "run_strategy", strategy)
-    _run(
+    _run_native(
         _payload(
             strategy={"mode": "single", "engine": "shinka_evolve"},
             max_cost_cents=1,
@@ -832,13 +838,13 @@ def test_validate_payload_checks_engine_and_scorer_code(monkeypatch: pytest.Monk
     monkeypatch.setattr(service_mod, "validate_scorer_code", checked.append)
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: "missing runtime")
 
-    validate_blackbox_payload(_payload())
+    validate_blackbox_payload(_payload(max_cost_cents=100))
     assert checked == [VOWEL_SCORER_CODE]
 
     with pytest.raises(ServiceError, match="not available"):
-        validate_blackbox_payload(_payload(strategy={"mode": "single", "engine": "autoresearch"}))
+        validate_blackbox_payload(_payload(strategy={"mode": "single", "engine": "autoresearch"}, max_cost_cents=100))
 
-    remote = _payload(scorer={"kind": "remote", "url": "https://scorer.example"})
+    remote = _payload(scorer={"kind": "remote", "url": "https://scorer.example"}, max_cost_cents=100)
     checked.clear()
     validate_blackbox_payload(remote)
     assert checked == []
@@ -847,7 +853,7 @@ def test_validate_payload_checks_engine_and_scorer_code(monkeypatch: pytest.Monk
 def test_validate_payload_surfaces_sandbox_errors() -> None:
     """Broken scorer code is caught by the real sandbox before the job is queued."""
     with pytest.raises(ServiceError, match="must define a function named 'score"):
-        validate_blackbox_payload(_payload(scorer={"kind": "python", "metric_code": "x = 1"}))
+        validate_blackbox_payload(_payload(scorer={"kind": "python", "metric_code": "x = 1"}, max_cost_cents=100))
 
 
 def test_protected_contract_validation_never_loads_authored_scorer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -858,7 +864,9 @@ def test_protected_contract_validation_never_loads_authored_scorer(monkeypatch: 
         pytest.fail("The protected parent must not execute authored scorer code.")
 
     monkeypatch.setattr(service_mod, "validate_scorer_code", forbid)
-    validate_blackbox_payload(_payload(scorer={"kind": "python", "metric_code": "x = 1"}), verify_scorer=False)
+    validate_blackbox_payload(
+        _payload(scorer={"kind": "python", "metric_code": "x = 1"}, max_cost_cents=100), verify_scorer=False
+    )
 
 
 _JUDGE_SCORER_CODE = "def score(candidate, case=None):\n    return {'score': float(llm(candidate, case['target'])), 'feedback': 'judged'}\n"
@@ -959,13 +967,13 @@ def test_combined_usage_preserves_distinct_native_model_keys() -> None:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "native"),
+    "strategy",
     [
-        ({"mode": "auto"}, True),
-        ({"mode": "single", "engine": "meta_harness"}, True),
-        ({"mode": "single", "engine": "autoresearch"}, True),
-        ({"mode": "single", "engine": "gepa"}, False),
-        ({"mode": "single", "engine": "best_of_n"}, False),
+        {"mode": "auto"},
+        {"mode": "single", "engine": "meta_harness"},
+        {"mode": "single", "engine": "autoresearch"},
+        {"mode": "single", "engine": "gepa"},
+        {"mode": "single", "engine": "best_of_n"},
     ],
 )
 @pytest.mark.parametrize(
@@ -979,15 +987,14 @@ def test_combined_usage_preserves_distinct_native_model_keys() -> None:
     ],
     ids=["temperature", "max-tokens", "base-url", "extra", "unknown-effort"],
 )
-def test_native_model_controls_are_rejected_without_restricting_direct_engines(
-    monkeypatch: pytest.MonkeyPatch, strategy: dict[str, str], native: bool, model_options: dict[str, Any]
+def test_native_model_controls_are_rejected_for_every_engine(
+    monkeypatch: pytest.MonkeyPatch, strategy: dict[str, str], model_options: dict[str, Any]
 ) -> None:
-    """Reject native model knobs that upstream cannot honor while retaining direct engine controls.
+    """Reject model knobs that the native proposer cannot honor: every engine runs it (SKY-834).
 
     Args:
         monkeypatch: Pytest fixture for deterministic runtime capabilities.
         strategy: Recipe whose model controls are validated.
-        native: Whether the recipe includes an upstream native proposer.
         model_options: Explicit sampler or routing options on the submitted model.
     """
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
@@ -998,10 +1005,7 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
         reflection_model_config={"name": "fake/model", **model_options},
     )
 
-    if native:
-        with pytest.raises(ServiceError, match="custom sampling and routing settings are unsupported"):
-            validate_blackbox_payload(payload)
-    else:
+    with pytest.raises(ServiceError, match="custom sampling and routing settings are unsupported"):
         validate_blackbox_payload(payload)
 
 
@@ -2066,12 +2070,14 @@ class _AsRepositoryScorer:
         return score, side_info
 
 
+@mock.patch.object(service_mod, "uses_native_runtime", mock.Mock(return_value=False))
 def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
     """Run ``payload`` with its python scorer in the place of the repository scorer.
 
     A real repository run needs a repository box and a native proposer. Here
     the python scorer stands in for the repository scorer's reply, so the run
     honors its ``run_failed`` status the way it honors the repository scorer's.
+    The run keeps the in-process proposer, as :func:`_run` does.
 
     Args:
         payload: The job; its python scorer returns what the repository scorer would.
