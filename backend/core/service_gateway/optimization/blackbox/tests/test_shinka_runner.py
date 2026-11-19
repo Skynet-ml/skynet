@@ -275,11 +275,14 @@ def test_usage_ledger_counts_a_routed_call_under_its_gateway_model() -> None:
     ledger.record("gpt-test", SimpleNamespace(input_tokens=3, output_tokens=None))
     # Upstream parses no model from a URL with nothing after the scheme, so the name stays whole.
     ledger.record("local/m@https://", SimpleNamespace(input_tokens=5, output_tokens=6))
+    # Upstream does not match a model name that holds "@", so that name stays whole too.
+    ledger.record("local/a@b@https://x/v1", SimpleNamespace(input_tokens=7, output_tokens=1))
 
     assert ledger.usage_by_model == {
         "claude-test": {"prompt_tokens": 105, "completion_tokens": 60, "total_tokens": 165},
         "gpt-test": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
         "local/m@https://": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+        "local/a@b@https://x/v1": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8},
     }
 
 
@@ -1491,6 +1494,52 @@ def test_an_evaluation_on_stdin_turns_a_null_score_into_negative_infinity() -> N
     assert mailbox.total_evals == 1
 
 
+def test_a_null_score_on_the_reply_stream_fails_the_program_with_its_run_failure(tmp_path: Path) -> None:
+    """Fail the program on a worker's null score, and still ask for its later cases (SKY-751).
+
+    Args:
+        tmp_path: Scratch folder for the queue and the program.
+    """
+
+    def reply(request: dict[str, Any]) -> dict[str, Any]:
+        """Send no score for case 1, with its run failure, and score the others.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The worker's reply fields.
+        """
+        if request["example"]["id"] == 1:
+            return {"score": None, "info": {"status": "run_failed", "feedback": "Run failed: boom"}}
+        return {"score": 1.0, "info": {}}
+
+    mailbox, sent = _connected_mailbox(reply)
+    send = mailbox.emit
+    # The scorer also writes progress lines, which the fake worker does not answer.
+    mailbox.emit = lambda prefix, payload: send(prefix, payload) if prefix == "APP_NATIVE_RPC " else None  # type: ignore[method-assign]
+    scorer = shinka_runner.ProgramScorer(
+        mailbox=mailbox,
+        queue=tmp_path / "queue",
+        examples=[{"id": 0}, {"id": 1}, {"id": 2}],
+        part_names=None,
+        max_concurrency=1,
+        stop_at_score=None,
+    )
+    program = tmp_path / "results" / "gen_2" / "main.md"
+    program.parent.mkdir(parents=True)
+    program.write_text(shinka_runner.pack_program("text"))
+
+    answer = scorer.score_program(str(program))
+    scorer.stop()
+
+    assert answer["correct"] is False
+    assert answer["error"] == "1 of 3 case(s) have no score."
+    assert answer["metrics"]["text_feedback"] == "Case 1 has no score:\nRun failed: boom"
+    assert [request["example"]["id"] for request in sent] == [0, 1, 2]
+    assert scorer.best is None
+
+
 @pytest.mark.parametrize(
     ("max_concurrency", "sent_cases"),
     [(1, [0, 1]), (3, [0, 1, 2])],
@@ -2115,6 +2164,19 @@ def test_the_patch_check_reads_the_whole_patch_from_inside_a_repository_subfolde
         shinka_runner.refuse_unsafe_patch(_symlink_patch("/etc"))
 
 
+def test_git_summary_of_a_mode_change_to_a_symlink_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the new mode from git's ``mode change OLD => NEW`` summary line.
+
+    Args:
+        monkeypatch: Turns off the text check, so only git's summary can see the mode.
+    """
+    monkeypatch.setattr(shinka_runner, "_PATCH_MODE", re.compile(r"(?!)"))
+    patch = "diff --git a/f b/f\nold mode 100644\nnew mode 120000\n"
+
+    with pytest.raises(ValueError, match="file mode 120000"):
+        shinka_runner.refuse_unsafe_patch(patch)
+
+
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2381,6 +2443,75 @@ def test_on_the_engine_loop_execute_scores_one_case_at_a_time_behind_the_gate(
 
     assert scorers[0]._cases._max_workers == 1
     assert runners[0]._generate_proposal_async.__qualname__ == "install_sequential_gate.<locals>.gated"
+
+
+@pytest.mark.parametrize(("seed", "reduced"), [(-1, 2**32 - 1), (2**40, 0)])
+def test_on_the_engine_loop_execute_reduces_an_out_of_range_seed_for_every_seeded_draw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int, reduced: int
+) -> None:
+    """Start the child with a seed NumPy refuses, and give NumPy and the bandit the same reduced seed.
+
+    The test restores the ``random`` and NumPy random states that the seeding changes.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Moves into the scratch folder and replaces upstream, ``uuid.uuid4`` and the reply stream.
+        seed: The user's seed.
+        reduced: The seed modulo 2**32.
+    """
+    seeded: list[int] = []
+    configs: list[Any] = []
+    real_seed_randomness = shinka_runner.seed_randomness
+
+    def recording_seed_randomness(value: int) -> None:
+        """Record the seed, then seed for real.
+
+        Args:
+            value: The seed the child passes.
+        """
+        seeded.append(value)
+        real_seed_randomness(value)
+
+    def runner(**fields: Any) -> _IdleRunner:
+        """Build an idle runner and record its evolution config.
+
+        Args:
+            **fields: Upstream's runner arguments.
+
+        Returns:
+            The runner.
+        """
+        configs.append(fields["evo_config"])
+        return _IdleRunner(**fields)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(uuid, "uuid4", uuid.uuid4)
+    # The test environment has no upstream, so the runner may have no NumPy of its own.
+    monkeypatch.setattr(shinka_runner, "np", np)
+    for name in ("EvolutionConfig", "LocalJobConfig", "DatabaseConfig"):
+        monkeypatch.setattr(shinka_runner, name, SimpleNamespace)
+    monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", runner)
+    monkeypatch.setattr(shinka_runner, "install_worker_models", lambda mailbox: None)
+    monkeypatch.setattr(shinka_runner, "seed_randomness", recording_seed_randomness)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    state = random.getstate()
+    np_state = np.random.get_state()
+    try:
+        shinka_runner.execute(
+            _payload(
+                nonce="testnonce",
+                timeout_seconds=5.0,
+                transport="stdio",
+                seed=seed,
+                task={"seed_candidate": "seed", "train_set": []},
+            )
+        )
+    finally:
+        random.setstate(state)
+        np.random.set_state(np_state)
+
+    assert seeded == [reduced]
+    assert configs[0].llm_dynamic_selection_kwargs["seed"] == reduced
 
 
 def test_runner_git_refuses_a_bare_repository_layout(
