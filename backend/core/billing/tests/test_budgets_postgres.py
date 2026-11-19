@@ -610,6 +610,26 @@ def test_a_fenced_late_settle_floor_counts_scope_usage_when_the_wallet_charge_is
         )
 
 
+def test_a_fenced_late_settle_floor_counts_wallet_usage_when_the_scope_grows_on_postgres(database: Engine) -> None:
+    """A later late settle can raise its scope, but its wallet charge must not go below an earlier one (SKY-829)."""
+    service = BudgetService(engine=database)
+    _, lease = _fenced_lease(service)
+    service.settle(
+        lease, "alice", evidence_key="late-1", actual_cents=6, actual_wallet_cents=4, evidence={"step": 2}, final=False
+    )
+
+    with pytest.raises(BudgetConflictError, match="cannot decrease"):
+        service.settle(
+            lease,
+            "alice",
+            evidence_key="late-2",
+            actual_cents=7,
+            actual_wallet_cents=3,
+            evidence={"step": 3},
+            final=False,
+        )
+
+
 def test_a_refused_fenced_late_settle_does_not_raise_the_floor_on_postgres(database: Engine) -> None:
     """A late settle that the bound refused counts for nothing, as on the live path (SKY-829)."""
     service = BudgetService(engine=database)

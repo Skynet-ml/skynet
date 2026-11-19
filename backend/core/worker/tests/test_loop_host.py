@@ -1104,6 +1104,31 @@ def test_a_refused_custom_byok_endpoint_leaves_no_http_client_open(monkeypatch: 
     assert all(client.is_closed for client in opened)
 
 
+def test_a_failed_managed_slug_lookup_closes_the_http_client_that_it_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller gets no model client to close, so a failed slug lookup must close the client it opened."""
+    opened = _record_clients(monkeypatch)
+
+    def fail(*args: Any, **kwargs: Any) -> str:
+        """Fail the slug lookup as an unreachable catalog does.
+
+        Args:
+            *args: The lookup's arguments.
+            **kwargs: The lookup's keyword arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(loop_host, "resolve_model_slug", fail)
+
+    with pytest.raises(RuntimeError, match="catalog down"):
+        LeaseModelClient({"name": "openai/gpt-4o"}, payload_token_source=None, managed_key=_FAKE_KEY)
+
+    assert len(opened) == 1
+    assert opened[0].is_closed
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["finished", "host-raised"])
 def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
     """The child process closes the model client when the loop ends, also when the loop raises."""
