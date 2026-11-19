@@ -1,24 +1,31 @@
-"""Sandbox-side runner that drives the pinned upstream ShinkaEvolve package.
+"""Child-process runner that drives the pinned upstream ShinkaEvolve package.
 
-This file is copied verbatim into an isolated sandbox and runs in the pinned
-``shinka-evolve`` interpreter. It imports no Skynet application code; the
-parent owns the scorer and its cases. Upstream's loop (islands, parent
-selection, diff/full/crossover mutations, meta notes and the model bandit)
-runs unchanged. Skynet contributes only:
+It runs in the pinned ``shinka-evolve`` interpreter, isolated from Skynet's
+dependencies, in one of two places: a sandbox, through the native runtime, or
+a folder of its own on the worker, as the engine loop's child (SKY-724). It
+imports no Skynet application code; the parent owns the scorer, its cases and
+the model routes. Upstream's loop (islands, parent selection,
+diff/full/crossover mutations, meta notes and the model bandit) runs
+unchanged. Skynet contributes only:
 
 * the starting version, written as one Markdown program whose evolvable text
   sits between upstream's ``EVOLVE-BLOCK`` markers (one marked block per named
   part, so the parts split back out losslessly);
 * an ``evaluate.py`` that hands each program to this process over a file
-  queue, where it is scored through the parent-owned budget over the same
-  filesystem mailbox the other native engines use;
-* model routing: every optimization model is an OpenAI-compatible
-  ``local/...`` model on the run's gateway, and every call carries usage tags
-  so the run's usage splits into mutation, meta-note, novelty-judge and
-  embedding calls;
+  queue, where it is scored through the parent's budget: the request goes out
+  as one line on stdout, and the reply comes back as a response file or, on
+  the engine loop, as one line on stdin;
+* model routing: in a sandbox, every optimization model is an
+  OpenAI-compatible ``local/...`` model on the run's gateway with usage tags;
+  on the engine loop, every upstream query becomes one request to the worker,
+  which answers it with the loop's model, so each reply is one step;
+* on the engine loop, a deterministic order: one proposal or evaluation at a
+  time, seeded random draws and program ids, so a resumed run replays the same
+  steps;
 * for a repository target, a program that is a bundle of the files a version
   changes, with the prompts, edit application and novelty input replaced by
-  ``shinka_bundle``'s file-aware versions;
+  ``shinka_bundle``'s file-aware versions, and every write into the checkout
+  kept inside it;
 * optionally, an agent editor: each new version is written by a Pi coding
   agent (file tools only) editing the parent's files in a scratch directory,
   instead of upstream's single model call answering with a patch.
@@ -32,26 +39,30 @@ import contextlib
 import difflib
 import importlib.util
 import io
+import itertools
 import json
 import math
 import os
+import random
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import traceback
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TextIO
 
 try:
+    import numpy as np
     import shinka.core.async_runner as shinka_async_runner
     import shinka.embed.embedding as shinka_embedding
     import shinka.llm.llm as shinka_llm
@@ -60,11 +71,12 @@ try:
     from shinka.database import DatabaseConfig
     from shinka.edit import summarize_diff
     from shinka.launch import LocalJobConfig
+    from shinka.llm.providers import QueryResult
     from shinka.local_openai_config import parse_local_openai_model
     from shinka.prompts import FULL_SYS_FORMATS
 except ImportError:  # Upstream needs Python 3.12; parent-side tests still import the helpers.
     shinka_async_runner = shinka_embedding = shinka_llm = shinka_query = EvolutionConfig = ShinkaEvolveRunner = None
-    DatabaseConfig = LocalJobConfig = parse_local_openai_model = summarize_diff = None
+    DatabaseConfig = LocalJobConfig = parse_local_openai_model = summarize_diff = QueryResult = np = None
     FULL_SYS_FORMATS = ()
 
 try:
@@ -193,14 +205,19 @@ class BudgetStopped(EvaluationStopped):
 
 
 class EvaluatorMailbox:
-    """Send evaluation requests to the parent and await matching response files."""
+    """Send evaluation and model requests to the worker and wait for its replies.
+
+    Two transports share one request framing. The sandbox runtime answers in
+    ``rpc/<id>.json`` files. The worker's engine loop answers on stdin, after
+    :meth:`listen` starts the reader (SKY-724).
+    """
 
     def __init__(self, nonce: str, timeout_seconds: float) -> None:
-        """Create a process-scoped evaluator transport.
+        """Create a process-scoped worker transport.
 
         Args:
-            nonce: Parent-generated request framing token.
-            timeout_seconds: Maximum time any evaluation can wait for a response.
+            nonce: Worker-generated request framing token.
+            timeout_seconds: Maximum time any request can wait for its reply.
         """
         self.nonce = nonce
         self.timeout_seconds = timeout_seconds
@@ -208,60 +225,179 @@ class EvaluatorMailbox:
         self.stopped = threading.Event()
         self.total_evals = 0
         self._write_lock = threading.Lock()
+        # A file descriptor, not ``sys.stdout``: :meth:`own_stdout` moves the frames off fd 1.
+        self._frames = 1
+        self._listening = False
+        self._arrived = threading.Condition()
+        self._replies: dict[str, dict[str, Any]] = {}
+        self._closed = False
+        # A counter, not uuid4: a request id needs to be unique only in this
+        # process, and a counter keeps these ids out of the seeded uuid4 sources.
+        self._ids = itertools.count()
 
-    def evaluate(
-        self, candidate: str | dict[str, str], example: Any = None, *, candidate_id: int | None = None
-    ) -> tuple[float, dict[str, Any]]:
-        """Evaluate only through the parent-owned budget and scorer.
+    def listen(self, stream: TextIO) -> threading.Thread:
+        """Take replies from a stream from now on, and file each one under its request id.
 
         Args:
-            candidate: Text candidate or named component mapping.
-            example: Visible case, or ``None`` for a run without cases.
-            candidate_id: Version number the parent files the scorer's logs under.
+            stream: The worker's reply stream, one JSON object per line.
 
         Returns:
-            Parent score, negative infinity when the case has no score, and feedback.
+            The reader thread.
+        """
+
+        def read() -> None:
+            """Read replies until the worker closes the stream."""
+            for line in stream:
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(reply, dict) and isinstance(reply.get("id"), str):
+                    with self._arrived:
+                        self._replies[reply["id"]] = reply
+                        self._arrived.notify_all()
+            with self._arrived:
+                self._closed = True
+                self._arrived.notify_all()
+
+        self._listening = True
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        return reader
+
+    def own_stdout(self) -> None:
+        """Keep the process's stdout for frames alone, and send every other stdout write to stderr.
+
+        Upstream prints Rich output to stdout from its own threads, outside the
+        write lock. Such a write inside a frame breaks the request the frame
+        carries, so upstream, its jobs and the model text it prints get stderr.
+        """
+        sys.stdout.flush()
+        self._frames = os.dup(self._frames)
+        os.dup2(2, 1)
+
+    def ask(self, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Send one request to the worker and wait for its reply.
+
+        Args:
+            kind: ``evaluate`` or ``model``. Only the stdin transport carries it,
+                because the sandbox runtime answers evaluations only.
+            fields: The request fields; the mailbox adds the id.
+
+        Returns:
+            The worker's reply.
 
         Raises:
-            EvaluationStopped: When the parent rejects evaluation or does not reply.
+            EvaluationStopped: When the run stopped, or the worker did not reply in time.
         """
         if self.stopped.is_set():
             raise self.error or EvaluationStopped("The parent evaluator has stopped this run.")
-        request_id = uuid.uuid4().hex
-        self.emit(
-            _RPC_PREFIX, {"id": request_id, "candidate": candidate, "example": example, "candidate_id": candidate_id}
-        )
-        response_path = Path("rpc") / f"{request_id}.json"
         deadline = time.monotonic() + self.timeout_seconds
-        while not self.stopped.is_set() and time.monotonic() < deadline:
-            if response_path.exists():
-                try:
-                    response = json.loads(response_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    # Both runtime filesystems can expose a new file before its
-                    # contents have finished landing.
-                    time.sleep(0.05)
-                    continue
-                if "error" in response:
-                    kind = BudgetStopped if response.get("stop_reason") == "budget_reached" else EvaluationStopped
-                    self.error = kind(str(response["error"]))
-                    self.stopped.set()
-                    raise self.error
-                with self._write_lock:
-                    self.total_evals += 1
-                score = response.get("score")
-                # SKY-751: the parent sends null for a case with no score (a
-                # failed [run] entry or a metric error); ``score_program``
-                # fails the program on a failed [run] entry, with its feedback.
-                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
-            time.sleep(0.05)
+        reply = self._ask_stream(kind, fields, deadline) if self._listening else self._ask_file(fields, deadline)
+        if reply is not None:
+            return reply
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply
             # timeout here would mask that reason.
             raise self.error or EvaluationStopped("The parent evaluator has stopped this run.")
-        self.error = self.error or EvaluationStopped("Native evaluator response timed out.")
+        reason = "The worker closed its reply stream." if self._closed else "Native evaluator response timed out."
+        self.error = self.error or EvaluationStopped(reason)
         self.stopped.set()
         raise self.error
+
+    def _ask_file(self, fields: dict[str, Any], deadline: float) -> dict[str, Any] | None:
+        """Send a request to the sandbox runtime and poll for its reply file.
+
+        Args:
+            fields: The request fields.
+            deadline: Monotonic time after which the wait ends.
+
+        Returns:
+            The reply, or ``None`` when the run stopped or the deadline passed.
+        """
+        # The sandbox runtime accepts only uuid4 hex ids.
+        request_id = uuid.uuid4().hex
+        self.emit(_RPC_PREFIX, {"id": request_id, **fields})
+        response_path = Path("rpc") / f"{request_id}.json"
+        while not self.stopped.is_set() and time.monotonic() < deadline:
+            if response_path.exists():
+                try:
+                    return json.loads(response_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    # Both runtime filesystems can expose a new file before its
+                    # contents have finished landing.
+                    pass
+            time.sleep(0.05)
+        return None
+
+    def _ask_stream(self, kind: str, fields: dict[str, Any], deadline: float) -> dict[str, Any] | None:
+        """Send a request to the worker and wait for the reader thread to file its reply.
+
+        Args:
+            kind: The request kind.
+            fields: The request fields.
+            deadline: Monotonic time after which the wait ends.
+
+        Returns:
+            The reply, or ``None`` when the run stopped, the stream closed or the deadline passed.
+        """
+        request_id = str(next(self._ids))
+        self.emit(_RPC_PREFIX, {"kind": kind, **fields, "id": request_id})
+        with self._arrived:
+            while request_id not in self._replies:
+                remaining = deadline - time.monotonic()
+                if self._closed or self.stopped.is_set() or remaining <= 0:
+                    break
+                self._arrived.wait(min(remaining, 0.5))
+            return self._replies.pop(request_id, None)
+
+    def evaluate(
+        self, candidate: str | dict[str, str], example: Any = None, *, candidate_id: int | None = None
+    ) -> tuple[float, dict[str, Any]]:
+        """Evaluate only through the worker-owned budget and scorer.
+
+        Args:
+            candidate: Text candidate or named component mapping.
+            example: Visible case, or ``None`` for a run without cases.
+            candidate_id: Version number the worker files the scorer's logs under.
+
+        Returns:
+            Worker score, negative infinity when the case has no score, and feedback.
+
+        Raises:
+            EvaluationStopped: When the worker rejects evaluation or does not reply.
+        """
+        response = self.ask("evaluate", {"candidate": candidate, "example": example, "candidate_id": candidate_id})
+        if "error" in response:
+            kind = BudgetStopped if response.get("stop_reason") == "budget_reached" else EvaluationStopped
+            self.error = kind(str(response["error"]))
+            self.stopped.set()
+            raise self.error
+        with self._write_lock:
+            self.total_evals += 1
+        score = response.get("score")
+        # SKY-751: the worker sends null for a case with no score (a failed
+        # [run] entry or a metric error); ``score_program`` fails the program
+        # on a failed [run] entry, with its feedback.
+        return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
+
+    def complete(self, messages: list[dict[str, Any]]) -> str:
+        """Ask the worker's model for one reply.
+
+        Args:
+            messages: The chat messages, system message first.
+
+        Returns:
+            The reply text.
+
+        Raises:
+            RuntimeError: When the model call failed, so upstream's own retry handles it.
+            EvaluationStopped: When the run stopped or the worker did not reply.
+        """
+        response = self.ask("model", {"messages": messages})
+        if "error" in response:
+            raise RuntimeError(f"The model call failed: {response['error']}")
+        return str(response["text"])
 
     def emit(self, prefix: str, payload: dict[str, Any]) -> None:
         """Write one framed event atomically across evaluator threads.
@@ -270,8 +406,12 @@ class EvaluatorMailbox:
             prefix: Request or progress event family.
             payload: Event fields to serialize.
         """
+        frame = memoryview(f"{prefix}{self.nonce} {json.dumps(payload, default=str, allow_nan=False)}\n".encode())
         with self._write_lock:
-            print(f"{prefix}{self.nonce} {json.dumps(payload, default=str, allow_nan=False)}", flush=True)
+            # One write per frame, newline included: ``print`` writes the newline
+            # separately, and the parent reads a frame only up to its newline.
+            while frame:
+                frame = frame[os.write(self._frames, frame) :]
 
 
 def rule_blocker(mailbox: EvaluatorMailbox) -> Callable[[str], None]:
@@ -425,22 +565,24 @@ def generation_of(program_path: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def local_model_name(model: str, url: str, key_env: str) -> str:
+def local_model_name(model: str, url: str, key_env: str | None) -> str:
     """Name a gateway route the way upstream addresses an OpenAI-compatible endpoint.
 
     Args:
         model: Model name the gateway route serves.
         url: Gateway base URL, ending in ``/v1``.
-        key_env: Variable holding the route's token.
+        key_env: Variable holding the route's token, or ``None`` for a route with no token.
 
     Returns:
-        A ``local/<model>@<url>?api_key_env=<VAR>`` model name.
+        A ``local/<model>@<url>?api_key_env=<VAR>`` model name, or ``local/<model>@<url>`` without a token.
 
     Raises:
         ValueError: When the model name cannot be expressed in that form.
     """
     if "@" in model or not model:
         raise ValueError(f"The model name {model!r} cannot be routed through ShinkaEvolve.")
+    if key_env is None:
+        return f"local/{model}@{url}"
     separator = "&" if "?" in url else "?"
     return f"local/{model}@{url}{separator}api_key_env={key_env}"
 
@@ -467,6 +609,45 @@ def generation_budget(max_evals: int, examples: int, max_iterations: int | None)
     return affordable
 
 
+def job_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Build upstream's ``LocalJobConfig`` fields.
+
+    On the engine loop, ``time`` is the run's timeout. Without it, upstream
+    0.0.7 cancels an evaluation as hung after ``max(60, ewma * 5 + 60)``
+    seconds of measured wall-clock time. A resume replays its evaluations at
+    once, so that limit would drop to 60 seconds and could cancel an
+    evaluation that the live run let finish.
+
+    Args:
+        payload: Parent configuration carrying ``transport`` and ``timeout_seconds``.
+
+    Returns:
+        Keyword arguments for ``LocalJobConfig``.
+    """
+    fields: dict[str, Any] = {"python_executable": sys.executable}
+    if payload.get("transport") == "stdio":
+        seconds = math.ceil(float(payload["timeout_seconds"]))
+        # Upstream reads only ``hh:mm:ss``; the hours may pass 24.
+        fields["time"] = f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    return fields
+
+
+def run_seed(payload: Mapping[str, Any]) -> int:
+    """Read the run's seed as a value NumPy and upstream's model bandit accept.
+
+    The seed is an unbounded user value, and ``numpy.random.seed`` refuses one
+    below 0 or at 2**32 and above. Every seeded draw takes this one value, so a
+    replay of the run makes the same draws.
+
+    Args:
+        payload: Parent configuration carrying the optional ``seed``.
+
+    Returns:
+        The seed modulo 2**32.
+    """
+    return int(payload.get("seed") or 0) % 2**32
+
+
 def build_config(
     payload: Mapping[str, Any], results_dir: str, examples: int, *, repo: bool = False
 ) -> dict[str, dict[str, Any]]:
@@ -486,14 +667,20 @@ def build_config(
         ValueError: When no optimization model is configured.
     """
     settings = dict(payload.get("shinka") or {})
+    stepped = payload.get("transport") == "stdio"
     routes = list(payload.get("shinka_models") or [])
     if not routes:
         raise ValueError("ShinkaEvolve needs at least one optimization model.")
-    models = [local_model_name(str(route["model"]), str(route["url"]), str(route["key_env"])) for route in routes]
+    # On the engine loop the worker answers every model call, so the child gets
+    # no key, and upstream 0.0.7 refuses a model whose api_key_env variable is unset.
+    models = [
+        local_model_name(str(route["model"]), str(route["url"]), None if stepped else str(route["key_env"]))
+        for route in routes
+    ]
     meta_notes = bool(settings.get("meta_notes", True))
     meta_env = payload.get("shinka_meta_key_env")
     meta_model = (
-        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), str(meta_env))
+        local_model_name(str(routes[0]["model"]), str(routes[0]["url"]), None if stepped else str(meta_env))
         if meta_notes and meta_env
         else None
     )
@@ -541,7 +728,9 @@ def build_config(
         "llm_dynamic_selection": "ucb",
         # Gateway models carry no upstream catalog price, so the bandit must
         # not weigh cost it cannot see.
-        "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.0},
+        "llm_dynamic_selection_kwargs": (
+            {"cost_aware_coef": 0.0, "seed": run_seed(payload)} if stepped else {"cost_aware_coef": 0.0}
+        ),
         "meta_rec_interval": int(settings.get("meta_rec_interval", 10)) if meta_model else None,
         "meta_llm_models": [meta_model] if meta_model else None,
         "meta_max_recommendations": int(settings.get("meta_max_recommendations", 5)),
@@ -569,8 +758,11 @@ def build_config(
         "num_beams": int(settings.get("num_beams", 5)),
     }
     runner = {
-        "max_evaluation_jobs": int(settings.get("max_parallel_evaluations", 2)),
-        "max_proposal_jobs": int(settings.get("max_parallel_proposals", 2)),
+        # On the worker's engine loop, one job of each kind: a resumed run
+        # replays its steps in order, so parallel jobs would make that order
+        # depend on thread timing (SKY-724).
+        "max_evaluation_jobs": 1 if stepped else int(settings.get("max_parallel_evaluations", 2)),
+        "max_proposal_jobs": 1 if stepped else int(settings.get("max_parallel_proposals", 2)),
         "verbose": False,
         "banner_style": "minimal",
     }
@@ -746,6 +938,315 @@ class UsageLedger:
         shinka_llm.query_async = counted_async
         shinka_embedding.get_client_embed = tagged_embed(original_embed_client)
         shinka_embedding.get_async_client_embed = tagged_embed(original_async_embed_client)
+
+
+def install_worker_models(mailbox: EvaluatorMailbox) -> None:
+    """Answer every upstream model query with the worker's model, so each reply is one worker step.
+
+    Every upstream model call (mutations and meta notes) goes through the
+    ``query`` and ``query_async`` names of ``shinka.llm.llm``, so no client is
+    ever built and no key enters this process.
+
+    Args:
+        mailbox: Worker connection.
+    """
+
+    def query(
+        model_name: str,
+        msg: str,
+        system_msg: str,
+        msg_history: Sequence[Mapping[str, Any]] = (),
+        output_model: Any = None,
+        model_posteriors: Mapping[str, float] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Send one upstream query to the worker's model.
+
+        Args:
+            model_name: The bandit's model; the worker's loop picks the model it calls.
+            msg: The user message.
+            system_msg: The system message.
+            msg_history: Earlier messages of the conversation.
+            output_model: Upstream's structured-output model; Skynet's settings never set it.
+            model_posteriors: The bandit's model weights, kept on the result.
+            **kwargs: Upstream's sampling settings, kept on the result.
+
+        Returns:
+            Upstream's ``QueryResult`` with the reply and zero tokens: the worker meters the call.
+        """
+        history = [dict(message) for message in msg_history or ()]
+        asked = [*history, {"role": "user", "content": msg}]
+        system = [{"role": "system", "content": system_msg}] if system_msg else []
+        content = mailbox.complete([*system, *asked])
+        return QueryResult(
+            content=content,
+            msg=msg,
+            system_msg=system_msg,
+            new_msg_history=[*asked, {"role": "assistant", "content": content}],
+            model_name=model_name,
+            kwargs=kwargs,
+            input_tokens=0,
+            output_tokens=0,
+            model_posteriors=dict(model_posteriors or {}),
+        )
+
+    async def query_async(*args: Any, **kwargs: Any) -> Any:
+        """Send one upstream query to the worker's model on upstream's event loop.
+
+        Args:
+            *args: ``query``'s positional arguments.
+            **kwargs: ``query``'s keyword arguments.
+
+        Returns:
+            The ``QueryResult``.
+        """
+        # No thread: upstream gathers meta-note queries concurrently, and threads
+        # would send them in a timing-dependent order that a resume replays
+        # differently. Blocking the loop sends them in creation order every run.
+        return query(*args, **kwargs)
+
+    shinka_llm.query = query
+    shinka_llm.query_async = query_async
+
+
+def install_sequential_gate(runner: Any) -> None:
+    """Start each proposal only once no evaluation, completed-job work or database retry is in flight.
+
+    A resumed run replays its steps in order, so the order of model calls and
+    evaluations must not depend on thread timing: with one proposal and one
+    evaluation job at a time, this gate makes the run strictly sequential.
+    Upstream's monitor loop retries a failed database write on its own, and
+    that retry draws program ids, so a proposal must not overlap it.
+
+    Args:
+        runner: Upstream's ``ShinkaEvolveRunner``.
+    """
+    original = runner._generate_proposal_async
+
+    async def gated(generation: int, task_id: str) -> Any:
+        """Wait until the previous version is scored and filed, then run upstream's proposal.
+
+        Args:
+            generation: Upstream's generation number.
+            task_id: Upstream's proposal task id.
+
+        Returns:
+            Upstream's proposal result.
+        """
+        # Upstream signals no event when its jobs finish, so the gate polls.
+        while (  # noqa: ASYNC110
+            runner.running_jobs
+            or runner.failed_jobs_for_retry
+            or runner._get_completed_job_work_count()
+            or runner._has_background_side_effect_work()
+        ):
+            await asyncio.sleep(0.05)
+        return await original(generation, task_id)
+
+    runner._generate_proposal_async = gated
+
+
+def seed_randomness(seed: int) -> None:
+    """Seed every random draw upstream makes, so a resumed run makes the same draws.
+
+    Upstream draws from ``random``, ``numpy.random`` and ``uuid.uuid4`` (its
+    program ids, which reach the prompts).
+
+    Each ``uuid4`` call site gets its own seeded generator. Upstream 0.0.7's
+    proposal coordinator draws a task id (``async_runner.py`` line 2498)
+    before the sequential gate, so that draw can fall before or after the
+    filing of the previous version, which draws program ids on the event loop
+    (line 4086) and on the database write thread (``islands.py`` lines 617
+    and 808). One shared generator would then give the same program a
+    different id in a live run and in its replay.
+
+    Args:
+        seed: The run's seed.
+    """
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+    sources: dict[str, random.Random] = {}
+
+    def uuid4() -> uuid.UUID:
+        """Draw the next seeded version-4 UUID of the calling line.
+
+        Returns:
+            The UUID.
+        """
+        caller = sys._getframe(1)
+        # The module name and line, not the file path: the replay may run from another folder.
+        source = f"{caller.f_globals.get('__name__')}:{caller.f_lineno}"
+        if source not in sources:
+            sources[source] = random.Random(f"{seed}:{source}")
+        return uuid.UUID(int=sources[source].getrandbits(128), version=4)
+
+    uuid.uuid4 = uuid4
+
+
+# Git's modes for a regular and an executable file. Any other mode in a seed
+# patch makes a symlink (120000) or a gitlink (160000).
+_FILE_MODES = frozenset({"100644", "100755"})
+# Tolerant of any blank between the words and the mode, so an odd separator
+# cannot hide a mode that git still reads.
+_PATCH_MODE = re.compile(r"^[ \t]*(?:new file mode|new mode|index[ \t]+\S+)[ \t]+(\d+)[ \t]*$", re.MULTILINE)
+_SUMMARY_MODE = re.compile(r"\bmode (?:change \d+ => )?(\d+)\b")
+
+
+def refuse_unsafe_tree(chunks: Sequence[str]) -> dict[str, str]:
+    """Refuse a shipped tree that carries Git metadata or anything but files, folders and symlinks.
+
+    ``tarfile``'s ``data`` filter already refuses absolute paths, ``..``, links
+    that leave the tree and device files. It still lets a ``.git`` folder
+    through, and git would then run that folder's hooks and config here.
+
+    Args:
+        chunks: Base64 chunk files of the tree, in order.
+
+    Returns:
+        Each shipped symlink's repository path and target.
+
+    Raises:
+        ValueError: When an entry is Git metadata, a hard link or a special file.
+    """
+    packed = b"".join(base64.b64decode(Path(chunk).read_text(encoding="ascii")) for chunk in chunks)
+    links: dict[str, str] = {}
+    with tarfile.open(fileobj=io.BytesIO(packed)) as tree:
+        for member in tree:
+            if ".git" in Path(member.name).parts or not (member.isfile() or member.isdir() or member.issym()):
+                raise ValueError(f"The repository tree has an unsafe entry: {member.name}")
+            if member.issym():
+                links[os.path.normpath(member.name)] = member.linkname
+    return links
+
+
+def refuse_unsafe_patch(patch: Any) -> None:
+    """Refuse a seed patch that adds or changes a symlink, a gitlink or any other non-file entry.
+
+    ``git apply`` already refuses absolute paths, ``..`` and paths beyond a
+    symlink, but it creates and retargets symlinks.
+
+    Args:
+        patch: The seed version as a ``git diff``, or anything else for no patch.
+
+    Raises:
+        ValueError: When the patch sets a mode other than a regular or executable file.
+    """
+    if not isinstance(patch, str) or not patch.strip():
+        return
+    text = patch.replace("\r\n", "\n").replace("\r", "\n")
+    # Git's own reading of the patch, raw line endings included. The image's
+    # base layer installs git (backend/Dockerfile), and a missing git raises here.
+    # Inside a repository git drops the paths outside the current folder and
+    # reads that repository's config, so it runs in an empty folder with no config.
+    with tempfile.TemporaryDirectory() as empty:
+        env = {
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CEILING_DIRECTORIES": str(Path(empty).parent),
+        }
+        summary = subprocess.run(
+            ["git", "apply", "--summary", "-"],
+            input=patch,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=empty,
+            env=env,
+        ).stdout
+    for mode in [*_PATCH_MODE.findall(text), *_SUMMARY_MODE.findall(summary)]:
+        if mode not in _FILE_MODES:
+            raise ValueError(f"The seed version sets file mode {mode}; only regular files may change.")
+
+
+def refuse_new_links(checkout: Path, shipped_links: Mapping[str, str]) -> None:
+    """Refuse a checkout with a symlink, gitlink or special file that the shipped tree did not have.
+
+    This runs after the seed patch is applied, so it holds whatever the patch
+    check missed.
+
+    Args:
+        checkout: The checkout, seed committed.
+        shipped_links: Each shipped symlink's repository path and target.
+
+    Raises:
+        ValueError: When the checkout has a new or retargeted symlink, a gitlink or a special file.
+    """
+    for folder, folders, files in os.walk(checkout, followlinks=False):
+        here = Path(folder)
+        if here == checkout:
+            folders[:] = [name for name in folders if name != ".git"]
+        for name in [*folders, *files]:
+            entry = here / name
+            path = entry.relative_to(checkout).as_posix()
+            if entry.is_symlink():
+                # The raw target, as tar stores it: Path.readlink would drop a trailing slash.
+                if shipped_links.get(path) != os.readlink(entry):  # noqa: PTH115
+                    raise ValueError(f"The seed version adds or changes the symlink '{path}'.")
+            elif not (entry.is_dir() or entry.is_file()):
+                raise ValueError(f"The seed version adds the special file '{path}'.")
+    staged = subprocess.run(
+        ["git", "ls-files", "--stage", "-z"], cwd=checkout, capture_output=True, text=True, check=True
+    ).stdout
+    for record in filter(None, staged.split("\0")):
+        if record.startswith("160000 "):
+            raise ValueError(f"The seed version adds the gitlink '{record.split(chr(9), 1)[-1]}'.")
+
+
+def checked_target(checkout: Path, path: str) -> Path:
+    """Resolve where a repository path lands, and refuse it unless it is a plain file inside the checkout.
+
+    Args:
+        checkout: The repository checkout.
+        path: Repository-relative path a version writes.
+
+    Returns:
+        The target file.
+
+    Raises:
+        ValueError: When the path leaves the checkout, crosses a symlink, or names a non-file.
+    """
+    root = checkout.resolve()
+    target = root / path
+    if not target.resolve().is_relative_to(root):
+        raise ValueError(f"'{path}' is outside the repository.")
+    current = root
+    for part in Path(path).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"'{path}' crosses a symlink.")
+    if target.exists() and not target.is_file():
+        raise ValueError(f"'{path}' is not a regular file.")
+    return target
+
+
+def guard_materialize(bundle: Any) -> None:
+    """Check every path a version writes before ``RepoBundle.materialize`` writes it.
+
+    ``materialize`` refuses ``..`` and absolute paths, but follows a symlink
+    the repository or the seed commits, so a version could write outside the
+    checkout through it.
+
+    Args:
+        bundle: The run's ``RepoBundle``.
+    """
+    original = bundle.materialize
+
+    def materialize(files: Mapping[str, str]) -> str:
+        """Refuse an unsafe path, then write the version as ``materialize`` does.
+
+        Args:
+            files: Bundle files.
+
+        Returns:
+            The version's patch.
+        """
+        for path in files:
+            checked_target(bundle.checkout, path)
+        return original(files)
+
+    bundle.materialize = materialize
 
 
 def install_repo_mode(bundle: Any, runner: Any) -> None:
@@ -1468,7 +1969,11 @@ class ProgramScorer:
             path: The queued request file.
         """
         try:
-            request = json.loads(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            # The poll lists this folder ten times a second for the whole run, so
+            # a handled request leaves it and each listing holds only new requests.
+            path.unlink(missing_ok=True)
+            request = json.loads(text)
             response = self.score_program(str(request["program_path"]))
         except (Exception, EvaluationStopped) as exc:
             response = {"correct": False, "error": f"{type(exc).__name__}: {exc}", "metrics": {}}
@@ -1501,12 +2006,39 @@ class ProgramScorer:
                 "error": str(exc),
                 "metrics": {"combined_score": 0.0, "text_feedback": f"Rejected without scoring: {exc}"},
             }
-        futures = [
-            self._cases.submit(self.mailbox.evaluate, value, example, candidate_id=generation)
-            for example in self.examples
-        ]
+        crashed = threading.Event()
+
+        def score_case(example: Any) -> tuple[float, dict[str, Any]]:
+            """Score one case, unless an earlier case of this version already failed.
+
+            Args:
+                example: The case.
+
+            Returns:
+                The score and feedback.
+
+            Raises:
+                RuntimeError: When an earlier case failed, so this case is skipped.
+            """
+            # The failure is recorded on the case's own thread, before the pool
+            # takes the next case, so with one case thread the skipped cases are
+            # the same live and on a replay.
+            if crashed.is_set():
+                raise RuntimeError("An earlier case of this version failed.")
+            try:
+                return self.mailbox.evaluate(value, example, candidate_id=generation)
+            except BaseException:
+                crashed.set()
+                raise
+
+        futures = [self._cases.submit(score_case, example) for example in self.examples]
+        # No case of this version may run after its answer: the next proposal's
+        # model request would race it, and a replay would see another step order.
+        wait(futures)
         results = []
         for index, future in enumerate(futures):
+            # Cases start in order, so a skipped case always follows the failed
+            # case, whose error this raises first.
             score, info = future.result()
             results.append((score, info))
             if math.isfinite(score):
@@ -1591,6 +2123,7 @@ class LineageReporter:
         self.generation_by_id: dict[str, int] = {}
         self.parent_by_generation: dict[int, int | None] = {}
         self.reported: set[int] = set()
+        self.last_rowid = 0
 
     def poll(self, *, final: bool = False) -> None:
         """Report every scored version whose lineage is known.
@@ -1638,17 +2171,25 @@ class LineageReporter:
         return steps
 
     def _read_lineage(self) -> None:
-        """Read every program's generation and parent from upstream's database."""
+        """Read the generation and parent of each program filed since the last read."""
         if not self.db_path.exists():
             return
+        # The poll runs ten times a second for the whole run, and each programs
+        # row holds its code, so a full read would cost CPU that grows with the
+        # square of the run length. Upstream never deletes a program, so new
+        # programs always get a higher rowid.
         try:
             with contextlib.closing(sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=1.0)) as db:
-                rows = db.execute("SELECT id, generation, parent_id FROM programs").fetchall()
+                rows = db.execute(
+                    "SELECT rowid, id, generation, parent_id FROM programs WHERE rowid > ? ORDER BY rowid",
+                    (self.last_rowid,),
+                ).fetchall()
         except sqlite3.Error:
             return
-        for program_id, generation, _ in rows:
+        for rowid, program_id, generation, _ in rows:
+            self.last_rowid = rowid
             self.generation_by_id[str(program_id)] = int(generation)
-        for _, generation, parent_id in rows:
+        for _, _, generation, parent_id in rows:
             parent = self.generation_by_id.get(str(parent_id)) if parent_id else None
             # Migration copies a program onto another island under a new id but
             # the same generation; the first filing names the true parent.
@@ -1728,6 +2269,14 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     results_dir.mkdir(parents=True, exist_ok=True)
     repo = payload.get("repo")
     mailbox = EvaluatorMailbox(payload["nonce"], timeout)
+    stepped = payload.get("transport") == "stdio"
+    if stepped:
+        mailbox.own_stdout()
+        mailbox.listen(sys.stdin)
+        seed_randomness(run_seed(payload))
+    if repo:
+        shipped_links = refuse_unsafe_tree(repo["chunks"])
+        refuse_unsafe_patch(seed)
     bundle = (
         shinka_bundle.RepoBundle.prepare(
             repo, seed, workdir / "repo-checkout", on_block=rule_blocker(mailbox), on_refusal=refusal_logger(mailbox)
@@ -1735,6 +2284,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         if repo
         else None
     )
+    if bundle is not None:
+        refuse_new_links(bundle.checkout, shipped_links)
+        guard_materialize(bundle)
     if bundle is not None and not isinstance(seed, str):
         seed = ""
     config = build_config(payload, str(results_dir), len(examples), repo=bundle is not None)
@@ -1743,20 +2295,27 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         queue=queue,
         examples=examples,
         part_names=part_names,
-        max_concurrency=int(payload.get("max_concurrency", 1)),
+        # On the engine loop, one case at a time, so the worker sees the same
+        # evaluation order on a resume.
+        max_concurrency=1 if stepped else int(payload.get("max_concurrency", 1)),
         stop_at_score=payload.get("stop_at_score"),
         bundle=bundle,
     )
     ledger = UsageLedger(payload.get("shinka_meta_key_env"), payload.get("shinka_novelty_key_env"))
-    ledger.install()
+    if stepped:
+        install_worker_models(mailbox)
+    else:
+        ledger.install()
     runner = ShinkaEvolveRunner(
         evo_config=EvolutionConfig(**config["evolution"]),
-        job_config=LocalJobConfig(python_executable=sys.executable),
+        job_config=LocalJobConfig(**job_fields(payload)),
         db_config=DatabaseConfig(**config["database"]),
         init_program_str=shinka_bundle.encode_bundle({}) if bundle is not None else pack_program(seed),
         evaluate_str=_EVALUATE_TEMPLATE.format(queue=str(queue), timeout=timeout),
         **config["runner"],
     )
+    if stepped:
+        install_sequential_gate(runner)
     if bundle is not None:
         install_repo_mode(bundle, runner)
     editor = None
@@ -1836,10 +2395,12 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     # The gateway meters and bills every call itself; these counts only
     # attribute tokens to models, so a failed call cannot leave them short.
     document["usage_complete"] = True
-    try:
-        _archive_artifacts([("upstream", results_dir)])
-    except Exception as exc:
-        document["error"] = f"Could not preserve native artifacts: {exc}"
+    # On the engine loop nothing reads the archive, so a large run must not fail for it.
+    if not stepped:
+        try:
+            _archive_artifacts([("upstream", results_dir)])
+        except Exception as exc:
+            document["error"] = f"Could not preserve native artifacts: {exc}"
     return _json_finite(document)
 
 
