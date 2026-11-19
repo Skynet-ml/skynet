@@ -220,6 +220,11 @@ class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
 
 
+# Skynet's own text, never the metric's (SKY-353). It ends with the answer
+# form, so the run stops on it before any version has a score (SKY-769).
+_WRONG_FORM = f"The scorer answer does not have the valid form, so the version has no score. {runner.ANSWER_FORM}"
+
+
 class _StageSnapshotError(RepoScoreError):
     """Stage boxes from the stage snapshot did not open or did not hold the tree."""
 
@@ -563,6 +568,9 @@ class RepoScorer:
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
+            # The fixed form text lets the run stop before any score (protocol.py); the metric's text stays out.
+            if runner.ANSWER_FORM in str(output["error"]):
+                raise RepoScoreError(_WRONG_FORM)
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
         if output.get("score") is None:
             raise RepoScoreError("The scorer returned no score.")
@@ -581,9 +589,7 @@ class RepoScorer:
         except runner.ScorerError as exc:
             # The error text can name keys that the version's code sets (SKY-353).
             logger.warning("Repository scorer answer refused: %s", exc)
-            raise RepoScoreError(
-                "The scorer answer does not have the valid form, so the version has no score."
-            ) from None
+            raise RepoScoreError(_WRONG_FORM) from None
         return {**side_info, "score": score}
 
     def _run_candidate(

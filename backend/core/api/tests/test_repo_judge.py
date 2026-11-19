@@ -1737,6 +1737,32 @@ def dispatched(boxes: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return boxes
 
 
+class _FailedRunScorer:
+    """A staged scorer whose guest endpoint reports a failed ``[run]`` entry, as the repository scorer builds it."""
+
+    def dispatch(self, body: Any) -> Any:
+        """Answer one scoring request with Skynet's run-failed document.
+
+        Args:
+            body: The guest's request.
+
+        Returns:
+            A 200 reply with no score and the ``run_failed`` status.
+        """
+        return SimpleNamespace(
+            status=200, body=json.dumps({"score": None, "feedback": "Run failed: x", "status": "run_failed"}).encode()
+        )
+
+
+def test_the_score_step_reads_a_failed_run_as_a_failed_run_not_a_key_error() -> None:
+    """The final score trusts the repository scorer's own ``status`` key, so a failed run is not a wrong answer (SKY-769)."""
+    final = _REAL_SCORE(SimpleNamespace(scorers=[_FailedRunScorer()]), OTHER_PATCH, ["case"], label="candidate")
+
+    assert final.score is None
+    assert final.run_failed is True
+    assert final.failures == ["x"]
+
+
 def _stored_text(job_store: SQLiteJobStore, session_id: str) -> str:
     """Join the session's job record and every evidence row as text.
 

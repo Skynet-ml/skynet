@@ -889,9 +889,10 @@ def test_a_metric_answer_with_cases_is_refused_with_the_key_that_replaced_it(
         "def score(repo_path):\n    return {'score': 1.0, 'cases': {'a': {'score': 1.0}}}\n",
     )
     try:
-        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="raised an error"):
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="valid form") as refused:
             scorer.score("")
         assert "unknown key `cases`. Use `scores`." in caplog.text
+        assert str(refused.value).endswith(runner.ANSWER_FORM)
     finally:
         scorer.close()
 
@@ -921,10 +922,14 @@ def test_the_parent_refuses_a_metric_box_answer_with_a_key_the_answer_form_does_
         "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
     )
     try:
-        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="does not have the valid form"):
+        with (
+            caplog.at_level(logging.WARNING),
+            pytest.raises(RepoScoreError, match="does not have the valid form") as refused,
+        ):
             scorer.score("")
         key = next(key for key in side_info if key != "feedback")
         assert f"unknown key `{key}`" in caplog.text
+        assert str(refused.value).endswith(runner.ANSWER_FORM)
     finally:
         scorer.close()
 

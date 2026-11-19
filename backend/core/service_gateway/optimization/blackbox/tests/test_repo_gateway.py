@@ -32,9 +32,10 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from .. import runner
 from .. import scorer as scorer_mod
 from ..preflight import verify_anything_in_sandbox
-from ..protocol import RUN_FAILED_STATUS
+from ..protocol import RUN_FAILED_STATUS, EvalServer, ScorerAbortError
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
@@ -544,6 +545,49 @@ def test_the_setup_check_trusts_the_failed_run_status_of_the_repository_scorer(
 
     assert result["scorer_result"]["score"] is None
     assert result["scorer_result"]["side_info"] == {"feedback": "Run failed: x", "status": RUN_FAILED_STATUS}
+
+
+def test_a_wrong_answer_form_stops_a_repository_run_before_any_score(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """A bare number from the metric stops the run after one evaluation, through the parent's relay (SKY-769).
+
+    The relay turns the parent's refusal into a 422, so the stop works only
+    when the parent's fixed text keeps the answer form.
+    """
+    model_gateway, _ = gateway
+    metric_code = "def score(repo_path, case=None):\n    return 0.8\n"
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=model_gateway.parent_sandbox_runtime(),
+            spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
+            archive=_archive(tmp_path, {"README": "hello"}),
+            editable_paths=["README"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric_code,
+        timeout_seconds=60,
+    )
+    relayed = scorer_mod.RemoteScorer(
+        "unused",
+        secret=None,
+        timeout_seconds=60,
+        protected_route=model_gateway.bind_evaluator(scorer),
+        label="repository scorer",
+        trusted_reply=True,
+    )
+    server = EvalServer(relayed, max_evals=5)
+    try:
+        with pytest.raises(ScorerAbortError) as caught:
+            server.evaluate("")
+    finally:
+        scorer.close()
+
+    assert str(caught.value).endswith(runner.ANSWER_FORM)
+    assert "return 0.8" not in str(caught.value)
+    assert server.used == 1
 
 
 def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:
