@@ -751,7 +751,7 @@ def _tree_version(
     parent: dict[str, str],
     seed_ids: dict[str, str],
     base_ids: dict[str, str],
-    max_files: int | None = None,
+    max_files: int,
 ) -> dict[str, str] | None:
     """Read the files of a tree that make up a new version.
 
@@ -766,7 +766,7 @@ def _tree_version(
         parent: The parent's files that differ from the seed.
         seed_ids: The content id of each file of the seed.
         base_ids: The content id of each file of the tree every session starts from.
-        max_files: The most files the work may add or change, or ``None`` for no limit.
+        max_files: The most files the work may add or change.
 
     Returns:
         The version's files by path, or ``None`` when the work added or changed more than ``max_files`` files,
@@ -791,7 +791,7 @@ def _tree_version(
         changed.append(path)
     # The editor drops ignored files only after it writes them, so a command that leaves an install
     # (``node_modules``) would otherwise cost thousands of reads and a reply of many megabytes.
-    if max_files is not None and len(changed) > max_files:
+    if len(changed) > max_files:
         return None
     for path in changed:
         # The tree entry has no size, so the limit is checked on the bytes.
@@ -928,8 +928,8 @@ class _AgentSession:
 
         Returns:
             ``{"files", "text", "tool_calls", "tool_cap_reached"}``: the version's files, the agent's last
-            reply and the tool calls it spent; or ``{"error": ...}`` when a model call failed or the parent
-            could not be written.
+            reply and the tool calls it spent; or ``{"error": ...}`` when a model call failed, the parent
+            could not be written, or the session added or changed more files than a tree listing holds.
 
         Raises:
             GrantError: When the loop cannot resolve the box's grants; every session would fail the same way.
@@ -947,6 +947,8 @@ class _AgentSession:
             {"role": "user", "content": task},
         ]
         calls = 0
+        text: str | None = None
+        cap_reached = False
         while True:
             if self.ctx.check_budget is not None:
                 self.ctx.check_budget()
@@ -958,6 +960,7 @@ class _AgentSession:
                 return {"error": f"The agent editor's model call failed: {exc}"}
             charge(reply.cost_cents)
             if not reply.tool_calls:
+                text = reply.text
                 break
             messages.append(
                 {
@@ -989,18 +992,21 @@ class _AgentSession:
                     output, tree = self._tool(call, tree)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
             if self.max_tool_calls is not None and calls >= self.max_tool_calls:
-                return {
-                    "files": _tree_version(self.ctx, tree, parent, files, self.seed_ids, self.seed_ids),
-                    "text": None,
-                    "tool_calls": calls,
-                    "tool_cap_reached": True,
-                }
-        return {
-            "files": _tree_version(self.ctx, tree, parent, files, self.seed_ids, self.seed_ids),
-            "text": reply.text,
-            "tool_calls": calls,
-            "tool_cap_reached": False,
-        }
+                cap_reached = True
+                break
+        version = _tree_version(
+            self.ctx, tree, parent, files, self.seed_ids, self.seed_ids, shinka_bundle._MAX_TREE_ENTRIES
+        )
+        if version is None:
+            # The child reads the tool-call counts from every reply, an error reply too.
+            return {
+                "error": f"The agent editor's session added or changed more than {shinka_bundle._MAX_TREE_ENTRIES}"
+                " files. Make the agent write its tools and caches outside the repository, or remove them before"
+                " it ends.",
+                "tool_calls": calls,
+                "tool_cap_reached": cap_reached,
+            }
+        return {"files": version, "text": text, "tool_calls": calls, "tool_cap_reached": cap_reached}
 
     def _system(self) -> str:
         """Describe the tools, and the ``[proposer] mcp`` servers when the run has some.

@@ -2687,6 +2687,29 @@ def test_a_command_that_leaves_too_many_files_is_a_failed_mutation_with_no_read(
     assert reads == []
 
 
+def test_a_command_that_leaves_exactly_the_file_limit_gives_a_version_with_each_file(tmp_path: Path) -> None:
+    """Read each file of a command that adds exactly as many files as a tree listing holds (SKY-815).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    count = shinka_bundle._MAX_TREE_ENTRIES
+    trees = {"after": {f"gen/m{index}.py": str(index) for index in range(count)}, "parent": {}}
+    reads: list[str] = []
+    options = _proposer_options("node agent.js")
+    ctx = _box_context(
+        options,
+        tmp_path,
+        file_ids=lambda tree: trees[tree],
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    version = shinka_evolve._Proposer(ctx, options)._version("after", "parent", {})
+
+    assert version == dict.fromkeys(trees["after"], "text\n")
+    assert len(reads) == count
+
+
 _BYOK_ROUTE = {"url": "http://127.0.0.1:4100/v1", "token": "byok-route", "model": "m", "role": "optimization"}
 
 
@@ -3209,6 +3232,44 @@ def test_an_agent_session_at_the_tool_call_limit_keeps_the_files_it_wrote(tmp_pa
     result = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
 
     assert result == {"files": {"new.py": "new\n"}, "text": None, "tool_calls": 1, "tool_cap_reached": True}
+
+
+def test_an_agent_run_that_leaves_too_many_files_is_an_error_with_no_read(tmp_path: Path) -> None:
+    """Fail the session whose ``run`` adds more files than a tree listing holds, before any read (SKY-830).
+
+    An agent that runs ``npm install`` leaves thousands of ignored files in the session's tree.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    replies = [
+        ModelReply("", Decimal(1), [_call(0, "run", command="npm install")]),  # type: ignore[list-item]
+        ModelReply("done", Decimal(1), []),
+    ]
+    count = shinka_bundle._MAX_TREE_ENTRIES + 1
+    trees = {"after": {f"node_modules/m{index}.js": str(index) for index in range(count)}}
+    reads: list[str] = []
+    result = SimpleNamespace(timed_out=False, exit_code=0, stderr="", stdout="")
+    options = _agent_options()
+    ctx = _box_context(
+        options,
+        tmp_path,
+        call_model=lambda *a: replies.pop(0),
+        put_files=lambda files, base: "parent",
+        run_command=lambda *a: (result, "after"),
+        file_ids=lambda tree: trees.get(tree, {}),
+        read_file=lambda tree, path: reads.append(path) or b"text\n",
+    )
+
+    reply = shinka_evolve._AgentSession(ctx, options, []).edit({}, "task", lambda cents: None)
+
+    assert reply == {
+        "error": f"The agent editor's session added or changed more than {shinka_bundle._MAX_TREE_ENTRIES} files."
+        " Make the agent write its tools and caches outside the repository, or remove them before it ends.",
+        "tool_calls": 1,
+        "tool_cap_reached": False,
+    }
+    assert reads == []
 
 
 def test_the_agent_box_grants_mcp_hosts_with_their_credential_and_never_the_gateway(tmp_path: Path) -> None:
