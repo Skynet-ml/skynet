@@ -1463,6 +1463,76 @@ def test_a_command_with_a_long_limit_gets_a_box_that_outlives_it(
     assert loop_host.command_box_seconds(1800) <= 2700
 
 
+def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
+    owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broker refuses a box past the run's deadline, so a 30-minute command in a 1000 s run gets a 1000 s box
+    and a 700 s limit, which leaves the pack room to end before the box dies.
+    """
+    lifetimes: list[float] = []
+    timeouts: list[float | None] = []
+    real_open = LocalSubprocessRuntime.open
+    real_run = EngineLoop.run
+
+    def record_open(self: LocalSubprocessRuntime, spec: SandboxSpec) -> Any:
+        """Record the box's lifetime, then open it.
+
+        Args:
+            self: The runtime.
+            spec: The box spec.
+
+        Returns:
+            The open box.
+        """
+        lifetimes.append(spec.lifetime_seconds)
+        return real_open(self, spec)
+
+    def record_run(self: EngineLoop, *args: Any, timeout_seconds: float | None = None, **kwargs: Any) -> Any:
+        """Record the command's limit, then run it.
+
+        Args:
+            self: The engine loop.
+            *args: The command's tree, text and grants.
+            timeout_seconds: The command's limit.
+            **kwargs: Other options.
+
+        Returns:
+            The command's result and tree.
+        """
+        timeouts.append(timeout_seconds)
+        return real_run(self, *args, timeout_seconds=timeout_seconds, **kwargs)
+
+    def strategy(strategy: Any, task: Task, server: EvalServer, ctx: EngineContext, *_: Any, **__: Any) -> Any:
+        """Run one command with a 30-minute limit.
+
+        Args:
+            strategy: The job's strategy.
+            task: The task.
+            server: The run's eval server.
+            ctx: The loop's context.
+            *_: The progress sink.
+            **__: The capabilities.
+
+        Returns:
+            The seed as the best version, and no lanes.
+        """
+        assert ctx.run_command is not None
+        assert ctx.repo_seed is not None
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800)
+        return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
+
+    payload = _host_payload(owner, tmp_path, monkeypatch)
+    payload["_budget_gateway_descriptor"]["lifetime_seconds"] = 1000
+    monkeypatch.setattr(service, "run_strategy", strategy)
+    monkeypatch.setattr(LocalSubprocessRuntime, "open", record_open)
+    monkeypatch.setattr(EngineLoop, "run", record_run)
+
+    events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
+
+    assert [event["type"] for event in events][-1] == "result"
+    assert (lifetimes[0], timeouts[0]) == (1000, 700)
+
+
 def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
     """The provider refuses a longer box, so the configured sandbox lifetime caps a command box."""
     monkeypatch.setattr(loop_host.settings, "vercel_sandbox_max_lifetime_seconds", 1000)

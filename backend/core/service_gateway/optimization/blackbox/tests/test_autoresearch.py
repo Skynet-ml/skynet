@@ -1396,6 +1396,51 @@ def test_a_files_proposer_setup_name_with_a_new_line_stays_out_of_every_version(
         assert loop.list_files(version, ".") == ["a.py"]
 
 
+def test_a_files_proposer_setup_lists_only_the_top_folder_of_its_output(
+    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """The setup box keeps only a new path whose folder existed before, so a nested output is one root to remove.
+
+    Args:
+        owner: Alice and her budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
+    seed = _tree(trees, "a.py", "a")
+    ctx = loop.context(repo_seed=RepoSeed(tree_id=seed))
+    run = ctx.run_command
+    assert run is not None
+    commands: list[str] = []
+
+    def record(tree: str, command: str, *args: Any, **kwargs: Any) -> Any:
+        """Record the command, then run it in its box.
+
+        Args:
+            tree: The tree the command starts from.
+            command: The shell command.
+            *args: The grants.
+            **kwargs: The time limit.
+
+        Returns:
+            The command's result and tree.
+        """
+        commands.append(command)
+        return run(tree, command, *args, **kwargs)
+
+    ctx = dataclasses.replace(ctx, run_command=record)
+    setup = ["sh", "-c", "mkdir -p deps/sub && printf lib > deps/sub/lib.txt && printf x > deps/top.txt"]
+    proposer = loop_tools.FileProposer(ctx, _command_options(setup=setup), ".autoresearch")  # type: ignore[arg-type]
+
+    base = proposer.base(ctx.repo_seed.tree_id)  # type: ignore[union-attr]
+    proposer.version("start", base, base)
+
+    assert proposer._roots == ["deps"]
+    assert commands[-1] == "rm -rf -- .autoresearch deps"
+
+
 def test_a_files_proposer_setup_folder_inside_a_seed_folder_stays_out_of_every_version(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
