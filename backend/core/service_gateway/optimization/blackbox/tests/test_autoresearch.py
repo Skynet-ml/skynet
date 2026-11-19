@@ -1296,9 +1296,14 @@ def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_call
 
 
 def test_a_failed_files_proposer_command_leaves_no_version_and_does_not_crash_the_run(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A command that exits 1 is a failed mutation: the seed stays the best version and the run ends.
+    """A command that exits 1 leaves the seed best and ends the run, and one engine warning says why.
 
     Args:
         owner: Alice and her budget generation.
@@ -1306,18 +1311,22 @@ def test_a_failed_files_proposer_command_leaves_no_version_and_does_not_crash_th
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     seed = _tree(trees, "a.py", "a")
 
-    result = _run(
-        loop,
-        score=_score_a_py,
-        repo_seed=RepoSeed(tree_id=seed),
-        native_options=_command_options("printf x >> a.py; exit 1"),
-    )
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        result = _run(
+            loop,
+            score=_score_a_py,
+            repo_seed=RepoSeed(tree_id=seed),
+            native_options=_command_options("printf x >> a.py; exit 1"),
+        )
 
     assert result.best_candidate == seed
+    warnings = [record.getMessage() for record in caplog.records if record.name == "app.engine"]
+    assert warnings == ["Proposer session round1 failed: The [proposer] entry command failed with exit code 1."]
 
 
 def test_a_files_proposer_setup_that_changes_a_seed_file_fails_the_run(

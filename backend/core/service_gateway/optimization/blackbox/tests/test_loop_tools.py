@@ -141,7 +141,7 @@ def test_an_entry_that_runs_out_of_time_gives_no_version() -> None:
             {"export APP_MODEL": TreeRejectedError("s", "hidden path")},
             r"setup command .* left files that the run refuses",
         ),
-        ({f"rm -rf {_LAB}": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),
+        ({"rm -rf --": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": TreeRejectedError("s", "refused")}, r"check of the \[proposer\] setup .* could not run"),
         ({"true": CommandResult(1)}, r"check of the \[proposer\] setup .* could not run"),
@@ -218,13 +218,15 @@ def test_the_setup_and_the_entry_get_thirty_minutes_and_the_other_boxes_keep_the
     assert other_limits == {None}
 
 
-def test_a_seed_file_too_large_to_compare_counts_as_changed() -> None:
-    """The error reads each file with a byte cap, and a file above the cap is named, not loaded."""
-    ctx = SimpleNamespace(list_files=lambda tree, path="", executable=False: [] if executable else ["a.bin", "b.py"])
+def test_a_seed_file_too_large_to_compare_counts_as_changed_only_when_its_size_changed() -> None:
+    """The error reads each file with a byte cap; a file above the cap is compared by its size, not loaded."""
+    ctx = SimpleNamespace(
+        list_files=lambda tree, path="", executable=False: [] if executable else ["a.bin", "b.bin", "c.py"]
+    )
     limits: list[int | None] = []
 
     def read_file(tree: str, path: str, limit: int | None = None) -> bytes:
-        """Refuse the large file, and give the same bytes for every other file.
+        """Refuse the large files, and give the same bytes for every other file.
 
         Args:
             tree: The tree.
@@ -235,16 +237,17 @@ def test_a_seed_file_too_large_to_compare_counts_as_changed() -> None:
             The file bytes.
 
         Raises:
-            FileTooLargeError: For the large file.
+            FileTooLargeError: For the large files; only ``b.bin`` has another size after the setup.
         """
         limits.append(limit)
-        if path == "a.bin":
-            raise FileTooLargeError(path, 2 * loop_tools._COMPARED_BYTES, loop_tools._COMPARED_BYTES)
+        if path.endswith(".bin"):
+            size = 2 * loop_tools._COMPARED_BYTES + (tree == "after" and path == "b.bin")
+            raise FileTooLargeError(path, size, loop_tools._COMPARED_BYTES)
         return b"same"
 
     ctx.read_file = read_file
 
-    assert loop_tools._changed_files(ctx, "seed", "after") == ["a.bin"]  # type: ignore[arg-type]
+    assert loop_tools._changed_files(ctx, "seed", "after") == (["b.bin"], False)  # type: ignore[arg-type]
     assert limits
     assert set(limits) == {loop_tools._COMPARED_BYTES}
 
@@ -262,7 +265,7 @@ def test_the_seed_change_error_compares_at_most_the_capped_number_of_files(monke
         read_file=lambda tree, path, limit=None: reads.append(path) or b"",
     )
 
-    assert loop_tools._changed_files(ctx, "seed", "after") == []  # type: ignore[arg-type]
+    assert loop_tools._changed_files(ctx, "seed", "after") == ([], True)  # type: ignore[arg-type]
     assert sorted(set(reads)) == ["f0", "f1", "f2"]
 
 
@@ -276,7 +279,8 @@ def test_the_seed_change_error_names_at_most_the_capped_number_of_added_files() 
         read_file=lambda tree, path, limit=None: reads.append(path) or b"",
     )
 
-    assert loop_tools._changed_files(ctx, "seed", "after") == [f"f{i:02}" for i in range(20)]  # type: ignore[arg-type]
+    names = [f"f{i:02}" for i in range(20)]
+    assert loop_tools._changed_files(ctx, "seed", "after") == (names, True)  # type: ignore[arg-type]
     assert reads == []
 
 
@@ -288,8 +292,107 @@ def test_the_seed_change_error_stops_reading_at_the_capped_number_of_changed_fil
         read_file=lambda tree, path, limit=None: reads.append(path) or tree.encode(),
     )
 
-    assert loop_tools._changed_files(ctx, "seed", "after") == [f"f{i:02}" for i in range(20)]  # type: ignore[arg-type]
+    names = [f"f{i:02}" for i in range(20)]
+    assert loop_tools._changed_files(ctx, "seed", "after") == (names, True)  # type: ignore[arg-type]
     assert len(reads) == 40
+
+
+def test_the_seed_change_error_names_a_changed_file_after_many_large_files_of_the_same_size() -> None:
+    """Large files whose size stays the same do not fill the named files, so a later changed file is named."""
+    paths = [f"big{i:02}" for i in range(25)] + ["z.py"]
+    ctx = SimpleNamespace(list_files=lambda tree, path="", executable=False: [] if executable else paths)
+
+    def read_file(tree: str, path: str, limit: int | None = None) -> bytes:
+        """Refuse the large files with one size, and give ``z.py`` other bytes after the setup.
+
+        Args:
+            tree: The tree.
+            path: The file.
+            limit: The byte cap.
+
+        Returns:
+            The file bytes.
+
+        Raises:
+            FileTooLargeError: For the large files.
+        """
+        if path.startswith("big"):
+            raise FileTooLargeError(path, 2 * loop_tools._COMPARED_BYTES, loop_tools._COMPARED_BYTES)
+        return tree.encode()
+
+    ctx.read_file = read_file
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == (["z.py"], False)  # type: ignore[arg-type]
+
+
+def test_a_complete_list_of_changed_files_is_not_shortened() -> None:
+    """When every common file is compared and few differ, the list is whole."""
+    ctx = SimpleNamespace(
+        list_files=lambda tree, path="", executable=False: [] if executable else ["a.py", "b.py"],
+        read_file=lambda tree, path, limit=None: tree.encode() if path == "a.py" else b"",
+    )
+
+    assert loop_tools._changed_files(ctx, "seed", "after") == (["a.py"], False)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("changed", "says"),
+    [
+        ((["a.py"], True), r"of the repository: a\.py \(list shortened\)\. Those changes"),
+        (([], False), r"of the repository\. The check names no file: the change is in a link"),
+    ],
+)
+def test_the_seed_change_error_says_when_its_list_is_shortened_or_empty(
+    changed: tuple[list[str], bool], says: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capped list says that it is shortened, and an empty list gives a general sentence, not a bare error.
+
+    Args:
+        changed: What ``_changed_files`` gives.
+        says: The pattern of the error.
+        monkeypatch: Sets what ``_changed_files`` gives.
+    """
+    monkeypatch.setattr(loop_tools, "_changed_files", lambda ctx, seed, tree: changed)
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    original = commands.__call__
+
+    def differ(
+        tree: str, command: str, grants: tuple[Grant, ...] = (), *, timeout_seconds: float | None = None
+    ) -> tuple[CommandResult, str]:
+        """Give the seed's round trip another tree than the setup's.
+
+        Args:
+            tree: The tree the command starts from.
+            command: The shell command.
+            grants: The box's grants.
+            timeout_seconds: The command's time limit.
+
+        Returns:
+            The result and the tree.
+        """
+        result, after = original(tree, command, grants, timeout_seconds=timeout_seconds)
+        return result, "seed-again" if command == "true" else after
+
+    proposer._ctx.run_command = differ  # type: ignore[attr-defined]
+
+    with pytest.raises(ServiceError, match=says):
+        proposer.base("seed")
+
+
+def test_a_version_removes_the_lab_and_the_setup_output_in_one_box() -> None:
+    """A session's version needs one ``rm`` box; the lab comes off the last tree only when the version is a parent."""
+    commands = _Commands()
+    proposer = _proposer(commands, setup=_SETUP)
+    proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
+    proposer.base("seed")
+    before = len(commands.calls)
+
+    version = proposer.version("start", "last", "seed")
+
+    assert [command for command, _ in commands.calls[before:]] == [f"rm -rf -- {_LAB} deps"]
+    proposer.base(version)  # type: ignore[arg-type]
+    assert [command for command, _ in commands.calls[before + 1 :]] == [f"rm -rf {_LAB}"]
 
 
 def test_a_setup_name_with_a_new_line_is_one_path_of_the_listing() -> None:
@@ -301,12 +404,14 @@ def test_a_setup_name_with_a_new_line_is_one_path_of_the_listing() -> None:
     proposer.base("seed")
 
     assert "find . -mindepth 1 -print0" in commands.calls[0][0]
-    assert [command for command, _ in commands.calls if command.startswith("rm -rf --")] == ["rm -rf -- deps 'a\nb'"]
+    assert [command for command, _ in commands.calls if command.startswith("rm -rf --")] == [
+        f"rm -rf -- {_LAB} deps 'a\nb'"
+    ]
 
 
 def test_a_setup_output_that_rm_cannot_remove_gives_its_own_error() -> None:
     """A failed ``rm`` is no box failure and no seed change, so the error names the removal and its output."""
-    commands = _Commands({"rm -rf -- deps": CommandResult(1, stderr="rm: deps/x: Permission denied")})
+    commands = _Commands({f"rm -rf -- {_LAB} deps": CommandResult(1, stderr="rm: deps/x: Permission denied")})
     proposer = _proposer(commands, setup=_SETUP)
     proposer._ctx.read_file = lambda tree, path, limit=None: b"./deps\0"  # type: ignore[attr-defined]
 

@@ -808,11 +808,21 @@ class _WorkerAutoResearch(native_engines.AutoResearchEngine):
             self._ctx, self._proposer.base(parent), _REPO_LAB, {**files, loop_tools.TASK_FILE: task}
         )
         tree, failure = self._proposer.run(start)
+        name = f"round{self.round}"
+        if failure:
+            # The outcome is no error, so the native loop logs nothing; this line says why no version came.
+            native_engines.log_event(
+                "proposer.done",
+                f"Proposer session {name} failed: {failure}",
+                level=logging.WARNING,
+                source="proposer",
+                session=name,
+            )
         self._pull_notebook(tree)
         version = self._proposer.version(start, tree, parent)
         exhausted = version is not None and version not in self._swept and not self._sweep(server, version)
         return native_engines.ProposerOutcome(
-            session_id=f"round{self.round}",
+            session_id=name,
             cost_usd=0.0,
             is_error=False,
             text=failure or "",

@@ -718,9 +718,14 @@ def test_a_files_proposer_command_makes_each_version_and_the_model_is_never_call
 
 
 def test_a_failed_files_proposer_command_leaves_the_seed_best_and_the_run_goes_on(
-    owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+    owner: tuple[User, int],
+    engine: Engine,
+    step_log: StepLogStore,
+    trees: TreeStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A command that exits 1 is a failed mutation: each iteration runs it, and the seed stays the best version.
+    """A command that exits 1 gives each iteration an engine warning that says why, and the seed stays best.
 
     Args:
         owner: Alice and her budget generation.
@@ -728,6 +733,7 @@ def test_a_failed_files_proposer_command_leaves_the_seed_best_and_the_run_goes_o
         step_log: The step log.
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
+        caplog: Pytest's log capture.
     """
     options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command="printf x >> a.py; exit 1")
     options.gateway = SimpleNamespace(url="")
@@ -750,10 +756,17 @@ def test_a_failed_files_proposer_command_leaves_the_seed_best_and_the_run_goes_o
         del case
         return float(len(loop.read_file(candidate, "a.py") or b"")), {}
 
-    result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=seed), native_options=options)
+    with caplog.at_level(logging.WARNING, logger="app.engine"):
+        result = _run(loop, scorer=score, repo_seed=RepoSeed(tree_id=seed), native_options=options)
 
     assert model.calls == []
     assert result.best_candidate == seed
+    warnings = [record.getMessage() for record in caplog.records if record.name == "app.engine"]
+    assert [message.split(":")[0] for message in warnings] == [
+        "Proposer session iter1 failed",
+        "Proposer session iter2 failed",
+    ]
+    assert all("exit code 1" in message for message in warnings)
     assert result.metadata["iterations"] == 2
     assert result.metadata["session_ids"] == ["iter1", "iter2"]
 

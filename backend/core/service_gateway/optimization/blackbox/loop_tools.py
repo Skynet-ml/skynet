@@ -581,7 +581,8 @@ class FileProposer:
     The command starts on the parent's tree with the engine's lab folder over it, and ``ASCENT_TASK`` names the
     task file there. The tree it leaves, without the lab folder and without the files that ``[proposer] setup``
     added, is the new version, so the command needs no ``eval.sh`` or ``save.sh``. Each command is one committed
-    ``command`` step, so a resume replays it. A failed command gives no version, so the run goes on.
+    ``command`` step, so a resume replays it. A failed command gives no version. Meta-Harness then goes on to
+    its next iteration; AutoResearch's native stop rule ends the run, because the round spent nothing.
     """
 
     def __init__(self, ctx: EngineContext, options: NativeOptions, lab: str) -> None:
@@ -607,6 +608,9 @@ class FileProposer:
         self._roots: list[str] | None = None
         # Each version's tree with the setup's output, so the next session from it gets that output back.
         self._full: dict[str, str] = {}
+        # The last tree of the session that left each version, with the lab still in it. Most versions never start
+        # a session, so ``base`` removes the lab from it only for a version that does.
+        self._last: dict[str, str] = {}
 
     def base(self, parent: str) -> str:
         """Return the tree that a session from a version starts on: the version with the setup's output.
@@ -624,6 +628,10 @@ class FileProposer:
         """
         if self._roots is None:
             self._roots = self._setup()
+        if parent not in self._full and parent in self._last:
+            # A box failure here leaves the version without the setup's output, so its session can fail; the run
+            # goes on, as for a failed command.
+            self._full[parent] = drop_lab(self._ctx, "", self._last[parent], parent, self._lab) or parent
         return self._full.get(parent, parent)
 
     def run(self, start: str) -> tuple[str, str | None]:
@@ -670,18 +678,20 @@ class FileProposer:
         """
         if tree == start:
             return parent
-        full = drop_lab(self._ctx, start, tree, parent, self._lab)
-        version = full if full is None or not self._roots else _remove(self._ctx, full, self._roots)
-        if version is not None and full is not None:
-            self._full.setdefault(version, full)
+        if not self._roots:
+            return drop_lab(self._ctx, start, tree, parent, self._lab)
+        version = _remove(self._ctx, tree, [self._lab, *self._roots])
+        if version is not None:
+            self._last.setdefault(version, tree)
         return version
 
     def _setup(self) -> list[str]:
         """Run ``[proposer] setup`` once over the seed tree, and list the top paths that it added.
 
         One box runs the setup and lists the new paths, so the list also holds links and empty folders, which no
-        tree read sees. Three more boxes check that only those paths changed: one removes the lab folder, one removes
-        the added paths, and one gives the seed's own tree to compare with.
+        tree read sees. Two more boxes check that only those paths changed: one removes the lab folder and the added
+        paths, and one gives the seed's own tree to compare with. ``base`` removes only the lab folder later, for
+        the first session's tree.
 
         Returns:
             The added paths that hold no seed path, relative to the repository root; empty with no setup.
@@ -726,20 +736,29 @@ class FileProposer:
         names = (data or b"").decode("utf-8", "replace").split("\0")
         # The lab folder that the listing's own ``mkdir`` made is no setup output.
         roots = [path for path in (name.removeprefix("./") for name in names if name) if path != self._lab]
-        full = drop_lab(self._ctx, seed, tree, seed, self._lab)
-        stripped = full if full is None or not roots else _remove(self._ctx, full, roots)
+        stripped = _remove(self._ctx, tree, [self._lab, *roots])
         # The same box round trip on the seed gives the tree to compare with, without the hidden paths.
         untouched = None if stripped is None else _round_trip(self._ctx, seed)
         if untouched is None:
             raise ServiceError(f"The check of the {name} could not run in a box. Start a new run.")
         if stripped != untouched:
-            changed = _changed_files(self._ctx, untouched, stripped)
+            changed, shortened = _changed_files(self._ctx, untouched, stripped)
+            if changed:
+                named = f": {', '.join(changed)}" + (" (list shortened)" if shortened else "") + "."
+            else:
+                named = (
+                    ". The check names no file: the change is in a link, an empty folder or a file that it did not"
+                    " read."
+                )
             raise ServiceError(
-                f"The {name} changed or removed files of the repository"
-                + (f": {', '.join(changed)}" if changed else "")
-                + ". Those changes would enter every version. Make the setup write only new files."
+                f"The {name} changed or removed files of the repository{named}"
+                " Those changes would enter every version. Make the setup write only new files."
             )
-        self._full[seed] = full
+        if roots:
+            del self._full[seed]
+            self._last[seed] = tree
+        else:
+            self._full[seed] = stripped
         return roots
 
 
@@ -770,7 +789,7 @@ def _remove(ctx: EngineContext, tree: str, paths: list[str]) -> str | None:
     return after
 
 
-def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
+def _changed_files(ctx: EngineContext, seed: str, tree: str) -> tuple[list[str], bool]:
     """Name the files that differ between the seed and a tree, for the error of a setup that changed the seed.
 
     Args:
@@ -780,8 +799,9 @@ def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
 
     Returns:
         The added, removed and changed files and the files whose executable mode changed, sorted, at most
-        ``_NAMED_FILES``. It compares the content of at most ``_COMPARED_FILES`` common files and counts a file
-        above ``_COMPARED_BYTES`` as changed. Empty when only a link or an empty folder differs.
+        ``_NAMED_FILES``. It compares the content of at most ``_COMPARED_FILES`` common files, and the size of a
+        file above ``_COMPARED_BYTES``. Empty when only a link or an empty folder differs. Then whether a cap
+        shortened the list.
     """
     assert ctx.list_files is not None
     assert ctx.read_file is not None
@@ -789,16 +809,36 @@ def _changed_files(ctx: EngineContext, seed: str, tree: str) -> list[str]:
     after = set(ctx.list_files(tree) or ())
     modes = set(ctx.list_files(seed, executable=True) or ()) ^ set(ctx.list_files(tree, executable=True) or ())
     changed = (before ^ after) | modes
-    for path in sorted((before & after) - changed)[:_COMPARED_FILES]:
+    common = sorted((before & after) - changed)
+    compared = 0
+    for path in common[:_COMPARED_FILES]:
         if len(changed) >= _NAMED_FILES:
             break
-        try:
-            differs = ctx.read_file(seed, path, _COMPARED_BYTES) != ctx.read_file(tree, path, _COMPARED_BYTES)
-        except FileTooLargeError:
-            differs = True
-        if differs:
+        compared += 1
+        if _content(ctx, seed, path) != _content(ctx, tree, path):
             changed.add(path)
-    return sorted(changed)[:_NAMED_FILES]
+    return sorted(changed)[:_NAMED_FILES], len(changed) > _NAMED_FILES or compared < len(common)
+
+
+def _content(ctx: EngineContext, tree: str, path: str) -> bytes | int | None:
+    """Read a file to compare, or give its size when it is above ``_COMPARED_BYTES``.
+
+    The engine context gives no blob id, so the size is the only cheap sign that a large file changed. A large
+    file whose size stays the same counts as unchanged, so it cannot push a changed file out of the named files.
+
+    Args:
+        ctx: The engine context, with its file read.
+        tree: The tree.
+        path: The file.
+
+    Returns:
+        The file bytes, its size in bytes when it is above the cap, or ``None`` when it is missing.
+    """
+    assert ctx.read_file is not None
+    try:
+        return ctx.read_file(tree, path, _COMPARED_BYTES)
+    except FileTooLargeError as error:
+        return error.size
 
 
 def _round_trip(ctx: EngineContext, tree: str) -> str | None:
