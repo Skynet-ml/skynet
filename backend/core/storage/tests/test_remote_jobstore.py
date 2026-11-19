@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -47,6 +47,7 @@ from core.storage.models import (
     AgentStepModel,
     Base,
     BillingCustomerModel,
+    BlackboxAgentRunModel,
     ExecutionBudgetModel,
     ExecutionOperationModel,
     GepaCheckpointModel,
@@ -408,8 +409,13 @@ def test_delete_job_cascades_agent_runs(store: SQLiteJobStore) -> None:
         store: Disposable job store.
     """
     store.create_job("job-del-runs")
-    store.save_agent_run("job-del-runs", {"run_id": 1, "phase": "version", "status": "running"})
-    store.append_agent_run_transcript("job-del-runs", 1, "hi\n")
+    with Session(store._engine) as session:
+        session.add(
+            BlackboxAgentRunModel(
+                optimization_id="job-del-runs", run_id=1, phase="version", status="running", transcript="hi\n"
+            )
+        )
+        session.commit()
     before = store.get_agent_run("job-del-runs", 1)
     assert before is not None
     assert before["transcript"] == "hi\n"
@@ -2966,6 +2972,24 @@ def test_payload_targets_read_only_the_target_and_judge_members(store: SQLiteJob
         "empty": None,
     }
     assert store.payload_targets([]) == {}
+
+
+def test_payload_targets_read_a_json_null_payload_as_no_payload(store: SQLiteJobStore) -> None:
+    """A JSON ``null`` payload reads as ``None``, as the full row reads it (SKY-834).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("nulled")
+    store.update_job("nulled", payload=None)
+    with Session(store._engine) as session:
+        stored = session.execute(
+            text("SELECT json_type(payload) FROM jobs WHERE optimization_id = 'nulled'")
+        ).scalar_one()
+
+    assert stored == "null"
+    assert store.get_job("nulled")["payload"] is None
+    assert store.payload_targets(["nulled"]) == {"nulled": None}
 
 
 def test_gepa_checkpoint_save_get_delete_roundtrip(store: SQLiteJobStore) -> None:

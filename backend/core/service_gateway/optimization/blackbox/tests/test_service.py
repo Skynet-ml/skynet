@@ -16,6 +16,7 @@ import pytest
 
 from core.api.errors import DomainError
 from core.billing.signals import BudgetReached
+from core.config import settings
 from core.constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
@@ -39,6 +40,7 @@ from core.models.blackbox import (
     BlackboxRepoSource,
     BlackboxRunRequest,
     BlackboxRunResponse,
+    BlackboxScorer,
     BlackboxTarget,
 )
 from core.models.results import ModelTokenUsage
@@ -67,8 +69,9 @@ from ..protocol import (
     Task,
     candidate_key,
 )
-from ..sandbox import LocalSubprocessSession
-from ..sandbox_scorer import ScorerGateway, ScorerUsage
+from ..sandbox import LocalSubprocessSession, scorer_runtime_from_settings
+from ..sandbox_scorer import SandboxPythonScorer, ScorerGateway, ScorerUsage, scorer_gateway
+from ..scorer import JobScorer, RemoteScorer
 from ..service import run_blackbox_optimization, validate_blackbox_payload
 from ..upstream import AUTO_ENGINES
 from .mocks import (
@@ -102,6 +105,33 @@ def test_job_validation_rejects_saved_custom_base_as_service_error() -> None:
     )
     with pytest.raises(DomainError):
         service_mod.validate_job(payload, api_bases={"openai": "https://public.example/v1"})
+
+
+def _build_scorer(spec: BlackboxScorer, *, job_id: str | None = None) -> JobScorer:
+    """Build the scorer that a direct test run of ``run_job`` scores with.
+
+    Production repository runs score only through the parent's relay, so this
+    test helper keeps the direct remote and sandboxed python scorers for the
+    engine tests (SKY-834).
+
+    Args:
+        spec: The test payload's scorer definition.
+        job_id: Names the python scorer's sandbox after the job.
+
+    Returns:
+        A scorer over ``(candidate, case)``.
+    """
+    if spec.kind == "remote":
+        return RemoteScorer(str(spec.url), secret=spec.secret, timeout_seconds=spec.timeout_seconds)
+    return SandboxPythonScorer(
+        str(spec.metric_code),
+        runtime=scorer_runtime_from_settings(settings),
+        gateway=scorer_gateway(spec.model, settings) if spec.model is not None else None,
+        timeout_seconds=spec.timeout_seconds,
+        job_id=job_id,
+        install_command=spec.install_command,
+        dependency_lock=spec.dependency_lock.model_dump(mode="json") if spec.dependency_lock else None,
+    )
 
 
 class _RecordingScorer:
@@ -196,7 +226,7 @@ def _run_native(
     try:
         response = service_mod.run_job(
             service_mod.job_spec_from_payload(payload),
-            scorer_mod.build_scorer(payload.scorer, job_id=artifact_id),
+            _build_scorer(payload.scorer, job_id=artifact_id),
             splits,
             artifact_id=artifact_id,
             started=time.perf_counter(),
@@ -618,7 +648,7 @@ def test_legacy_judge_source_controls_budget(
                 ctx.check_budget()
         return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
 
-    monkeypatch.setattr(scorer_mod, "build_scorer", lambda *args, **kwargs: Scorer())
+    monkeypatch.setitem(globals(), "_build_scorer", lambda *args, **kwargs: Scorer())
     monkeypatch.setattr(service_mod, "run_strategy", strategy)
     _run(
         _payload(
@@ -669,7 +699,7 @@ def test_legacy_byok_reflection_keeps_managed_scorer_budget(
             ctx.check_budget()
         return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
 
-    monkeypatch.setattr(scorer_mod, "build_scorer", lambda *args, **kwargs: ManagedScorer())
+    monkeypatch.setitem(globals(), "_build_scorer", lambda *args, **kwargs: ManagedScorer())
     monkeypatch.setattr(service_mod, "run_strategy", strategy)
     _run(
         _payload(
@@ -1111,7 +1141,7 @@ def test_scorer_llm_usage_is_billed_with_the_run(
             chosen.append(config.name)
             return ScorerGateway(url=judge.url, model="judge", api_key="k", billing_model=config.name)
 
-        monkeypatch.setattr(scorer_mod, "scorer_gateway", fake_gateway)
+        monkeypatch.setitem(globals(), "scorer_gateway", fake_gateway)
         response = _run(
             _payload(scorer={"kind": "python", "metric_code": _JUDGE_SCORER_CODE, "model": {"name": "fake/judge"}}),
             artifact_id="job-judge",
@@ -1138,8 +1168,8 @@ def test_gateway_prefixed_reflection_usage_merges_with_the_scorer_row(
     """A reflection LM on the managed gateway and a scorer on the same model report one usage row."""
     fake_lm.model = "litellm_proxy/fake/judge"
     with FakeGateway(reply="0.5", usage=(3, 1)) as judge:
-        monkeypatch.setattr(
-            scorer_mod,
+        monkeypatch.setitem(
+            globals(),
             "scorer_gateway",
             lambda config, settings: ScorerGateway(
                 url=judge.url, model="judge", api_key="k", billing_model=config.name
@@ -1614,7 +1644,7 @@ def test_final_run_rescores_both_versions_outside_the_budget(
         tmp_path: Per-test artifact directory.
         monkeypatch: Pytest fixture wrapping the job's scorer.
     """
-    real_build = scorer_mod.build_scorer
+    real_build = _build_scorer
     recorders: list[_RecordingScorer] = []
 
     def build(*args: Any, **kwargs: Any) -> _RecordingScorer:
@@ -1622,7 +1652,7 @@ def test_final_run_rescores_both_versions_outside_the_budget(
         recorders.append(_RecordingScorer(real_build(*args, **kwargs)))
         return recorders[-1]
 
-    monkeypatch.setattr(scorer_mod, "build_scorer", build)
+    monkeypatch.setitem(globals(), "_build_scorer", build)
 
     response = _run(_payload(), artifact_id="job-final", gepa_log_dir_path=str(tmp_path))
 
@@ -1887,7 +1917,7 @@ def _crash_metric_on(monkeypatch: pytest.MonkeyPatch, crashing: set[str]) -> Non
         monkeypatch: The test's monkeypatch fixture.
         crashing: The versions the metric crashes on.
     """
-    real_build_scorer = scorer_mod.build_scorer
+    real_build_scorer = _build_scorer
 
     def build_scorer(*args: Any, **kwargs: Any) -> Any:
         """Wrap the real scorer so the metric crashes on the winner."""
@@ -1918,7 +1948,7 @@ def _crash_metric_on(monkeypatch: pytest.MonkeyPatch, crashing: set[str]) -> Non
 
         return Crashing()
 
-    monkeypatch.setattr(scorer_mod, "build_scorer", build_scorer)
+    monkeypatch.setitem(globals(), "_build_scorer", build_scorer)
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -2093,7 +2123,7 @@ def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id:
     """
     return service_mod.run_job(
         service_mod.job_spec_from_payload(payload),
-        _AsRepositoryScorer(scorer_mod.build_scorer(payload.scorer, job_id=artifact_id)),
+        _AsRepositoryScorer(_build_scorer(payload.scorer, job_id=artifact_id)),
         service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
         artifact_id=artifact_id,
         started=time.perf_counter(),
@@ -2256,7 +2286,7 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
 
     response = service_mod.run_job(
         job,
-        scorer_mod.build_scorer(payload.scorer, job_id="job-source"),
+        _build_scorer(payload.scorer, job_id="job-source"),
         service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
         artifact_id="job-source",
         started=time.perf_counter(),
@@ -2314,7 +2344,7 @@ def test_a_repository_run_hands_the_files_proposer_and_its_setup_to_the_native_e
     with pytest.raises(_NativeOptionsBuiltError):
         service_mod.run_job(
             job,
-            scorer_mod.build_scorer(payload.scorer, job_id="job-file-proposer"),
+            _build_scorer(payload.scorer, job_id="job-file-proposer"),
             service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
             artifact_id="job-file-proposer",
             started=time.perf_counter(),

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_billing import normalize_model_token_sources
-from core.api.routers import submissions
+from core.api.routers import submissions, wizard_preflight
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.api.routers.optimizations_meta import create_optimizations_meta_router
 from core.api.routers.wizard_preflight import create_wizard_preflight_router
@@ -427,15 +427,18 @@ def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> Non
 @pytest.mark.parametrize("scope", ["evaluation", "execution"])
 @pytest.mark.parametrize("target", [None, {"kind": "text"}, {"kind": "agent", "model": "openai/agent"}])
 def test_the_setup_check_refuses_a_text_or_agent_target(
-    harness: _Harness, scope: str, target: dict[str, Any] | None
+    harness: _Harness, scope: str, target: dict[str, Any] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse a retired target in every scope before any paid check runs (SKY-834).
+    """Refuse a retired target in every scope before any paid check runs or a rate-limit slot is used (SKY-834).
 
     Args:
         harness: Funded real API fixture.
         scope: The setup check scope.
         target: The retired target, or none, which means a text run.
+        monkeypatch: Records each use of the submission rate limit.
     """
+    rate_checks: list[str] = []
+    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", rate_checks.append)
     budget = harness.budgets.create(harness.username, 20, idempotency_key=f"retired-{scope}")
     payload: dict[str, Any] = {
         "reflection_model_config": {"name": "openai/reflection"},
@@ -456,6 +459,7 @@ def test_the_setup_check_refuses_a_text_or_agent_target(
     assert response.status_code == 422, response.text
     assert TARGET_RETIRED in response.text
     assert not harness.calls
+    assert rate_checks == []
 
 
 def test_legacy_submission_attaches_paid_setup_once(harness: _Harness) -> None:

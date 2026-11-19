@@ -172,6 +172,13 @@ def checked_preflight(
     Returns:
         The check result.
     """
+    target = request.payload.get("target")
+    # The evaluation check skips the run request model, so it refuses a retired target here (SKY-834).
+    # The refusal comes before the rate limit, so a refused request uses no slot.
+    if not isinstance(target, dict) or target.get("kind") != BLACKBOX_TARGET_REPO:
+        raise RequestValidationError(
+            [{"type": "value_error", "loc": ("body", "payload", "target"), "msg": TARGET_RETIRED, "input": target}]
+        )
     enforce_submission_rate(user.username)
     payload = copy.deepcopy(request.payload)
     payload["username"] = user.username
@@ -179,12 +186,6 @@ def checked_preflight(
     payload["execution_budget_revision"] = request.execution_budget_revision
     if payload.get("seed") is None:
         payload["seed"] = setup_seed(request.execution_budget_id)
-    target = payload.get("target")
-    # The evaluation check skips the run request model, so it refuses a retired target here (SKY-834).
-    if not isinstance(target, dict) or target.get("kind") != BLACKBOX_TARGET_REPO:
-        raise RequestValidationError(
-            [{"type": "value_error", "loc": ("body", "payload", "target"), "msg": TARGET_RETIRED, "input": target}]
-        )
     if request.scope == "execution":
         try:
             typed = BlackboxRunRequest.model_validate(payload)

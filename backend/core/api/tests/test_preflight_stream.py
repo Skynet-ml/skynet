@@ -90,7 +90,7 @@ def test_stream_reports_admission_failure_without_success(monkeypatch: pytest.Mo
             json={
                 "workflow": "anything",
                 "scope": "evaluation",
-                "payload": {},
+                "payload": {"target": {"kind": "repo"}},
                 "execution_budget_id": "draft",
                 "execution_budget_revision": 1,
             },

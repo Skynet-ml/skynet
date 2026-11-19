@@ -1712,25 +1712,6 @@ class RemoteDBJobStore:
         self._evict_job_counters(optimization_ids)
         return int(deleted or 0)
 
-    def save_agent_run(self, optimization_id: str, run: dict[str, Any]) -> None:
-        """Persist (or replace) one sandboxed agent run's record.
-
-        Args:
-            optimization_id: Owning job id.
-            run: The record as the job's recorder sends it, keyed by ``run_id``.
-        """
-        self._agent_runs.save(optimization_id, run)
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Add a piece of live transcript to a sandboxed agent run.
-
-        Args:
-            optimization_id: Owning job id.
-            run_id: The run's ordinal within the job.
-            text: The new transcript text.
-        """
-        self._agent_runs.append_transcript(optimization_id, run_id, text)
-
     def get_agent_run(self, optimization_id: str, run_id: int) -> dict[str, Any] | None:
         """Return one sandboxed agent run's record, or ``None``.
 
@@ -1848,16 +1829,19 @@ class RemoteDBJobStore:
 
         Returns:
             For each id found, a payload that holds only its ``target`` and ``judge``
-            members, or ``None`` when the job has no payload.
+            members, or ``None`` when the job has no payload. A SQL ``NULL`` and a
+            JSON ``null`` payload both give ``None``, as the full row reads them.
         """
         if not optimization_ids:
             return {}
+        # The type function reads the JSON kind without serializing the multi-MB payload.
+        json_type = func.jsonb_typeof if self._engine.dialect.name == "postgresql" else func.json_type
         session = self._get_session()
         try:
             rows = (
                 session.query(
                     JobModel.optimization_id,
-                    JobModel.payload.is_(None),
+                    json_type(JobModel.payload),
                     JobModel.payload["target"],
                     JobModel.payload["judge"],
                 )
@@ -1868,9 +1852,9 @@ class RemoteDBJobStore:
             session.close()
         return {
             oid: None
-            if no_payload
+            if kind in (None, "null")
             else {key: value for key, value in (("target", target), ("judge", judge)) if value is not None}
-            for oid, no_payload, target, judge in rows
+            for oid, kind, target, judge in rows
         }
 
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:

@@ -170,27 +170,6 @@ class _BaseFakeJobStore:
         """Return one page of the run's candidate summaries through the real store."""
         return self._run_call_store().list_candidates(optimization_id, limit=limit, offset=offset)
 
-    def save_agent_run(self, optimization_id: str, run: dict) -> None:
-        """Store one agent run record under its ``run_id``.
-
-        Args:
-            optimization_id: Owning job id.
-            run: The record, keyed by ``run_id``.
-        """
-        self._agent_runs.setdefault(optimization_id, {})[int(run["run_id"])] = dict(run)
-
-    def append_agent_run_transcript(self, optimization_id: str, run_id: int, text: str) -> None:
-        """Extend a stored run's transcript, ignoring unknown runs.
-
-        Args:
-            optimization_id: Owning job id.
-            run_id: The run's ordinal.
-            text: The transcript piece to add.
-        """
-        run = self._agent_runs.get(optimization_id, {}).get(run_id)
-        if run is not None:
-            run["transcript"] = run.get("transcript", "") + text
-
     def get_agent_run(self, optimization_id: str, run_id: int) -> dict | None:
         """Return a stored run record, or ``None``.
 

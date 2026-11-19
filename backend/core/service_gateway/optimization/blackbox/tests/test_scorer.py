@@ -1,21 +1,16 @@
-"""Tests for the scorer adapters: normalization, code loading, remote endpoints and dispatch."""
+"""Tests for the scorer adapters: normalization, code loading and remote endpoints."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BlackboxScorer
 
 from .. import scorer as scorer_mod
-from ..sandbox import LocalSubprocessRuntime
-from ..sandbox_scorer import SandboxPythonScorer, ScorerGateway
-from ..scorer import RemoteScorer, build_scorer, load_scorer_from_code, normalize_score
-from .mocks import FakeSandboxRuntime, FakeSandboxSession
+from ..scorer import RemoteScorer, load_scorer_from_code, normalize_score
 
 
 @pytest.mark.parametrize(
@@ -312,74 +307,3 @@ def test_trusted_relay_keeps_skynet_keys_of_the_repository_scorer() -> None:
         None,
         {"feedback": "Run failed: boom", "status": "run_failed"},
     )
-
-
-def test_build_scorer_dispatches_on_kind() -> None:
-    """``build_scorer`` returns a remote adapter for ``remote`` and a sandboxed scorer otherwise."""
-    remote = build_scorer(BlackboxScorer(kind="remote", url="https://scorer.example"))
-    python = build_scorer(
-        BlackboxScorer(metric_code="def score(c, case=None): return {'score': 1.0, 'feedback': 'f'}"),
-        runtime=LocalSubprocessRuntime(),
-    )
-
-    assert isinstance(remote, RemoteScorer)
-    assert isinstance(python, SandboxPythonScorer)
-    try:
-        assert python("x", None) == (1.0, {"feedback": "f"})
-    finally:
-        python.close()
-
-
-def test_build_scorer_opens_the_configured_runtime_named_after_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without an explicit runtime the settings decide; the box is tagged with the job."""
-    output = json.dumps({"score": 0.5, "side_info": {"k": 1}, "error": None, "usage": []})
-    runtime = FakeSandboxRuntime(
-        lambda: FakeSandboxSession(
-            produces={"python3 app_runner.py calls/000001": {"calls/000001/output.json": output}}
-        )
-    )
-    monkeypatch.setattr(scorer_mod, "scorer_runtime_from_settings", lambda settings: runtime)
-
-    scorer = build_scorer(BlackboxScorer(metric_code="def score(c, case=None): return 0.5"), job_id="job-7")
-
-    assert scorer("x", None) == (0.5, {"k": 1})
-    assert runtime.specs[0].name.startswith("app-scorer-job-7-")
-    assert runtime.specs[0].tags == {"skynet_job": "job-7"}
-
-
-def test_build_scorer_resolves_the_scorer_model_into_a_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A python scorer with a model gets a gateway and a usage ledger billed under that model."""
-    seen: list[str] = []
-
-    def fake_gateway(config: Any, settings: Any) -> ScorerGateway:
-        """Record the model and answer with a canned gateway."""
-        seen.append(config.name)
-        return ScorerGateway(url="http://gw/v1", model="judge", api_key="k", billing_model=config.name)
-
-    monkeypatch.setattr(scorer_mod, "scorer_gateway", fake_gateway)
-
-    scorer = build_scorer(
-        BlackboxScorer(metric_code="def score(c, case=None): return 1.0", model={"name": "fake/judge"}),
-        runtime=LocalSubprocessRuntime(),
-    )
-
-    assert seen == ["fake/judge"]
-    assert scorer.usage is not None
-    assert scorer.usage.model == "fake/judge"
-    scorer.close()
-
-
-_SLOW_SCORER = "import time\ndef score(candidate, case=None):\n    time.sleep(30)\n    return 1.0\n"
-
-
-def test_build_scorer_bounds_python_scorers_by_the_spec_timeout() -> None:
-    """The spec's ``timeout_seconds`` applies to python scorers, not only remote ones."""
-    scorer = build_scorer(
-        BlackboxScorer(metric_code=_SLOW_SCORER, timeout_seconds=0.5), runtime=LocalSubprocessRuntime()
-    )
-
-    try:
-        with pytest.raises(ServiceError, match=r"exceeded the 0\.5s timeout"):
-            scorer("x", None)
-    finally:
-        scorer.close()

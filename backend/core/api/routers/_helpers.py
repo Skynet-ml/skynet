@@ -650,10 +650,12 @@ def is_resumable(job_store: Any, job_data: dict) -> bool:
     orphan sweep stopped as interrupted needs no checkpoint: it starts again
     from the beginning. The cheap, indexed checkpoint lookup is gated behind
     the status/attempts checks so list pages query only the few candidate rows,
-    never the whole page.
+    never the whole page. A stored text or agent run never offers Resume (SKY-834).
 
     Args:
-        job_store: The job store used to test for a saved checkpoint.
+        job_store: The job store used to read the payload target of a row
+            without its payload, which finds a retired run, and to test for a
+            saved checkpoint.
         job_data: Raw job row from the store.
 
     Returns:

@@ -29,13 +29,31 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxScorer
 from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
-from core.service_gateway.optimization.blackbox.scorer import build_scorer
+from core.service_gateway.optimization.blackbox.scorer import RemoteScorer
 from core.storage.models import ExecutionOperationModel
 from core.worker.scoped_relay import model_forwarder
 
 from .test_model_gateway_transport import gateway as _gateway_fixture
 
 gateway = _gateway_fixture
+
+
+def _relay_scorer(payload: dict[str, Any]) -> RemoteScorer:
+    """Build the remote scorer that relays a protected payload through its parent route.
+
+    Args:
+        payload: The protected payload, with its scorer and evaluator route.
+
+    Returns:
+        The relaying remote scorer.
+    """
+    spec = BlackboxScorer.model_validate(payload["scorer"])
+    return RemoteScorer(
+        str(spec.url),
+        secret=spec.secret,
+        timeout_seconds=spec.timeout_seconds,
+        protected_route=payload["_skynet_evaluator_route"],
+    )
 
 
 def test_scorer_model_pending_points_to_metric_code() -> None:
@@ -143,9 +161,7 @@ def test_actual_protocol_pins_destination_and_preserves_endpoint_result(
     assert all(
         secret not in encoded for secret in ("parent-evaluator-secret", "unused-parent-key", "evaluator.example")
     )
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     assert scorer(payload["seed_candidate"], {"question": "actual case"}) == (
         0.75,
         {"feedback": "actual endpoint feedback"},
@@ -174,10 +190,7 @@ def test_remote_evaluator_response_cannot_echo_parent_credentials(
         "feedback": "Bearer parent-evaluator-secret at parent-query-secret",
     }
     payload = _protect(gateway)
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]),
-        protected_route=payload["_skynet_evaluator_route"],
-    )
+    scorer = _relay_scorer(payload)
 
     score, metadata = scorer(payload["seed_candidate"], {"question": "actual case"})
 
@@ -194,9 +207,7 @@ def test_http_failure_is_original_and_never_retried_or_redirected(
     endpoint.status = status
     endpoint.result = {"error": "the real endpoint rejected this candidate"}
     endpoint.headers = {"Location": "http://169.254.169.254/credentials"}
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     with pytest.raises(ServiceError, match=f"HTTP {status}.*real endpoint rejected"):
         scorer("actual candidate", None)
     assert len(endpoint.requests) == 1
@@ -215,9 +226,7 @@ def test_network_failure_is_safe_provider_error_without_hidden_retry(
         raise httpx.ConnectError("sensitive endpoint transport detail", request=request)
 
     monkeypatch.setattr(mcp_broker.httpx, "AsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(fail))
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     with pytest.raises(ServiceError, match="HTTP 502") as failed:
         scorer("actual candidate", None)
     assert "evaluator.example" not in str(failed.value)
@@ -332,9 +341,7 @@ def test_persistent_budget_stop_crosses_relay_without_external_dispatch(
 ) -> None:
     """Restore the normal typed stop from authoritative parent state without a paid retry."""
     payload = _protect(gateway)
-    scorer = build_scorer(
-        BlackboxScorer.model_validate(payload["scorer"]), protected_route=payload["_skynet_evaluator_route"]
-    )
+    scorer = _relay_scorer(payload)
     gateway.runtime.service.stop_admission(gateway.runtime.budget_id, "alice", reason="budget_reached")
     with pytest.raises(BudgetReached):
         scorer("actual candidate", None)

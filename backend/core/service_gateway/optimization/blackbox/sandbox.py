@@ -155,7 +155,7 @@ from .sandbox_runtime import (
 )
 
 # The SDK is a declared dependency, but an image built from an older
-# requirements file must degrade to "agent targets unavailable", not
+# requirements file must degrade to "cloud sandbox unavailable", not
 # fail to import the worker.
 try:
     from vercel import sandbox as vercel_sandbox
