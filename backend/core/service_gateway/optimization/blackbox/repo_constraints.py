@@ -92,7 +92,7 @@ CONSTRAINTS_REQUIRED = (
 _LIMITS = RunnerLimits(max_vcpus=VERCEL_CAPABILITIES.max_vcpus, max_timeout=None)
 
 
-def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstraints:
+def parse_constraints(raw: bytes, *, require_version: bool = True, legacy_forms: bool = False) -> RepoConstraints:
     """Check the bytes of a contract file with the package parser and Skynet's limits.
 
     Args:
@@ -100,6 +100,11 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         require_version: Whether a file with no ``version`` fails. ``False``
             reads it as version 1, for a run that started before the key
             was required (SKY-690); a wrong ``version`` fails either way.
+        legacy_forms: Whether the package also accepts the older forms that
+            Skynet's own reader accepted, such as a path with a ``/`` at the
+            end. Only the re-read of a run that started under that reader
+            passes ``True`` (SKY-760); a new check keeps ``False``. A
+            ``network`` entry must name a public host either way.
 
     Returns:
         The validated proposal.
@@ -108,15 +113,19 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         ConstraintsError: When the file is too large, not TOML, or holds an
             unknown, malformed, or unsupported setting.
     """
-    return _parse_constraints(raw, require_version=require_version, limits=_LIMITS)
+    return _parse_constraints(raw, require_version=require_version, limits=_LIMITS, legacy_forms=legacy_forms)
 
 
-def read_constraints(archive: Path, *, require_version: bool = True) -> RepoConstraints | None:
+def read_constraints(
+    archive: Path, *, require_version: bool = True, legacy_forms: bool = False
+) -> RepoConstraints | None:
     """Read the contract file at the root of a packed snapshot, with the files it names.
 
     Args:
         archive: Packed tree from :func:`fetch_snapshot`.
         require_version: Passed to :func:`parse_constraints`.
+        legacy_forms: Passed to :func:`parse_constraints`. It also lets the
+            ``type`` of a server in a named ``.mcp.json`` file match in any case.
 
     Returns:
         The validated proposal, or ``None`` when the repository has no such file.
@@ -125,4 +134,10 @@ def read_constraints(archive: Path, *, require_version: bool = True) -> RepoCons
         ConstraintsError: When the file or a file it names is invalid, or when
             the ``[sandbox] compose`` file is not a compose file the box can run.
     """
-    return _read_constraints(archive, require_version=require_version, limits=_LIMITS, compose_parser=parse_compose)
+    return _read_constraints(
+        archive,
+        require_version=require_version,
+        limits=_LIMITS,
+        compose_parser=parse_compose,
+        legacy_forms=legacy_forms,
+    )

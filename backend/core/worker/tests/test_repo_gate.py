@@ -81,6 +81,16 @@ def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> 
     assert check_repository(archive, (), place="local", require_version=False) == []
 
 
+def test_a_started_run_reads_an_older_form_and_a_new_run_refuses_it(tmp_path: Path) -> None:
+    """The gate reads the tree as its staging did: a started run accepts ``" bot/ "`` (SKY-760)."""
+    raw = b'version = 1\n[paths]\neditable = [" bot/ "]\n[run]\nentry = "run.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    with pytest.raises(ConstraintsError, match="must be written 'bot'"):
+        check_repository(archive, (), place="local")
+    assert check_repository(archive, (), place="local", require_version=False) == []
+
+
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     """No ascent.toml asks for nothing."""
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []

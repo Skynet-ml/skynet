@@ -435,7 +435,10 @@ def stage_repository(
             apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
-        constraints = read_constraints(snapshot.archive, require_version=require_version)
+        # A started run passed its first staging under Skynet's older reader, so it re-reads in its forms (SKY-760).
+        constraints = read_constraints(
+            snapshot.archive, require_version=require_version, legacy_forms=not require_version
+        )
         # A started run (resume, recovery) already recorded the rules it runs under, so only a new run stops here.
         if require_constraints and constraints is None and not isinstance(repo.get(ENVIRONMENT_KEY), dict):
             raise ConstraintsError(CONSTRAINTS_REQUIRED)

@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 from openascent import contract
 
+from core.worker import hardening_runner
+
 from .. import repo_constraints
 from ..repo_constraints import (
     CONSTRAINTS_FILE,
@@ -1108,8 +1110,9 @@ _STDIO_ROLES = {
         b'{"command": "npx", "args": ["files-mcp", "--token", "' + _RAW_KEY.encode() + b'"]}',
         b'{"type": "stdio", "command": "notes-mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
         b'{"url": "https://a.example.com/mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
+        b'{"type": "STDIO", "url": "https://a.example.com/mcp"}',
     ],
-    ids=["command", "type-stdio", "url-with-env"],
+    ids=["command", "type-stdio", "url-with-env", "type-stdio-upper"],
 )
 def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, server: bytes) -> None:
     """Only http servers are supported now, so a stdio server in any role's file fails the setup check (E64)."""
@@ -1137,15 +1140,18 @@ def test_an_http_type_is_accepted(tmp_path: Path, kind: str) -> None:
     assert constraints.run_role.mcp_servers == (McpServer(name="m", url="https://a.example.com/mcp", headers={}),)
 
 
-@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "STDIO"])
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP"])
 def test_an_mcp_type_not_in_lowercase_is_refused(tmp_path: Path, kind: str) -> None:
-    """The package parser matches the MCP type exactly, so ``HTTP`` fails with the allowed types (SKY-760)."""
+    """A new check matches the MCP type exactly; a started run's re-read accepts any case (SKY-760)."""
     raw = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
     server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
     files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
 
     with pytest.raises(ConstraintsError, match=r"server 'm' type must be http, streamable-http or sse"):
         read_constraints(_archive(tmp_path, files))
+    constraints = read_constraints(_archive(tmp_path, files), legacy_forms=True)
+    assert constraints is not None
+    assert constraints.run_role.mcp_servers == (McpServer(name="m", url="https://a.example.com/mcp", headers={}),)
 
 
 _DATA = b'version = 1\n[run]\nentry = "run.py:main"\n[data]\ncases = "data/cases.jsonl"\n'
@@ -1258,11 +1264,12 @@ def test_a_missing_linked_or_folder_cases_file_is_refused(tmp_path: Path) -> Non
 
 def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A cases file over the size limit, or with too many cases, fails before the run starts."""
-    monkeypatch.setattr("openascent.contract._MAX_CASES_FILE_BYTES", 10)
+    # A scorer load puts the helper module at sys.modules["openascent"], so a dotted-name patch can miss the package.
+    monkeypatch.setattr(contract, "_MAX_CASES_FILE_BYTES", 10)
     with pytest.raises(ConstraintsError, match=r"which is larger than"):
         _read(tmp_path, _DATA, {"data/cases.jsonl": _CASES})
-    monkeypatch.setattr("openascent.contract._MAX_CASES_FILE_BYTES", 1 << 20)
-    monkeypatch.setattr("openascent.contract._MAX_CASES", 1)
+    monkeypatch.setattr(contract, "_MAX_CASES_FILE_BYTES", 1 << 20)
+    monkeypatch.setattr(contract, "_MAX_CASES", 1)
     with pytest.raises(ConstraintsError, match=r"holds more than 1 cases"):
         _read(tmp_path, _DATA, {"data/cases.jsonl": _CASES})
 
@@ -1425,3 +1432,44 @@ def test_a_bad_compose_file_fails_at_the_sandbox_compose_setting(tmp_path: Path)
     with pytest.raises(ConstraintsError, match=r"\[sandbox\] compose names 'compose.yaml': .*'services'") as caught:
         _read(tmp_path, raw, {"compose.yaml": b"version: '3'\n"})
     assert (caught.value.section, caught.value.key) == ("sandbox", "compose")
+
+
+# Skynet's older reader accepted spaces and a "/" at the end of a path; the package refuses them in a new check.
+_LEGACY = b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = [" scoring/ "]\n'
+
+
+def test_a_new_check_refuses_an_older_form() -> None:
+    """A new check keeps the strict forms of the package parser (SKY-760)."""
+    with pytest.raises(ConstraintsError, match=r"must be written 'scoring'") as caught:
+        parse_constraints(_LEGACY)
+    assert (caught.value.section, caught.value.key) == ("metric", "files")
+
+
+def test_the_wrappers_pass_legacy_forms_to_the_package(tmp_path: Path) -> None:
+    """``legacy_forms=True`` reads the older forms as the older reader did, in both wrappers (SKY-760)."""
+    assert parse_constraints(_LEGACY, legacy_forms=True).metric.files == ("scoring",)
+    constraints = read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: _LEGACY}), legacy_forms=True)
+    assert constraints is not None
+    assert constraints.metric.files == ("scoring",)
+    with pytest.raises(ConstraintsError, match=r"must be written 'scoring'"):
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: _LEGACY}))
+
+
+def test_a_legacy_network_entry_must_still_name_a_public_host() -> None:
+    """Under ``legacy_forms`` a private host still fails, because the list comes from the repository (SKY-760)."""
+    raw = b'version = 1\n[run]\nentry = "run.py:main"\nnetwork = ["localhost"]\n'
+
+    with pytest.raises(ConstraintsError, match="localhost"):
+        parse_constraints(raw, legacy_forms=True)
+
+
+def test_a_started_hardening_pass_rereads_the_older_forms(tmp_path: Path) -> None:
+    """The trusted tree of a started pass reads as its staging did; a new pass stays strict (SKY-760)."""
+    (tmp_path / CONSTRAINTS_FILE).write_bytes(_LEGACY)
+
+    started = hardening_runner._trusted_constraints(tmp_path, require_version=False)
+
+    assert started is not None
+    assert started.metric.files == ("scoring",)
+    with pytest.raises(ConstraintsError, match=r"must be written 'scoring'"):
+        hardening_runner._trusted_constraints(tmp_path, require_version=True)
