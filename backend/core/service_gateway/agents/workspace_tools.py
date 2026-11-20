@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import posixpath
 import re
+import tomllib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -33,7 +35,7 @@ from ...models.blackbox import (
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
-from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
+from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints, rule_file_settings
 from .repo_browser import RepoBrowser, RepoRead
 
 if TYPE_CHECKING:
@@ -289,6 +291,161 @@ def optimize_toml_error(text: str) -> dict[str, Any] | None:
     return None
 
 
+# An ``instructions`` or ``illegal`` key and its string, anywhere in a current file that is not TOML
+# at all: at a line start, after a dotted or quoted key, or inside an inline table, in any TOML quote form.
+_RULE_STRING = re.compile(
+    r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*"
+    r"(?P<s>\"\"\"|'''|\"|')(?P<path>[^\"'\n]+)(?P=s)"
+)
+# The same key with any value, to find one that _RULE_STRING cannot read (over many lines, or not a string).
+_RULE_KEY = re.compile(r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=")
+# A quoted key with an escape, which could spell instructions or illegal so that neither search sees it.
+# No backslash before the first one, so each quote starts one linear scan (a long run cannot backtrack).
+_ESCAPED_KEY = re.compile(r"[\"'][^\"'\n\\]*\\[^\"'\n]*[\"']\s*=")
+
+
+def _clean_rule_path(path: str) -> str:
+    """Write a raw rules-file path the way the run's parser does, so both forms compare equal.
+
+    Args:
+        path: The path as the file holds it.
+
+    Returns:
+        The path with ``/`` separators, no surrounding spaces or slashes, and no
+        ``.`` or empty parts; ``""`` for an empty path.
+    """
+    # The parser refuses ./docs/intent.md, so the guard must see its fix, docs/intent.md, as the same file.
+    clean = posixpath.normpath(path.strip().replace("\\", "/").strip("/"))
+    return "" if clean == "." else clean
+
+
+def _rule_settings(text: str) -> dict[str, str] | None:
+    """Read each setting that names an intent or rules file, with the path it names.
+
+    Args:
+        text: An ``optimize.toml`` text.
+
+    Returns:
+        Setting to path, such as ``{"[proposer] illegal": "docs/rules.md"}``; the
+        raw TOML values when the run's parser refuses the file; ``None`` when the
+        text is not TOML.
+    """
+    try:
+        parsed = parse_constraints(text.encode("utf-8", "surrogatepass"))
+    except ConstraintsError:
+        pass
+    else:
+        return dict(rule_file_settings(parsed))
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    # A file the parser refuses can still name rules files; read them raw so the guard does not fail open.
+    tables = {f"[{name}] illegal": document.get(name) for name in ("proposer", "run", "metric")}
+    targets = document.get("target")
+    if isinstance(targets, dict):
+        tables |= {f"[target.{name}] illegal": stage for name, stage in targets.items()}
+    raw = {"instructions": document.get("instructions")}
+    raw |= {setting: table.get("illegal") for setting, table in tables.items() if isinstance(table, dict)}
+    # The run reads only a path string, so a list or table (the rule text of the format before SKY-380)
+    # names no file; dropping it is the move the parser asks for.
+    return {setting: _clean_rule_path(value) for setting, value in raw.items() if isinstance(value, str)}
+
+
+def _decode_string(match: re.Match[str]) -> str | None:
+    """Decode the escapes of a basic TOML string the raw search found, as the TOML reader would.
+
+    Args:
+        match: A :data:`_RULE_STRING` match.
+
+    Returns:
+        The decoded value; the raw text for a literal (single-quote) string; ``None``
+        when TOML refuses the string, such as a path cut at an escaped quote.
+    """
+    if match["s"].startswith("'"):
+        return match["path"]
+    try:
+        return str(tomllib.loads(f"x = {match['s']}{match['path']}{match['s']}")["x"])
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+def _rule_line_paths(text: str) -> list[str] | None:
+    """Find the paths of the ``instructions`` and ``illegal`` keys of a text that is not TOML.
+
+    Args:
+        text: The raw file text.
+
+    Returns:
+        The distinct cleaned paths, in file order; ``None`` when one cannot be read.
+    """
+    decoded = [_decode_string(match) for match in _RULE_STRING.finditer(text)]
+    if None in decoded:
+        return None
+    return list(dict.fromkeys(_clean_rule_path(path) for path in decoded if path is not None))
+
+
+def dropped_rule_files(current: str, text: str) -> str | None:
+    """Refuse an ``optimize.toml`` text that drops or moves an intent or rules file the current text names.
+
+    The rules files hold the illegal actions that stop reward hacking, so a
+    whole-file rewrite must not lose them silently (SKY-794).
+
+    Args:
+        current: The ``optimize.toml`` text the draft or the repository holds now.
+        text: The new text.
+
+    Returns:
+        The refusal that names each dropped setting and path, or ``None`` when
+        nothing is dropped or the current text names no rules file.
+    """
+    before = _rule_settings(current)
+    after = _rule_settings(text)
+    # A current text that is not TOML gives only its paths; the raw search never runs on the new text.
+    found = _rule_line_paths(current) if before is None else []
+    raw_paths = found or []
+    if before is None:
+        named = [f"{path!r}" for path in raw_paths]
+    else:
+        named = [f"{setting} = {path!r}" for setting, path in before.items()]
+    if before is None and (
+        found is None
+        or _ESCAPED_KEY.search(current)
+        or any(not _RULE_STRING.match(current, key.start()) for key in _RULE_KEY.finditer(current))
+    ):
+        # A rules path the raw search cannot read could be dropped unseen, so refuse (fail closed).
+        return (
+            "The current optimize.toml is not valid TOML and names an instructions or illegal rules file "
+            "that cannot be read, so a new optimize.toml could drop it. Ask the user to fix optimize.toml "
+            "in the editor."
+        )
+    if not named:
+        return None
+    if after is None:
+        return (
+            f"The new optimize.toml is not valid TOML, so it cannot keep {', '.join(named)}. "
+            "Send a valid file that keeps these settings."
+        )
+    if before is None:
+        dropped = [f"{path!r}" for path in raw_paths if path not in after.values()]
+    else:
+        dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
+    if not dropped:
+        return None
+    if before is None:
+        # The raw search also matches comments and string values, so it cannot say the file names the path.
+        return (
+            f"The new optimize.toml drops {', '.join(dropped)}. The current optimize.toml is not valid TOML, "
+            "and a raw search finds these as instructions or illegal rules files, maybe in a comment. Keep each "
+            "path. If the user wants one removed, ask them to fix optimize.toml in the editor."
+        )
+    return (
+        f"The new optimize.toml drops {', '.join(dropped)}, which the current optimize.toml names as its "
+        "instructions or illegal rules file. Keep each setting with its path. If the user wants one removed, "
+        "ask them to remove it in the editor."
+    )
+
+
 def workspace_tools(
     state: WizardState,
     turn: _TurnAuthoringFlag,
@@ -316,6 +473,8 @@ def workspace_tools(
     opened: list[tuple[RepoBrowser | None, str]] = []
     # Pi may run tool calls at the same time; one lock keeps one repository open and the read count exact.
     lock = asyncio.Lock()
+    # The repository's optimize.toml, read once a turn for the rules-file guard.
+    repo_toml: list[str] = []
 
     async def browse(read: Callable[[RepoBrowser], RepoRead]) -> RepoRead:
         """Open the repository once, then run one read off the event loop.
@@ -448,15 +607,73 @@ def workspace_tools(
             text: The whole file text.
 
         Returns:
-            The :func:`save` result, or ``{"error": ...}`` for a refused path or
-            an empty text.
+            The :func:`save` result, or ``{"error": ...}`` for a refused path,
+            an empty text, or an ``optimize.toml`` that drops an intent or rules file.
         """
         found = target(path)
         if isinstance(found, str):
             return {"error": found}
         if not text.strip():
             return {"error": "Empty file: send the whole file text."}
-        return save(*found, text)
+        clean, field = found
+        if field == "optimize_toml":
+            current = await current_toml()
+            if isinstance(current, dict):
+                return dict(current)
+            if refusal := dropped_rule_files(current, text):
+                return {"error": refusal}
+        return save(clean, field, text)
+
+    def read_repo_toml(browser: RepoBrowser) -> RepoRead:
+        """Read the repository's ``optimize.toml`` for the guard, outside the agent's read limit.
+
+        The guard's read is not the agent's: counted, it would stop at the
+        limit and let an unchecked write through, or use up the agent's reads.
+
+        Args:
+            browser: The opened repository.
+
+        Returns:
+            The text, ``""`` when the tree has no ``optimize.toml``, or
+            ``{"error": ...}`` when the file cannot be read whole.
+        """
+        try:
+            read = browser.read_unmetered("optimize.toml", DRAFT_FILE_BYTES)
+        except Exception as exc:  # a failed host read refuses the write, not the turn
+            logger.info("Setup agent cannot read optimize.toml of %s: %s", browser.repository, type(exc).__name__)
+            # A failed read is not cached, so a retry can work.
+            return {"error": "the host refused the read.", "advice": "Try again, or ask the user."}
+        if read is None:
+            return ""
+        text, truncated = read
+        if truncated:
+            # A retry reads the same file, so only the user can fix it.
+            return {"error": f"the file is larger than {DRAFT_FILE_BYTES} bytes.", "advice": "Ask the user."}
+        return text
+
+    async def current_toml() -> str | dict[str, str]:
+        """Return the ``optimize.toml`` text a write is checked against: the draft's, else the repository's.
+
+        Returns:
+            The current text (``""`` when there is none), or ``{"error": ...}``
+            when the repository's file cannot be checked.
+        """
+        current = {**state, **turn.wizard_patch}
+        text = str(current.get("optimize_toml") or "")
+        if text.strip():
+            return text
+        if not str(current.get("repository") or "").strip():
+            return ""
+        if not repo_toml:
+            read = await browse(read_repo_toml)
+            if isinstance(read, dict):
+                reason = read.get("error", "")
+                # A repository that cannot open stays closed for the turn, so a retry cannot work.
+                advice = read.get("advice", "Ask the user.")
+                return {"error": f"optimize.toml cannot be checked against the repository's file: {reason} {advice}"}
+            # A refusal leaves the draft empty, so a retry must not ask the host for the file again.
+            repo_toml.append(read)
+        return repo_toml[0]
 
     async def current_text(path: str, field: str | None) -> RepoRead:
         """Return the text an edit starts from: the draft's, else the repository's.
@@ -474,6 +691,9 @@ def workspace_tools(
             # metric.py is the scorer, never a repository file.
             if text or field == "metric_code":
                 return text
+            # The guard read optimize.toml already; one host read serves both.
+            if field == "optimize_toml" and repo_toml and repo_toml[0]:
+                return repo_toml[0]
         else:
             files = drafts()
             if path in files:
@@ -493,8 +713,8 @@ def workspace_tools(
         Returns:
             The :func:`save` result, or ``{"error": ...}`` for a refused path, a
             file that cannot be read, an empty ``old_text``, an ``old_text`` that
-            is not in the file or is in it more than once, or an edit that leaves
-            the file empty.
+            is not in the file or is in it more than once, an edit that leaves
+            the file empty, or an ``optimize.toml`` edit that drops an intent or rules file.
         """
         found = target(path)
         if isinstance(found, str):
@@ -502,6 +722,13 @@ def workspace_tools(
         clean, field = found
         if not old_text:
             return {"error": "Empty old_text: send the exact text to replace, or write the whole file instead."}
+        guarded = ""
+        if field == "optimize_toml":
+            # A blank draft is the edit's base but not the file to guard, so check against current_toml.
+            checked = await current_toml()
+            if isinstance(checked, dict):
+                return dict(checked)
+            guarded = checked
         current = await current_text(clean, field)
         if isinstance(current, dict):
             return dict(current)
@@ -512,6 +739,8 @@ def workspace_tools(
         edited = current.replace(old_text, new_text, 1)
         if not edited.strip():
             return {"error": "The edit leaves the file empty: send the whole file text instead."}
+        if field == "optimize_toml" and (refusal := dropped_rule_files(guarded, edited)):
+            return {"error": refusal}
         return save(clean, field, edited)
 
     file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example optimize.toml."

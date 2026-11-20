@@ -352,7 +352,7 @@ class RepoConstraints:
     @property
     def rule_files(self) -> tuple[str, ...]:
         """Return the distinct repository paths of the instructions and rule files the toml names."""
-        return tuple(dict.fromkeys(path for _, path in _rule_file_settings(self)))
+        return tuple(dict.fromkeys(path for _, path in rule_file_settings(self)))
 
     @property
     def mcp_files(self) -> tuple[str, ...]:
@@ -1847,7 +1847,7 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
     return replace(constraints, cases=tuple(cases))
 
 
-def _rule_file_settings(constraints: RepoConstraints) -> list[tuple[str, str]]:
+def rule_file_settings(constraints: RepoConstraints) -> list[tuple[str, str]]:
     """List each setting that names an instructions or rule file, with the path it names.
 
     Args:
@@ -1881,7 +1881,7 @@ def _load_rule_files(constraints: RepoConstraints, archive: Path) -> RepoConstra
         ConstraintsError: When a named file is missing, not a regular text file,
             too large, empty, or not a list of top-level bullets.
     """
-    settings = _rule_file_settings(constraints)
+    settings = rule_file_settings(constraints)
     if not settings:
         return constraints
     texts: dict[str, str] = {}
