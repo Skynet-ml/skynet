@@ -50777,7 +50777,7 @@ const ui_ja: Partial<Record<MessageKey, string>> = {
   "tooltip.tagger.text_column": "タグ付けするテキストを含む列を選択します。他の列はエクスポートに保持されます",
   "tooltip.usage_tab.api_rate": "これらの呼び出しをキャッシュ割引なしの API 定価で行った場合の費用。サブスクリプションでまかなわれたため、請求はありません。",
   "tooltip.usage_tab.charged": "{term.appName} がウォレットに請求した金額です。自分のキーによるモデル呼び出しに料金はかかりません。",
-  "tooltip.usage_tab.charged_local": "これらの呼び出しがMac アプリ残高から使った額です。実際のお金ではありません。料金はプロバイダーがご自身のキーに請求します。",
+  "tooltip.usage_tab.charged_local": "これらの呼び出しが Mac アプリ残高から使った額です。実際のお金ではありません。料金はプロバイダーがご自身のキーに請求します。",
   "tooltip.usage_tab.col.cost": "これらの呼び出しがウォレットに請求した額。",
   "tooltip.usage_tab.not_priced": "このモデルには価格が登録されていないため、呼び出しとトークンはカウントされますが、コストは表示できません。",
   "tooltip.usage_tab.provider": "これらの呼び出しについて、プロバイダーがあなた自身のキーに請求する額。概算であり、請求はプロバイダーが行います。",

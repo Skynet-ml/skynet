@@ -4141,7 +4141,7 @@
   "submit.budget.local_note": "Mac アプリには支出上限がありません。各モデル呼び出しの料金は、ご自身のプロバイダーキーまたは CLI プランが支払います。",
   "billing.mode.byok_hint_local": "モデルの料金はご自身のプロバイダーキーに請求されます。Mac アプリは手数料を請求しません。",
   "usage_tab.charged_local": "Mac アプリの残高",
-  "tooltip.usage_tab.charged_local": "これらの呼び出しがMac アプリ残高から使った額です。実際のお金ではありません。料金はプロバイダーがご自身のキーに請求します。",
+  "tooltip.usage_tab.charged_local": "これらの呼び出しが Mac アプリ残高から使った額です。実際のお金ではありません。料金はプロバイダーがご自身のキーに請求します。",
   "usage_tab.api_rates_note_local": "* API 料金での金額です。プロバイダーがご自身のキーに請求します。",
   "usage_tab.subscription_note_local": "この実行はサブスクリプションでまかなわれたため、請求はありません。",
   "usage_tab.subscription_api_rates_note_local": "この実行はサブスクリプションでまかなわれたため、請求はありません。* 金額は、この実行をキャッシュ割引なしの API 定価で行った場合の費用です。",
