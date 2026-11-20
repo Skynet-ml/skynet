@@ -172,8 +172,9 @@ How to write the run's files:
     build --release"``, that builds the metric one time, before the first metric call; like a command
     ``entry``, it runs in the folder that holds the ``[metric] files`` paths, with the repository root layout;
     write the build output next to the metric files), ``mcp``, ``network``, ``services``, ``illegal``,
-    ``vcpus`` and ``scores`` (the ``[metric.scores]`` table, see ``[outcome]``). ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
-    besides the relay, default none) and ``vcpus`` (SKY-398).
+    ``vcpus`` and ``scores`` (the ``[metric.scores]`` table, see ``[outcome]``). ``[run]`` and ``[metric]``
+    run in separate boxes, so each sets its own ``network`` (hosts besides the relay, default none) and
+    ``vcpus`` (SKY-398).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
   - ``[sandbox]``: ``compose``, the path of a compose file whose services run beside the metric.
   - ``[services.<name>]``: ``url`` (https, required) and ``headers``, nothing else. One secret may go to one
