@@ -188,6 +188,8 @@ class StagedRepository:
     run_vcpus: int | None = None
     metric_hosts: tuple[str, ...] = ()
     metric_vcpus: int | None = None
+    # The [metric] setup command, run once in the metric setup box (SKY-740).
+    metric_setup: str | None = None
     # Each repository module a metric file imports; the metric box cannot import it (SKY-398).
     metric_warnings: tuple[str, ...] = ()
     agent_archive: Path | None = None
@@ -508,6 +510,7 @@ def stage_repository(
                 contract_sha256=environment.constraints.sha256,
                 metric_files=metric.files,
                 metric_entry=metric.entry,
+                metric_setup=metric.setup,
                 metric_code=str((result.get("scorer") or {}).get("metric_code") or ""),
                 drafts=drafts,
                 cases_file=cases_file,
@@ -603,6 +606,7 @@ def stage_repository(
         run_vcpus=environment.constraints.run_vcpus if environment.constraints is not None else None,
         metric_hosts=_role_hosts(environment.constraints.metric_role if environment.constraints is not None else None),
         metric_vcpus=environment.constraints.metric_vcpus if environment.constraints is not None else None,
+        metric_setup=metric.setup,
         metric_warnings=warnings,
         agent_archive=agent_archive,
         scorer_archive=scorer_archive,
@@ -1155,6 +1159,7 @@ def bind_repo_scorer(
             run_vcpus=staged.run_vcpus,
             metric_hosts=staged.metric_hosts,
             metric_vcpus=staged.metric_vcpus,
+            metric_setup=staged.metric_setup,
         ),
         str(scorer_spec.get("metric_code") or ""),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
@@ -1478,6 +1483,8 @@ def improved_patch(result: dict[str, Any]) -> str | None:
     return best if better else None
 
 
+# The [metric] setup part's key: archive paths lose their leading "/", so no file can take it (SKY-740).
+_METRIC_SETUP_PART = "/[metric] setup"
 # The record hashes stream each member in parts of this size, so a large
 # metric file never sits in the worker's memory (SKY-694).
 _HASH_CHUNK = 1 << 20
@@ -1526,6 +1533,7 @@ def _record_facts(
     drafts: Mapping[str, str],
     cases_file: str | None,
     cases: list[Any] | None,
+    metric_setup: str | None = None,
 ) -> dict[str, Any]:
     """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
 
@@ -1534,10 +1542,14 @@ def _record_facts(
     :func:`_framed`. The rule is the same for a Python and a command
     ``[metric] entry`` (SKY-738). For a Python entry, ``metric_code`` counts as
     one file at the entry's path and takes the place of a repository file
-    there. The entry value is not a part: ``contract_sha256`` covers it. ``metric_source`` describes the
-    ``[metric] files`` only: it is ``repository`` when the file sets
-    ``[metric] files`` and every one comes from the pinned commit, and
-    ``request`` when there are none or a draft file replaces or adds one.
+    there. The entry value is not a part: ``contract_sha256`` covers it. A
+    ``[metric] setup`` command is one more part at the path ``/[metric] setup``,
+    which no archive path can take, framed over the command's UTF-8 bytes
+    (SKY-740); the record then also holds the command as ``metric_setup``.
+    ``metric_source`` describes the ``[metric] files`` only: it is
+    ``repository`` when the file sets ``[metric] files`` and every one comes
+    from the pinned commit, and ``request`` when there are none or a draft
+    file replaces or adds one.
     ``cases_sha256`` hashes the ``[data] cases`` file bytes (``cases_source``
     ``file``), or else the compact JSON of the request's cases with sorted
     keys (``cases_source`` ``request``).
@@ -1555,10 +1567,13 @@ def _record_facts(
         drafts: The run's draft files by path.
         cases_file: The ``[data] cases`` path, or ``None``.
         cases: The request's cases, used when there is no cases file.
+        metric_setup: The ``[metric] setup`` command, or ``None``.
 
     Returns:
         ``contract_sha256``, ``metric_sha256``, ``metric_source``,
-        ``cases_sha256`` and ``cases_source``; the last two are ``None`` with no cases.
+        ``cases_sha256`` and ``cases_source``; the last two are ``None`` with
+        no cases. ``metric_setup`` is added only when the file sets one, so a
+        record without it keeps its old keys.
     """
     roots = tuple(metric_files) + ((cases_file,) if cases_file is not None else ())
     digests: dict[str, tuple[int, str]] = {}
@@ -1572,6 +1587,9 @@ def _record_facts(
     if isinstance(metric_entry, str) and metric_code:
         code = metric_code.encode("utf-8")
         parts[posixpath.normpath(metric_entry.rsplit(":", 1)[0])] = (len(code), hashlib.sha256(code).hexdigest())
+    if metric_setup is not None:
+        command = metric_setup.encode("utf-8")
+        parts[_METRIC_SETUP_PART] = (len(command), hashlib.sha256(command).hexdigest())
     metric = hashlib.sha256()
     for path in sorted(parts):
         metric.update(_framed(path, *parts[path]))
@@ -1584,13 +1602,16 @@ def _record_facts(
         cases_sha256, cases_source = hashlib.sha256(canonical.encode("utf-8")).hexdigest(), "request"
     else:
         cases_sha256, cases_source = None, None
-    return {
+    facts: dict[str, Any] = {
         "contract_sha256": contract_sha256,
         "metric_sha256": metric.hexdigest(),
         "metric_source": "repository" if from_commit else "request",
         "cases_sha256": cases_sha256,
         "cases_source": cases_source,
     }
+    if metric_setup is not None:
+        facts["metric_setup"] = metric_setup
+    return facts
 
 
 def _finite_number(value: Any) -> bool:
@@ -1776,6 +1797,9 @@ def _record_block(result: dict[str, Any]) -> str:
         else:
             listed = "; ".join(f"{name} {positions}" for name, positions in parts.items())
             split_line = f"`{split.get('rule')}`, seed {split.get('seed')}: {listed}"
+    setup = record.get("metric_setup")
+    # The JSON escape keeps a backtick in the command inside the code span (SKY-740).
+    setup_text = json.dumps(setup).replace("`", "\\u0060") if isinstance(setup, str) else None
     change = record.get("change_sha256")
     change_line = f"`{change}`" if change else "none, the reported patch is empty"
     fields = [
@@ -1788,6 +1812,7 @@ def _record_block(result: dict[str, Any]) -> str:
         ),
         f"- Contract SHA-256: `{record.get('contract_sha256')}`",
         f"- Metric SHA-256: `{record.get('metric_sha256')}` (metric source: {record.get('metric_source')})",
+        *([f"- Metric setup: `{setup_text}`"] if setup_text is not None else []),
         f"- Cases SHA-256: `{record.get('cases_sha256')}` (source: {record.get('cases_source')})",
         f"- Seed: {record.get('seed')}",
         f"- Split: {split_line}",

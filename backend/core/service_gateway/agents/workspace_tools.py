@@ -168,7 +168,9 @@ How to write the run's files:
   - ``[metric]``: ``entry`` (``"path.py:function"``, default ``"metric.py:score"``, or a command list),
     ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``direction`` (``"maximize"``, the default, or
-    ``"minimize"`` when a lower score is better), ``mcp``, ``network``, ``services``, ``illegal`` and
+    ``"minimize"`` when a lower score is better), ``setup`` (one shell command, such as ``"cargo build
+    --release"``, that builds the metric one time in the folder of the metric files, before the first metric
+    call; write the build output into that folder), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
     besides the relay, default none) and ``vcpus`` (SKY-398).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
