@@ -420,6 +420,21 @@ def test_the_job_reads_a_minimize_metric_direction(tmp_path: Path) -> None:
     assert workspace.minimize is True
 
 
+def test_the_job_saves_the_metric_direction_for_the_page(tmp_path: Path) -> None:
+    """The returned job says the metric direction, so the hardening tree picks the best score by it (SKY-867)."""
+    toml = _TOML + b'direction = "minimize"\n'
+    (tmp_path / "min").mkdir()
+    (tmp_path / "max").mkdir()
+    minimized = _run(
+        Recorder(tmp_path / "min", files={**_FILES, CONSTRAINTS_FILE: toml}), _cloud_job(), local_mode=False
+    )
+    maximized = _run(Recorder(tmp_path / "max"), _cloud_job(), local_mode=False)
+
+    assert minimized.status == maximized.status == "waiting_review"
+    assert minimized.minimize is True
+    assert maximized.minimize is False
+
+
 def test_staging_gets_the_run_shaped_target_and_binding(tmp_path: Path) -> None:
     """The job stages its repository with the same inputs a run submit gives stage_repository."""
     recorder = Recorder(tmp_path)

@@ -185,6 +185,7 @@ def run_hardening_job(
             if failures:
                 return _preflight_failed(job, [failure.reason for failure in failures])
             workspace = _workspace(staged, staged_payload, job)
+            job = job.model_copy(update={"minimize": workspace.minimize})
             with runner_factory(workspace, job) as runner:
                 result = run_until_wait(
                     job,
