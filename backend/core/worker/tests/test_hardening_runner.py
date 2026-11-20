@@ -1674,7 +1674,7 @@ def _tool(name: str, **args: Any) -> list[dict[str, Any]]:
 
 
 def _session_runner(
-    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok"
+    tmp_path: Path, dispatch: Any, monkeypatch: pytest.MonkeyPatch, *, feedback: str = "ok", minimize: bool = False
 ) -> tuple[RepoHardeningRunner, list[str], list[str]]:
     """Build a runner with a fake gateway and lane boxes that record their lane.
 
@@ -1683,6 +1683,7 @@ def _session_runner(
         dispatch: The fake ``dispatch_guest``.
         monkeypatch: Swaps the Pi turn for a fake one.
         feedback: The feedback each box's score gives.
+        minimize: True when the metric's lower score is better.
 
     Returns:
         The runner, the lanes opened and the lanes closed.
@@ -1704,6 +1705,7 @@ def _session_runner(
         commit="c0ffee",
         applied_fixes=(),
         secrets={},
+        minimize=minimize,
     )
     opened: list[str] = []
     closed: list[str] = []
@@ -1791,6 +1793,46 @@ def test_attack_runs_one_session_for_each_brief_in_its_own_lane_box(
     assert all(("def score(): return 1" in p) == (view == "white_box") for p in prompts)
     tool_text = json.dumps([b["messages"] for b in bodies if "tools" in b])
     assert "eval/metric.py" not in tool_text
+
+
+def test_attack_asks_to_lower_the_score_of_a_minimize_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A minimize job tells the lead agent and every session that a hack lowers the score (SKY-750)."""
+    prompts: list[str] = []
+
+    def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> SimpleNamespace:
+        """Answer the lead agent with one brief, and the session with a patch.
+
+        Args:
+            token: The route token.
+            path: The provider path.
+            body: The request.
+            headers: The headers.
+
+        Returns:
+            The provider response.
+        """
+        if len(body["messages"]) == 1:
+            prompts.append(body["messages"][0]["content"])
+        if "tools" not in body:
+            return _reply('{"briefs": ["brief one"]}')
+        return _reply(calls=_tool("write_patch", kind="case", patch_diff="+x", why_md="Games it."))
+
+    runner, _opened, _closed = _session_runner(tmp_path, dispatch, monkeypatch, minimize=True)
+    try:
+        runner.attack(
+            round_index=1,
+            view="black_box",
+            model="openai/m",
+            exploits_path=tmp_path / "none",
+            budget_usd=None,
+            sessions=1,
+        )
+    finally:
+        runner.close()
+
+    assert len(prompts) == 2
+    assert "try to lower this repository's metric" in prompts[0]
+    assert "a change that lowers this repository's metric" in prompts[1]
 
 
 def test_a_session_sees_metric_feedback_without_hidden_traceback_frames(

@@ -392,8 +392,7 @@ export function RepoFileCard({ call }: { call: AgentToolCall }) {
  */
 export function RepoFolderCard({ call }: { call: AgentToolCall }) {
   const view = useResult(call, repoTree);
-  const path =
-    (argText(call, "path") || call.reason?.trim() || "").replace(/^\/+|\/+$/g, "") || "/";
+  const path = (argText(call, "path") || call.reason?.trim() || "").replace(/^\/+|\/+$/g, "") || "/";
   const tree = view?.kind === "tree" ? view : null;
   const items = tree ? tree.entries.filter((e) => e.more === null && e.depth === 0).length : 0;
   return (
@@ -656,9 +655,11 @@ export function GithubToolCard({ call }: { call: AgentToolCall }) {
             parts={[
               whereNode,
               one && <span className="min-w-0 truncate">{one.title}</span>,
-              one?.added != null && one.removed != null && (one.added > 0 || one.removed > 0) && (
-                <LineCounts added={one.added} removed={one.removed} />
-              ),
+              one?.added != null &&
+                one.removed != null &&
+                (one.added > 0 || one.removed > 0) && (
+                  <LineCounts added={one.added} removed={one.removed} />
+                ),
               text?.cut && msg("agent.tool.content.cut"),
             ]}
           />

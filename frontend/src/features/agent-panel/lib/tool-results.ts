@@ -381,8 +381,7 @@ export function repoTree(value: unknown): TreeView | NoResult | null {
     // Each key file starts after the tree with a blank row and its header, so
     // a README line in the header's form, with no blank row above it, is text.
     for (let i = end + 1; i < rows.length; i++) {
-      const m =
-        rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
+      const m = rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
       if (m?.[1]) keyFiles.push(m[1]);
     }
   }
