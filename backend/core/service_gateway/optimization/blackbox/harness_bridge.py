@@ -2266,24 +2266,26 @@ def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
         model: The session's model.
 
     Returns:
-        The session's own binding file, or ``None`` when the folder cannot be written.
+        The session's own binding file, or ``None`` when the folder cannot be written or UTF-8
+        cannot hold the model name or the route key.
     """
-    target = folder / hashlib.sha256(api_key.encode()).hexdigest()
     # One file for each session: concurrent sessions of one key with different models must all pass.
     name = uuid.uuid4().hex
-    binding = target / name
-    # The proxy must never read a partial name, so the name is renamed into place.
-    partial = target / f".{name}"
-    # A stop signal can land at any point below, so both files are live before either exists.
-    _LIVE_BINDINGS.update((binding, partial))
+    files: tuple[Path, ...] = ()
     try:
+        target = folder / hashlib.sha256(api_key.encode()).hexdigest()
+        # The proxy must never read a partial name, so the name is renamed into place.
+        binding, partial = target / name, target / f".{name}"
+        # A stop signal can land at any point below, so both files are live before either exists.
+        files = (binding, partial)
+        _LIVE_BINDINGS.update(files)
         target.mkdir(parents=True, exist_ok=True)
         partial.write_text(model, encoding="utf-8")
         partial.replace(binding)
     except (OSError, ValueError):
         # The gateway refuses another model anyway, so a folder the session cannot write, or a model name
-        # that UTF-8 cannot hold, skips only the clearer error.
-        _unbind(binding, partial)
+        # or route key that UTF-8 cannot hold, skips only the clearer error.
+        _unbind(*files)
         return None
     _LIVE_BINDINGS.discard(partial)
     return binding

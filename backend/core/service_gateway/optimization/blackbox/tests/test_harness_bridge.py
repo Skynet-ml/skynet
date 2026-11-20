@@ -4660,3 +4660,23 @@ def test_a_model_name_utf8_cannot_hold_leaves_no_binding(bindings: Path, monkeyp
     assert ran
     assert live == set()
     assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_a_route_key_utf8_cannot_hold_leaves_no_binding(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A route key with a lone surrogate binds nothing, and its session still runs (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Gives the test its own live set.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    ran = False
+
+    with harness_bridge.model_binding(env, "bad\udcff", "run-model"):
+        ran = True
+
+    assert ran
+    assert live == set()
+    assert list(bindings.iterdir()) == []
