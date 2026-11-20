@@ -4935,6 +4935,21 @@ def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
     )
 
 
+@_needs_openascent
+def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: Path) -> None:
+    """Full stderr and stdout tails still leave the cause in the run feedback (SKY-757)."""
+    script = 'for i in $(seq 300); do echo "out line $i"; echo "err line $i" >&2; done\nexit 1\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert result["feedback"].endswith("out line 300")
+    assert "err line 300\n\nstdout: " in result["feedback"]
+
+
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
     """A run without ``[run]`` passes no output to the metric (E38)."""
     metric = (

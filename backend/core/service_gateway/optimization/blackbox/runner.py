@@ -2094,11 +2094,13 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             # The same logs as a passed call: stdout, then stderr (SKY-757).
             sys.stderr.write(exc.stdout + exc.stderr)
             # stderr comes first in the error: a stage error keeps only its
-            # head, and a command's stdout is often progress output.
+            # head, and a command's stdout is often progress output. Two
+            # 800-character tails leave room for the cause in the [run]
+            # feedback, which keeps only the last 1,988 characters.
             if exc.stderr:
-                error += f"\nstderr: {exc.stderr[-1_000:]}"
+                error += f"\nstderr: {exc.stderr[-800:]}"
             if exc.stdout:
-                error += f"\nstdout: {exc.stdout[-1_000:]}"
+                error += f"\nstdout: {exc.stdout[-800:]}"
         else:
             error = f"{type(exc).__name__}: {exc}"
         text = json.dumps({"error": error})
