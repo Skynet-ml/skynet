@@ -357,6 +357,9 @@ interface ScorerDependencyLock {
 export interface BlackboxScorer {
   kind: "python" | "remote";
   metric_code?: string | null;
+  // True when optimize.toml's [metric] entry is a command: the metric box runs
+  // it, so the request carries no metric_code (SKY-738, SKY-770).
+  command_metric?: boolean;
   url?: string | null;
   secret?: string | null;
   timeout_seconds?: number;
