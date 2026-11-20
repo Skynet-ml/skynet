@@ -1508,6 +1508,50 @@ def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_a_st
     assert _no_part_of_the_long_secret(feedback)
 
 
+# Each script writes an output file whose OpenAscent cause quotes a secret in a
+# form the mask misses: a head cut of a number, or a key as a repr (SKY-757).
+_QUOTED_SECRETS = [
+    pytest.param(
+        "4111222233334444",
+        'printf \'{"output": %s%se400}\' "$(printf \'1%.0s\' $(seq 30))" 4111222233334444 > "$ASCENT_OUTPUT"',
+        ("4111222233", "22223333", "33334444"),
+        id="number",
+    ),
+    pytest.param(
+        "ab\\cd\\efgh",
+        'printf \'%s\' \'{"ab\\\\cd\\\\efgh": 1, "ab\\\\cd\\\\efgh": 2}\' > "$ASCENT_OUTPUT"',
+        ("efgh", "\\cd"),
+        id="repr-key",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_a_stage_error(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A stage whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", script), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": secret}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert f"Stage 'failing' failed: {runner.INVALID_JSON_CAUSE[:40]}" in feedback
+    assert not [piece for piece in pieces if piece in feedback]
+
+
 def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
     marker = tmp_path / "base-python-ran"
@@ -5061,6 +5105,22 @@ def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_
     assert result["feedback"].startswith("Run failed: The command exited with code 1.")
     assert "\nstderr: [secret]" in result["feedback"]
     assert _no_part_of_the_long_secret(result["feedback"])
+
+
+@_needs_openascent
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A [run] command whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, script + "\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: " + runner.INVALID_JSON_CAUSE)
+    assert not [piece for piece in pieces if piece in result["feedback"]]
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:

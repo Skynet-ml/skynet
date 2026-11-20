@@ -187,6 +187,13 @@ COMMAND_LOG_CHARS = 800
 # the box marks each log it cut, and the parent drops the cut edge before it
 # masks the log (SKY-757).
 _COMMAND_LOG_BOUND = 4_000
+# OpenAscent's invalid-JSON cause can quote the output file: the first 40
+# characters of a number, or a key as a repr. The mask can miss both, so a
+# failed command gets this fixed cause instead (SKY-757).
+INVALID_JSON_CAUSE = (
+    "The output file is not valid JSON. Write one strict JSON value to ASCENT_OUTPUT: "
+    "UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate escape."
+)
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
 # The metric input key that names the folder the metric setup step installed
@@ -2161,7 +2168,8 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             sys.stderr.write(exc.stdout + exc.stderr)
             # The parent masks the secrets and only then cuts each log to
             # COMMAND_LOG_CHARS. It drops the edge of a log cut here (SKY-757).
-            document: dict[str, Any] = {"error": str(exc)}
+            cause = INVALID_JSON_CAUSE if isinstance(exc, ascent.InvalidJsonError) else str(exc)
+            document: dict[str, Any] = {"error": cause}
             for stream, log in (("stderr", exc.stderr), ("stdout", exc.stdout)):
                 if log:
                     document[stream] = log[-_COMMAND_LOG_BOUND:]

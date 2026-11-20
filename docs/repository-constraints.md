@@ -399,9 +399,14 @@ gets the failure as an error. The error names the cause, then shows the last
 800 characters of the command's stderr and of its stdout, with the run's
 secrets masked. The box sends at most the last 4,000 characters of each log.
 That cut can split a secret, so Skynet drops the start of a log that the box
-cut. The drop is a little longer than the longest secret, and it never stops
-inside a whole secret. Skynet then masks the secrets, and only then cuts each
-log to 800 characters. Thus no part of a secret shows. The feedback of a failed `[run]` case shows all of this.
+cut. The drop is one character shorter than the longest secret, and it never
+stops inside a whole secret. Skynet then masks the secrets, and only then cuts
+each log to 800 characters. Thus no part of a masked secret (6 characters or
+more) shows across a cut. When the output file is not valid JSON, the cause is
+always "The output file is not valid JSON. Write one strict JSON value to
+ASCENT_OUTPUT: UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate
+escape." This cause quotes no part of the file. The feedback of a failed
+`[run]` case shows all of this.
 The error of a failed stage keeps only its first 500 characters: the cause,
 then the start of the stderr part, or of the stdout part when stderr is
 empty. Each call gets a new output path, so a file
