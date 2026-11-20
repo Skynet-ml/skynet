@@ -353,6 +353,10 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         # the write; the guest check still fails closed if Codex starts.
         if _starts_codex(guest_payload):
             session.write_codex_requirements()
+        # The box user cannot remove the /dev/null covers that stop a metric
+        # box from mounting its own /proc, so the parent's root step does it
+        # once, before the guest starts under no_new_privs (SKY-885).
+        session.unmount_proc_covers()
         session_root = f".app-dspy-{nonce}"
         snapshot = guest_payload.pop(REPO_SNAPSHOT_KEY, None)
         if isinstance(snapshot, dict):

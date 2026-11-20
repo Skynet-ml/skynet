@@ -280,6 +280,9 @@ class StoppedSession:
         )
         raise AssertionError("unreachable")
 
+    def unmount_proc_covers(self) -> None:
+        """Accept the parent's /proc cover unmount, which this fake does not need."""
+
     def write_files(self, files: dict[str, str]) -> None:
         """Record the staged request.
 

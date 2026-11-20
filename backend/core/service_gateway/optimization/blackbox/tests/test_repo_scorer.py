@@ -1569,9 +1569,7 @@ def test_no_shell_stays_alive_above_a_command_stage_runner(tmp_path: Path, monke
     parent = tmp_path / "runner-parent"
     base = tmp_path / "base" / "python3"
     base.parent.mkdir()
-    base.write_text(
-        f'#!/bin/sh\nps -o comm= -p $PPID > {shlex.quote(str(parent))}\nexec {shlex.quote(sys.executable)} "$@"\n'
-    )
+    base.write_text(f'#!/bin/sh\necho $PPID > {shlex.quote(str(parent))}\nexec {shlex.quote(sys.executable)} "$@"\n')
     base.chmod(0o755)
     monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
     code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
@@ -1580,7 +1578,8 @@ def test_no_shell_stays_alive_above_a_command_stage_runner(tmp_path: Path, monke
         assert scorer.score("")["feedback"] == "HI"
     finally:
         scorer.close()
-    assert "bash" not in parent.read_text()
+    # A shell left alive between them would be the runner's parent instead of this test process.
+    assert parent.read_text().strip() == str(os.getpid())
 
 
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:

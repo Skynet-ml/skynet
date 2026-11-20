@@ -270,8 +270,9 @@ def test_only_a_contained_metric_box_runs_its_commands_in_the_pid_namespace(monk
 def _require_user_namespaces() -> None:
     """Skip the test when this host refuses unprivileged user namespaces, unless ``SKY_REQUIRE_USERNS=1``.
 
-    CI sets the variable, so a seccomp profile that blocks the namespaces
-    fails the test there instead of skipping it (SKY-885).
+    No CI job sets the variable yet. Set it on a Linux host that must run
+    these tests, so a seccomp profile that blocks the namespaces fails the
+    test there instead of skipping it (SKY-885).
     """
     try:
         sandbox_runtime._require_pid_namespace()
@@ -299,6 +300,24 @@ def test_a_contained_metric_box_sees_only_its_own_processes(monkeypatch: pytest.
     assert listed[0] == "1"
     assert str(os.getpid()) not in listed
     assert unmounted.stdout.strip() == "-1"
+
+
+def test_the_pid_namespace_probe_refuses_a_root_user_inside(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe fails closed when the namespace user is root and can unmount the new /proc (SKY-885).
+
+    A root caller under ``--map-current-user`` stays root inside, as ``--map-root-user`` makes it here.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _require_user_namespaces()
+    root_inside = tuple(
+        "--map-root-user" if flag == "--map-current-user" else flag for flag in sandbox_runtime._PID_NAMESPACE
+    )
+    monkeypatch.setattr(sandbox_runtime, "_pid_namespace_ready", False)
+    monkeypatch.setattr(sandbox_runtime, "_PID_NAMESPACE", root_inside)
+    with pytest.raises(ServiceError, match="needs its own user and PID namespaces"):
+        sandbox_runtime._require_pid_namespace()
 
 
 class _NoClient:

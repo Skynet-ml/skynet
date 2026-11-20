@@ -31,6 +31,12 @@ from .sandbox_runtime import write_codex_requirements
 logger = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
+# Vercel bind-mounts /dev/null over these two /proc files, so the kernel refuses the new /proc that a contained
+# metric box mounts in its own PID namespace (SKY-885). The fixed paths and the device check keep this root
+# command from unmounting anything else, and a path with no cover stays as it is.
+PROC_COVERS_COMMAND = (
+    'for p in /proc/kcore /proc/keys; do if [ -c "$p" ] && mountpoint -q "$p"; then umount "$p" || exit 1; fi; done'
+)
 
 
 class SandboxCommandRunner(Protocol):
@@ -125,6 +131,24 @@ def _relative_path(value: Any) -> str:
     if path.is_absolute() or ".." in path.parts:
         raise ServiceError("Sandbox file path must stay inside its working directory.")
     return str(path)
+
+
+def _unmount_proc_covers(session: SandboxSession) -> None:
+    """Unmount the device covers on ``/proc/kcore`` and ``/proc/keys``, so a metric box can mount its own ``/proc``.
+
+    A failure only logs a warning. The guest's namespace probe still fails
+    closed, so only a metric box fails to open, and a run that never opens
+    one keeps working (SKY-885).
+
+    Args:
+        session: The owned box; the command runs in it as root.
+    """
+    result = session.run(PROC_COVERS_COMMAND, timeout_seconds=60, sudo=True)
+    if not result.ok or result.timed_out:
+        logger.warning(
+            "The /proc covers stay mounted (exit %s), so a contained metric box in this sandbox does not open.",
+            result.exit_code,
+        )
 
 
 class ParentSandboxSession:
@@ -649,9 +673,9 @@ class SandboxBroker:
         """Perform one non-streaming action inside an owned guest sandbox.
 
         Args:
-            action: Open, write, read, close, or codex_requirements.
+            action: Open, write, read, close, codex_requirements, or proc_covers.
             payload: JSON action parameters from the separately authenticated control route.
-                ``codex_requirements`` reads only the sandbox handle from it.
+                ``codex_requirements`` and ``proc_covers`` read only the sandbox handle from it.
 
         Returns:
             JSON guest data, excluding credentials, provider metadata, and settlement state.
@@ -675,6 +699,9 @@ class SandboxBroker:
             return {"content": content}
         if action == "codex_requirements":
             write_codex_requirements(owned.session)
+            return {}
+        if action == "proc_covers":
+            _unmount_proc_covers(owned.session)
             return {}
         if action == "close":
             with self._lock:

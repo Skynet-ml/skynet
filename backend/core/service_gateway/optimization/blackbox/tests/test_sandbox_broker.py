@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import threading
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
@@ -22,7 +24,7 @@ from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
 from ..repo_scorer import _STAGE_LAYOUT_SECONDS
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
-from ..sandbox_broker import SandboxBroker
+from ..sandbox_broker import PROC_COVERS_COMMAND, SandboxBroker
 
 IMAGE = "vcr.example/skynet/optimizer@sha256:" + "a" * 64
 
@@ -37,6 +39,7 @@ class FakeSession:
         self.fail_close = fail_close
         self.root_commands: list[str] = []
         self.readback = _CODEX_REQUIREMENTS_READBACK
+        self.root_exit = 0
 
     def write_files(self, files: dict[str, str]) -> None:
         """Store guest files without writing on the host."""
@@ -50,7 +53,7 @@ class FakeSession:
         """Emit deterministic output through the broker's output sink, and answer a root command with a read-back."""
         if kwargs.get("sudo"):
             self.root_commands.append(command)
-            return CommandResult(exit_code=0, stdout=self.readback)
+            return CommandResult(exit_code=self.root_exit, stdout=self.readback)
         if kwargs.get("on_output"):
             kwargs["on_output"]("stdout", command)
         return CommandResult(exit_code=0, stdout=command)
@@ -472,6 +475,55 @@ def test_the_remote_session_sends_only_the_action_and_its_box() -> None:
     assert set(action["payload"]) == {"sandbox_id"}
     assert all(request["action"] != "run" for request in requests)
     assert runtime.sessions[0].root_commands == [_CODEX_REQUIREMENTS_COMMAND]
+
+
+def test_the_proc_covers_action_runs_only_the_fixed_root_command() -> None:
+    """Run the parent's fixed command as root, whatever the child sends, and touch only the two covers (SKY-885)."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    forged = {"path": "/", "paths": ["/proc"], "command": "umount -a", "sudo": False}
+    assert broker.handle("proc_covers", {**opened, **forged}) == {}
+    assert runtime.sessions[0].root_commands == [PROC_COVERS_COMMAND]
+    assert set(re.findall(r"/[\w/]+", PROC_COVERS_COMMAND)) == {"/proc/kcore", "/proc/keys"}
+    other = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120)
+    with pytest.raises(ServiceError, match="does not belong"):
+        other.handle("proc_covers", opened)
+
+
+def test_a_failed_proc_covers_command_only_logs(caplog: pytest.LogCaptureFixture) -> None:
+    """A failed unmount logs a warning and leaves the final guard to the guest's namespace probe (SKY-885).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    runtime.sessions[0].root_exit = 1
+    with caplog.at_level(logging.WARNING):
+        assert broker.handle("proc_covers", opened) == {}
+    assert "covers stay mounted" in caplog.text
+
+
+def test_the_remote_proc_covers_request_names_only_its_box() -> None:
+    """The child asks for the unmount by name and sends no path or command (SKY-885)."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    requests = []
+
+    def parent(request: httpx.Request) -> httpx.Response:
+        """Answer the JSON control actions with the real broker."""
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, json=broker.handle(body["action"], body["payload"]))
+
+    with httpx.Client(transport=httpx.MockTransport(parent)) as client:
+        remote = RemoteSandboxRuntime("http://127.0.0.1:9000", "opaque-control", client=client)
+        remote.open(SandboxSpec(lifetime_seconds=60)).unmount_proc_covers()
+    [action] = [request for request in requests if request["action"] == "proc_covers"]
+    assert set(action["payload"]) == {"sandbox_id"}
+    assert runtime.sessions[0].root_commands == [PROC_COVERS_COMMAND]
 
 
 def test_a_parent_session_forwards_root_commands() -> None:

@@ -28,11 +28,10 @@ import openai
 import openascent
 import pytest
 
-from core.exceptions import ServiceError
 from core.sandbox.providers import vercel
 from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
 
-from .. import runner, sandbox_runtime
+from .. import runner
 from ..repo_constraints import McpServer, RoleEnvironment
 from ..repo_services import box_mcp_config
 from ..runner import (
@@ -49,6 +48,7 @@ from ..runner import (
     side_info_json_default,
 )
 from .mocks import FakeGateway
+from .test_sandbox_runtime import _require_user_namespaces
 
 # The OpenAscent package folder a command entry gets, as the parent copies it into a box (SKY-757).
 _PACKAGE = str(Path(openascent.__file__).parent)
@@ -3085,20 +3085,6 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     else:
         assert found == []
         assert stage_pid not in (box / "readable").read_text().split()
-
-
-def _require_user_namespaces() -> None:
-    """Skip the test when this host refuses unprivileged user namespaces, unless ``SKY_REQUIRE_USERNS=1``.
-
-    CI sets the variable, so a seccomp profile that blocks the namespaces
-    fails the test there instead of skipping it (SKY-885).
-    """
-    try:
-        sandbox_runtime._require_pid_namespace()
-    except ServiceError:
-        if os.environ.get("SKY_REQUIRE_USERNS") == "1":
-            raise
-        pytest.skip("This host refuses unprivileged user and PID namespaces.")
 
 
 # Runs the shipped guest entry point, as ``_CONTAINED_GUEST`` does, with a job that starts a stand-in proposer child

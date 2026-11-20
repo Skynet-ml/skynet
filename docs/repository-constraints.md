@@ -796,9 +796,14 @@ PID namespaces, with a new `/proc` (SKY-885). The metric command then sees
 only its own processes. It cannot read the environment of a stage, a
 proposer or the guest. The namespace maps the guest's user to itself, not
 to root, so the command cannot unmount its `/proc`. When the session opens
-a metric box, it first checks that the sandbox allows these namespaces. If
-the check fails, the metric box does not open; the run never falls back to
-a shared `/proc`. The shell that starts a stage's runner `exec`s the
+a metric box, it first checks that the sandbox allows these namespaces. The
+check also fails when the user inside is root, or can unmount the new
+`/proc`. If the check fails, the metric box does not open; the run never
+falls back to a shared `/proc`. Vercel covers `/proc/kcore` and
+`/proc/keys` with `/dev/null`, and the kernel then refuses the new `/proc`.
+So before the guest starts, the parent runs one fixed root command that
+unmounts only those two covers. If it fails, the parent logs a warning,
+and the check still stops the metric box. The shell that starts a stage's runner `exec`s the
 runner, so no shell stays alive with the stage's environment. Some risks
 stay:
 

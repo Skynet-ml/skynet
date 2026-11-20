@@ -55,6 +55,10 @@ class FakeSession:
         if self.requirements_error is not None:
             raise self.requirements_error
 
+    def unmount_proc_covers(self) -> None:
+        """Record the parent's /proc cover unmount."""
+        self.steps.append("proc_covers")
+
     def run(self, command: str, **kwargs: Any) -> CommandResult:
         """Answer the protocol probe, then emit fragmented checkpoint and optimizer frames.
 
@@ -462,6 +466,30 @@ def test_the_parent_writes_the_codex_requirements_before_the_optimizer_starts(
 
     assert session.steps[:2] == ["probe", "codex_requirements"]
     assert session.steps.index("codex_requirements") < session.steps.index("write_files")
+    assert session.steps[-1] == "optimizer"
+    assert events.get_nowait()["type"] == "result"
+
+
+@pytest.mark.parametrize("proposer", [{"harness": "codex"}, None], ids=["codex", "no-codex"])
+def test_the_parent_unmounts_the_proc_covers_before_the_guest_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proposer: dict[str, Any] | None
+) -> None:
+    """Ask the parent once for the /proc cover unmount after the image checks and before the guest starts (SKY-885).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+        proposer: The proposer of the run, or none.
+    """
+    session = FakeSession()
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    extra = {"proposer": proposer} if proposer else {}
+    events: queue.Queue = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path, **extra), "job-covers", events, "spawn")
+
+    assert session.steps.count("proc_covers") == 1
+    assert session.steps.index("probe") < session.steps.index("proc_covers") < session.steps.index("write_files")
     assert session.steps[-1] == "optimizer"
     assert events.get_nowait()["type"] == "result"
 

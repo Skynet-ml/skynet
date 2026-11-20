@@ -193,6 +193,14 @@ class RemoteSandboxSession:
         """
         self._runtime._request("codex_requirements", {"sandbox_id": self._identity})
 
+    def unmount_proc_covers(self) -> None:
+        """Ask the parent to unmount the device covers on two ``/proc`` files in this box (SKY-885).
+
+        The request names only the box: the parent runs its own fixed root
+        command, so the child cannot choose a path or a command.
+        """
+        self._runtime._request("proc_covers", {"sandbox_id": self._identity})
+
     def read_file(self, path: str) -> str | None:
         """Read a guest file without exposing the parent's filesystem.
 

@@ -144,7 +144,9 @@ _PID_NAMESPACE = (
     "--",
 )
 # Proves that the command runs as PID 1 of a new namespace, not only that unshare exits 0.
-_PID_NAMESPACE_PROBE = ("/bin/sh", "-c", 'test "$$" = 1')
+# A root caller stays uid 0 inside under --map-current-user and keeps its capabilities, so it
+# could unmount the new /proc and see every outer process. The probe then fails closed.
+_PID_NAMESPACE_PROBE = ("/bin/sh", "-c", 'test "$$" = 1 && test "$(id -u)" != 0 && ! umount /proc 2>/dev/null')
 _PID_NAMESPACE_PROBE_SECONDS = 30
 _pid_namespace_ready = False
 
