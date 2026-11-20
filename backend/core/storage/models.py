@@ -717,7 +717,7 @@ class BillingCustomerModel(Base):
         server_default="0",
     )
     # ``grant_remaining`` is what is left of the account's one-time
-    # grant (500 cents = $5, seeded once and never renewed). NULL until the first
+    # grant (seeded once from ``grant_cents()``, never renewed). NULL until the first
     # wallet read or run seeds it; seeding is lazy-evaluated on read, never
     # cron'd.
     grant_remaining: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)

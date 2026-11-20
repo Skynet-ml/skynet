@@ -96,7 +96,7 @@ export interface UsageEntry {
   id: string;
   /** ISO-8601 instant the entry was recorded. */
   at: string;
-  /** Human label for the row (a run name, "Top-up", "Monthly grant") — dynamic, LTR-islanded. */
+  /** Human label for the row (a run name, "Top-up", "Grant") — dynamic, LTR-islanded. */
   label: string;
   /** Model id involved, or null for non-run entries. Always rendered LTR. */
   model: string | null;
