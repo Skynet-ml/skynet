@@ -55,7 +55,7 @@ interface BalanceContextValue {
    */
   shown: ShownBalance;
   /**
-   * The wallet whose paid balance, grant and activity surfaces show next to
+   * The wallet whose balance and activity surfaces show next to
    * `shown`. On the web it is `wallet`. In the Mac app it is the linked
    * account's wallet, or null when no linked wallet loaded: never the local credit.
    */

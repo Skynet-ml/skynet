@@ -55,7 +55,7 @@ export interface ShownBalance {
   status: WalletStatus;
   /** True in the Mac app when no account is linked: show a link prompt, no number. */
   linkNeeded: boolean;
-  /** True when the number is the linked account's total, with no paid/grant split. */
+  /** True when the number is the linked account's hosted total. */
   hosted: boolean;
 }
 

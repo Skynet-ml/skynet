@@ -7,7 +7,7 @@ a synced cache plus an audit trail, reconciled by
 :meth:`StripeBillingService.handle_webhook` on every event Stripe delivers.
 
 Ledger reads work whether or not Stripe is configured, so a deploy without
-keys degrades to a read-only free tier. Stripe profile/history reads report
+keys degrades to a read-only zero balance. Stripe profile/history reads report
 the provider as unavailable, while mutations (checkout and portal) require
 ``settings.is_stripe_configured`` and raise
 ``DomainError("billing.not_configured", 503)`` otherwise — never a 500.
