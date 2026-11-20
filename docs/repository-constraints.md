@@ -341,10 +341,10 @@ content and no metric code. It has these keys:
   List the files in byte order (`LC_ALL=C sort`). With no part, the hash is
   the SHA-256 of no bytes. With `[metric] setup`, the command is one more
   part. Its path is `/[metric] setup`, and its bytes are the command text in
-  UTF-8, with the whitespace (spaces, tabs, newlines) at the start and end
-  removed. No file path starts with `/`, so the part cannot clash with a
-  file. Sort this part with the
-  file paths in byte order, like any other part.
+  UTF-8, with all the whitespace at both ends removed, as Python
+  `str.strip()` removes it. No file path starts with `/`, so the part cannot
+  clash with a file. Sort this part with the file paths in byte order, like
+  any other part.
 - `metric_setup`: the `[metric] setup` command. The record has this key only
   when the file sets `[metric] setup`. The pull request block shows it as
   "Metric setup".
@@ -475,11 +475,13 @@ Each box holds only the code that it needs. The run uses these boxes:
   digest.
 - **Metric setup.** It runs once, in a separate box, only when the
   repository has `.optimize/metric-requirements.txt` or the file sets
-  `[metric] setup`. It installs only the packages in that file. Then it puts
-  the `[metric] files` in the box and runs `[metric] setup` in their folder.
-  The box reaches only the package registries. It gets no secret, no service
-  and no version file. The parent saves this second state. It holds no
-  repository code.
+  `[metric] setup`. It installs only the packages in that file. When the
+  file sets `[metric] setup`, the box then puts the `[metric] files` in,
+  runs the command, and removes the metric files again before it saves its
+  state. The build output stays in the saved state. The box reaches only the
+  package registries. It gets no secret, no service and no version file. The
+  parent saves this second state. It holds no repository code and no
+  `[metric] files`, only the installed packages and the build output.
 - **Candidate box.** Each evaluation opens a new one from the prepared
   state. The parent checks the digest and lays out the version. The box
   runs the `[run]` entry on the case's `input` and reaches only the `[run]`

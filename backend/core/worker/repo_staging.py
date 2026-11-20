@@ -1546,10 +1546,10 @@ def _record_facts(
     ``[metric] setup`` command is one more part at the path ``/[metric] setup``,
     which no archive path can take, framed over the command's UTF-8 bytes
     (SKY-740); the record then also holds the command as ``metric_setup``.
-    ``metric_source`` describes the
-    ``[metric] files`` only: it is ``repository`` when the file sets
-    ``[metric] files`` and every one comes from the pinned commit, and
-    ``request`` when there are none or a draft file replaces or adds one.
+    ``metric_source`` describes the ``[metric] files`` only: it is
+    ``repository`` when the file sets ``[metric] files`` and every one comes
+    from the pinned commit, and ``request`` when there are none or a draft
+    file replaces or adds one.
     ``cases_sha256`` hashes the ``[data] cases`` file bytes (``cases_source``
     ``file``), or else the compact JSON of the request's cases with sorted
     keys (``cases_source`` ``request``).
