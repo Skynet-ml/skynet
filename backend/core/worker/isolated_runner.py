@@ -7,7 +7,6 @@ import contextlib
 import ctypes
 import hashlib
 import json
-import os
 import re
 import sys
 import threading
@@ -167,9 +166,9 @@ def main() -> None:
             raise RuntimeError("The protected tool roster requires its isolated mailbox relay.")
         # In process only: os.environ reaches every child that copies it (SKY-880).
         use_tool_relay_token(str(tools_route["token"]))
-    packages_route = document["payload"].pop("_skynet_packages_route", None)
-    if packages_route is not None:
-        os.environ["APP_PACKAGE_RELAY_TOKEN"] = str(packages_route["token"])
+    # Popped so user code never sees it. Nothing in the guest uses it: the
+    # parent gives package setup its own copy (SKY-880).
+    document["payload"].pop("_skynet_packages_route", None)
     preflight = document["payload"].pop("_preflight", None)
     interaction = document["payload"].pop("_interaction", None)
     directory = Path(document["payload"].get("_gepa_log_dir") or "checkpoints")
