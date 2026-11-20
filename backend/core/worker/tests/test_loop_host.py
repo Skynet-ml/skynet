@@ -1596,6 +1596,12 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     """The broker refuses a box past the run's deadline, so a 30-minute command in a 1000 s run gets a 1000 s box
     and a 700 s limit, which leaves the pack room to end before the box dies. The command's own environment, such
     as the file proposer's route key, reaches the loop.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
     """
     lifetimes: list[float] = []
     timeouts: list[float | None] = []

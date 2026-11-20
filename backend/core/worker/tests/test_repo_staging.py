@@ -1814,7 +1814,11 @@ def test_binding_opens_the_scorer_box_on_the_loopback_tree(tmp_path: Path) -> No
 
 
 def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:
-    """The scorer's model reaches the box as its scoped route; the box stays offline."""
+    """The scorer's model reaches the box as its scoped route; the box stays offline.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     route = {"url": "http://127.0.0.1:1/v1", "token": "route-token", "model": "vendor/judge", "role": "judge"}
     payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {ROUTE_KEY: route}}

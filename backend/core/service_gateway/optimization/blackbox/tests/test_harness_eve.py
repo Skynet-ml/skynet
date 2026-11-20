@@ -407,7 +407,11 @@ _BOX_KEYS = (
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_path: Path) -> None:
-    """Run the real sandbox provider: drop the key and token from commands, keep PATH, and refuse hidden paths."""
+    """Run the real sandbox provider: drop the key and token from commands, keep PATH, and refuse hidden paths.
+
+    Args:
+        tmp_path: Test folder.
+    """
     project = tmp_path / "eve"
     stubs = project / "node_modules/eve"
     stubs.mkdir(parents=True)

@@ -284,7 +284,12 @@ def test_exec_shim_records_become_steps_before_the_next_model_call(step_log, tmp
 
 
 def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
-    """Launch files, logs, copies, tool output and exec records never put the key into the step log or tree store."""
+    """Launch files, logs, copies, tool output and exec records never put the key into the step log or tree store.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir, bin_dir = tmp_path / "work", tmp_path / "session", tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "probe").write_text('#!/bin/sh\necho "probe $ASCENT_MODEL_KEY"\n')

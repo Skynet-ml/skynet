@@ -306,7 +306,11 @@ def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
 
 
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output."""
+    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("gemini-3-pro", _GATEWAY, reasoning_effort="high")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -349,7 +353,11 @@ def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any SDK call when the gateway token is missing."""
+    """The runner exits before any SDK call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 

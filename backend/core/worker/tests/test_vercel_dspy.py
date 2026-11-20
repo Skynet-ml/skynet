@@ -129,7 +129,13 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
 def test_an_image_before_the_current_protocol_is_refused_at_the_probe(
     image_protocol: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An image before protocol 22 reads the old model names, so the worker refuses it before it sends work (SKY-776)."""
+    """An image before protocol 22 reads the old model names, so the worker refuses it before it sends work (SKY-776).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     session = FakeSession()
     session.image_protocol = image_protocol
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
@@ -188,7 +194,12 @@ def _run_with_outcome(
 @pytest.mark.parametrize("image_protocol", [12, 13, 14, 15])
 @pytest.mark.parametrize("outcome", [{"target": 0.9, "require": {}}, {"target": None, "require": {"latency": 0.5}}])
 def test_an_older_image_is_refused_for_a_run_with_outcome_values(image_protocol: int, outcome: dict[str, Any]) -> None:
-    """An image before 16 drops the file's target or minimums, or gives no run end verdict (SKY-691, SKY-692)."""
+    """An image before 16 drops the file's target or minimums, or gives no run end verdict (SKY-691, SKY-692).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        outcome: The snapshot's ``outcome`` entry.
+    """
     with pytest.raises(RuntimeError) as refusal:
         vercel_dspy._require_outcome_support(image_protocol, {"outcome": outcome})
     assert str(refusal.value) == vercel_dspy.OUTCOME_IMAGE_MESSAGE
@@ -206,12 +217,22 @@ def test_an_older_image_is_refused_for_a_run_with_outcome_values(image_protocol:
 def test_an_older_image_passes_the_outcome_gate_when_it_can_read_the_runs_outcome(
     image_protocol: int, outcome: dict[str, Any]
 ) -> None:
-    """An older image passes the gate for a run with no outcome values; an image at 16 passes one with a target."""
+    """An older image passes the gate for a run with no outcome values; an image at 16 passes one with a target.
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        outcome: The snapshot's ``outcome`` entry.
+    """
     vercel_dspy._require_outcome_support(image_protocol, {"outcome": outcome})
 
 
 def test_the_current_image_runs_a_run_with_a_target_and_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An image at the current protocol runs a run whose outcome sets a target and a limit."""
+    """An image at the current protocol runs a run whose outcome sets a target and a limit.
+
+    Args:
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     session, events = _run_with_outcome(
         tmp_path, monkeypatch, SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}}
     )
@@ -299,7 +320,12 @@ def test_an_image_before_20_is_refused_for_a_minimize_run(direction: str, refuse
 
 
 def test_the_current_image_runs_a_minimize_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An image at the current protocol runs a minimize run."""
+    """An image at the current protocol runs a minimize run.
+
+    Args:
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     session, seen = _run_with_outcome(
         tmp_path, monkeypatch, SANDBOX_PROTOCOL, {"target": None, "require": {}, "direction": "minimize"}
     )
@@ -348,7 +374,12 @@ def test_an_image_before_21_is_refused_for_limits_or_a_minimize_named_score(
 def test_the_current_image_runs_limits_and_a_minimize_named_score(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An image at the current protocol runs a minimize score with a limit."""
+    """An image at the current protocol runs a minimize score with a limit.
+
+    Args:
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     outcome = {
         "target": None,
         "require": {"cost_usd": 0.05},

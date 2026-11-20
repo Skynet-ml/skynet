@@ -346,7 +346,12 @@ class _Evaluator:
 def test_a_box_cannot_reach_any_capability_beyond_its_model_route(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """The box's code is refused at the evaluator, budget and model paths, even with a leaked token, and never blocks."""
+    """The box's code is refused at the evaluator, budget and model paths, even with a leaked token, and never blocks.
+
+    Args:
+        gateway: The gateway and the requests it sent.
+        tmp_path: Scratch folder.
+    """
     model_gateway, sent = gateway
     evaluator = _Evaluator()
     evaluator_token = model_gateway.bind_evaluator(evaluator)["token"]

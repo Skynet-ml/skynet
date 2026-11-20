@@ -413,7 +413,11 @@ def test_call_event_matches_the_proxy() -> None:
 
 
 async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _FakeDocker) -> None:
-    """Write one masked egress row for each proxy request before the proxy goes away (SKY-634)."""
+    """Write one masked egress row for each proxy request before the proxy goes away (SKY-634).
+
+    Args:
+        fake_docker: The Docker CLI recorder, which answers with the proxy log.
+    """
     fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
     store, recorder = _run_record()
     spec = _spec(network_disabled=False, allowed_hosts=("pypi.org",), env={"ASCENT_MODEL_KEY": _BOX_VALUE, "FLAG": "1"})

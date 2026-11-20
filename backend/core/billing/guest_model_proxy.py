@@ -217,7 +217,11 @@ def model_matches(model: object, expected: str) -> bool:
     """
 
     def normalized(value: str) -> str:
-        """Remove transport prefixes without changing the provider model id."""
+        """Remove transport prefixes without changing the provider model id.
+
+        Args:
+            value: A model name.
+        """
         return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
 
     return isinstance(model, str) and normalized(model) == normalized(expected)

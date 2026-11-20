@@ -329,7 +329,11 @@ def test_runner_sends_the_effort_in_the_extra_body_for_gpt5_ids(tmp_path: Path, 
 
 
 def test_runner_sends_no_effort_without_a_choice(tmp_path: Path) -> None:
-    """Without a chosen effort the runner sets neither field, so the SDK keeps its default."""
+    """Without a chosen effort the runner sets neither field, so the SDK keeps its default.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("gpt-5.1", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -381,7 +385,11 @@ def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
 
 
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake SDK, the runner points the LLM at the gateway, drops direct keys and prints parseable output."""
+    """Against a fake SDK, the runner points the LLM at the gateway, drops direct keys and prints parseable output.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("claude-sonnet-4-5", _GATEWAY, reasoning_effort="high")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -436,7 +444,11 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
 
 
 def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:
-    """The AGENTS.md candidate reaches the system prompt as raw suffix text, not as an untrusted repo skill."""
+    """The AGENTS.md candidate reaches the system prompt as raw suffix text, not as an untrusted repo skill.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -456,7 +468,11 @@ def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) ->
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any SDK call when the gateway token is missing."""
+    """The runner exits before any SDK call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 

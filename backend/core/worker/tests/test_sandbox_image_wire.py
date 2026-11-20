@@ -56,7 +56,11 @@ def test_usage_tags_travel_under_both_header_names() -> None:
 
 
 def test_model_proxy_hands_its_command_both_relay_variable_names(tmp_path: Path) -> None:
-    """The shipped proxy sets the legacy relay names that older guest code reads, and the one model URL name."""
+    """The shipped proxy sets the legacy relay names that older guest code reads, and the one model URL name.
+
+    Args:
+        tmp_path: Folder for the proxy's config and its answer mailbox.
+    """
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"prefix": "P:", "response_dir": str(tmp_path / "responses"), "timeout_seconds": 5}))
     probe = (

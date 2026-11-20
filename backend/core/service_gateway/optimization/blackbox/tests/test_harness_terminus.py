@@ -305,7 +305,11 @@ def test_launch_refuses_a_bad_gateway_url(url: str) -> None:
 
 
 def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and its files, and cleans up."""
+    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and its files, and cleans up.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("gpt-x", _GATEWAY, reasoning_effort="xhigh")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Write out.txt.\n")
@@ -344,7 +348,11 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
 
 
 def test_runner_without_an_effort_sends_no_effort(tmp_path: Path) -> None:
-    """Without an effort, the runner adds no ``extra_body`` and the model default applies."""
+    """Without an effort, the runner adds no ``extra_body`` and the model default applies.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("gpt-x", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
@@ -384,7 +392,11 @@ def test_litellm_sends_the_extra_body_effort_unchanged_with_drop_params(model: s
 
 
 def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
-    """A budget or tool-cap stop sends SIGTERM; the runner still kills tmux and removes its temp folder."""
+    """A budget or tool-cap stop sends SIGTERM; the runner still kills tmux and removes its temp folder.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
@@ -419,7 +431,11 @@ def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any agent call when the gateway token is missing."""
+    """The runner exits before any agent call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
     env = {**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_HARBOR_RECORD": str(record)}
@@ -432,7 +448,11 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
 
 
 def test_runner_stops_when_tmux_is_missing(tmp_path: Path) -> None:
-    """Without tmux the runner exits with a clear message instead of Harbor's root package install."""
+    """Without tmux the runner exits with a clear message instead of Harbor's root package install.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")

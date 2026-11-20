@@ -69,7 +69,11 @@ def test_cli_parser_accepts_the_meta_harness_and_autoresearch_shapes() -> None:
 
 
 def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_path: Path) -> None:
-    """Materialize the launch in the workspace, swap in the real key and capture the harness answer."""
+    """Materialize the launch in the workspace, swap in the real key and capture the harness answer.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+    """
     proposer = {
         **_PLAIN,
         "run_command": 'cat "$ASCENT_TASK"; cat config.json; echo "$TOKEN"',

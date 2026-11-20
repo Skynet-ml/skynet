@@ -557,7 +557,11 @@ def test_run_call_binds_llm_to_the_gateway_with_the_key_from_the_environment(
 
 
 def test_run_call_prefers_a_key_in_the_payload_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit ``api_key`` in the gateway section wins over ``ASCENT_MODEL_KEY``."""
+    """An explicit ``api_key`` in the gateway section wins over ``ASCENT_MODEL_KEY``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setenv(runner.ENV_API_KEY, "env-key")
     with FakeGateway() as gateway:
         run_call(
@@ -698,7 +702,11 @@ def test_scorer_code_imports_log_from_openascent() -> None:
 
 
 def test_env_value_falls_back_to_the_legacy_name_only_for_app_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Read ``APP_*`` first, then its pre-rename ``SKYNET_*`` spelling; ``ASCENT_*`` names get no fallback."""
+    """Read ``APP_*`` first, then its pre-rename ``SKYNET_*`` spelling; ``ASCENT_*`` names get no fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
     monkeypatch.setenv("SKYNET_BUDGET_RELAY_URL", "old")
     assert runner.env_value("APP_BUDGET_RELAY_URL") == "old"
@@ -2341,7 +2349,11 @@ def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: p
 @_needs_openascent
 @_needs_curl
 def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_key(tmp_path: Path) -> None:
-    """With a gateway the command reaches the model through the runner; the key stays out of its environment."""
+    """With a gateway the command reaches the model through the runner; the key stays out of its environment.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     script = (
         _CURL_POST
         + 'env | grep -c "sk-test" > keys || true\n'
@@ -2441,7 +2453,11 @@ def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) ->
 
 @_needs_openascent
 def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Path) -> None:
-    """Each key, model mailbox and tool relay name stays out of the command; other variables stay in."""
+    """Each key, model mailbox and tool relay name stays out of the command; other variables stay in.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     hidden = dict.fromkeys(runner._COMMAND_HIDDEN_ENV, "secret-value")
     output = _command_metric(
         tmp_path, 'env > seen\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n', environ={**hidden, "KEEP_ME": "1"}
@@ -2458,7 +2474,11 @@ def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Pat
 @_needs_openascent
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
 def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> None:
-    """The runner holds the model key in its start environment; its child command cannot read it from /proc."""
+    """The runner holds the model key in its start environment; its child command cannot read it from /proc.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     script = (
         'tr "\\0" " " < "/proc/$PPID/cmdline" > parent\n'
         'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^ASCENT_MODEL_KEY="; then\n'
@@ -2527,6 +2547,10 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     address and token. It does not copy the session's own parent process.
     ``vercel_key_in_env`` is the old scorer, which put the key in the command
     env: the scan must find it in the wrapper shell, so the scan works.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+        chain: The process chain that runs the metric, as the summary says.
     """
     box = tmp_path / "box"
     box.mkdir()
