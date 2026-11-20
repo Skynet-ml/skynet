@@ -342,8 +342,8 @@ content and no metric code. It has these keys:
   the SHA-256 of no bytes. With `[metric] setup`, the command is one more
   part. Its path is `/[metric] setup`, and its bytes are the command text in
   UTF-8, with the spaces at the start and end removed. No file path starts
-  with `/`, so the part cannot clash with a file. In `sort` byte order it
-  comes before every file path.
+  with `/`, so the part cannot clash with a file. Sort this part with the
+  file paths in byte order, like any other part.
 - `metric_setup`: the `[metric] setup` command. The record has this key only
   when the file sets `[metric] setup`. The pull request block shows it as
   "Metric setup".
@@ -618,11 +618,11 @@ file. The time limit is 30 minutes, and the box time counts in the run's
 cost. A command that fails or runs out of time stops the run before the
 first version. The error shows the last lines of the build output.
 
-Each metric box opens from the state that the metric setup box saved. Only
-the box's working folder is saved. Build into the folder of the metric
-files, for example a `target/` or `bin/` folder next to the source. A file
-that the build writes outside the working folder, such as `~/.cargo` or the
-Go build cache, is not kept. The metric box then puts the `[metric] files`
+Each metric box opens from the state that the metric setup box saved. The
+saved state can be the box's working folder only. A file that the build
+writes outside the working folder, such as `~/.cargo` or the Go build cache,
+may not be kept. Build into the folder of the metric files, for example a
+`target/` or `bin/` folder next to the source. The metric box then puts the `[metric] files`
 in the folder again, and the built files stay next to them.
 
 A Rust metric:
