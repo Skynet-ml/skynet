@@ -289,7 +289,7 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     return browser, ""
 
 
-def ascent_toml_diagnostics(text: str) -> list[dict[str, Any]]:
+def ascent_toml_diagnostics(text: str) -> tuple[list[dict[str, Any]], int]:
     """Parse an ``ascent.toml`` text the way a run reads it, and return every diagnostic (SKY-763).
 
     Args:
@@ -299,17 +299,22 @@ def ascent_toml_diagnostics(text: str) -> list[dict[str, Any]]:
         Each diagnostic's ``level`` (``error`` or ``warning``), ``line``,
         ``section``, ``key`` and ``message``, in the parser's order; empty
         when the file is valid with no warning. An ``error`` item blocks the
-        run; a ``warning`` item does not.
+        run; a ``warning`` item does not. Then the count of errors past the
+        parser's cap, which the list does not hold.
     """
+    hidden = 0
     try:
         # A lone surrogate cannot encode as UTF-8; let the parser refuse it instead of raising here.
         diagnostics = parse_constraints(text.encode("utf-8", "surrogatepass")).warnings
     except ConstraintsError as error:
-        diagnostics = error.errors
-    return [
+        hidden = error.hidden
+        # Past its cap the parser adds one summary item; Skynet counts the hidden errors itself.
+        diagnostics = error.errors[:-1] if hidden else error.errors
+    items = [
         {"level": item.level, "line": item.line, "section": item.section, "key": item.key, "message": item.message}
         for item in diagnostics
     ]
+    return items, hidden
 
 
 def diagnostic_text(item: dict[str, Any]) -> str:
@@ -345,24 +350,38 @@ def has_error(diagnostics: list[dict[str, Any]]) -> bool:
 MODEL_DIAGNOSTICS_MAX = 20
 
 
-def model_diagnostics(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+def model_diagnostics(diagnostics: list[dict[str, Any]], hidden: int = 0) -> dict[str, Any]:
     """Cap a diagnostic list for a tool result the model reads, errors first.
 
     Errors come before warnings, so a capped list still shows why the run is blocked.
 
     Args:
         diagnostics: The list from :func:`ascent_toml_diagnostics`.
+        hidden: The errors past the parser's cap, which the list does not hold.
 
     Returns:
         ``{"diagnostics": [...]}`` with at most :data:`MODEL_DIAGNOSTICS_MAX`
-        items, plus ``diagnostics_omitted`` (the count of dropped items) when
-        the list was longer.
+        items, plus ``diagnostics_omitted`` (the dropped items and the hidden
+        errors) when that count is above zero.
     """
     ordered = sorted(diagnostics, key=lambda item: item["level"] != ERROR)
     kept: dict[str, Any] = {"diagnostics": ordered[:MODEL_DIAGNOSTICS_MAX]}
-    if len(ordered) > MODEL_DIAGNOSTICS_MAX:
-        kept["diagnostics_omitted"] = len(ordered) - MODEL_DIAGNOSTICS_MAX
+    if omitted := max(len(ordered) - MODEL_DIAGNOSTICS_MAX, 0) + hidden:
+        kept["diagnostics_omitted"] = omitted
     return kept
+
+
+def omitted_text(count: int) -> str:
+    """Say how many diagnostics a capped list leaves out, as one line of plain text.
+
+    Args:
+        count: The left-out diagnostics, above zero.
+
+    Returns:
+        The line, in the singular for one.
+    """
+    noun = "diagnostic is" if count == 1 else "diagnostics are"
+    return f"ascent.toml: {count} more {noun} not shown. Fix the ones above and check again."
 
 
 # An ``instructions`` or ``illegal`` key and its string, anywhere in a current file that is not TOML
@@ -637,8 +656,9 @@ def workspace_tools(
             ``{"wizard_state": {field: text}}`` or ``{"wizard_state": {"workspace_files":
             {path: text}}}``, plus ``ascent_toml_diagnostics`` (the diagnostics of
             :func:`ascent_toml_diagnostics`, capped by :func:`model_diagnostics`, with
-            ``ascent_toml_diagnostics_omitted`` for the dropped count) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
-            file that is too large, one file too many, or files too large together.
+            ``ascent_toml_diagnostics_omitted`` for the dropped count) when the
+            ``ascent.toml`` text has one; or ``{"error": ...}`` for a file that is
+            too large, one file too many, or files too large together.
         """
         if len(text.encode("utf-8", "surrogatepass")) > DRAFT_FILE_BYTES:
             return {"error": f"The file is larger than {DRAFT_FILE_BYTES} bytes. Write a smaller file."}
@@ -670,8 +690,9 @@ def workspace_tools(
         turn.wizard_patch[field] = text
         result["wizard_state"][field] = text
         # The file still reaches the draft (last write wins); the agent fixes it or tells the user.
-        if field == "ascent_toml" and (diagnostics := ascent_toml_diagnostics(text)):
-            capped = model_diagnostics(diagnostics)
+        diagnostics, hidden = ascent_toml_diagnostics(text) if field == "ascent_toml" else ([], 0)
+        if diagnostics:
+            capped = model_diagnostics(diagnostics, hidden)
             result["ascent_toml_diagnostics"] = capped["diagnostics"]
             if "diagnostics_omitted" in capped:
                 result["ascent_toml_diagnostics_omitted"] = capped["diagnostics_omitted"]
@@ -847,9 +868,10 @@ def workspace_tools(
             desc=(
                 "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
                 "It goes into the editor at once, and the run uses it in place of the repository's file. For "
-                "ascent.toml the result has ascent_toml_diagnostics: the parser's errors, then its warnings, each with "
-                "its level, line, section, key and message. It holds at most 20; ascent_toml_diagnostics_omitted counts "
-                "the rest. Fix every error in one write; a warning blocks nothing."
+                "ascent.toml the result has ascent_toml_diagnostics: the parser's errors, then its warnings, "
+                "each with its level, line, section, key and message. It holds at most 20; "
+                "ascent_toml_diagnostics_omitted counts the rest. Fix every error in one write; a warning "
+                "blocks nothing."
             ),
             arg_desc={"path": file_arg, "text": "The whole file text."},
         ),
@@ -884,6 +906,7 @@ __all__ = [
     "diagnostic_text",
     "has_error",
     "model_diagnostics",
+    "omitted_text",
     "open_repo",
     "workspace_tools",
 ]

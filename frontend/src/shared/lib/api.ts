@@ -1071,6 +1071,7 @@ const TOAST_DIAGNOSTICS_MAX = 10;
  *
  * Args:
  *   items: The diagnostics.
+ *   hidden: The errors past the parser's cap, which `items` does not hold.
  *
  * Returns:
  *   One line for each of the first ten, each line starting with a line break,
@@ -1078,6 +1079,7 @@ const TOAST_DIAGNOSTICS_MAX = 10;
  */
 export function ascentTomlDiagnosticLines(
   items: Array<Pick<AscentTomlDiagnostic, "level" | "line" | "message">>,
+  hidden = 0,
 ): string {
   const ordered = [
     ...items.filter((d) => d.level !== "warning"),
@@ -1086,7 +1088,7 @@ export function ascentTomlDiagnosticLines(
   const shown = ordered
     .slice(0, TOAST_DIAGNOSTICS_MAX)
     .map((d) => `\n${ascentTomlDiagnosticText(d)}`);
-  const rest = ordered.length - TOAST_DIAGNOSTICS_MAX;
+  const rest = Math.max(ordered.length - TOAST_DIAGNOSTICS_MAX, 0) + hidden;
   if (rest > 0) shown.push(`\n${formatMsg("submit.setup_check.more", { p1: rest })}`);
   return shown.join("");
 }
@@ -1094,6 +1096,7 @@ export function ascentTomlDiagnosticLines(
 /**
  * Check an ascent.toml text with the repository parser. `errors` holds every
  * error and warning of the file; `ok` is false only for an error (SKY-763).
+ * `hidden` counts the errors past the parser's cap, which `errors` does not hold.
  * `metric_command` is the command that `[metric] entry` names, else null (SKY-770).
  * `proposer_command` is the command that `[proposer] entry` names, else null (SKY-771).
  */
@@ -1101,6 +1104,7 @@ export function checkAscentToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
     errors: AscentTomlDiagnostic[];
+    hidden: number;
     metric_command: string[] | null;
     proposer_command: string[] | null;
   }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });

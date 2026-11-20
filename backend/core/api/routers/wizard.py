@@ -164,6 +164,7 @@ class AscentTomlError(BaseModel):
 class AscentTomlCheckResponse(BaseModel):
     ok: bool
     errors: list[AscentTomlError]
+    hidden: int = Field(default=0, description="The errors past the parser's cap, which errors does not list.")
     metric_command: list[str] | None = Field(
         default=None,
         description="The command that [metric] entry names. Null for a Python entry, no entry, or a file with an error.",
@@ -474,13 +475,16 @@ def create_wizard_router() -> APIRouter:
         Returns:
             ``ok`` true with the warnings, if any, and the ``[metric] entry``
             and ``[proposer] entry`` commands, if any; or ``ok`` false with
-            each error, each with its level, line, section and key.
+            each error, each with its level, line, section and key, and the
+            count of errors past the parser's cap.
         """
         try:
             # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
             constraints = parse_constraints(req.text.encode("utf-8", "surrogatepass"))
         except ConstraintsError as error:
-            return AscentTomlCheckResponse(ok=False, errors=_diagnostics(error.errors))
+            # Past its cap the parser adds one summary item; the client counts the hidden errors itself.
+            shown = error.errors[:-1] if error.hidden else error.errors
+            return AscentTomlCheckResponse(ok=False, errors=_diagnostics(shown), hidden=error.hidden)
         # A command entry needs no metric.py; a Python entry still runs the wizard's metric code (SKY-770).
         entry = constraints.metric.entry
         proposer = constraints.proposer_entry

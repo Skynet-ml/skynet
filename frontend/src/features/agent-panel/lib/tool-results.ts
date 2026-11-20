@@ -381,7 +381,8 @@ export function repoTree(value: unknown): TreeView | NoResult | null {
     // Each key file starts after the tree with a blank row and its header, so
     // a README line in the header's form, with no blank row above it, is text.
     for (let i = end + 1; i < rows.length; i++) {
-      const m = rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
+      const m =
+        rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
       if (m?.[1]) keyFiles.push(m[1]);
     }
   }
@@ -453,6 +454,8 @@ export interface WorkspaceSave {
   text: string;
   /** Every error and warning of the ``ascent.toml`` parser; empty for a clean file. */
   tomlDiagnostics: TomlDiagnostic[];
+  /** The diagnostics the result leaves out past its cap; 0 when it lists all. */
+  tomlOmitted: number;
 }
 
 /**
@@ -474,7 +477,11 @@ export function workspaceSave(value: unknown): WorkspaceSave | { note: string } 
   const state = asObj(r.wizard_state);
   const text = state ? Object.values(state).find((v) => typeof v === "string") : undefined;
   if (typeof text !== "string") return null;
-  return { text, tomlDiagnostics: readTomlDiagnostics(r.ascent_toml_diagnostics) };
+  return {
+    text,
+    tomlDiagnostics: readTomlDiagnostics(r.ascent_toml_diagnostics),
+    tomlOmitted: num(r.ascent_toml_diagnostics_omitted) ?? 0,
+  };
 }
 
 /**
@@ -1037,13 +1044,16 @@ export function taggingGuide(value: unknown): TaggingGuideView | null {
  * The ``ascent.toml`` errors and warnings ``check_setup`` found.
  *
  * Args:
- *   value: The tool result, ``{ok, errors}``.
+ *   value: The tool result, ``{ok, errors, errors_omitted?}``.
  *
  * Returns:
- *   Whether the file is valid and its errors, or null for anything else.
+ *   Whether the file is valid, its errors and the count the result leaves
+ *   out past its cap, or null for anything else.
  */
-export function setupCheck(value: unknown): { ok: boolean; errors: TomlDiagnostic[] } | null {
+export function setupCheck(
+  value: unknown,
+): { ok: boolean; errors: TomlDiagnostic[]; omitted: number } | null {
   const r = asObj(value);
   if (!r || typeof r.ok !== "boolean") return null;
-  return { ok: r.ok, errors: readTomlDiagnostics(r.errors) };
+  return { ok: r.ok, errors: readTomlDiagnostics(r.errors), omitted: num(r.errors_omitted) ?? 0 };
 }

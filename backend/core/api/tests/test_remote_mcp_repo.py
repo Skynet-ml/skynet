@@ -316,7 +316,7 @@ def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) ->
     body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml="[run]\nentry = 'a.py:f'\n")
     assert body["saved"] == {"ascent_toml": "[run]\nentry = 'a.py:f'\n"}
     assert body["issues"] == [
-        m["message"] for m in remote_mcp_repo.ascent_toml_diagnostics("[run]\nentry = 'a.py:f'\n")
+        m["message"] for m in remote_mcp_repo.ascent_toml_diagnostics("[run]\nentry = 'a.py:f'\n")[0]
     ]
     assert "version" in body["issues"][0]
     assert body["next_tool"] == "repo_draft_set_contract"
@@ -357,12 +357,34 @@ def test_review_lists_a_contract_warning_as_a_note_that_blocks_nothing(
     client, _engine, _calls = harness
     draft_id = _complete_draft(client)
     warning = {"level": "warning", "line": 2, "section": "run", "key": "old", "message": "ascent.toml: old style."}
-    monkeypatch.setattr(remote_mcp_repo, "ascent_toml_diagnostics", lambda text: [warning])
+    monkeypatch.setattr(remote_mcp_repo, "ascent_toml_diagnostics", lambda text: ([warning], 0))
 
     review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
 
     assert "Warning: ascent.toml: old style. (line 2)" in review["notes"]
     assert not any("old style" in issue for issue in review["issues"])
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+def test_contract_step_lists_at_most_20_errors_and_counts_the_rest(harness: Any) -> None:
+    """A file past the parser's cap gives 20 issues and one line with the true count of the rest (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=_OVER_THE_CAP)
+
+    assert len(body["issues"]) == 21
+    assert all("is not a supported setting" in issue for issue in body["issues"][:20])
+    assert body["issues"][20] == "ascent.toml: 580 more diagnostics are not shown. Fix the ones above and check again."
+    assert not any("not shown" in note for note in body["notes"])
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert review["ready"] is False
+    assert body["issues"][20] in review["issues"]
 
 
 def test_review_reports_a_contract_with_no_run_and_no_target(harness: Any) -> None:

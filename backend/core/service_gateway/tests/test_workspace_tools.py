@@ -670,7 +670,7 @@ def _many_diagnostics(errors: int, warnings: int) -> list[dict[str, Any]]:
 async def test_write_caps_the_diagnostics_the_model_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     """One bad write gives the model at most 20 diagnostics, errors first, and the count of the rest (SKY-763)."""
     _fake_github(monkeypatch, [])
-    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(5, 25))
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(5, 25), 0))
 
     result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
         path="ascent.toml", text="version = 1\n"
@@ -685,7 +685,7 @@ async def test_write_caps_the_diagnostics_the_model_reads(monkeypatch: pytest.Mo
 async def test_a_short_diagnostic_list_has_no_omitted_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """Twenty diagnostics or fewer reach the model whole, with no omitted count."""
     _fake_github(monkeypatch, [])
-    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(20, 0))
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(20, 0), 0))
 
     result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
         path="ascent.toml", text="version = 1\n"
@@ -697,7 +697,7 @@ async def test_a_short_diagnostic_list_has_no_omitted_count(monkeypatch: pytest.
 
 async def test_check_setup_and_continue_cap_the_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
     """``check_setup`` and the Continue refusal give at most 20 diagnostics and count the rest (SKY-763)."""
-    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(30, 3))
+    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(30, 3), 0))
     turn = _TurnAuthoringFlag()
     state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
     tools = {tool.name: tool for tool in screen_nav_tools(state, turn)}
@@ -710,6 +710,50 @@ async def test_check_setup_and_continue_cap_the_diagnostics(monkeypatch: pytest.
     assert "e19 (line 19)" in refused
     assert "e20 (line 20)" not in refused
     assert "ascent.toml has 10 more errors; call check_setup after the fix." in refused
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+@pytest.mark.asyncio
+async def test_a_file_past_the_parser_cap_gives_the_true_omitted_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parser's summary item is dropped and its hidden errors count, in every model-facing result (SKY-763)."""
+    _fake_github(monkeypatch, [])
+    diagnostics, hidden = workspace_tools.ascent_toml_diagnostics(_OVER_THE_CAP)
+    assert (len(diagnostics), hidden) == (500, 100)
+    assert not any("not shown" in item["message"] for item in diagnostics)
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_OVER_THE_CAP
+    )
+    assert len(result["ascent_toml_diagnostics"]) == 20
+    assert result["ascent_toml_diagnostics_omitted"] == 580
+
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml=_OVER_THE_CAP)
+    tools = {tool.name: tool for tool in screen_nav_tools(state, _TurnAuthoringFlag())}
+    assert (await tools["check_setup"].acall())["errors_omitted"] == 580
+    refused = await tools["continue_to_next_screen"].acall()
+    assert "ascent.toml has 580 more errors; call check_setup after the fix." in refused
+
+
+async def test_the_continue_refusal_says_one_more_error_in_the_singular(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twenty-one errors give twenty lines and "1 more error", not "1 more errors"."""
+    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(21, 0), 0))
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
+    tools = {tool.name: tool for tool in screen_nav_tools(state, _TurnAuthoringFlag())}
+
+    refused = await tools["continue_to_next_screen"].acall()
+
+    assert "ascent.toml has 1 more error; call check_setup after the fix." in refused
+
+
+def test_omitted_text_uses_the_singular_for_one() -> None:
+    """The MCP count line reads right for one and for many."""
+    assert workspace_tools.omitted_text(1).startswith("ascent.toml: 1 more diagnostic is not shown.")
+    assert workspace_tools.omitted_text(2).startswith("ascent.toml: 2 more diagnostics are not shown.")
 
 
 def test_diagnostic_text_keeps_the_message_and_adds_the_line() -> None:

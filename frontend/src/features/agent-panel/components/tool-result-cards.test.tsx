@@ -473,6 +473,64 @@ void describe("tool result cards", () => {
     assert.equal(ascentTomlDiagnosticLines([]), "");
   });
 
+  void it("a toast adds the errors past the parser cap to the count (SKY-763)", () => {
+    const items = Array.from({ length: 12 }, (_, i) => ({
+      level: "error" as const,
+      line: i + 1,
+      message: `bad ${i}`,
+    }));
+    const many = withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items, 100));
+    assert.equal(many.split("\n").at(-1), "And 102 more.");
+    const few = withMessages(setupCheckMessages(), () =>
+      ascentTomlDiagnosticLines(items.slice(0, 3), 5),
+    );
+    assert.deepEqual(few.split("\n").slice(1), [
+      "Error at line 1: bad 0",
+      "Error at line 2: bad 1",
+      "Error at line 3: bad 2",
+      "And 5 more.",
+    ]);
+  });
+
+  void it("the save and setup check cards count the diagnostics the result leaves out (SKY-763)", () => {
+    const error = {
+      level: "error",
+      line: 1,
+      section: "run",
+      key: "entry",
+      message: "entry is missing",
+    };
+    const text = "[run]\n";
+    const saved = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <WorkspaceWriteCard
+          call={call(
+            "write_workspace_file",
+            {
+              wizard_state: { ascent_toml: text },
+              ascent_toml_diagnostics: [error],
+              ascent_toml_diagnostics_omitted: 580,
+            },
+            { path: "ascent.toml", text },
+          )}
+        />,
+      ),
+    );
+    assert.match(saved, />And 580 more\.<\/li>/);
+    const checked = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <SetupCheckCard
+          call={call("check_setup", { ok: false, errors: [error], errors_omitted: 19 })}
+        />,
+      ),
+    );
+    assert.match(checked, />And 19 more\.<\/li>/);
+    const whole = withMessages(setupCheckMessages(), () =>
+      renderOpen(<SetupCheckCard call={call("check_setup", { ok: false, errors: [error] })} />),
+    );
+    assert.doesNotMatch(whole, /more\.<\/li>/);
+  });
+
   void it("a setup check says ok or failed, and puts [section.key] before each error and warning", () => {
     const ok = renderOpen(<SetupCheckCard call={call("check_setup", { ok: true, errors: [] })} />);
     assert.match(ok, /<span>agent\.tool\.check_setup\.ok<\/span>/);

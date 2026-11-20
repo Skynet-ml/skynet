@@ -63,6 +63,8 @@ from ..service_gateway.agents.workspace_tools import (
     METRIC_GUIDE,
     ascent_toml_diagnostics,
     diagnostic_text,
+    model_diagnostics,
+    omitted_text,
 )
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
@@ -833,11 +835,14 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
 
     Returns:
         Each error of the parser as an issue, which blocks the run, and the
-        notes: each warning, which does not (SKY-763).
+        notes: each warning, which does not (SKY-763). Both lists hold at most
+        20 diagnostics together, errors first; one last line counts the rest.
     """
-    diagnostics = ascent_toml_diagnostics(text)
-    issues = [diagnostic_text(item) for item in diagnostics if item["level"] == ERROR]
-    notes = [diagnostic_text(item) for item in diagnostics if item["level"] != ERROR]
+    capped = model_diagnostics(*ascent_toml_diagnostics(text))
+    issues = [diagnostic_text(item) for item in capped["diagnostics"] if item["level"] == ERROR]
+    notes = [diagnostic_text(item) for item in capped["diagnostics"] if item["level"] != ERROR]
+    if omitted := capped.get("diagnostics_omitted"):
+        (issues or notes).append(omitted_text(omitted))
     if issues:
         return issues, notes
     return [], [

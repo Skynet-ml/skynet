@@ -269,7 +269,7 @@ def test_a_valid_ascent_toml_checks_ok(wizard_client: TestClient) -> None:
     resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": [], "metric_command": None, "proposer_command": None}
+    assert resp.json() == {"ok": True, "errors": [], "hidden": 0, "metric_command": None, "proposer_command": None}
 
 
 @pytest.mark.parametrize(
@@ -290,7 +290,13 @@ def test_the_check_names_the_metric_command_only_for_a_command_entry(
     resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML + metric})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": [], "metric_command": command, "proposer_command": None}
+    assert resp.json() == {
+        "ok": True,
+        "errors": [],
+        "hidden": 0,
+        "metric_command": command,
+        "proposer_command": None,
+    }
 
 
 def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
@@ -312,6 +318,7 @@ def test_the_check_names_the_proposer_command_of_the_file(wizard_client: TestCli
     assert resp.json() == {
         "ok": True,
         "errors": [],
+        "hidden": 0,
         "metric_command": None,
         "proposer_command": ["python", "agent/propose.py"],
     }
@@ -381,6 +388,23 @@ def test_a_file_with_three_mistakes_returns_each_with_its_level_and_line(wizard_
         ("error", 6, "metric", "entry"),
     ]
     assert body["errors"][0]["message"] == "ascent.toml: [run] bogus is not a supported setting."
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+def test_a_file_past_the_parser_cap_lists_500_errors_and_counts_the_hidden_ones(wizard_client: TestClient) -> None:
+    """The route drops the parser's summary item and gives the hidden count, so the client counts right (SKY-763)."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _OVER_THE_CAP})
+
+    body = resp.json()
+    assert body["ok"] is False
+    assert len(body["errors"]) == 500
+    assert body["hidden"] == 100
+    assert not any("not shown" in e["message"] for e in body["errors"])
 
 
 def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:
