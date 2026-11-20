@@ -261,7 +261,7 @@ async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatc
     assert [end["status"] for end in ends] == ["error", "error", "ok"]
     assert ends[0]["result"]["error"].startswith("run.py cannot be written")
     assert "error" in ends[1]["result"]
-    assert "ascent_toml_error" in ends[2]["result"]
+    assert "ascent_toml_diagnostics" in ends[2]["result"]
     assert "error" not in ends[2]["result"]
 
 
@@ -275,7 +275,9 @@ def test_an_invalid_ascent_toml_holds_the_metric_screen() -> None:
     """The Metric screen is not done while the draft's ascent.toml fails the run's parser."""
     bad = WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="version = 2")
     assert _screen_problems("metric", bad) == [
-        "ascent.toml is not valid: ascent.toml: version 2 is not supported; use version = 1."
+        "ascent.toml is not valid: ascent.toml: version 2 is not supported; use version = 1. (line 1)",
+        "ascent.toml is not valid: ascent.toml: the metric cannot score a version with no output. Add a [run] "
+        "section or a [target.<name>] stage whose outputs the metric scores.",
     ]
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml=_VALID_TOML)) == []
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="  ")) == []
@@ -291,7 +293,7 @@ def test_a_wizard_state_with_the_retired_field_has_no_draft_contract() -> None:
 
 
 async def test_check_setup_reports_the_parser_error_and_holds_continue() -> None:
-    """``check_setup`` returns the first error, and Continue refuses with it until a fix lands this turn."""
+    """``check_setup`` returns every error, and Continue refuses with them until a fix lands this turn."""
     turn = _TurnAuthoringFlag()
     state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
     tools = {tool.name: tool for tool in screen_nav_tools(state, turn)}
@@ -625,10 +627,143 @@ async def test_write_reports_the_parser_error_of_ascent_toml(monkeypatch: pytest
     )
 
     assert result["wizard_state"] == {"workspace_base": _HEAD, "ascent_toml": toml_text}
-    error = result["ascent_toml_error"]
-    assert (error["section"], error["key"]) == ("run", "entry")
+    [error] = result["ascent_toml_diagnostics"]
+    assert (error["level"], error["line"], error["section"], error["key"]) == ("error", 2, "run", "entry")
     assert "[run] entry is missing" in error["message"]
     assert turn.wizard_patch["ascent_toml"] == toml_text
+
+
+@pytest.mark.asyncio
+async def test_write_reports_every_mistake_of_ascent_toml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file with three mistakes gives three errors in one result, so the agent fixes all in one turn (SKY-763)."""
+    _fake_github(monkeypatch, [])
+    toml_text = 'version = 1\n[run]\nentry = "a.py:f"\nbogus = 1\n[metric]\nentry = 5\n[paths]\neditable = 3\n'
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=toml_text
+    )
+
+    assert [(e["level"], e["line"], e["section"], e["key"]) for e in result["ascent_toml_diagnostics"]] == [
+        ("error", 4, "run", "bogus"),
+        ("error", 8, "paths", "editable"),
+        ("error", 6, "metric", "entry"),
+    ]
+
+
+def _many_diagnostics(errors: int, warnings: int) -> list[dict[str, Any]]:
+    """Build a made-up parser result: the warnings first, then the errors.
+
+    Args:
+        errors: How many errors.
+        warnings: How many warnings.
+
+    Returns:
+        The diagnostics, in the shape of ``ascent_toml_diagnostics``.
+    """
+    return [
+        *({"level": "warning", "line": i, "section": "", "key": "", "message": f"w{i}"} for i in range(warnings)),
+        *({"level": "error", "line": i, "section": "", "key": "", "message": f"e{i}"} for i in range(errors)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_caps_the_diagnostics_the_model_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One bad write gives the model at most 20 diagnostics, errors first, and the count of the rest (SKY-763)."""
+    _fake_github(monkeypatch, [])
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(5, 25), 0))
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text="version = 1\n"
+    )
+
+    kept = result["ascent_toml_diagnostics"]
+    assert [e["message"] for e in kept] == [*(f"e{i}" for i in range(5)), *(f"w{i}" for i in range(15))]
+    assert result["ascent_toml_diagnostics_omitted"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_short_diagnostic_list_has_no_omitted_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twenty diagnostics or fewer reach the model whole, with no omitted count."""
+    _fake_github(monkeypatch, [])
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(20, 0), 0))
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text="version = 1\n"
+    )
+
+    assert len(result["ascent_toml_diagnostics"]) == 20
+    assert "ascent_toml_diagnostics_omitted" not in result
+
+
+async def test_check_setup_and_continue_cap_the_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``check_setup`` and the Continue refusal give at most 20 diagnostics and count the rest (SKY-763)."""
+    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(30, 3), 0))
+    turn = _TurnAuthoringFlag()
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
+    tools = {tool.name: tool for tool in screen_nav_tools(state, turn)}
+
+    result = await tools["check_setup"].acall()
+    assert result["ok"] is False
+    assert [e["message"] for e in result["errors"]] == [f"e{i}" for i in range(20)]
+    assert result["errors_omitted"] == 13
+    refused = await tools["continue_to_next_screen"].acall()
+    assert "e19 (line 19)" in refused
+    assert "e20 (line 20)" not in refused
+    assert "ascent.toml has 10 more errors; call check_setup after the fix." in refused
+
+
+# 600 unsupported keys: the parser lists 500 errors, adds one summary item and hides 100 (SKY-763).
+_OVER_THE_CAP = 'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n' + "".join(
+    f"k{i} = 1\n" for i in range(600)
+)
+
+
+@pytest.mark.asyncio
+async def test_a_file_past_the_parser_cap_gives_the_true_omitted_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parser's summary item is dropped and its hidden errors count, in every model-facing result (SKY-763)."""
+    _fake_github(monkeypatch, [])
+    diagnostics, hidden = workspace_tools.ascent_toml_diagnostics(_OVER_THE_CAP)
+    assert (len(diagnostics), hidden) == (500, 100)
+    assert not any("not shown" in item["message"] for item in diagnostics)
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_OVER_THE_CAP
+    )
+    assert len(result["ascent_toml_diagnostics"]) == 20
+    assert result["ascent_toml_diagnostics_omitted"] == 580
+
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml=_OVER_THE_CAP)
+    tools = {tool.name: tool for tool in screen_nav_tools(state, _TurnAuthoringFlag())}
+    assert (await tools["check_setup"].acall())["errors_omitted"] == 580
+    refused = await tools["continue_to_next_screen"].acall()
+    assert "ascent.toml has 580 more errors; call check_setup after the fix." in refused
+
+
+async def test_the_continue_refusal_says_one_more_error_in_the_singular(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twenty-one errors give twenty lines and "1 more error", not "1 more errors"."""
+    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: (_many_diagnostics(21, 0), 0))
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
+    tools = {tool.name: tool for tool in screen_nav_tools(state, _TurnAuthoringFlag())}
+
+    refused = await tools["continue_to_next_screen"].acall()
+
+    assert "ascent.toml has 1 more error; call check_setup after the fix." in refused
+
+
+def test_omitted_text_uses_the_singular_for_one() -> None:
+    """The MCP count line reads right for one and for many."""
+    assert workspace_tools.omitted_text(1).startswith("ascent.toml: 1 more diagnostic is not shown.")
+    assert workspace_tools.omitted_text(2).startswith("ascent.toml: 2 more diagnostics are not shown.")
+
+
+def test_diagnostic_text_keeps_the_message_and_adds_the_line() -> None:
+    """A plain-text diagnostic is the parser's message, then its line; a warning says so first."""
+    error = {"level": "error", "line": None, "section": None, "key": "version", "message": "ascent.toml: bad."}
+    assert workspace_tools.diagnostic_text(error) == "ascent.toml: bad."
+    assert workspace_tools.diagnostic_text({**error, "line": 3}) == "ascent.toml: bad. (line 3)"
+    assert workspace_tools.diagnostic_text({**error, "level": "warning", "line": 3}) == (
+        "Warning: ascent.toml: bad. (line 3)"
+    )
 
 
 @pytest.mark.asyncio

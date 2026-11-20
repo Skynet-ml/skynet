@@ -231,20 +231,28 @@ void test("the root overview marks the tree cut when GitHub cut it short", () =>
   assert.equal(overview(false)?.cut, false);
 });
 
-void test("a workspace save reads the saved file and the toml error; a refusal is a note", () => {
+void test("a workspace save reads the saved file and every toml mistake; a refusal is a note", () => {
   assert.deepEqual(
     workspaceSave({
       wizard_state: { ascent_toml: "[run]\n" },
-      ascent_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
+      ascent_toml_diagnostics: [
+        { level: "error", line: 1, section: "run", key: "entry", message: "entry is missing" },
+        { level: "warning", line: null, section: "", key: "", message: "old style" },
+      ],
     }),
     {
       text: "[run]\n",
-      tomlError: { section: "run", key: "entry", message: "[run] entry is missing" },
+      tomlDiagnostics: [
+        { level: "error", line: 1, where: "run.entry", message: "entry is missing" },
+        { level: "warning", line: null, where: "", message: "old style" },
+      ],
+      tomlOmitted: 0,
     },
   );
   assert.deepEqual(workspaceSave({ wizard_state: { metric_code: "x" } }), {
     text: "x",
-    tomlError: null,
+    tomlDiagnostics: [],
+    tomlOmitted: 0,
   });
   assert.deepEqual(workspaceSave("Not a file you can write: 'a'."), {
     note: "Not a file you can write: 'a'.",
@@ -260,7 +268,31 @@ void test("a stored workspace save with the retired error key shows no error car
       wizard_state: { [retired]: "[run]\n" },
       [`${retired}_error`]: { section: "run", key: "entry", message: "[run] entry is missing" },
     }),
-    { text: "[run]\n", tomlError: null },
+    { text: "[run]\n", tomlDiagnostics: [], tomlOmitted: 0 },
+  );
+});
+
+void test("a capped result keeps the count of the diagnostics it leaves out (SKY-763)", () => {
+  const error = { level: "error", line: 1, section: "run", key: "x", message: "bad" };
+  const saved = workspaceSave({
+    wizard_state: { ascent_toml: "[run]\n" },
+    ascent_toml_diagnostics: [error],
+    ascent_toml_diagnostics_omitted: 580,
+  });
+  assert.equal(saved && "text" in saved ? saved.tomlOmitted : null, 580);
+  assert.equal(setupCheck({ ok: false, errors: [error], errors_omitted: 13 })?.omitted, 13);
+  assert.equal(setupCheck({ ok: true, errors: [] })?.omitted, 0);
+});
+
+void test("a stored workspace save with the retired single-error key shows no error card (SKY-763)", () => {
+  // Built from parts so the tree holds no retired name.
+  const retired = ["ascent", "toml", "error"].join("_");
+  assert.deepEqual(
+    workspaceSave({
+      wizard_state: { ascent_toml: "[run]\n" },
+      [retired]: { section: "run", key: "entry", message: "[run] entry is missing" },
+    }),
+    { text: "[run]\n", tomlDiagnostics: [], tomlOmitted: 0 },
   );
 });
 
@@ -492,12 +524,16 @@ void test("a tagging guide reads its name, question, categories and rule count",
   assert.equal(taggingGuide({ name: "x" }), null);
 });
 
-void test("a setup check reads its errors with their place", () => {
+void test("a setup check reads its errors with their level, line and place", () => {
   assert.deepEqual(
-    setupCheck({ ok: false, errors: [{ section: "run", key: "entry", message: "missing" }] }),
+    setupCheck({
+      ok: false,
+      errors: [{ level: "error", line: 4, section: "run", key: "entry", message: "missing" }],
+    }),
     {
       ok: false,
-      errors: [{ where: "run.entry", message: "missing" }],
+      errors: [{ level: "error", line: 4, where: "run.entry", message: "missing" }],
+      omitted: 0,
     },
   );
   assert.equal(setupCheck("x"), null);

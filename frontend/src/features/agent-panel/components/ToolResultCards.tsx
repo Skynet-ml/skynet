@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 
 import { getStatusLabel } from "@/shared/constants/job-status";
+import { ascentTomlDiagnosticText } from "@/shared/lib/api";
 import { runHref } from "@/shared/lib/api-route";
 import { formatImprovement, formatLogTimestamp, formatPercent } from "@/shared/lib/formatters";
 import { formatMsg, msg } from "@/shared/lib/messages";
@@ -44,6 +45,7 @@ import {
   writtenLines,
   type FileLine,
   type GithubRow,
+  type TomlDiagnostic,
 } from "../lib/tool-results";
 
 import { GainPill } from "./result-card-atoms";
@@ -53,6 +55,7 @@ const MAX_ROWS = 8;
 const MAX_LINES = 400;
 const ERROR_TONE = "text-[var(--danger)]";
 const ADDED_TONE = "text-[var(--success)]";
+const WARNING_TONE = "text-[var(--warning)]";
 const MONO_BOX =
   "max-h-52 overflow-auto rounded-md border border-border/40 bg-background/70 p-2 pe-9 font-mono text-[0.6875rem]/[1.55] text-foreground/90";
 
@@ -482,7 +485,7 @@ export function WorkspaceWriteCard({ call }: { call: AgentToolCall }) {
           parts={[
             path && <PathDetail path={path} />,
             ok && (counts.added > 0 || counts.removed > 0) && <LineCounts {...counts} />,
-            ok && saved.tomlError && (
+            ok && saved.tomlDiagnostics.some((e) => e.level === "error") && (
               <span className={cn("inline-flex items-center gap-1", ERROR_TONE)}>
                 <Warning className="size-3 shrink-0" aria-hidden />
                 {msg("agent.tool.check_setup.failed")}
@@ -494,11 +497,7 @@ export function WorkspaceWriteCard({ call }: { call: AgentToolCall }) {
     >
       {ok ? (
         <div className="flex flex-col gap-1.5">
-          {saved.tomlError && (
-            <p dir="auto" className={cn("break-words", ERROR_TONE)}>
-              {saved.tomlError.message}
-            </p>
-          )}
+          <TomlDiagnosticList items={saved.tomlDiagnostics} omitted={saved.tomlOmitted} />
           {written.length > 0 && <CodeLines lines={written} cut={false} />}
         </div>
       ) : null}
@@ -1238,7 +1237,7 @@ export function TaggingGuideCard({ call }: { call: AgentToolCall }) {
   );
 }
 
-/** ``check_setup``: whether ``ascent.toml`` is valid. Opens to each error and its place. */
+/** ``check_setup``: whether ``ascent.toml`` is valid. Opens to each error and warning, with its place and line. */
 export function SetupCheckCard({ call }: { call: AgentToolCall }) {
   const check = useResult(call, setupCheck);
   return (
@@ -1258,23 +1257,34 @@ export function SetupCheckCard({ call }: { call: AgentToolCall }) {
         ) : undefined
       }
     >
-      {check && check.errors.length > 0 ? (
-        <ul className="flex flex-col gap-1">
-          {check.errors.map((e, i) => (
-            <li key={i} className="min-w-0">
-              {e.where && (
-                <code dir="ltr" className="me-1.5 font-mono text-[0.6875rem] text-foreground/80">
-                  [{e.where}]
-                </code>
-              )}
-              <span dir="auto" className={ERROR_TONE}>
-                {e.message}
-              </span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {check ? <TomlDiagnosticList items={check.errors} omitted={check.omitted} /> : null}
     </ResultStep>
+  );
+}
+
+/** Every ``ascent.toml`` error and warning with its place and line, then the count past the cap (SKY-763). */
+function TomlDiagnosticList({ items, omitted }: { items: TomlDiagnostic[]; omitted: number }) {
+  if (items.length === 0 && omitted === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1">
+      {items.map((e, i) => (
+        <li key={i} className="min-w-0 break-words">
+          {e.where && (
+            <code dir="ltr" className="me-1.5 font-mono text-[0.6875rem] text-foreground/80">
+              [{e.where}]
+            </code>
+          )}
+          <span dir="auto" className={e.level === "error" ? ERROR_TONE : WARNING_TONE}>
+            {ascentTomlDiagnosticText(e)}
+          </span>
+        </li>
+      ))}
+      {omitted > 0 && (
+        <li className="text-muted-foreground/60">
+          {formatMsg("submit.setup_check.more", { p1: omitted })}
+        </li>
+      )}
+    </ul>
   );
 }
 

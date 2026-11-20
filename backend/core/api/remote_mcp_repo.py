@@ -58,10 +58,18 @@ from ..models.blackbox import (
     BlackboxRepoSource,
     BlackboxRunRequest,
 )
-from ..service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE, ascent_toml_error
+from ..service_gateway.agents.workspace_tools import (
+    ASCENT_TOML_EXAMPLE,
+    METRIC_GUIDE,
+    ascent_toml_diagnostics,
+    diagnostic_text,
+    model_diagnostics,
+    omitted_text,
+)
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
+    ERROR,
     ConstraintsError,
     parse_constraints,
 )
@@ -826,12 +834,21 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
         text: The file text.
 
     Returns:
-        The parser's first error as an issue, and the notes.
+        Each error of the parser as an issue, which blocks the run, and the
+        notes: each warning, which does not (SKY-763). Both lists hold at most
+        20 diagnostics together, errors first; one last line counts the rest.
     """
-    error = ascent_toml_error(text)
-    if error is not None:
-        return [error["message"]], []
-    return [], [f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged."]
+    capped = model_diagnostics(*ascent_toml_diagnostics(text))
+    issues = [diagnostic_text(item) for item in capped["diagnostics"] if item["level"] == ERROR]
+    notes = [diagnostic_text(item) for item in capped["diagnostics"] if item["level"] != ERROR]
+    if omitted := capped.get("diagnostics_omitted"):
+        (issues or notes).append(omitted_text(omitted))
+    if issues:
+        return issues, notes
+    return [], [
+        *notes,
+        f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged.",
+    ]
 
 
 def review_draft(
@@ -851,10 +868,13 @@ def review_draft(
     missing = _remaining(spec)
     if missing:
         return [_missing_step_issue(step) for step in missing], [], {}
-    repo_problems, notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
-    issues = list(repo_problems)
+    repo_problems, repo_notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
+    issues, notes = list(repo_problems), list(repo_notes)
     if contract := (spec.get("contract") or {}).get("ascent_toml"):
-        issues += contract_issues(contract)[0]
+        # As in repo_draft_set_contract: errors block the run, warnings are notes (SKY-763).
+        contract_problems, contract_notes = contract_issues(contract)
+        issues += contract_problems
+        notes += contract_notes
     elif has_contract is False:
         issues.append(_missing_step_issue("contract"))
     data = spec.get("data") or {}

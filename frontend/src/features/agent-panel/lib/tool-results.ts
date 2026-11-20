@@ -422,15 +422,44 @@ export function writtenLines(
   return lines.map((l, i) => ({ n: first === null ? null : first + i, text: l.text }));
 }
 
+/** One ``ascent.toml`` diagnostic as a card shows it: ``where`` is ``section.key``. */
+export interface TomlDiagnostic {
+  level: "error" | "warning";
+  line: number | null;
+  where: string;
+  message: string;
+}
+
+/**
+ * Read the ``ascent.toml`` diagnostics of a tool result, in the parser's order (SKY-763).
+ *
+ * Args:
+ *   value: The list of ``{level, line, section, key, message}``.
+ *
+ * Returns:
+ *   Each diagnostic with a message; an unknown level counts as an error.
+ */
+function readTomlDiagnostics(value: unknown): TomlDiagnostic[] {
+  return asList(value).flatMap((e) => {
+    const message = str(e.message);
+    const where = [str(e.section), str(e.key)].filter(Boolean).join(".");
+    const level = e.level === "warning" ? "warning" : "error";
+    return message ? [{ level, line: num(e.line), where, message }] : [];
+  });
+}
+
 export interface WorkspaceSave {
   /** The whole file as the editor now has it. */
   text: string;
-  tomlError: { section: string; key: string; message: string } | null;
+  /** Every error and warning of the ``ascent.toml`` parser; empty for a clean file. */
+  tomlDiagnostics: TomlDiagnostic[];
+  /** The diagnostics the result leaves out past its cap; 0 when it lists all. */
+  tomlOmitted: number;
 }
 
 /**
  * ``write_workspace_file`` or ``edit_workspace_file``: the saved file and the
- * ``ascent.toml`` parser's error, or a note for a refused write.
+ * ``ascent.toml`` parser's errors and warnings, or a note for a refused write.
  *
  * Args:
  *   value: The tool result.
@@ -447,12 +476,10 @@ export function workspaceSave(value: unknown): WorkspaceSave | { note: string } 
   const state = asObj(r.wizard_state);
   const text = state ? Object.values(state).find((v) => typeof v === "string") : undefined;
   if (typeof text !== "string") return null;
-  const err = asObj(r.ascent_toml_error);
   return {
     text,
-    tomlError: err
-      ? { section: str(err.section), key: str(err.key), message: str(err.message) }
-      : null,
+    tomlDiagnostics: readTomlDiagnostics(r.ascent_toml_diagnostics),
+    tomlOmitted: num(r.ascent_toml_diagnostics_omitted) ?? 0,
   };
 }
 
@@ -1013,25 +1040,19 @@ export function taggingGuide(value: unknown): TaggingGuideView | null {
 }
 
 /**
- * The ``ascent.toml`` errors ``check_setup`` found.
+ * The ``ascent.toml`` errors and warnings ``check_setup`` found.
  *
  * Args:
- *   value: The tool result, ``{ok, errors}``.
+ *   value: The tool result, ``{ok, errors, errors_omitted?}``.
  *
  * Returns:
- *   Whether the file is valid and its errors, or null for anything else.
+ *   Whether the file is valid, its errors and the count the result leaves
+ *   out past its cap, or null for anything else.
  */
 export function setupCheck(
   value: unknown,
-): { ok: boolean; errors: Array<{ where: string; message: string }> } | null {
+): { ok: boolean; errors: TomlDiagnostic[]; omitted: number } | null {
   const r = asObj(value);
   if (!r || typeof r.ok !== "boolean") return null;
-  return {
-    ok: r.ok,
-    errors: asList(r.errors).flatMap((e) => {
-      const message = str(e.message);
-      const where = [str(e.section), str(e.key)].filter(Boolean).join(".");
-      return message ? [{ where, message }] : [];
-    }),
-  };
+  return { ok: r.ok, errors: readTomlDiagnostics(r.errors), omitted: num(r.errors_omitted) ?? 0 };
 }
