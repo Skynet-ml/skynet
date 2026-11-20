@@ -607,8 +607,10 @@ class RepoScorer:
             session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
+                # ``exec`` replaces the shell, so no process of the box's user
+                # other than the runner holds the model key in its environment.
                 result = metric.box.run(
-                    f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
+                    f"cd {shlex.quote(metric.repo_path)} && exec python3 {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
                     timeout_seconds=self._timeout_seconds,

@@ -135,7 +135,20 @@ ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 # This file runs alone in the box, without ``core.config``; boxes started by an
 # older control plane still carry only the pre-rename spellings.
 _LEGACY_ENV_PREFIX = "SKYNET_"
-_KEY_ENV_NAMES = frozenset({ENV_API_KEY, _LEGACY_ENV_PREFIX + "API_KEY"})
+# A command metric reaches the model and the stages only through its helper
+# URLs (SKY-767), which meter each call and check each stage. These names hold
+# the model key, the protected model mailbox and the tool relay token that the
+# box (or a contained session, ``sandbox_runtime._contained_environment``)
+# sets, so they stay out of the command's environment, in both spellings.
+_COMMAND_HIDDEN_ENV = (
+    *(
+        name
+        for base in (ENV_API_KEY, ENV_BUDGET_RELAY_URL, "APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN")
+        for name in (base, _LEGACY_ENV_PREFIX + base.removeprefix("APP_"))
+    ),
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+)
 IMAGE_HELPER_NAME = "Image"
 LOG_HELPER_NAME = "log"
 # ``from openascent import call, StageError`` reaches the run's ``[target.<name>]`` stages.
@@ -1701,7 +1714,14 @@ class MetricHelpers:
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()
         base = f"http://127.0.0.1:{self._server.server_address[1]}"
-        self.env = {stage_env_name(name): f"{base}/stage/{urllib.parse.quote(name, safe='')}" for name in names}
+        variables = [stage_env_name(name) for name in names]
+        # Two names with one variable (``a-b`` and ``a_b``) get none, so a call
+        # fails as an absent stage and never reaches the other stage.
+        self.env: dict[str, str] = {}
+        for name in names:
+            variable = stage_env_name(name)
+            if variables.count(variable) == 1:
+                self.env[variable] = f"{base}/stage/{urllib.parse.quote(name, safe='')}"
         self.env[LOG_URL_ENV] = f"{base}/log"
         if gateway is not None and model:
             self.env.update({MODEL_URL_ENV: f"{base}/model", MODEL_ENV: model, MODEL_KEY_ENV: ""})
@@ -1845,6 +1865,10 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     stages = payload.get("stages")
+    # The command runs as this process's user, and this process's start
+    # environment holds the model key, so /proc/<pid>/environ must not be
+    # readable. The flag does not reach the command: execve resets it.
+    _block_tracing()
     relay = StageClient(stages) if isinstance(stages, dict) else None
     if relay is not None:
         os.environ.update(_relay_env(relay, stages))
@@ -1853,8 +1877,7 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
     names = [str(name) for name in stages.get("names") or ()] if isinstance(stages, dict) else []
     model = (gateway.get("declared_model") or gateway.get("model")) if isinstance(gateway, dict) else None
     helpers = MetricHelpers(relay, names, llm, str(model) if model else None)
-    # The model helper adds the key, so the command never holds it (SKY-776).
-    env = {key: value for key, value in os.environ.items() if key not in _KEY_ENV_NAMES}
+    env = {key: value for key, value in os.environ.items() if key not in _COMMAND_HIDDEN_ENV}
     env.update(helpers.env)
     case = payload.get("case")
     case = case if isinstance(case, dict) else {"input": case}

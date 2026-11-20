@@ -2395,6 +2395,66 @@ def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) ->
     assert output["control"] == {"code": "budget_reached", "message": "The run budget is spent."}
 
 
+@_needs_openascent
+def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Path) -> None:
+    """Each key, model mailbox and tool relay name stays out of the command; other variables stay in."""
+    hidden = dict.fromkeys(runner._COMMAND_HIDDEN_ENV, "secret-value")
+    output = _command_metric(
+        tmp_path, 'env > seen\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n', environ={**hidden, "KEEP_ME": "1"}
+    )
+    seen = (tmp_path / "box" / "seen").read_text()
+
+    assert output["score"] == 1.0
+    assert {"APP_API_KEY", "SKYNET_API_KEY", "APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"} <= set(hidden)
+    assert {"APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} <= set(hidden)
+    assert "secret-value" not in seen
+    assert "KEEP_ME=1" in seen.splitlines()
+
+
+@_needs_openascent
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
+def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> None:
+    """The runner holds the model key in its start environment; its child command cannot read it from /proc."""
+    script = (
+        'tr "\\0" " " < "/proc/$PPID/cmdline" > parent\n'
+        'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^APP_API_KEY="; then\n'
+        "  echo read > seen\nelse\n  echo refused > seen\nfi\n"
+        'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    )
+    output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"})
+    box = tmp_path / "box"
+
+    assert output["score"] == 1.0
+    assert Path(runner.__file__).name in (box / "parent").read_text()
+    assert (box / "seen").read_text().strip() == "refused"
+
+
+def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_metric_command`` makes the runner non-dumpable before it starts anything; ``run_call`` does not."""
+
+    class BlockedError(Exception):
+        """Raised by the stand-in for ``_block_tracing``."""
+
+    def blocked() -> None:
+        """Stop the call where the runner blocks tracing."""
+        raise BlockedError
+
+    monkeypatch.setattr(runner, "_block_tracing", blocked)
+    with pytest.raises(BlockedError):
+        runner.run_metric_command({})
+    assert "_block_tracing" not in runner.run_call.__code__.co_names
+
+
+def test_stage_names_that_share_a_variable_get_no_variable() -> None:
+    """``a-b`` and ``a_b`` (or ``Judge`` and ``judge``) would reach each other's stage, so neither gets a URL."""
+    helpers = runner.MetricHelpers(None, ["a-b", "a_b", "Judge", "judge", "ok"], None, None)
+    try:
+        stages = {name for name in helpers.env if name.startswith(runner.STAGE_ENV_PREFIX)}
+    finally:
+        helpers.close()
+    assert stages == {"ASCENT_STAGE_OK_URL"}
+
+
 def test_stage_env_name_follows_the_openascent_rule() -> None:
     """Each ASCII letter is upper case, each digit stays, and each other character is ``_``."""
     assert runner.stage_env_name("double") == "ASCENT_STAGE_DOUBLE_URL"

@@ -718,7 +718,9 @@ that is not 2xx and the body `{"error": "<text>"}`.
 
 - `ASCENT_STAGE_<NAME>_URL`: one variable for each `[target.<name>]` stage.
   In `<NAME>`, each ASCII letter is upper case, each ASCII digit stays, and
-  each other character is `_`. POST `{"input": <any JSON>}`. The answer is
+  each other character is `_`. Two stages with the same `<NAME>` (such as
+  `a-b` and `a_b`) get no variable, so a call to either fails as an
+  unknown stage. POST `{"input": <any JSON>}`. The answer is
   `{"output": <the stage's output>}`. An unknown stage, a failed stage, a
   stage with no valid output, a stage time-out and a body with another key
   each give an error answer.
@@ -728,10 +730,16 @@ that is not 2xx and the body `{"error": "<text>"}`.
   The request takes `messages` and, optionally, `max_tokens`, `temperature`
   and `reasoning_effort`. A request that names another model, asks for a
   stream or has another key gets an error answer. `ASCENT_MODEL_KEY` is
-  empty, because the box adds the key itself. The command's environment
-  holds no model key. Each call is metered like a call from a Python metric.
+  empty, because the box adds the key itself. Each call is metered like a
+  call from a Python metric.
 - `ASCENT_LOG_URL`: POST `{"event": "<name>", "fields": {...}}`. The run log
   gets the same event as `log()` in a Python metric. The answer is `{}`.
+
+The command reaches the model and the stages only through these URLs. Its
+environment holds no model key, no model mailbox address
+(`APP_BUDGET_RELAY_URL`, `APP_GATEWAY_URL`, `OPENAI_BASE_URL`,
+`ANTHROPIC_BASE_URL`) and no tool relay token (`APP_TOOL_RELAY_TOKEN`), also
+not in the old `SKYNET_` spelling.
 
 A Python metric gets none of these variables, because it imports the helpers.
 
