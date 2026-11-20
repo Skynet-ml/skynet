@@ -286,9 +286,10 @@ that score. Every named score that a person or an API client sees stays
 raw. A minimize named score in the run result has `"direction":
 "minimize"`.
 
-A run that uses a minimize named score needs a sandbox image at protocol
-21 or later. With an older image, the run fails before it starts, and the
-message tells you to rebuild and re-pin the sandbox image.
+A run that sets an `[outcome.require]` limit or uses a minimize named
+score needs a sandbox image at protocol 21 or later. With an older image,
+the run fails before it starts, and the message tells you to rebuild and
+re-pin the sandbox image.
 
 ## Outcome: `[outcome]`
 

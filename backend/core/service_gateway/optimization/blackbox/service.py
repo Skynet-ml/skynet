@@ -1713,7 +1713,7 @@ def _run_job(
             # It stays None unless both final runs finished, so a budget stop
             # in the winner's held-out run never passes for a finished final run.
             "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
-            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
+            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no limit.
             **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,

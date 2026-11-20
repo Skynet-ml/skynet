@@ -22,6 +22,7 @@ from ..trajectory import (
     current_proposal_iteration,
 )
 from .protocol import SCORE_DIRECTION_KEY, Candidate, SideInfo
+from .repo_constraints import MINIMIZE
 from .runner import side_info_json_default
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,6 @@ STR_CANDIDATE_KEY = "current_candidate"
 # GEPA's frontier treats every named score as higher-is-better, so a ``[metric.scores]`` minimize
 # score reaches it negated; this key lists those names so its reflection can read them raw (SKY-775).
 LOWER_IS_BETTER_KEY = "Lower is better"
-MINIMIZE = "minimize"
 
 
 def is_data_image(value: Any) -> bool:

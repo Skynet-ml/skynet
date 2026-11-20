@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -306,3 +307,27 @@ def test_a_budget_stop_is_not_a_cli_failure() -> None:
         native_engines.ProposerOutcome("s", 0.0, False, "done", budget_exhausted=False, killed=False, returncode=0),
     ):
         outcome.raise_if_failed("round1")
+
+
+def test_the_state_table_marks_a_minimize_named_column_as_negated(tmp_path: Path) -> None:
+    """``STATE.md`` names each minimize named column, so the agent reads its negated value right (SKY-775).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    config = _config("autoresearch")
+    config.run_dir = str(tmp_path)
+    engine = native_engines.AutoResearchEngine(config)
+    engine.example_ids = ["e1"]
+    for folder in ("frontier", "archive"):
+        (engine.work_dir / folder).mkdir(parents=True)
+    side_info = {"scores": {"cost_usd": {"score": 0.06, "feedback": "", "direction": "minimize"}, "recall": 0.8}}
+    named, named_feedback = native_engines.named_score_columns([side_info])
+    engine._observe(native_engines.Observation("v1", 0.5, {"e1": 0.5, **named}, {"e1": "", **named_feedback}, True, 1))
+
+    engine._write_state(SimpleNamespace(budget=SimpleNamespace(remaining=6)), "survey")
+
+    state = (engine.work_dir / "STATE.md").read_text(encoding="utf-8")
+    assert "| `score:cost_usd` (lower is better, negated) | -0.06" in state
+    assert "| `score:recall` | 0.8" in state
+    assert "`score:recall` (lower" not in state

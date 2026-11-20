@@ -1130,12 +1130,21 @@ class AutoResearchEngine:
             lines.append("Nothing has been fully evaluated yet.")
         columns = self._columns(table)
         if table and columns:
+            # named_score_columns marks a negated column's feedback, so the agent learns which columns flipped.
+            with self._lock:
+                lower = {
+                    column
+                    for o in self.observations
+                    for column, note in o.feedback.items()
+                    if note.startswith(_NEGATED_NOTE)
+                }
             lines += ["", "## Per-example and named scores on the frontier", ""]
             lines += ["| column | " + " | ".join(self._ids[c] for c in front) + " |"]
             lines += ["| --- " * (len(front) + 1) + "|"]
             for column in columns:
                 cells = " | ".join(_shown(table[c].get(column, _MISSING_SCORE)) for c in front)
-                lines.append(f"| `{column}` | {cells} |")
+                label = f"`{column}` (lower is better, negated)" if column in lower else f"`{column}`"
+                lines.append(f"| {label} | {cells} |")
         lines += ["", "## Failure dossier", ""]
         lines += self._dossier(table, front)
         (self.work_dir / "STATE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

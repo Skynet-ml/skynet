@@ -261,23 +261,26 @@ def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
 
 
 def _require_score_direction_support(image_protocol: int, snapshot: Any) -> None:
-    """Refuse an older image for a run whose staged ``optimize.toml`` minimizes a named score.
+    """Refuse an older image for a run whose staged ``optimize.toml`` sets limits or minimizes a named score.
 
     An image before protocol 21 ignores the snapshot's ``outcome.scores``. It
     would judge a minimize score's ``[outcome.require]`` limit as a minimum and
-    report a wrong verdict (SKY-775).
+    report a wrong verdict. It also writes the verdict under the old keys, so a
+    run with any limit would silently lose its ``details.record`` (SKY-775).
 
     Args:
         image_protocol: The image's protocol, from :func:`_require_image_protocol`.
         snapshot: The staged repository snapshot of the request, if any.
 
     Raises:
-        RuntimeError: When the image is older and ``[metric.scores]`` minimizes a score.
+        RuntimeError: When the image is older and ``[outcome.require]`` sets a limit
+            or ``[metric.scores]`` minimizes a score.
     """
     if image_protocol >= SCORE_DIRECTION_PROTOCOL or not isinstance(snapshot, dict):
         return
-    directions = (snapshot.get("outcome") or {}).get("scores") or {}
-    if isinstance(directions, dict) and "minimize" in directions.values():
+    outcome = snapshot.get("outcome") or {}
+    directions = outcome.get("scores") or {}
+    if outcome.get("require") or (isinstance(directions, dict) and "minimize" in directions.values()):
         raise RuntimeError(SCORE_DIRECTION_IMAGE_MESSAGE)
 
 

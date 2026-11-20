@@ -46,8 +46,9 @@ SANDBOX_PROTOCOL = 21
 # reads the staged snapshot's ``outcome.scores`` (``[metric.scores]``), judges
 # a minimize named score's ``[outcome.require]`` limit as a maximum, and writes
 # the verdict as ``requirements_passed`` and ``failed_requirements``. An older
-# image judges every limit as a minimum, so the worker refuses every image
-# before 21 for a run with a minimize named score.
+# image judges every limit as a minimum and writes the old verdict keys, so the
+# worker refuses every image before 21 for a run with an ``[outcome.require]``
+# limit or a minimize named score.
 # The worker sends an older image the image's own protocol number.
 READABLE_PROTOCOLS = frozenset({12, 13, 14, 15, 16, 17, 18, 19, 20, SANDBOX_PROTOCOL})
 
