@@ -9,7 +9,9 @@ inputs, optimizer (with models and budget), and the metric/code workspace.
 
 ``POST /wizard/optimize-toml/check`` runs the repository parser on the text
 of an ``optimize.toml`` from the setup draft and returns each error with the
-section and key that caused it, so the editor can show it there.
+section and key that caused it, so the editor can show it there. It also
+returns the command that ``[metric] entry`` names, so the wizard asks for no
+``metric.py`` without a TOML parser of its own (SKY-770).
 
 Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 """
@@ -153,6 +155,10 @@ class OptimizeTomlError(BaseModel):
 class OptimizeTomlCheckResponse(BaseModel):
     ok: bool
     errors: list[OptimizeTomlError]
+    metric_command: list[str] | None = Field(
+        default=None,
+        description="The command that [metric] entry names. Null for a Python entry, no entry, or a file with an error.",
+    )
 
 
 def _check_reasoning_effort(extra: dict[str, Any], name: str | None, field_name: str) -> None:
@@ -438,16 +444,21 @@ def create_wizard_router() -> APIRouter:
             req: The file text.
 
         Returns:
-            ``ok`` true with no errors, or ``ok`` false with the error and its section and key.
+            ``ok`` true with no errors and the ``[metric] entry`` command, if any,
+            or ``ok`` false with the error and its section and key.
         """
         try:
             # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
-            parse_constraints(req.text.encode("utf-8", "surrogatepass"))
+            constraints = parse_constraints(req.text.encode("utf-8", "surrogatepass"))
         except ConstraintsError as error:
             return OptimizeTomlCheckResponse(
                 ok=False,
                 errors=[OptimizeTomlError(section=error.section, key=error.key, message=str(error))],
             )
-        return OptimizeTomlCheckResponse(ok=True, errors=[])
+        # A command entry needs no metric.py; a Python entry still runs the wizard's metric code (SKY-770).
+        entry = constraints.metric.entry
+        return OptimizeTomlCheckResponse(
+            ok=True, errors=[], metric_command=list(entry) if isinstance(entry, tuple) else None
+        )
 
     return router

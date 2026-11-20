@@ -567,6 +567,12 @@ export interface WizardV2Context {
   optimizerCatalogLoading: boolean;
   /** An i18n key or the exact error text. */
   runBlockedReason: string | null;
+  /**
+   * The command that the run's optimize.toml names in `[metric] entry`, from
+   * the server's contract check; null for a Python entry, no entry, or no
+   * answer yet. A command needs no metric.py (SKY-770).
+   */
+  metricCommand: readonly string[] | null;
   /** The wizard's execution budget, created on first use. */
   ensureBudget(): Promise<ExecutionBudget>;
   submit(): Promise<void>;

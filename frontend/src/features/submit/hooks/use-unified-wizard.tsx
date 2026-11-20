@@ -38,6 +38,7 @@ import {
   getOptimizerCatalog,
   getLatestHardeningJob,
   getStagedDataset,
+  checkOptimizeToml,
   hostedRunsAvailable,
   webPicked,
   isInsufficientFundsError,
@@ -88,7 +89,7 @@ import {
   type Row,
 } from "../lib/inputs-mode";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
-import { contractMetricEntry, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
+import { contractText, finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   WIZARD_HARDENING_KEY,
   WIZARD_SESSION_KEY,
@@ -140,6 +141,8 @@ import {
 
 // A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
 const OPTIMIZE_TOML = "optimize.toml";
+// The contract check waits this long after the last edit, so typing sends one check.
+const CONTRACT_CHECK_DELAY_MS = 400;
 
 /** The draft's repository files other than optimize.toml, or undefined when there are none. */
 function otherFiles(files: Readonly<Record<string, string>>): Record<string, string> | undefined {
@@ -473,12 +476,40 @@ export function WizardV2Provider({
     return () => controller.abort();
   }, [mode, runSource, catalogLoads]);
 
-  // A contract that names its own metric needs no wizard metric code (SKY-749).
+  // A contract whose [metric] entry is a command needs no metric.py. The
+  // server's parser names the command; the wizard parses no TOML (SKY-770).
   const repoContract = useWizardStateOptional()?.repoBase?.get(OPTIMIZE_TOML);
-  const metricEntry = contractMetricEntry(state.workspace.files[OPTIMIZE_TOML], repoContract);
+  const contract = state.task.repo
+    ? contractText(state.workspace.files[OPTIMIZE_TOML], repoContract)
+    : "";
+  const [checkedContract, setCheckedContract] = useState<{
+    text: string;
+    command: readonly string[] | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!contract.trim()) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      checkOptimizeToml(contract, controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted) return;
+          const command = result.ok ? (result.metric_command ?? null) : null;
+          setCheckedContract({ text: contract, command: command?.length ? command : null });
+        })
+        // With no answer the wizard asks for metric.py, as for a contract with no command.
+        .catch(() => {});
+    }, CONTRACT_CHECK_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [contract]);
+  // An answer counts only for the text it checked, so an edit never keeps a stale command.
+  const metricCommand =
+    contract.trim() && checkedContract?.text === contract ? checkedContract.command : null;
   const stepIssue = useCallback(
-    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog, { metricEntry }),
-    [state, optimizerCatalog, metricEntry],
+    (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog, { metricCommand }),
+    [state, optimizerCatalog, metricCommand],
   );
 
   // The Optimizer step is blocked only once it has a setup to judge; before
@@ -544,8 +575,8 @@ export function WizardV2Provider({
   // While the wizard's agent works, missing code reads as being written.
   const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
-    () => blockedReason(state, optimizerCatalog, { agentWriting, metricEntry }),
-    [state, optimizerCatalog, agentWriting, metricEntry],
+    () => blockedReason(state, optimizerCatalog, { agentWriting, metricCommand }),
+    [state, optimizerCatalog, agentWriting, metricCommand],
   );
 
   const metricCallsModel = scorerCallsModel(state.workspace.metricCode);
@@ -624,7 +655,7 @@ export function WizardV2Provider({
         maxCostCents: budgetUncapped ? null : maxCostCents,
         // The ids belong to this app's server; a web run from the Mac cannot resolve them.
         savedSecrets: runSource === "local" ? savedSecrets : [],
-        metricEntry,
+        metricCommand,
       },
     );
   }, [
@@ -636,7 +667,7 @@ export function WizardV2Provider({
     sandboxProviders,
     runSource,
     savedSecrets,
-    metricEntry,
+    metricCommand,
   ]);
   const exposedCatalog = optimizerCatalog && optimizerCatalog.data_mode === mode ? optimizerCatalog : null;
   const hostedBlock =
@@ -673,7 +704,7 @@ export function WizardV2Provider({
 
   const firstBlockedStep = (): WizardStepId | null => {
     for (const step of WIZARD_V2_STEPS) {
-      if (computeStepIssue(state, step, optimizerCatalog)) return step;
+      if (computeStepIssue(state, step, optimizerCatalog, { metricCommand })) return step;
     }
     return null;
   };
@@ -733,7 +764,7 @@ export function WizardV2Provider({
         runOn,
         readSessionValue(WIZARD_HARDENING_KEY),
         getLatestHardeningJob,
-        metricEntry,
+        metricCommand,
       );
       const conversationId = runSetupChatId(readSessionValue(SETUP_CHAT_KEY), runOn);
       const result = await submitRepoRun(
@@ -1174,6 +1205,7 @@ export function WizardV2Provider({
     optimizerCatalog: exposedCatalog,
     optimizerCatalogLoading,
     runBlockedReason,
+    metricCommand,
     ensureBudget,
     submit,
     submitting: submitPhase !== "idle",

@@ -269,7 +269,38 @@ def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
     resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": []}
+    assert resp.json() == {"ok": True, "errors": [], "metric_command": None}
+
+
+@pytest.mark.parametrize(
+    ("metric", "command"),
+    [
+        (
+            '[metric]\nfiles = ["eval"]\nentry = ["cargo", "run", "--manifest-path", "eval/Cargo.toml"]\n',
+            ["cargo", "run", "--manifest-path", "eval/Cargo.toml"],
+        ),
+        ('[metric]\nentry = "eval/score.py:grade"\n', None),
+        ("", None),
+    ],
+)
+def test_the_check_names_the_metric_command_only_for_a_command_entry(
+    wizard_client: TestClient, metric: str, command: list[str] | None
+) -> None:
+    """A command ``[metric] entry`` comes back as its argv; a Python entry or none gives null (SKY-770)."""
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML + metric})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "errors": [], "metric_command": command}
+
+
+def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
+    """A file the parser refuses names no command, so the wizard still asks for metric.py (SKY-770)."""
+    text = _VALID_TOML + '[metric]\nentry = ["bash", "metric.sh"]\n'
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert resp.json()["metric_command"] is None
 
 
 @pytest.mark.parametrize(

@@ -24,13 +24,14 @@ function catalogOption(state: WizardV2State, catalog: OptimizerCatalogResponse |
 
 /**
  * The message key (or exact text) of what blocks one step; null when it is complete.
- * `metricEntry` is the `[metric] entry` that the run's optimize.toml names, if any.
+ * `metricCommand` is the command that the run's optimize.toml names in
+ * `[metric] entry`, from the contract check; null for a Python entry or none.
  */
 export function computeStepIssue(
   state: WizardV2State,
   step: WizardStepId,
   catalog: OptimizerCatalogResponse | null,
-  { metricEntry = null }: { metricEntry?: string | null } = {},
+  { metricCommand = null }: { metricCommand?: readonly string[] | null } = {},
 ): string | null {
   const { task, inputs, optimizer, workspace } = state;
   switch (step) {
@@ -62,8 +63,8 @@ export function computeStepIssue(
     }
     case "metric": {
       // A repository scorer is checked on the server, against the staged checkout, at submit.
-      // A contract that names its own metric needs no wizard code (SKY-749).
-      if (metricEntry) return null;
+      // A command metric needs no metric.py; a Python entry still runs it (SKY-770).
+      if (metricCommand) return null;
       return workspace.metricCode.trim() ? null : "submit.v2.metric.issue.metric_code";
     }
   }
@@ -76,10 +77,13 @@ export function computeStepIssue(
 export function runBlockedReason(
   state: WizardV2State,
   catalog: OptimizerCatalogResponse | null,
-  { agentWriting = false, metricEntry = null }: { agentWriting?: boolean; metricEntry?: string | null } = {},
+  {
+    agentWriting = false,
+    metricCommand = null,
+  }: { agentWriting?: boolean; metricCommand?: readonly string[] | null } = {},
 ): string | null {
   for (const step of WIZARD_V2_STEPS) {
-    const issue = computeStepIssue(state, step, catalog, { metricEntry });
+    const issue = computeStepIssue(state, step, catalog, { metricCommand });
     if (!issue) continue;
     if (agentWriting && issue === "submit.v2.metric.issue.metric_code")
       return "submit.v2.metric.agent.writing_metric";
