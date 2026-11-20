@@ -105,7 +105,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -182,10 +182,10 @@ _COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
 # shows. Two tails leave room for the cause in the [run] feedback, which keeps
 # only its last 1,988 characters (SKY-757).
 COMMAND_LOG_CHARS = 800
-# The characters of each log that the box sends to the parent, which cuts them
-# to COMMAND_LOG_CHARS after it masks the secrets. The extra characters hold
-# the whole of a secret that the box's cut splits, so the parent's cut drops
-# all of it.
+# The characters of each log that the box sends to the parent. The bound keeps
+# the answer file small. The box knows no secrets, so this cut can split one:
+# the box marks each log it cut, and the parent drops the cut edge before it
+# masks the log (SKY-757).
 _COMMAND_LOG_BOUND = 4_000
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
@@ -1979,19 +1979,22 @@ def _run_entry(
         else:
             result["error"] = str(answer.get("error") or "returned nothing")
             result.update((stream, str(answer[stream])) for stream in ("stderr", "stdout") if answer.get(stream))
+            result.update((key, True) for key in ("stderr_cut", "stdout_cut") if answer.get(key))
     return result
 
 
-def command_error(document: dict[str, Any], mask: Callable[[str], str]) -> str:
+def command_error(document: dict[str, Any], mask: Callable[[str], str], secrets: Iterable[str]) -> str:
     """Join a failed call's cause and the tails of its stderr and its stdout.
 
     stderr comes first: a stage error keeps only its head, and a command's
     stdout is often progress output (SKY-757).
 
     Args:
-        document: ``{"error"}``, and ``stderr`` and ``stdout`` from a failed command.
-        mask: Removes the secrets from a text. It runs before each cut, so a
-            secret across a cut leaves no part of itself.
+        document: ``{"error"}``, and ``stderr`` and ``stdout`` from a failed
+            command, with ``stderr_cut`` or ``stdout_cut`` when the box cut that log.
+        mask: Removes the secrets from a text. It runs before each cut here,
+            so a secret across one of these cuts leaves no part of itself.
+        secrets: The values that ``mask`` removes, to find the edge of a log the box cut.
 
     Returns:
         The masked cause, then the last ``COMMAND_LOG_CHARS`` of each masked log.
@@ -1999,8 +2002,39 @@ def command_error(document: dict[str, Any], mask: Callable[[str], str]) -> str:
     error = mask(str(document["error"]))
     for stream in ("stderr", "stdout"):
         if document.get(stream):
-            error += f"\n{stream}: {mask(str(document[stream]))[-COMMAND_LOG_CHARS:]}"
+            text = str(document[stream])
+            if document.get(f"{stream}_cut"):
+                text = _drop_cut_edge(text, secrets)
+            error += f"\n{stream}: {mask(text)[-COMMAND_LOG_CHARS:]}"
     return error
+
+
+def _drop_cut_edge(text: str, secrets: Iterable[str]) -> str:
+    """Drop the start of a log the box cut, so no part of a split secret stays.
+
+    The cut can leave the end of a secret at the start, which no mask finds.
+    That end is shorter than the longest secret. The drop also covers each
+    whole secret that it would split, so the mask still finds the rest.
+
+    Args:
+        text: The log after the box's cut.
+        secrets: The values to hide.
+
+    Returns:
+        The log without its first characters.
+    """
+    values = [value for value in set(secrets) if value]
+    edge = max((len(value) for value in values), default=1) - 1
+    moved = True
+    while moved:
+        moved = False
+        for value in values:
+            start = text.find(value, max(0, edge - len(value) + 1))
+            while 0 <= start < edge:
+                if start + len(value) > edge:
+                    edge, moved = start + len(value), True
+                start = text.find(value, start + 1)
+    return text[edge:]
 
 
 class _quiet:  # noqa: N801
@@ -2126,13 +2160,13 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             # The same logs as a passed call: stdout, then stderr (SKY-757).
             sys.stderr.write(exc.stdout + exc.stderr)
             # The parent masks the secrets and only then cuts each log to
-            # COMMAND_LOG_CHARS, so no secret here is cut in two (SKY-757).
-            document = {"error": str(exc)}
-            document.update(
-                (stream, text[-_COMMAND_LOG_BOUND:])
-                for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout))
-                if text
-            )
+            # COMMAND_LOG_CHARS. It drops the edge of a log cut here (SKY-757).
+            document: dict[str, Any] = {"error": str(exc)}
+            for stream, log in (("stderr", exc.stderr), ("stdout", exc.stdout)):
+                if log:
+                    document[stream] = log[-_COMMAND_LOG_BOUND:]
+                if len(log) > _COMMAND_LOG_BOUND:
+                    document[f"{stream}_cut"] = True
         else:
             document = {"error": f"{type(exc).__name__}: {exc}"}
         text = json.dumps(document)

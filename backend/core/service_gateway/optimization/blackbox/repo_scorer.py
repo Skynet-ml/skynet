@@ -490,6 +490,7 @@ class RepoScorer:
                         lambda text: _scrub(RUN_FAILED + redact(text, secrets), opened.root, self._hidden)[
                             len(RUN_FAILED) :
                         ],
+                        secrets,
                     )
                     # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
@@ -2157,7 +2158,8 @@ class _StageRelay:
             if isinstance(stage.entry, str):
                 return {"error": f"Stage {name!r} raised {output['error']}"}
             # A command's error leads with its cause, then log tails that may echo a secret.
-            tail = runner.command_error(output, lambda text: redact(text, self._stage_secrets))[:_STAGE_ERROR_CHARS]
+            mask = functools.partial(redact, secrets=self._stage_secrets)
+            tail = runner.command_error(output, mask, self._stage_secrets)[:_STAGE_ERROR_CHARS]
             return {"error": f"Stage {name!r} failed: {tail}"}
         return {"error": f"Stage {name!r} returned no valid output."}
 

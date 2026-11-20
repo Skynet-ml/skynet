@@ -1086,11 +1086,51 @@ def test_a_failed_stage_command_writes_the_package_error(tmp_path: Path) -> None
     assert document["stderr"] == "broken\n"
 
 
+def test_a_command_error_drops_a_split_secret_at_the_edge_of_a_log_the_box_cut() -> None:
+    """The box's cut can leave the end of a secret first; the parent drops it before it masks (SKY-757).
+
+    The repeated secret masks down to less than ``COMMAND_LOG_CHARS``, so
+    only the drop keeps the split copy out of the error.
+    """
+    secret = "tok-" + "".join(f"{i:03d}" for i in range(40))
+    log = (secret * 60)[-4_000:]
+    assert not log.startswith(secret)
+    document = {"error": "The command exited with code 1.", "stderr": log, "stderr_cut": True}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret, ""])
+    assert error.startswith("The command exited with code 1.\nstderr: [secret][secret]")
+    assert not any(secret[i : i + 8] in error for i in range(len(secret) - 7))
+
+
+@_needs_openascent
+def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
+    """A command log over the box's bound reaches the parent cut, with a ``_cut`` mark (SKY-757)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    script = "import sys; sys.stderr.write('e' * 5000); print('short'); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert document["stderr"] == "e" * runner._COMMAND_LOG_BOUND
+    assert document["stderr_cut"] is True
+    assert document["stdout"] == "short\n"
+    assert "stdout_cut" not in document
+
+
 def test_a_command_error_masks_each_log_before_it_cuts_it() -> None:
     """The cause comes first, then each masked log's last ``COMMAND_LOG_CHARS``, stderr first (SKY-757)."""
     secret = "secret-value-9876"
     document = {"error": "The command exited with code 1.", "stdout": "out", "stderr": secret + "x" * 795}
-    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"))
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret])
     cause, stderr, stdout = error.split("\n")
     assert cause == "The command exited with code 1."
     assert stderr == "stderr: " + ("[secret]" + "x" * 795)[-runner.COMMAND_LOG_CHARS :]
@@ -1599,7 +1639,7 @@ def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path)
     assert ran["output"] is None
     assert "said-on-stdout\nsaid-on-stderr\n" in logs[0]
     assert ran["error"].startswith("The command exited with code 1.")
-    assert runner.command_error(ran, str).endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
+    assert runner.command_error(ran, str, []).endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
 
 
 def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:

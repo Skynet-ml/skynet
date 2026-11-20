@@ -1466,6 +1466,48 @@ def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_a_stage
     assert "9876" not in feedback
 
 
+_LONG_SECRET = "tok-" + "".join(f"{i:03d}" for i in range(40))
+# 60 copies pass the box's 4,000-character bound, and 4,000 is no whole number
+# of copies, so the box's cut splits one copy (SKY-757).
+_REPEAT_SECRET = f"for i in $(seq 60); do printf '%s' '{_LONG_SECRET}' >&2; done"
+
+
+def _no_part_of_the_long_secret(text: str) -> bool:
+    """Say whether no 8-character piece of ``_LONG_SECRET`` is in the text.
+
+    Args:
+        text: The feedback to check.
+
+    Returns:
+        ``True`` when the text holds no part of the secret.
+    """
+    return not any(_LONG_SECRET[i : i + 8] in text for i in range(len(_LONG_SECRET) - 7))
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut before it masks the log (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", f"{_REPEAT_SECRET}; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": _LONG_SECRET}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: [secret]" in feedback
+    assert _no_part_of_the_long_secret(feedback)
+
+
 def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
     marker = tmp_path / "base-python-ran"
@@ -5005,6 +5047,20 @@ def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run
     assert result["feedback"].startswith("Run failed: The command exited with code 1.")
     assert "\nstderr: " in result["feedback"]
     assert "9876" not in result["feedback"]
+
+
+@_needs_openascent
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut, and the cause stays (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, f"{_REPEAT_SECRET}\nexit 1\n", {"JUDGE_KEY": _LONG_SECRET})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: [secret]" in result["feedback"]
+    assert _no_part_of_the_long_secret(result["feedback"])
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
