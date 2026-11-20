@@ -104,10 +104,41 @@ into a file.
   for example the settings of another tool. `tool` must be a table, and each
   `tool.<name>` must be a table.
 - A key that the format does not define is an error in every section.
+- Each value has one strict form. Skynet does not fix a value for you: it
+  does not strip spaces or change the case of a value. For example, an MCP
+  server `type` must be `http`, `streamable-http` or `sse` in lowercase,
+  and `[metric] setup` must not start or end with a space.
 
 The worker never reads the metric. The metric lives in the repository, and
 the worker gets a copy of the repository without the metric files. Or the
 metric lives with the judge.
+
+### Check the file outside Skynet
+
+Skynet reads `ascent.toml` with the parser of the
+[`openascent`](https://pypi.org/project/openascent/) package (SKY-760). The
+same parser is in the package's `ascent` command, so a file that
+`ascent check` accepts passes the same format checks in Skynet:
+
+```bash
+pip install openascent
+ascent check ascent.toml
+```
+
+`ascent check` checks the file itself, not the files that it names, and it
+reports all the errors in one pass. Skynet also reads the named files and
+applies its own limits: a box has 1 vCPU or an even number from 2 to 32
+vCPUs, and Skynet sets no maximum `timeout`. A file with many errors can
+show a different first error in Skynet than before SKY-760, because the
+parser finds all the errors and reports them in a fixed order.
+
+`ascent schema` prints the JSON Schema of the file. The same schema is
+`ascent.schema.json` at the root of the openascent repository. To check
+the file in your editor, put this line at the top of the file:
+
+```toml
+#:schema https://raw.githubusercontent.com/Skynet-ml/openascent/main/ascent.schema.json
+```
 
 ## Your own proposer: `[proposer] entry` and `setup`
 
@@ -741,7 +772,8 @@ writeFileSync(process.env.ASCENT_OUTPUT, JSON.stringify({ score: ok ? 1 : 0 }));
 
 `[metric] setup` is one shell command that builds the metric, for example
 for a metric in a compiled language. It is text of 1 to 300 characters, the
-same limit as `[setup] command`. Another type fails the setup check.
+same limit as `[setup] command`. Another type, or a text that starts or
+ends with a space or a line break, fails the setup check.
 
 The command runs one time for each run, in the metric setup box, before the
 first metric call. It runs in the folder that holds the `[metric] files`
@@ -1108,7 +1140,8 @@ mcp = "eval/.mcp.json"
   the file in the stage's tree names a fixed port that no call serves.
 - Only http servers are supported now. Each server has a `url` and goes
   through Skynet's relay. A stdio server (`command`, `args`, `env`) fails
-  the setup check before any sandbox starts.
+  the setup check before any sandbox starts. A `type` must be `http`,
+  `streamable-http` or `sse`, in lowercase; any other `type` fails.
 - Each `url` must be `https` on a public host. The check refuses local,
   private and link-local addresses.
 - Secrets appear only as `${NAME}` in `headers`. A value that looks like a real key fails with a message that says
