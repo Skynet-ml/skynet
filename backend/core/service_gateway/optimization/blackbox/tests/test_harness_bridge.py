@@ -2994,7 +2994,7 @@ def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
     Args:
         starter: Whether the group is the setup's or the harness session's.
         tmp_path: The checkout and the session folder.
-        monkeypatch: The signal at the start, a fake ``os._exit`` and a fresh deferred-stop record.
+        monkeypatch: The signal at the start, a fake ``os._exit``, a fresh deferred-stop record and live binding set.
     """
     real_popen = subprocess.Popen
     started: list[subprocess.Popen[Any]] = []
@@ -3028,6 +3028,7 @@ def test_a_stop_that_lands_while_a_group_starts_still_kills_the_group(
 
     checkout = _git_checkout(tmp_path / "checkout")
     monkeypatch.setattr(harness_bridge, "_DEFERRED_STOP", [])
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", set())
     monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(os, "_exit", exit_)
     try:
@@ -4140,7 +4141,8 @@ def bindings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     Args:
         tmp_path: Holds the bindings folder.
-        monkeypatch: Sets the folder, removes ``ASCENT_MODEL`` and makes the proxy a non-root user.
+        monkeypatch: Sets the folder, removes ``ASCENT_MODEL``, makes the proxy a non-root user and gives
+            the bridge a fresh live binding set.
 
     Returns:
         The bindings folder.
@@ -4150,6 +4152,8 @@ def bindings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
     monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(folder))
     monkeypatch.setattr(guest_model_proxy.os, "geteuid", lambda: 1000, raising=False)
+    # Without a fresh set, each binding path stays in the worker's global set after the test.
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", set())
     return folder
 
 
