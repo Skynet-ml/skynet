@@ -96,23 +96,23 @@ def purchase_fee_cents(cents: int) -> int:
     return math.ceil(cents * PURCHASE_FEE_RATE) + PURCHASE_FEE_FIXED_CENTS
 
 
-# One-time allowance a new account gets. 0 = no free balance: every cent
+# One-time allowance a new account gets. 0 = no starting balance: every cent
 # spent was paid for, so the platform never subsidizes tokens or compute.
 # Grants seeded while this was non-zero were cleared by migration c4f1a7d9e2b5.
-FREE_GRANT_CENTS = 0
+GRANT_CENTS = 0
 
 
-def free_grant_cents() -> int:
-    """Return the one-time allowance a new account gets in this deployment.
+def grant_cents() -> int:
+    """Return the one-time grant a new account gets in this deployment.
 
     Only a PR preview environment grants credit, so automated checks there can
     pay for a run. The single-user Mac app grants ``local_grant_cents``, because
     its subscription runs cost nothing here. Everywhere else it is
-    :data:`FREE_GRANT_CENTS`.
+    :data:`GRANT_CENTS`.
     """
     if settings.local_mode:
         return settings.local_grant_cents
-    return settings.preview_grant_cents if settings.is_preview_environment else FREE_GRANT_CENTS
+    return settings.preview_grant_cents if settings.is_preview_environment else GRANT_CENTS
 
 
 # Prefix on the placeholder ``stripe_customer_id`` of a billing row created by a
@@ -309,8 +309,7 @@ class WalletSnapshot:
     """The account's billing state as a single read for the wallet surfaces."""
 
     paid_balance_cents: int
-    free_grant_remaining: int
-    free_grant_total: int
+    grant_remaining: int
     usage: list[LedgerRow] = field(default_factory=list)
 
 
@@ -648,12 +647,12 @@ class StripeBillingService:
         self._engine = engine
 
     def _resolve_grant(self, customer: BillingCustomerModel | None, now: datetime) -> int:
-        """Seed the one-time free grant if unseeded; return the remaining cents.
+        """Seed the one-time grant if unseeded; return the remaining cents.
 
         Seeds an unseeded row (NULL ``grant_remaining`` — a new account) to the
-        one-time :func:`free_grant_cents`. The grant is lifetime — once seeded
+        one-time :func:`grant_cents`. The grant is lifetime — once seeded
         it only ever draws down; there is no renewal. Mutates ``customer`` in
-        place; the caller commits. A missing row (``None``) reads a full free
+        place; the caller commits. A missing row (``None``) reads a full
         grant without persisting — the row is created on the first real mutation
         (debit / top-up).
 
@@ -665,9 +664,9 @@ class StripeBillingService:
             Cents remaining in the account's grant.
         """
         if customer is None:
-            return free_grant_cents()
+            return grant_cents()
         if customer.grant_remaining is None:
-            customer.grant_remaining = free_grant_cents()
+            customer.grant_remaining = grant_cents()
             customer.updated_at = now
             return int(customer.grant_remaining)
         return int(customer.grant_remaining)
@@ -1137,7 +1136,7 @@ class StripeBillingService:
         """Return the account's wallet snapshot from the billing tables.
 
         A pure DB read — no Stripe call — so it serves even when Stripe is
-        unconfigured (balance 0). The free grant reflects real spend: run
+        unconfigured (balance 0). The grant reflects real spend: run
         completions debit it via :meth:`debit_run`. The grant is one-time
         (seeded once, never renewed). A read that seeds an existing row is
         persisted; a brand-new account reads a full grant without creating a
@@ -1147,7 +1146,7 @@ class StripeBillingService:
             username: Account to summarize.
 
         Returns:
-            A :class:`WalletSnapshot` of paid balance, free grant, and the most
+            A :class:`WalletSnapshot` of paid balance, grant, and the most
             recent ledger rows.
         """
         now = datetime.now(UTC)
@@ -1180,8 +1179,7 @@ class StripeBillingService:
                 session.commit()
             return WalletSnapshot(
                 paid_balance_cents=customer.balance_cents if customer else 0,
-                free_grant_remaining=grant_remaining,
-                free_grant_total=free_grant_cents(),
+                grant_remaining=grant_remaining,
                 usage=usage,
             )
 
@@ -1304,9 +1302,9 @@ class StripeBillingService:
         )
 
     def spendable_cents(self, username: str) -> int:
-        """Return the account's total spendable cents (free grant + paid balance).
+        """Return the account's total spendable cents (grant + paid balance).
 
-        Resolves the grant first (seeding a new account's one-time free grant),
+        Resolves the grant first (seeding a new account's one-time grant),
         so the figure is never stale. A seeded row is persisted. This is the
         figure the submit gate checks: ``> 0`` means a managed run may start. A
         brand-new account reads a full grant without a row being created.
@@ -1315,7 +1313,7 @@ class StripeBillingService:
             username: Account to read.
 
         Returns:
-            Free-grant remaining plus purchased balance, never negative.
+            Grant remaining plus purchased balance, never negative.
         """
         now = datetime.now(UTC)
         with Session(self._engine) as session:
@@ -1330,7 +1328,7 @@ class StripeBillingService:
     def total_outstanding_cents(self) -> int:
         """Return the total unspent balance liability across every account.
 
-        Sums each account's purchased ``balance_cents`` plus its remaining free
+        Sums each account's purchased ``balance_cents`` plus its remaining
         grant. This is the pool the shared OpenRouter float ultimately backs:
         cents users have paid for (or been granted) but not yet spent on runs.
         A pure DB read — no grant seeding, no Stripe call — so it reflects only
@@ -1389,12 +1387,12 @@ class StripeBillingService:
         """Charge a finished run's per-model cost to the account, grant first.
 
         Writes one signed negative ``run`` row to ``wallet_ledger`` and draws the
-        cost from the free grant before the purchased balance, mirroring how
+        cost from the grant before the purchased balance, mirroring how
         :meth:`get_wallet` reports spendable cents (grant then paid). A **managed**
         run is charged its full per-model token cost; a **BYOK** model call carries
         no Skynet charge (:func:`run_cost_cents`). The provider bills the user's key.
         The grant is
-        resolved first (seeding a new account's one-time free grant) so the
+        resolved first (seeding a new account's one-time grant) so the
         debit lands against a current grant. A caller that may retry passes a
         ``settlement_key``: a second debit with the same key charges nothing and
         returns the first charge, so a redelivered or re-run leg never
@@ -1962,7 +1960,7 @@ class StripeBillingService:
         clawback draws from ``balance_cents`` first, under ``FOR UPDATE`` so it
         serializes with concurrent debits. When those cents were already spent,
         the platform is out of pocket for the tokens they bought: the remainder
-        is taken from the free grant (which then cannot be spent on top of the
+        is taken from the grant (which then cannot be spent on top of the
         reversed money) and whatever is still owed becomes ``debt_cents``.
         Both balances are then zero, so every spend gate refuses until a top-up
         repays the debt (:meth:`_on_checkout_completed`). The ledger row records

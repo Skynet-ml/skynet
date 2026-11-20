@@ -74,11 +74,7 @@ interface BalanceContextValue {
 function applyWalletResponse(prev: WalletBalance, r: BillingWalletResponse): WalletBalance {
   return {
     ...prev,
-    paidBalanceCents: r.paid_balance_cents,
-    freeGrant: {
-      centsRemaining: r.free_grant.cents_remaining,
-      centsTotal: r.free_grant.cents_total,
-    },
+    balanceCents: r.balance_cents,
     usage: r.usage.map((u) => ({
       id: u.id,
       at: u.at,
@@ -120,7 +116,7 @@ export function usePricingTerms(): PricingTerms {
 /**
  * Provide the wallet to the client tree.
  *
- * Fetches the real wallet (paid balance, free grant, ledger)
+ * Fetches the real wallet (balance, ledger)
  * from the billing backend once the session is signed in and after every
  * `refresh()` — e.g. when a Stripe Checkout returns. Signed-out pages make no
  * wallet request, since the endpoint only answers a signed-in caller. The provider starts with a truthful empty value and
@@ -220,7 +216,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
     () => {
       setSyncing(true);
       let attempt = 0;
-      const baseline = wallet.paidBalanceCents;
+      const baseline = wallet.balanceCents;
       const poll = () => {
         attempt += 1;
         void getWallet()
@@ -228,7 +224,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
             setWallet((prev) => applyWalletResponse(prev, r));
             setAvailable(true);
             setLoadError(false);
-            return r.paid_balance_cents !== baseline;
+            return r.balance_cents !== baseline;
           })
           .catch(() => {
             setLoadError(true);
@@ -246,7 +242,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
       };
       poll();
     },
-    [wallet.paidBalanceCents],
+    [wallet.balanceCents],
   );
 
   // Stripe Checkout returns to `/?billing=success|cancel` (there is no

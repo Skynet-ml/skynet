@@ -40,7 +40,7 @@ from .budget_amounts import (
     cent_units,
     cents_from_units,
 )
-from .service import StripeBillingService, account_committed_cents, free_grant_cents, local_customer_id
+from .service import StripeBillingService, account_committed_cents, grant_cents, local_customer_id
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
@@ -393,7 +393,7 @@ class BudgetService:
             Locked wallet with its legacy grant resolved.
         """
         wallet = session.get(BillingCustomerModel, username, with_for_update=True)
-        if wallet is None and free_grant_cents() > 0:
+        if wallet is None and grant_cents() > 0:
             # A new account's grant is only shown until a mutation creates its
             # row; create that row here so the grant can also fund a budget.
             # Two first submissions race to create it, so the loser keeps the
@@ -1582,7 +1582,7 @@ class BudgetService:
             budget.updated_at = datetime.now(UTC)
             to_grant = 0
             if refund:
-                # Free-grant cents go back to the grant, so a waiver never turns
+                # Grant cents go back to the grant, so a waiver never turns
                 # them into paid balance. Only the grant the lost charges drew
                 # returns; the kept work stays paid as it was.
                 run_rows = (WalletLedgerModel.budget_id == budget_id, WalletLedgerModel.kind == "run")

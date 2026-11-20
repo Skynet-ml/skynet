@@ -7,7 +7,7 @@ dependency and key every operation on ``user.username`` (the lowercased email).
 The webhook route is deliberately unauthenticated — Stripe can't present a
 bearer token — and instead verifies the event's signature in the service.
 
-Ledger reads succeed even when Stripe is unconfigured (free-tier zeros);
+Ledger reads succeed even when Stripe is unconfigured (zero balance);
 Stripe-backed reads report unavailability, and mutations raise
 ``DomainError("billing.not_configured", 503)``.
 """
@@ -249,13 +249,6 @@ def _byok_catalog_for_user(vault: ProviderKeyVault, username: str) -> ModelCatal
     return response
 
 
-class FreeGrantResponse(BaseModel):
-    """The account's one-time free grant."""
-
-    cents_remaining: int = Field(description="Cents left in the grant.")
-    cents_total: int = Field(description="Full grant size (500).")
-
-
 class UsageEntryResponse(BaseModel):
     """One row of the wallet usage ledger."""
 
@@ -293,10 +286,9 @@ def _pricing_terms() -> PricingTermsResponse:
 
 
 class WalletResponse(BaseModel):
-    """The caller's wallet: purchased balance, free grant, recent ledger."""
+    """The caller's wallet: spendable balance and recent ledger."""
 
-    paid_balance_cents: int = Field(description="Purchased balance in cents, on top of the free grant.")
-    free_grant: FreeGrantResponse
+    balance_cents: int = Field(description="Spendable balance in cents.")
     usage: list[UsageEntryResponse] = Field(default_factory=list, description="Most-recent-first ledger rows.")
     pricing: PricingTermsResponse = Field(default_factory=_pricing_terms)
 
@@ -575,21 +567,17 @@ def create_billing_router(*, job_store) -> APIRouter:
         tags=[] if local else ["agent"],
     )
     def get_wallet(user: AuthenticatedUserDep) -> WalletResponse:
-        """Return the caller's purchased balance, free grant, and recent ledger.
+        """Return the caller's spendable balance and recent ledger.
 
         Args:
             user: Authenticated caller whose wallet is read.
 
         Returns:
-            The wallet snapshot; free-tier zeros when the caller has no billing row.
+            The wallet snapshot; zeros when the caller has no billing row.
         """
         snapshot = service.get_wallet(user.username)
         return WalletResponse(
-            paid_balance_cents=snapshot.paid_balance_cents,
-            free_grant=FreeGrantResponse(
-                cents_remaining=snapshot.free_grant_remaining,
-                cents_total=snapshot.free_grant_total,
-            ),
+            balance_cents=snapshot.grant_remaining + snapshot.paid_balance_cents,
             usage=[
                 UsageEntryResponse(
                     id=row.id,

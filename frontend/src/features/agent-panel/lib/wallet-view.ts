@@ -1,8 +1,3 @@
-interface FreeGrant {
-  cents_remaining?: number;
-  cents_total?: number;
-}
-
 interface UsageEntry {
   id?: string;
   label?: string;
@@ -17,7 +12,7 @@ interface UsageEntry {
  * balance, or no number at all, so its local credit never reaches the card.
  */
 export type WalletView =
-  | { kind: "web"; totalCents: number; paidCents: number; grant: FreeGrant; usage: UsageEntry[] }
+  | { kind: "web"; totalCents: number; usage: UsageEntry[] }
   | { kind: "hosted"; totalCents: number; low: boolean }
   | { kind: "not_linked" }
   | { kind: "unavailable" };
@@ -31,19 +26,10 @@ export function walletView(result: unknown): WalletView | null {
     if (typeof r.hosted_balance_cents !== "number") return { kind: "unavailable" };
     return { kind: "hosted", totalCents: r.hosted_balance_cents, low: r.low_balance === true };
   }
-  if (
-    typeof r.paid_balance_cents !== "number" ||
-    !r.free_grant ||
-    typeof r.free_grant !== "object"
-  ) {
-    return null;
-  }
-  const grant = r.free_grant as FreeGrant;
+  if (typeof r.balance_cents !== "number") return null;
   return {
     kind: "web",
-    totalCents: (grant.cents_remaining ?? 0) + r.paid_balance_cents,
-    paidCents: r.paid_balance_cents,
-    grant,
+    totalCents: r.balance_cents,
     usage: Array.isArray(r.usage) ? (r.usage as UsageEntry[]) : [],
   };
 }

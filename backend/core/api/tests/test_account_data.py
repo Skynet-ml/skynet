@@ -612,7 +612,7 @@ def _wallet_tombstone(session: Session) -> str:
 
 
 def _open_wallets(engine: Any) -> None:
-    """Give both seeded wallets a spendable balance and an unspent free grant.
+    """Give both seeded wallets a spendable balance and an unspent grant.
 
     Args:
         engine: The SQLite engine holding the seeded wallets.

@@ -1326,7 +1326,7 @@ def _interrupted_run(engine: Engine, *, grant: int = 0) -> tuple[BudgetService, 
 
     Args:
         engine: Private funded ledger database.
-        grant: Free-grant cents alice holds before the run.
+        grant: Grant cents alice holds before the run.
 
     Returns:
         The service, the fenced budget, and the checkpoint time.
@@ -1398,7 +1398,7 @@ def test_restart_waiver_keeps_the_setup_charge(engine: Engine) -> None:
 
 
 def test_restart_waiver_returns_grant_cents_to_the_grant(engine: Engine) -> None:
-    """A waiver never turns free-grant cents into paid balance."""
+    """A waiver never turns grant cents into paid balance."""
     service, budget, checkpoint = _interrupted_run(engine, grant=4)
     with Session(engine) as session:
         wallet = session.get(BillingCustomerModel, "alice")

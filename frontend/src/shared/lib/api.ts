@@ -1482,11 +1482,6 @@ export function deleteAccount(password: string) {
   });
 }
 
-interface BillingFreeGrant {
-  cents_remaining: number;
-  cents_total: number;
-}
-
 export interface BillingUsageEntry {
   id: string;
   at: string;
@@ -1506,8 +1501,7 @@ interface BillingPricingTerms {
 
 /** The caller's wallet as the backend reports it (snake_case mirrors the API). */
 export interface BillingWalletResponse {
-  paid_balance_cents: number;
-  free_grant: BillingFreeGrant;
+  balance_cents: number;
   usage: BillingUsageEntry[];
   /** Absent from a backend older than the frontend (e.g. mid-deploy). */
   pricing?: BillingPricingTerms;

@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...billing.service import FREE_GRANT_CENTS, free_grant_cents
+from ...billing.service import GRANT_CENTS, grant_cents
 from ...config import settings
 from ...local.cli_probe import clear_probe_cache
 from ...models.blackbox import HOST_CLI_AUTO_KEY, BlackboxProposer
@@ -542,10 +542,10 @@ def test_local_mode_grants_the_local_credit(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch: Pytest fixture used to set local mode.
     """
     monkeypatch.setattr(settings, "local_grant_cents", 12_345)
-    assert free_grant_cents() == FREE_GRANT_CENTS
+    assert grant_cents() == GRANT_CENTS
 
     monkeypatch.setattr(settings, "local_mode", True)
-    assert free_grant_cents() == 12_345
+    assert grant_cents() == 12_345
 
 
 def _execution_request(**overrides: Any) -> WizardPreflightRequest:

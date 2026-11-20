@@ -7,7 +7,7 @@ O Skynet usa um saldo pré-pago. Você adiciona fundos ao saldo. Cada execução
 
 O seu saldo é em dólares americanos. O Skynet o mantém em centavos.
 
-Por padrão, o Skynet não dá saldo inicial gratuito. Adicione fundos antes de iniciar a sua primeira execução paga.
+O Skynet não dá saldo inicial. Adicione fundos antes de iniciar a sua primeira execução paga.
 
 Você adiciona fundos em **Definições → Faturação**. Você pode escolher um valor fixo ou inserir um valor personalizado:
 

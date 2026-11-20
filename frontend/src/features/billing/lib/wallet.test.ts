@@ -19,15 +19,13 @@ function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} ≈ ${expected}`);
 }
 
-const walletWith = (paidBalanceCents: number, freeRemaining: number): WalletBalance => ({
+const walletWith = (balanceCents: number): WalletBalance => ({
   ...EMPTY_WALLET,
-  paidBalanceCents,
-  freeGrant: { ...EMPTY_WALLET.freeGrant, centsRemaining: freeRemaining },
+  balanceCents,
 });
 
 test("empty wallet never seeds demo balances or activity", () => {
-  assert.equal(EMPTY_WALLET.paidBalanceCents, 0);
-  assert.equal(EMPTY_WALLET.freeGrant.centsRemaining, 0);
+  assert.equal(EMPTY_WALLET.balanceCents, 0);
   assert.deepEqual(EMPTY_WALLET.usage, []);
 });
 
@@ -41,16 +39,16 @@ test("centsToUsd values each cent at $0.01", () => {
   near(centsToUsd(0), 0);
 });
 
-test("totalCents sums the free grant remaining and the purchased balance", () => {
-  assert.equal(totalCents(walletWith(1240, 480)), 1720);
-  assert.equal(totalCents(walletWith(0, 0)), 0);
+test("totalCents is the one spendable balance", () => {
+  assert.equal(totalCents(walletWith(1720)), 1720);
+  assert.equal(totalCents(walletWith(0)), 0);
 });
 
 test("walletStatus buckets the wallet by spendable value", () => {
-  assert.equal(walletStatus(walletWith(0, 0)), "empty");
+  assert.equal(walletStatus(walletWith(0)), "empty");
   // 30 cents = $0.30, under the $0.50 low-balance line.
-  assert.equal(walletStatus(walletWith(30, 0)), "low");
-  assert.equal(walletStatus(walletWith(1000, 0)), "healthy");
+  assert.equal(walletStatus(walletWith(30)), "low");
+  assert.equal(walletStatus(walletWith(1000)), "healthy");
 });
 
 test("formatCents groups thousands in the given locale", () => {

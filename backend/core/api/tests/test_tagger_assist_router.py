@@ -135,7 +135,7 @@ def _client(
     """
     store = store or _MemStore()
     worker = (worker or _FakeWorker()) if worker_available else None
-    # No free allowance exists, so the authed user is funded explicitly to pass
+    # No starting balance exists, so the authed user is funded explicitly to pass
     # the 402 balance gate on the LLM-invoking assist routes.
     with Session(store.engine) as session:
         if session.get(BillingCustomerModel, user.username) is None:

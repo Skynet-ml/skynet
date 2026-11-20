@@ -7,7 +7,7 @@ Skynet ön ödemeli bir bakiye kullanır. Bakiyeye para eklersiniz. Her çalış
 
 Bakiyeniz ABD doları cinsindendir. Skynet bakiyeyi sent cinsinden tutar.
 
-Skynet varsayılan olarak ücretsiz bir başlangıç bakiyesi vermez. İlk ücretli çalıştırmanızı başlatmadan önce bakiye ekleyin.
+Skynet başlangıç bakiyesi vermez. İlk ücretli çalıştırmanızı başlatmadan önce bakiye ekleyin.
 
 Bakiyeyi **Ayarlar → Faturalandırma** bölümünden eklersiniz. Sabit bir tutar seçebilir veya özel bir tutar girebilirsiniz:
 

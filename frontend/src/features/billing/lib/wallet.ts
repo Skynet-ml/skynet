@@ -2,7 +2,7 @@
  * Wallet domain model shared by the billing UI surfaces.
  *
  * Skynet runs on a pay-as-you-go prepaid dollar balance — the only plan: users
- * top up and every run spends against the balance; there is no free allowance.
+ * top up and every run spends against the balance; there is no starting balance.
  * The balance is spendable on any model. Amounts are stored as integer US cents
  * and shown to users in dollars. Platform-paid usage (model tokens and sandbox compute) bills at
  * provider cost times the backend's usage markup. BYOK model calls have no Skynet
@@ -91,12 +91,6 @@ export function purchaseTotalUsd(
   return centsToUsd(cents) + purchaseFeeUsd(cents, terms);
 }
 
-/** The one-time free grant that lets a new account try the platform. */
-interface FreeGrant {
-  centsRemaining: number;
-  centsTotal: number;
-}
-
 /** One row of the usage ledger. `label`/`model` are backend-supplied, not translated. */
 export interface UsageEntry {
   id: string;
@@ -122,9 +116,8 @@ export interface TopUpPack {
 
 /** The whole wallet as the UI needs it. */
 export interface WalletBalance {
-  /** Purchased balance in cents, on top of the free grant. */
-  paidBalanceCents: number;
-  freeGrant: FreeGrant;
+  /** Spendable balance in cents. */
+  balanceCents: number;
   /** Most-recent-first ledger rows. */
   usage: UsageEntry[];
   pricing: PricingTerms;
@@ -140,9 +133,9 @@ export function usdToCents(usd: number): number {
   return Math.round(usd / CENT_USD_VALUE);
 }
 
-/** Total spendable cents = free grant remaining + purchased balance. */
+/** Total spendable cents. */
 export function totalCents(wallet: WalletBalance): number {
-  return wallet.freeGrant.centsRemaining + wallet.paidBalanceCents;
+  return wallet.balanceCents;
 }
 
 /** Derive the chip's health bucket from spendable value. */
@@ -205,8 +198,7 @@ export const TOP_UP_PACKS: TopUpPack[] = [
 
 /** Truthful zero-value seed used until the billing API returns real data. */
 export const EMPTY_WALLET: WalletBalance = {
-  paidBalanceCents: 0,
-  freeGrant: { centsRemaining: 0, centsTotal: 0 },
+  balanceCents: 0,
   usage: [],
   pricing: DEFAULT_PRICING_TERMS,
 };

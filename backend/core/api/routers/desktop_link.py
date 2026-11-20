@@ -729,7 +729,7 @@ def create_desktop_link_router(*, job_store) -> APIRouter:
 
     @router.get("/desktop/v1/balance", response_model=DesktopBalance, summary="Spendable hosted balance")
     def balance(principal: BalanceDep) -> DesktopBalance:
-        """Return the hosted spendable balance (free grant plus paid, less holds).
+        """Return the hosted spendable balance (grant plus paid, less holds).
 
         Args:
             principal: Desktop principal with the ``balance:read`` scope.
