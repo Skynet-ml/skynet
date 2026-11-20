@@ -39,7 +39,11 @@ function buildSummary(job: OptimizationSummaryResponse | null, isRunning: boolea
   if (!job) return null;
   const title = job.name?.trim() || job.optimization_id.slice(0, 8);
   const parts = [title, getStatusLabel(job.status)];
-  const gain = computeGain(job.baseline_test_metric, job.optimized_test_metric);
+  const gain = computeGain(
+    job.baseline_test_metric,
+    job.optimized_test_metric,
+    job.metric_improvement,
+  );
   if (gain && gain.kind !== "neutral") parts.push(gain.text);
   return parts.join(" · ");
 }
@@ -80,7 +84,10 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
             {TERMS.score}
           </span>
           {job.optimized_test_metric != null ? (
-            <span dir="ltr" className="text-[0.8125rem] font-medium tabular-nums text-foreground/90">
+            <span
+              dir="ltr"
+              className="text-[0.8125rem] font-medium tabular-nums text-foreground/90"
+            >
               {formatPercent(job.optimized_test_metric)}
             </span>
           ) : (
@@ -88,7 +95,11 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
               {formatPercent(job.baseline_test_metric)}
             </span>
           )}
-          <GainPill baseline={job.baseline_test_metric} optimized={job.optimized_test_metric} />
+          <GainPill
+            baseline={job.baseline_test_metric}
+            optimized={job.optimized_test_metric}
+            improvement={job.metric_improvement}
+          />
         </div>
       )}
 

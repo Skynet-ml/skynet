@@ -381,7 +381,8 @@ export function repoTree(value: unknown): TreeView | NoResult | null {
     // Each key file starts after the tree with a blank row and its header, so
     // a README line in the header's form, with no blank row above it, is text.
     for (let i = end + 1; i < rows.length; i++) {
-      const m = rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
+      const m =
+        rows[i - 1] === "" ? /^--- (.+) \(already read for you\) ---$/.exec(rows[i] ?? "") : null;
       if (m?.[1]) keyFiles.push(m[1]);
     }
   }
@@ -772,6 +773,8 @@ export interface JobRow {
   optimizer: string;
   baseline: number | null;
   optimized: number | null;
+  /** Positive when the run got better, also for a ``minimize`` run (SKY-750). */
+  improvement: number | null;
 }
 
 /**
@@ -800,6 +803,7 @@ export function jobRows(value: unknown): { rows: JobRow[]; total: number | null 
         optimizer: str(r.optimizer_name),
         baseline: num(r.baseline_test_metric),
         optimized: num(r.optimized_test_metric),
+        improvement: num(r.metric_improvement),
       },
     ];
   });
