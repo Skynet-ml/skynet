@@ -172,10 +172,10 @@ def test_extend_installs_only_what_a_later_candidate_adds(tmp_path: Path, monkey
 def test_inference_ignores_strings_stdlib_and_injected_helpers() -> None:
     """Infer executable imports while leaving image-provided libraries untouched."""
     requirements, imports = package_setup.infer_requirements(
-        'import json\nfrom skynet import llm\ntext="import absent"', []
+        'import json\nfrom openascent import llm\ntext="import absent"', []
     )
     assert requirements == []
-    assert imports == ["json", "skynet"]
+    assert imports == ["json", "openascent"]
     with pytest.raises(ValueError, match="direct URLs"):
         package_setup.infer_requirements("import json", ["package @ https://elsewhere.invalid/pkg.whl"])
 

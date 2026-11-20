@@ -34,6 +34,7 @@ from ...connectors.github_repo import RepoFetchError, RepoRateLimitError
 from ...exceptions import InfrastructureInterruptionError, ServiceError
 from ...models.blackbox import BlackboxNamedScore
 from ...sandbox.errors import SandboxTransientError
+from ...service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ...service_gateway.optimization.blackbox.service import FinalRun
 from ...storage.models import BillingCustomerModel, ExecutionBudgetModel
 from ...storage.preflights import WizardPreflightModel
@@ -48,9 +49,7 @@ USER = "alice@example.com"
 ADMIN = AuthenticatedUser(username="admin1", role="admin", groups=())
 BASE = "a" * 40
 GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
-CONTRACT_PATCH = (
-    "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n@@ -1 +1 @@\n-a\n+b\n"
-)
+CONTRACT_PATCH = "diff --git a/ascent.toml b/ascent.toml\n--- a/ascent.toml\n+++ b/ascent.toml\n@@ -1 +1 @@\n-a\n+b\n"
 OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-a\n+c\n"
 OUTSIDE_PATCH = "diff --git a/other/x.py b/other/x.py\n--- a/other/x.py\n+++ b/other/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 THIRD_PATCH = "diff --git a/src/c.py b/src/c.py\n--- a/src/c.py\n+++ b/src/c.py\n@@ -1 +1 @@\n-a\n+d\n"
@@ -235,7 +234,10 @@ def _session(
     attached = budgets.attach_to_job(budget.id, USER, session_id, expected_revision=budget.revision)
     payload = {
         "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"], "commit": BASE}},
-        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case):\n    return 1.0, 'ok'\n"},
+        "scorer": {
+            "kind": "python",
+            "metric_code": "def score(repo_path, case):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+        },
         "cases": cases,
         "seed": 7,
         "judge": {"version": 1, "draft_id": draft, "base_commit": BASE, "floor_cents": floor},
@@ -327,7 +329,7 @@ def test_a_retry_with_the_same_candidate_pays_once(store: SQLiteJobStore, boxes:
 def test_a_candidate_that_changes_the_contract_is_refused_before_any_paid_box(
     store: SQLiteJobStore, boxes: Any
 ) -> None:
-    """Refuse a change to optimize.toml, charge nothing, and replay the refusal."""
+    """Refuse a change to ascent.toml, charge nothing, and replay the refusal."""
     session_id = _session(store, _cases(3))
     with pytest.raises(repo_judge.JudgeError) as refused:
         _call(store, session_id, CONTRACT_PATCH)
@@ -1474,7 +1476,7 @@ def test_a_refusal_names_every_broken_rule(store: SQLiteJobStore, boxes: Any) ->
     session_id = _session(store, _cases(3))
     with pytest.raises(repo_judge.JudgeError) as refused:
         _call(store, session_id, CONTRACT_PATCH + OUTSIDE_PATCH)
-    assert "optimize.toml" in refused.value.detail
+    assert "ascent.toml" in refused.value.detail
     assert "other/x.py" in refused.value.detail
 
 
@@ -1559,7 +1561,7 @@ def test_a_retry_of_a_refusal_stored_pending_replays_it_without_headroom(store: 
     with pytest.raises(repo_judge.JudgeError) as again:
         _call(store, session_id, CONTRACT_PATCH)
     assert again.value.code == "judge.candidate_refused"
-    assert "optimize.toml" in again.value.detail
+    assert "ascent.toml" in again.value.detail
     assert _final_rows(store, session_id) == 0
     assert store.get_job(session_id)["status"] == "running"
     assert len(boxes["staged"]) == staged
@@ -1732,6 +1734,32 @@ def dispatched(boxes: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(repo_judge, "_score", score)
     return boxes
+
+
+class _FailedRunScorer:
+    """A staged scorer whose guest endpoint reports a failed ``[run]`` entry, as the repository scorer builds it."""
+
+    def dispatch(self, body: Any) -> Any:
+        """Answer one scoring request with Skynet's run-failed document.
+
+        Args:
+            body: The guest's request.
+
+        Returns:
+            A 200 reply with no score and the ``run_failed`` status.
+        """
+        return SimpleNamespace(
+            status=200, body=json.dumps({"score": None, "feedback": "Run failed: x", "status": "run_failed"}).encode()
+        )
+
+
+def test_the_score_step_reads_a_failed_run_as_a_failed_run_not_a_key_error() -> None:
+    """The final score trusts the repository scorer's own ``status`` key, so a failed run is not a wrong answer (SKY-769)."""
+    final = _REAL_SCORE(SimpleNamespace(scorers=[_FailedRunScorer()]), OTHER_PATCH, ["case"], label="candidate")
+
+    assert final.score is None
+    assert final.run_failed is True
+    assert final.failures == ["x"]
 
 
 def _stored_text(job_store: SQLiteJobStore, session_id: str) -> str:
@@ -1917,7 +1945,10 @@ def _open_request() -> repo_judge.BlackboxRunRequest:
     return repo_judge.BlackboxRunRequest.model_validate(
         {
             "recipe": "repo",
-            "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return 1.0, 'ok'\n"},
+            "scorer": {
+                "kind": "python",
+                "metric_code": "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+            },
             "target": {"kind": "repo", "repo": {"repository": "acme/app", "branch": "main", "editable_paths": ["src"]}},
             "strategy": {"mode": "single", "engine": "gepa"},
             "reflection_model_config": {"name": "openai/gpt-5"},
@@ -2309,3 +2340,43 @@ def test_a_resume_of_a_running_opening_row_finishes_the_open(
     budget = BudgetService(engine=store.engine).get(job["execution_budget_id"], USER)
     assert (budget.job_id, budget.state) == (session_id, "attached")
     assert _call(store, session_id)["status"] == "scored"
+
+
+@pytest.mark.parametrize(("direction", "winner"), [("minimize", "low"), ("maximize", "high"), (None, "high")])
+def test_the_end_picks_the_best_call_by_the_contracts_direction(
+    store: SQLiteJobStore, boxes: Any, monkeypatch: pytest.MonkeyPatch, direction: str | None, winner: str
+) -> None:
+    """A judge session skips the eval server, so the end picks its best call by the direction itself (SKY-750)."""
+    session_id = _session(store, _cases(10))
+    patches = {"low": GOOD_PATCH, "high": GOOD_PATCH.replace("+b", "+high")}
+    boxes["score"] = {patches["low"]: 0.2, patches["high"]: 0.8}
+    fake = repo_judge.judge_scorer
+    outcome = (
+        {"target": None, "require": {}}
+        if direction is None
+        else {"target": None, "require": {}, "direction": direction}
+    )
+
+    @contextmanager
+    def with_outcome(*args: Any, **kwargs: Any) -> Iterator[tuple[dict[str, Any], Any, Any]]:
+        """Stage like the fake scorer, with the contract's outcome in the snapshot.
+
+        Args:
+            *args: The fake scorer's arguments.
+            **kwargs: The fake scorer's keyword arguments.
+
+        Yields:
+            The fake scorer's payload with the snapshot, the staged repository and no gateway.
+        """
+        with fake(*args, **kwargs) as (protected, staged, gateway):
+            yield {**protected, REPO_SNAPSHOT_KEY: {"outcome": outcome}}, staged, gateway
+
+    monkeypatch.setattr(repo_judge, "judge_scorer", with_outcome)
+    _call(store, session_id, patches["high"])
+    _call(store, session_id, patches["low"])
+
+    assert repo_judge.end_session(store, store.get_job(session_id), ended_by="stop_run").status == "success"
+
+    result = store.get_job(session_id)["result"]
+    assert result["best_candidate"] == patches[winner]
+    assert result["direction"] == (direction or "maximize")

@@ -517,7 +517,7 @@ class RepoBundle:
             One entry per file git does not consider binary.
         """
         result = subprocess.run(
-            ["git", "grep", "-z", "-I", "-l", "-e", "", self.start, "--"],
+            ["git", *repo_tree.SAFE_GIT, "grep", "-z", "-I", "-l", "-e", "", self.start, "--"],
             cwd=self.checkout,
             capture_output=True,
             text=True,
@@ -539,7 +539,7 @@ class RepoBundle:
             text = None
             if path in set(self.paths()):
                 blob = subprocess.run(
-                    ["git", "cat-file", "blob", f"{self.start}:{path}"],
+                    ["git", *repo_tree.SAFE_GIT, "cat-file", "blob", f"{self.start}:{path}"],
                     cwd=self.checkout,
                     capture_output=True,
                     check=False,
@@ -562,7 +562,10 @@ class RepoBundle:
             Whether git knows the path at the starting commit.
         """
         result = subprocess.run(
-            ["git", "cat-file", "-e", f"{self.start}:{path}"], cwd=self.checkout, capture_output=True, check=False
+            ["git", *repo_tree.SAFE_GIT, "cat-file", "-e", f"{self.start}:{path}"],
+            cwd=self.checkout,
+            capture_output=True,
+            check=False,
         )
         return result.returncode == 0
 

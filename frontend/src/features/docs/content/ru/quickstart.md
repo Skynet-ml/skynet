@@ -55,26 +55,27 @@ Skynet создаёт репозиторий в вашем аккаунте GitH
 
 ## 5. Метрика и запуск
 
-Последний шаг — **Метрика и запуск**. Ассистент пишет оценщик за вас. Вы можете его изменить. Оценщик получает путь к одной версии репозитория и один пример:
+Последний шаг — **Метрика и запуск**. Ассистент пишет оценщик и файл `ascent.toml` за вас. Вы можете их изменить. Точка входа `[run]` запускает одну версию репозитория на одном примере. Оценщик получает вывод точки входа и пример:
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = str(module.serve(case["input"])).strip().lower()
-    want = case["expected"]["label"].strip().lower()
-    if got == want:
-        return 1.0, {"feedback": "Correct label."}
-    return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
+[run]
+entry = "serve.py:serve"
 ```
 
-`case["input"]` содержит столбцы с ролью «Вход» для одного примера. `case["expected"]` содержит столбец с ролью «Выход», ключ — имя этого столбца. В репозитории есть файл `serve.py` с `def serve(input)`. После запуска Skynet использует эту же функцию, чтобы обслуживать лучшую версию.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    got = str(output).strip().lower()
+    want = case["expected"]["label"].strip().lower()
+    if got == want:
+        return {"score": 1.0, "feedback": "Correct label."}
+    return {"score": 0.0, "feedback": f"Expected '{want}', got '{got}'."}
+```
 
-Затем запустите проверку. Проверка выполняет вашу настройку и ваш оценщик на исходной версии в песочнице. Начать запуск можно только после того, как проверка пройдёт успешно.
+`case["input"]` содержит столбцы с ролью «Вход» для одного примера. `case["expected"]` содержит столбец с ролью «Выход», ключ — имя этого столбца. В репозитории есть файл `serve.py` с `def serve(input)`. Точка входа `[run]` вызывает его, и `output` — это значение, которое он возвращает. Оценщик работает в отдельной песочнице, где есть только ваши файлы метрики и нет кода версии, поэтому не может импортировать `serve.py`. После запуска Skynet использует эту же функцию, чтобы обслуживать лучшую версию.
+
+Затем запустите проверку. Проверка выполняет вашу настройку, точку входа `[run]` и ваш оценщик на исходной версии в песочнице. Начать запуск можно только после того, как проверка пройдёт успешно.
 
 ## 6. Запуск и наблюдение
 

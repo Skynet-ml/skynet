@@ -34,7 +34,7 @@ def test_declared_effort_reaches_the_gateway_unchanged(effort: str) -> None:
     entry = json.loads(launch.files[_MODELS_FILE])["providers"]["app"]["models"][0]
     pi_level = "off" if effort == "none" else effort
     assert entry["thinkingLevelMap"] == {pi_level: effort}
-    assert f'--model "$APP_MODEL:{pi_level}"' in launch.run_command
+    assert f'--model "$ASCENT_MODEL:{pi_level}"' in launch.run_command
 
 
 @pytest.mark.parametrize("effort", [None, ""])
@@ -49,4 +49,4 @@ def test_no_effort_keeps_the_pi_default(effort: str | None) -> None:
     entry = json.loads(launch.files[_MODELS_FILE])["providers"]["app"]["models"][0]
     assert "thinkingLevelMap" not in entry
     assert entry["reasoning"] is False
-    assert '--model "$APP_MODEL"' in launch.run_command
+    assert '--model "$ASCENT_MODEL"' in launch.run_command

@@ -186,6 +186,9 @@ class RunNotificationWatcher:
     def _observe_candidate(self, metrics: dict[str, Any]) -> None:
         """Track the best score and emit the first improvement over the starting one.
 
+        A ``[metric] direction = "minimize"`` run stamps ``direction`` on its
+        candidate events, and then a lower score is the improvement (SKY-750).
+
         Args:
             metrics: A ``candidate`` event's metrics.
         """
@@ -202,12 +205,16 @@ class RunNotificationWatcher:
             self._start = score
             self._last_improvement_calls = self._done_calls
             return
-        if score <= self._best:
+        direction = metrics.get("direction")
+        improved = score < self._best if direction == "minimize" else score > self._best
+        if not improved:
             return
         self._best = score
         self._last_improvement_calls = self._done_calls
         if self._wants(NEW_BEST) and self._claim("new_best"):
-            self._dispatch(notify_run_new_best, self._optimization_id, self._username, score, self._start)
+            self._dispatch(
+                notify_run_new_best, self._optimization_id, self._username, score, self._start, direction=direction
+            )
 
     def spend_check_due(self) -> bool:
         """Return whether the worker should read the run's spend now (rate-limited).

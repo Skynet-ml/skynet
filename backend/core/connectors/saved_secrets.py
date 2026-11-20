@@ -194,7 +194,7 @@ class SavedSecretStore:
             if row is None:
                 raise DomainError("secrets.not_found", status=404)
             # The run payload names these hosts, and an agent can write the
-            # optimize.toml they came from; only the user's stored list counts.
+            # ascent.toml they came from; only the user's stored list counts.
             refused = sorted(set(hosts) - set(row.allowed_hosts or ()))
             if refused:
                 raise ValueError(

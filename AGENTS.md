@@ -108,9 +108,12 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   Before and After images or videos.
 - **Fix bugs locally, push once.** Each push starts a new review. Test and
   review the full diff locally, then push once.
-- **Among agents, only the orchestrator merges**, in the daily window (03:00
-  America/Los_Angeles) or when Gilad asks. Implementation and review agents
-  never merge, and never post `Approved for merge` or `Changes requested:`.
+- **Among agents, only the orchestrator merges.** It merges PRs into
+  `staging` through a batch, as soon as the batch passes all its pre-merge
+  gates. There is no fixed merge window (Gilad, 2026-11-18). The
+  `skynet-pr-workflow` skill lists the gates. Implementation and review
+  agents never merge, and never post `Approved for merge` or
+  `Changes requested:`.
 - A PR merges into `staging` when one Opus 5.5 review at medium effort
   approves its current head commit with 0 findings, and CI passes (Gilad,
   2026-11-11). This includes CI (`.github/**`), deploy and infra config, and
@@ -123,8 +126,11 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates and Linear flow: the `skynet-pr-workflow` skill.
 - **CI runs only per batch and on the promotion PR** (`staging` → `main`).
-  A red batch run or a red promotion run blocks the promotion. Put its fix
-  in a new PR.
+  A red batch run or a red promotion run blocks the promotion. A red batch
+  run that no PR in the batch causes gets its fix in a new PR. A red
+  promotion run does the same. That PR goes through the next batch. A PR
+  that causes a red batch run leaves the batch and gets its fix in its own
+  branch.
 
 ## Test accounts and environments (MANDATORY)
 
@@ -232,10 +238,15 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
   implementation and include GEPA, Best-of-N and Meta-Harness, plus Skynet's
   own AutoResearch and the pinned AutoSaddler and ShinkaEvolve packages.
   `Auto` composes eligible engines without redefining their algorithms.
-- **Vercel Sandbox** is the production execution boundary for user workloads,
-  including optimization setup, runs, recovery, and completed-run
-  interactions. Workers are the control plane: they orchestrate jobs, reserve
-  and settle budgets, broker scoped credentials, persist checkpoints, and
+- The **sandbox component** is the production execution boundary for user
+  code. Vercel Sandbox is its most mature provider today. Other providers
+  plug in through the same `SandboxEnvironment` interface. Each candidate
+  runs in its own sandbox. The metric scores each candidate in a separate
+  sandbox. A sandbox may fail at any time: the step log is the truth, and
+  it records files only as tree ids. Workers are the control plane: they host
+  the user, workspace, run and agent actors, run the engine loops and model
+  calls with no box alive, commit every step, reserve and settle budgets,
+  broker scoped credentials through the workspace capability registry, and
   dispatch sandbox work.
 - **Protected execution** reserves wallet and run-budget headroom before paid
   work. Managed model usage, Skynet fees, and sandbox usage are metered. For

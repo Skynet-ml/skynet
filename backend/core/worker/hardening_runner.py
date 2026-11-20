@@ -63,7 +63,11 @@ from ..service_gateway.optimization.blackbox.hardening import (
     Candidate,
     HardeningRunner,
 )
-from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    DEFAULT_METRIC_ENTRY,
+    RepoConstraints,
+    read_constraints,
+)
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
@@ -476,6 +480,7 @@ class RepoHardeningRunner(HardeningRunner):
                 files=_tree_files(self.workspace.agent_archive),
                 known=known,
                 metric=metric,
+                minimize=self.workspace.minimize,
             ),
             {"max_tokens": BRIEF_ANSWER_TOKENS},
         )
@@ -568,7 +573,12 @@ class RepoHardeningRunner(HardeningRunner):
             outcome = run_sessions(
                 briefs,
                 prompt_for=lambda brief: session_prompt(
-                    brief=brief, round_index=round_index, tree=tree, known=known, metric=metric
+                    brief=brief,
+                    round_index=round_index,
+                    tree=tree,
+                    known=known,
+                    metric=metric,
+                    minimize=self.workspace.minimize,
                 ),
                 ask=ask,
                 scorer_for=scorer_for,
@@ -773,7 +783,8 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score, or NaN when ``fix_diff`` does not apply.
+            The metric score, or NaN when ``fix_diff`` does not apply or the
+            patch's ``[run]`` entry failed.
 
         Raises:
             Exception: The box's first open failure, again on each later call
@@ -801,7 +812,9 @@ class RepoHardeningRunner(HardeningRunner):
                 self._score_failures[fixes] = exc
                 raise
             self._scorers[fixes] = scorer
-        return float(scorer.score(patch)["score"])
+        score = scorer.score(patch)["score"]
+        # SKY-751: a failed [run] entry has no score; NaN fails every check, as above.
+        return float("nan") if score is None else float(score)
 
     def _fixed_archive(self, fixes: tuple[str, ...]) -> Path:
         """Pack the trusted tree with the given metric fixes applied in order.
@@ -840,6 +853,7 @@ def _trusted_constraints(trusted_root: Path, *, require_version: bool) -> RepoCo
     Args:
         trusted_root: The base-commit tree.
         require_version: Passed to :func:`read_constraints`, as the pass's staging used it.
+            ``False`` marks a started pass, which also reads the older forms, as its staging did.
 
     Returns:
         The validated constraints, or None when the tree has no constraints file.
@@ -847,7 +861,7 @@ def _trusted_constraints(trusted_root: Path, *, require_version: bool) -> RepoCo
     with tempfile.TemporaryDirectory(prefix="hardening-constraints-") as folder:
         archive = Path(folder) / "tree.tgz"
         _pack_tree(trusted_root, archive)
-        return read_constraints(archive, require_version=require_version)
+        return read_constraints(archive, require_version=require_version, legacy_forms=not require_version)
 
 
 @contextmanager
@@ -892,7 +906,11 @@ def open_hardening_runner(
             configured, or a BYOK scorer model has no vault.
     """
     scorer_spec = copy.deepcopy(job.scorer or {})
-    if scorer_spec.get("kind", "python") != "python" or not scorer_spec.get("metric_code"):
+    if (
+        scorer_spec.get("kind", "python") != "python"
+        or not scorer_spec.get("metric_code")
+        or scorer_spec.get("command_metric")
+    ):
         raise ValueError("A hardening job needs a Python metric.")
     if settings.openrouter_api_key is None:
         raise ValueError("Managed model routing is not configured.")
@@ -933,6 +951,9 @@ def open_hardening_runner(
         # file list and [run] and [metric] settings. Each box still packs the
         # metric files from its own fixed tree into the metric box (SKY-398).
         constraints = _trusted_constraints(workspace.trusted_root, require_version=workspace.require_version)
+        # The attackers and the fixes read and edit Python metric code; a command metric is out of scope (SKY-738).
+        if constraints is not None and not isinstance(constraints.metric.entry, str):
+            raise ValueError("A hardening job needs a Python metric.")
         compose_services = constraints.compose_services if constraints is not None else ()
         hidden = hidden_repo_paths(constraints)
 
@@ -976,6 +997,7 @@ def open_hardening_runner(
                     run_vcpus=constraints.run_vcpus if constraints is not None else None,
                     metric_hosts=_role_hosts(constraints.metric_role if constraints is not None else None),
                     metric_vcpus=constraints.metric_vcpus if constraints is not None else None,
+                    metric_setup=constraints.metric.setup if constraints is not None else None,
                 ),
                 str(scorer_spec["metric_code"]),
                 timeout_seconds=float(scorer_spec.get("timeout_seconds") or SCORE_TIMEOUT_SECONDS),
@@ -983,6 +1005,7 @@ def open_hardening_runner(
                 hidden_paths=hidden,
                 run_entry=constraints.run_entry if constraints is not None else None,
                 run_timeout=constraints.run_timeout if constraints is not None else 60.0,
+                metric_entry=constraints.metric.entry if constraints is not None else DEFAULT_METRIC_ENTRY,
             )
             try:
                 scorer.prepare()
@@ -1173,6 +1196,31 @@ def store_live_sessions(engine: Engine, job_id: str, sessions: list[HardeningSes
         return True
 
 
+def store_job_direction(engine: Engine, job_id: str, *, minimize: bool, claim: str) -> bool:
+    """Write the metric direction to the job row as soon as the pass has staged its tree.
+
+    The page reads the row while the round runs, so it picks the best live
+    score by the direction before the pass result is written (SKY-867).
+
+    Args:
+        engine: SQLAlchemy engine of the job store.
+        job_id: The job.
+        minimize: Whether the metric treats a lower score as better.
+        claim: The pass's claim token.
+
+    Returns:
+        Whether the direction was written; False when the claim is lost.
+    """
+    with Session(engine) as session:
+        row = session.scalars(select(HardeningJobModel).where(HardeningJobModel.id == job_id).with_for_update()).first()
+        if row is None or row.claimed_by != claim:
+            return False
+        # A new dict, so SQLAlchemy sees the JSON column change.
+        row.job = {**row.job, "minimize": minimize}
+        session.commit()
+        return True
+
+
 def process_next_hardening_job(
     engine: Engine,
     *,
@@ -1273,6 +1321,9 @@ def process_next_hardening_job(
                 local_mode=local_mode,
                 runner_factory=runner_factory,
                 reserve=reserve,
+                on_staged=lambda staged_job: store_job_direction(
+                    engine, job_id, minimize=staged_job.minimize, claim=claim
+                ),
             )
         except Exception as exc:
             # One bad job must not stop the worker loop.
@@ -1310,7 +1361,11 @@ def _start_failure(job: HardeningJob, settings: Settings, *, username: str, vaul
         return "hardening.no_scorer"
     if job.binding_id is None or job.target is None:
         return "hardening.no_target"
-    if job.scorer.get("kind", "python") != "python" or not job.scorer.get("metric_code"):
+    if (
+        job.scorer.get("kind", "python") != "python"
+        or not job.scorer.get("metric_code")
+        or job.scorer.get("command_metric")
+    ):
         return "hardening.no_python_metric"
     if settings.openrouter_api_key is None:
         return "hardening.no_managed_models"

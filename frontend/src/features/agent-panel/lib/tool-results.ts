@@ -430,7 +430,7 @@ export interface WorkspaceSave {
 
 /**
  * ``write_workspace_file`` or ``edit_workspace_file``: the saved file and the
- * ``optimize.toml`` parser's error, or a note for a refused write.
+ * ``ascent.toml`` parser's error, or a note for a refused write.
  *
  * Args:
  *   value: The tool result.
@@ -447,7 +447,7 @@ export function workspaceSave(value: unknown): WorkspaceSave | { note: string } 
   const state = asObj(r.wizard_state);
   const text = state ? Object.values(state).find((v) => typeof v === "string") : undefined;
   if (typeof text !== "string") return null;
-  const err = asObj(r.optimize_toml_error);
+  const err = asObj(r.ascent_toml_error);
   return {
     text,
     tomlError: err
@@ -772,6 +772,8 @@ export interface JobRow {
   optimizer: string;
   baseline: number | null;
   optimized: number | null;
+  /** Positive when the run got better, also for a ``minimize`` run (SKY-750). */
+  improvement: number | null;
 }
 
 /**
@@ -800,6 +802,7 @@ export function jobRows(value: unknown): { rows: JobRow[]; total: number | null 
         optimizer: str(r.optimizer_name),
         baseline: num(r.baseline_test_metric),
         optimized: num(r.optimized_test_metric),
+        improvement: num(r.metric_improvement),
       },
     ];
   });
@@ -1010,7 +1013,7 @@ export function taggingGuide(value: unknown): TaggingGuideView | null {
 }
 
 /**
- * The ``optimize.toml`` errors ``check_setup`` found.
+ * The ``ascent.toml`` errors ``check_setup`` found.
  *
  * Args:
  *   value: The tool result, ``{ok, errors}``.

@@ -22,11 +22,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.api.errors import DomainError
+from core.billing.host_agent import host_proposer
 from core.billing.vercel_usage import PROPOSER_REGISTRY_HOSTS
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
 from core.i18n_keys import I18nKey
-from core.models.blackbox import BlackboxRunRequest
+from core.models.blackbox import HOST_CLI_AUTO_KEY, BlackboxRunRequest
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
 
@@ -802,6 +803,7 @@ _BLACKBOX_PAYLOAD: dict = {
     "objective": "more vowels",
     "scorer": {"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
     "reflection_model_config": {"name": "gpt-4o"},
+    "target": {"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
 }
 
 _BLACKBOX_OVERVIEW: dict = {
@@ -811,6 +813,26 @@ _BLACKBOX_OVERVIEW: dict = {
     "model_name": "gpt-4o",
     "token_source": "managed",
 }
+
+
+@pytest.mark.parametrize(
+    "target", [{"kind": "text"}, {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run"}]
+)
+def test_a_stored_text_or_agent_run_never_runs_again(
+    worker: BackgroundWorker, store: FakeJobStore, target: dict[str, str]
+) -> None:
+    """A stored text or agent run fails before any setup, because every run optimizes a repository (SKY-834)."""
+    payload = {**_BLACKBOX_PAYLOAD, "target": target}
+    store.seed_job("retired", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
+    worker.enqueue_job("retired")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.ModelGateway") as gateway,
+    ):
+        worker._process_job("retired", 0)
+    assert store._jobs["retired"]["status"] == "failed"
+    assert "Every run optimizes a repository" in store._jobs["retired"]["message"]
+    gateway.assert_not_called()
 
 
 def test_protected_blackbox_novelty_failure_has_plain_detail(worker: BackgroundWorker, store: FakeJobStore) -> None:
@@ -1037,6 +1059,7 @@ def _run_repository_job(
     *,
     host: tuple[str, str] | None = None,
     patched: dict[str, Any] | None = None,
+    proposer: dict[str, Any] | None = None,
 ) -> tuple[MagicMock, MagicMock, MagicMock]:
     """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
 
@@ -1048,6 +1071,8 @@ def _run_repository_job(
             for a proposer in the sandbox.
         patched: Engine names mapped to the stand-ins that replace them,
             applied after the defaults.
+        proposer: The stored ``proposer`` settings, or ``None`` to keep the
+            request's own.
 
     Returns:
         The budget gateway, the publish step and the staged repository.
@@ -1060,10 +1085,13 @@ def _run_repository_job(
         reflection_model_config={"name": "gpt-4o"},
         hardening_job_id="hardening-1",
     )
+    payload = request.model_dump(mode="json", by_alias=True)
+    if proposer is not None:
+        payload["proposer"] = proposer
     store.engine = MagicMock()
     store.seed_job(
         "repo-hardened",
-        payload=request.model_dump(mode="json", by_alias=True),
+        payload=payload,
         payload_overview=_BLACKBOX_OVERVIEW,
         execution_budget_id="budget",
         execution_budget_generation=0,
@@ -1140,8 +1168,20 @@ def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWor
     assert record.call_args.kwargs == {"image": None}
 
 
+def test_a_stored_job_with_the_files_proposer_fails_on_an_engine_that_ignores_it(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """Fail an Auto job staged with the file's proposer, which the loop would replace in silence (SKY-728)."""
+    _gateway, publish, _staged = _run_repository_job(worker, store, {"file_proposer": True})
+
+    publish.assert_not_called()
+    job = store._jobs["repo-hardened"]
+    assert job["status"] == "failed"
+    assert "only a single AutoResearch or Meta-Harness run can use it" in str(job)
+
+
 _MAPS_TOML = (
-    b'version = 1\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'version = 1\n[run]\nentry = "run.py:main"\n[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
     b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
 )
 _MAPS_SECRET = {"name": "GOOGLE_MAPS_KEY", "credential_ref": "ref-maps", "credential_revision": 1}
@@ -1175,7 +1215,7 @@ def test_the_run_gate_reads_secret_bindings_and_allowed_hosts_before_staging(
     """The run gate gets the bindings and allowed hosts that staging removes from the payload (E50, E52)."""
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(_MAPS_TOML)
         packed.addfile(info, io.BytesIO(_MAPS_TOML))
     request = BlackboxRunRequest(
@@ -1250,10 +1290,10 @@ def test_the_run_gate_reads_a_started_run_file_with_no_version(
         store: Its job store.
         tmp_path: The folder for the packed tree.
     """
-    raw = b"[paths]\neditable = ['src']\n"
+    raw = b"[paths]\neditable = ['src']\n[run]\nentry = 'run.py:main'\n"
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
     request = BlackboxRunRequest(
@@ -1358,6 +1398,99 @@ def test_a_host_proposer_gets_the_staged_hidden_paths(worker: BackgroundWorker, 
 
     bind.assert_called_once()
     assert bind.call_args.kwargs["hidden_paths"] is staged.hidden_paths
+
+
+def test_a_filled_in_host_cli_that_the_files_proposer_replaces_gets_no_host_agent(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """A host CLI that local mode filled in and that staging replaces with the file's proposer gets no setup (SKY-753).
+
+    Args:
+        worker: The worker under test.
+        store: The fake job store that holds the run.
+    """
+    bind, check = MagicMock(return_value="host-token"), MagicMock()
+    staged = MagicMock()
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Stage the repository the way a ``[proposer] entry`` leaves the payload.
+
+        Args:
+            payload: The run payload.
+            **kwargs: The staging options.
+
+        Returns:
+            The staged payload and repository.
+        """
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = {}
+        payload["proposer"] = {"harness": "custom", "run_command": "python propose.py", "host_cli": None}
+        return payload, staged
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        proposer={"host_cli": "claude", HOST_CLI_AUTO_KEY: True},
+        patched=_host_patches(
+            bind,
+            check_host_agent=check,
+            host_proposer=host_proposer,
+            stage_repository=MagicMock(side_effect=stage),
+        ),
+    )
+
+    check.assert_not_called()
+    bind.assert_not_called()
+    publish.assert_called_once()
+
+
+def test_a_filled_in_host_cli_that_staging_keeps_is_checked_once_after_staging(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """Without ``[proposer] entry`` staging keeps the filled-in host CLI, so its check runs once, after it (SKY-753).
+
+    Args:
+        worker: The worker under test.
+        store: The fake job store that holds the run.
+    """
+    calls: list[str] = []
+    bind = MagicMock(return_value="host-token")
+    check = MagicMock(side_effect=lambda *_args, **_kwargs: calls.append("check"))
+    staged = MagicMock()
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Stage the repository the way a file without ``[proposer] entry`` leaves the payload.
+
+        Args:
+            payload: The run payload.
+            **kwargs: The staging options.
+
+        Returns:
+            The staged payload and repository.
+        """
+        calls.append("stage")
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = {}
+        return payload, staged
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        proposer={"host_cli": "claude", HOST_CLI_AUTO_KEY: True},
+        patched=_host_patches(
+            bind,
+            check_host_agent=check,
+            host_proposer=host_proposer,
+            stage_repository=MagicMock(side_effect=stage),
+        ),
+    )
+
+    assert calls == ["stage", "check"]
+    assert check.call_args.kwargs["cli"] == "claude"
+    bind.assert_called_once()
+    publish.assert_called_once()
 
 
 def test_a_gate_refused_run_binds_no_host_agent_token(worker: BackgroundWorker, store: FakeJobStore) -> None:

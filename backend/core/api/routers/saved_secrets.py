@@ -40,7 +40,7 @@ class SaveSecretRequest(BaseModel):
     name: str = Field(pattern=REPO_SECRET_NAME_PATTERN)
     value: str = Field(min_length=1, max_length=MAX_SECRET_BYTES)
     # The only hosts a run may send this secret to (SKY-641). The server
-    # enforces this list, never the hosts a run payload or optimize.toml names.
+    # enforces this list, never the hosts a run payload or ascent.toml names.
     allowed_hosts: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("allowed_hosts")

@@ -258,3 +258,17 @@ def test_observe_progress_never_raises() -> None:
     watcher.observe_progress(PROGRESS_CANDIDATE, "not-a-dict")
 
     assert sent.calls == []
+
+
+def test_a_minimize_run_counts_a_lower_score_as_the_new_best() -> None:
+    """A ``direction = "minimize"`` candidate event makes a lower score the improvement (SKY-750)."""
+    store, sent = _ClaimStore(), _Sent()
+    watcher = _watcher(store, sent)
+
+    watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.5, "direction": "minimize"})
+    watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.6, "direction": "minimize"})
+    assert sent.calls == []
+    watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.3, "direction": "minimize"})
+
+    assert sent.kinds() == [notify_run_new_best]
+    assert sent.calls[0][1:] == ((_JOB, _USER, 0.3, 0.5), {"direction": "minimize"})

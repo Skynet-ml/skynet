@@ -15,7 +15,7 @@ import { v2Msg } from "./ArtifactConfirmCard";
  * Step 3's budget: how many scorer runs the optimizer may spend, the
  * iteration cap where the engine honours one, and the spending limit with
  * the least it can be. The score that ends the run early is `[outcome] target`
- * in optimize.toml.
+ * in ascent.toml.
  */
 export function BudgetSection({ choice }: { choice: OptimizerChoice }) {
   const ctx = useWizardV2();

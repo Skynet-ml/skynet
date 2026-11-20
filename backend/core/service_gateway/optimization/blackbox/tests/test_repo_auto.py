@@ -8,9 +8,13 @@ from typing import Any
 
 import pytest
 
-from core.models.blackbox import BlackboxRunRequest, BlackboxStrategy
+from core.exceptions import ServiceError
+from core.models.blackbox import (
+    BlackboxRunRequest,
+    BlackboxStrategy,
+)
 
-from .. import auto, gepa_engine
+from .. import auto
 from ..gepa_engine import GepaEngine
 from ..harness import GatewayConfig
 from ..native_runtime import NativeOptions
@@ -144,35 +148,13 @@ def test_auto_on_a_repository_explores_five_lanes_then_continues_gepa_from_the_w
     assert result.best_score == 1.0
 
 
-def test_gepa_on_a_repository_runs_the_native_repository_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """GEPA with repository options hands the lane to the native ``gepa_repo`` engine.
+def test_gepa_refuses_a_repository_run_off_the_engine_loop(tmp_path: Path) -> None:
+    """GEPA with repository options and no loop context fails closed: no box runs a repository (SKY-728).
 
     Args:
         tmp_path: Artifact directory.
-        monkeypatch: Pytest monkeypatch fixture.
     """
-    seen: list[tuple[str, Any]] = []
-
-    def fake_native(name: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
-        """Record the native engine call.
-
-        Args:
-            name: Native engine name.
-            task: The lane task.
-            server: The lane scorer.
-            ctx: The lane context.
-
-        Returns:
-            A fixed result.
-        """
-        seen.append((name, task.seed_candidate))
-        return Result(task.seed_candidate, 1.0, 0)
-
-    monkeypatch.setattr(gepa_engine, "run_native_engine", fake_native)
     server = EvalServer(score, max_evals=2)
 
-    GepaEngine().run(Task(_patch("meta_harness")), server, make_ctx(str(tmp_path), native_options=_native()))
-
-    assert seen == [("gepa_repo", _patch("meta_harness"))]
+    with pytest.raises(ServiceError, match="only on the worker engine loop"):
+        GepaEngine().run(Task(_patch("meta_harness")), server, make_ctx(str(tmp_path), native_options=_native()))

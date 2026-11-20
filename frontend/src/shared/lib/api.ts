@@ -1030,12 +1030,18 @@ export interface AccountDeletionResult {
   anonymized_rows: number;
 }
 
-/** Check an optimize.toml text with the repository parser; it stops at the first error. */
-export function checkOptimizeToml(text: string, signal?: AbortSignal) {
+/**
+ * Check an ascent.toml text with the repository parser; it stops at the first error.
+ * `metric_command` is the command that `[metric] entry` names, else null (SKY-770).
+ * `proposer_command` is the command that `[proposer] entry` names, else null (SKY-771).
+ */
+export function checkAscentToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
     errors: Array<{ section: string | null; key: string | null; message: string }>;
-  }>("/wizard/optimize-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
+    metric_command: string[] | null;
+    proposer_command: string[] | null;
+  }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 
 export interface PackageRegistryPreference {
@@ -1227,6 +1233,8 @@ export type NotificationTab = "focused" | "everything";
 
 interface NotificationFacts {
   score?: number | null;
+  /** A finished run whose final version has no score (SKY-751). */
+  no_score?: boolean | null;
   /** Score change versus the run's baseline. */
   delta?: number | null;
   /** Dollars spent. */
@@ -2463,6 +2471,44 @@ export function getAgentRun(
   const q = new URLSearchParams({ since_transcript: String(sinceTranscript) });
   return request<BlackboxAgentRunResponse>(
     `/optimizations/${optimizationId}/agent-runs/${runId}?${q.toString()}`,
+    undefined,
+    source,
+  );
+}
+
+/** One flushed agent step of a run. Long text is cut on the server; `truncated` says so. */
+export interface ReplayStep {
+  step_id: string;
+  seq: number;
+  kind: string;
+  tree_id: string | null;
+  created_at: string;
+  command: string | null;
+  output: string | null;
+  response: string | null;
+  truncated: boolean;
+}
+
+/** One page of one agent's steps, oldest first, with the run's agents. */
+export interface ReplayStepPage {
+  agents: Array<{ agent_id: string; step_count: number }>;
+  agent_id: string | null;
+  steps: ReplayStep[];
+  has_more: boolean;
+  next_after_seq: number;
+}
+
+/** One page of a run's step log for one agent; no agent picks the first one. */
+export function getReplaySteps(
+  optimizationId: string,
+  options: { agentId?: string | null; afterSeq?: number; limit?: number } = {},
+  source?: ApiSource,
+) {
+  const q = new URLSearchParams({ after_seq: String(options.afterSeq ?? -1) });
+  if (options.agentId) q.set("agent_id", options.agentId);
+  if (options.limit) q.set("limit", String(options.limit));
+  return request<ReplayStepPage>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/steps?${q.toString()}`,
     undefined,
     source,
   );

@@ -16,37 +16,73 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
 import posixpath
 import re
+import select
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import IO, Any
 
 Usage = dict[str, int]
 
 CONFIG_ENV = "APP_PROPOSER_CONFIG"
-KEY_ENV = "APP_API_KEY"
+KEY_ENV = "ASCENT_MODEL_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
-KEY_TOKEN = "__APP_API_KEY__"
+# The openascent parser refuses it in the contract file's own commands (SKY-776).
+KEY_TOKEN = "__ASCENT_MODEL_KEY__"
+# The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
+# otherwise its harness would send the token's text as the key and fail auth with no clear reason.
+_OLD_KEY_TOKEN = re.compile(r"__(?:APP|SKYNET)_API_KEY__")
+# The open standard's name for the task file; a custom command reads it (SKY-753).
+TASK_ENV = "ASCENT_TASK"
+# The same allowance as repo_workspace's setup command; this file runs alone
+# in the sandbox, so it cannot import that constant.
+SETUP_TIMEOUT_SECONDS = 1_800.0
+# The folder in the git dir that keeps ``[proposer] setup``'s record and a
+# copy of its output. ``git clean -fdx`` never touches the git dir, and every
+# worktree of a checkout shares its common dir, so the setup runs once per git
+# checkout and its worktrees. Each Auto lane checkout runs it again (SKY-753).
+SETUP_STATE = "ascent-proposer-setup"
+# repo_tree.SAFE_GIT, which this lone file cannot import: the setup undo's git
+# calls refuse an implicit bare repository layout, as Skynet's other git calls do (SKY-812).
+_SAFE_GIT = ("-c", "safe.bareRepository=explicit")
+# An exclude line is a pattern, so these characters in a setup's file name are escaped.
+_GLOB_CHARS = re.compile(r"([*?[\\])")
+# An exclude line cannot hold these: a newline starts a new pattern, and git
+# drops trailing whitespace, so such a name could hide other files. A name that
+# is not UTF-8 decodes to lone surrogates, which the UTF-8 exclude file cannot hold.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
+# The setup and harness processes this bridge runs now, by pid, with their
+# start times. A stop signal to the bridge kills their groups (SKY-753).
+_OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
+# A stop signal that lands while a group starts waits until the group is in
+# ``_OWNED_GROUPS``, so the stop also kills it. Masking the signal instead
+# would leave it masked in the child (SKY-753).
+_STARTING = [0]
+_DEFERRED_STOP: list[int] = []
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
-_LEGACY_KEY_TOKEN = "__SKYNET_API_KEY__"
 SHIM_DIR = ".local/app-bin"
 SESSIONS_DIR = ".app-bridge"
+# Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
+EXEC_SHIM_DIR = "exec-bin"
+EXEC_LOG = "exec-log.jsonl"
 _SLUG_RE = re.compile(r"[^A-Za-z0-9-]")
 _USAGE_KEYS = ("input_tokens", "output_tokens")
 # The instruction file every harness reads on start, pointing it at the skills
@@ -64,20 +100,23 @@ _RESUME_NOTE = (
 
 
 def _env(name: str, default: str = "") -> str:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
-        default: Value returned when neither name is set.
+        name: Variable name.
+        default: Value returned when no name is set.
 
     Returns:
         The first non-empty value found, else ``default``.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) or default
+    legacy = os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or default
 
 
 def _with_key(text: str, api_key: str) -> str:
-    """Restore the gateway key in place of either key token.
+    """Restore the gateway key in place of the key token.
 
     Args:
         text: A launch command, file or environment value.
@@ -86,7 +125,32 @@ def _with_key(text: str, api_key: str) -> str:
     Returns:
         ``text`` with every key token replaced.
     """
-    return text.replace(KEY_TOKEN, api_key).replace(_LEGACY_KEY_TOKEN, api_key)
+    return text.replace(KEY_TOKEN, api_key)
+
+
+def _refuse_old_key_token(proposer: dict[str, Any]) -> None:
+    """Refuse a launch whose command, environment or files still hold a key token from before SKY-776.
+
+    The contract file's own command (``file_command``) is the user's text, so it is not checked here.
+
+    Args:
+        proposer: The serialized launch.
+
+    Raises:
+        RuntimeError: When a part of the launch holds an old key token.
+    """
+    parts = {
+        **({} if proposer.get("file_command") else {"run_command": proposer["run_command"]}),
+        **{f"env {name}": value for name, value in (proposer.get("env") or {}).items()},
+        **{f"file {path}": content for path, content in (proposer.get("files") or {}).items()},
+    }
+    for where, text in parts.items():
+        old = _OLD_KEY_TOKEN.search(text)
+        if old:
+            raise RuntimeError(
+                f"The proposer launch's {where} holds the old key token {old.group()}. Use {KEY_TOKEN} in its place,"
+                " or start the run again."
+            )
 
 
 def _json_lines(stdout: str) -> Iterator[dict[str, Any]]:
@@ -358,6 +422,797 @@ def workspace_files(proposer: dict[str, Any]) -> list[str]:
     return paths
 
 
+def run_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
+
+    Args:
+        command: The exact argument list from ``ascent.toml``.
+        checkout: The repository checkout or worktree of the next session.
+        timeout_seconds: Stop the setup, and every process it started, after this long.
+        env: The setup's environment; the default is this process's environment.
+
+    Raises:
+        RuntimeError: When the command cannot start, runs out of time or
+            exits with an error, so no session starts without its setup.
+    """
+    label = f"The [proposer] setup command in ascent.toml ({shlex.join(command)})"
+    reaped = sys.platform == "linux" and bool(sys.executable)
+    if reaped:
+        # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
+        command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
+    # Files, not pipes: a background child keeps an inherited pipe open, and a
+    # read to its end would wait for that child instead of for the setup.
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        with _defer_stop():
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=checkout,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise RuntimeError(f"{label} could not start: {error}") from error
+            root_start = _start_time(process.pid)
+            _OWNED_GROUPS[process.pid] = (process, root_start)
+        try:
+            finished = _wait_unreaped(process.pid, timeout_seconds)
+            # A process the setup left in the background (a watcher, a server)
+            # must not run beside the proposer sessions, so the group stops
+            # after a finished setup too. The setup is not reaped yet, so its
+            # pid, and the group id, cannot belong to another process.
+            _stop_group(process, signal.SIGKILL, root_start)
+            process.wait()
+        finally:
+            _OWNED_GROUPS.pop(process.pid, None)
+        if not finished:
+            raise RuntimeError(f"{label} did not finish within {timeout_seconds:g} seconds.")
+        if process.returncode != 0:
+            detail = (_tail(stderr_file) or _tail(stdout_file)).strip()[-2000:]
+            if reaped and process.returncode in (_REAPER_NOT_FOUND, _REAPER_NOT_EXECUTABLE):
+                raise RuntimeError(f"{label} could not start: {detail}")
+            raise RuntimeError(f"{label} failed with exit code {process.returncode}: {detail}")
+
+
+def _wait_unreaped(pid: int, timeout_seconds: float) -> bool:
+    """Wait for a child to end, and leave it unreaped so its pid stays its own.
+
+    Args:
+        pid: The child's process id.
+        timeout_seconds: How long to wait.
+
+    Returns:
+        True when the child ended, False when the time ran out.
+    """
+    if not hasattr(os, "waitid"):
+        # macOS has no waitid. Its kqueue reports the exit without reaping the
+        # child, and reports an already ended child at once, with an error flag.
+        queue = select.kqueue()
+        try:
+            event = select.kevent(
+                pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT
+            )
+            return bool(queue.control([event], 1, timeout_seconds))
+        finally:
+            queue.close()
+    deadline = time.monotonic() + timeout_seconds
+    while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _stop_owned_groups(signum: int, _frame: Any) -> None:
+    """Kill the setup and session groups this bridge started, then exit.
+
+    The upstream drivers stop a session with SIGTERM to the bridge alone.
+    The setup and the harness run in their own sessions, so without this
+    they would outlive a cancelled run, and the next session would start a
+    second setup in the same checkout (SKY-753). The exit skips the undo of
+    a setup that has not finished; the next session does that undo from the
+    copy that :func:`ensure_setup` keeps.
+
+    Args:
+        signum: The signal that stops the bridge.
+        _frame: The interrupted frame.
+    """
+    if _STARTING[0]:
+        _DEFERRED_STOP.append(signum)
+        return
+    for process, root_start in list(_OWNED_GROUPS.values()):
+        # Without /proc (macOS) nothing proves a reaped pid is still ours.
+        if process.returncode is None or root_start is not None:
+            _stop_group(process, signal.SIGKILL, root_start)
+    os._exit(128 + signum)
+
+
+@contextlib.contextmanager
+def _defer_stop() -> Iterator[None]:
+    """Hold a stop signal while a group starts, then handle it once the group is owned.
+
+    Yields:
+        Nothing; the block starts one process group and adds it to ``_OWNED_GROUPS``.
+    """
+    _STARTING[0] += 1
+    try:
+        yield
+    finally:
+        _STARTING[0] -= 1
+        if _DEFERRED_STOP and not _STARTING[0]:
+            _stop_owned_groups(_DEFERRED_STOP[0], None)
+
+
+def _tail(file: IO[bytes]) -> str:
+    """Read the end of a setup's output file.
+
+    A package install can write megabytes, and the error keeps only the end.
+
+    Args:
+        file: The output file, at any position.
+
+    Returns:
+        The last 8 KiB of the file as text.
+    """
+    file.seek(max(0, file.seek(0, os.SEEK_END) - 8192))
+    return file.read().decode(errors="replace")
+
+
+def _checkout_git(arguments: list[str], checkout: Path, stdin: bytes = b"") -> str:
+    """Run one git command in a checkout and return its output.
+
+    Args:
+        arguments: Arguments after ``git``.
+        checkout: The checkout or worktree.
+        stdin: The command's standard input.
+
+    Returns:
+        The command's standard output.
+
+    Raises:
+        RuntimeError: When git fails.
+    """
+    done = subprocess.run(["git", *_SAFE_GIT, *arguments], cwd=checkout, input=stdin, capture_output=True, check=False)
+    # Bytes, not text mode: text mode turns a ``\r`` in a file name into ``\n``.
+    stdout, stderr = (stream.decode("utf-8", "surrogateescape") for stream in (done.stdout, done.stderr))
+    if done.returncode != 0:
+        raise RuntimeError(f"git {arguments[0]} failed: {(stderr or stdout).strip()[-2000:]}")
+    return stdout
+
+
+def _untracked(checkout: Path, *, folders: bool, ignored: bool = False, empty: bool = False) -> set[str]:
+    """List the untracked paths of a checkout, either those git ignores or those it does not.
+
+    Args:
+        checkout: The checkout or worktree.
+        folders: List a folder that holds only untracked files as one path
+            that ends with ``/``, in place of each file in it.
+        ignored: List the ignored paths in place of the not ignored ones.
+        empty: With ``folders``, list the empty folders too.
+
+    Returns:
+        Checkout-relative paths.
+    """
+    arguments = [
+        "ls-files",
+        "-z",
+        "--others",
+        *(["--ignored"] if ignored else []),
+        "--exclude-standard",
+        # An empty folder holds no file of the version or of the setup, so it is no output either.
+        *(["--directory"] if folders else []),
+        *(["--no-empty-directory"] if folders and not empty else []),
+    ]
+    return {path for path in _checkout_git(arguments, checkout).split("\0") if path}
+
+
+def _setup_output(checkout: Path, before: set[str], folders: set[str], *, ignored: bool = False) -> set[str]:
+    """Find the untracked paths that a setup added to a checkout.
+
+    Args:
+        checkout: The checkout or worktree, after the setup.
+        before: Every untracked file of the same kind before the setup, one path per file.
+        folders: :func:`_old_folders` from before the setup.
+        ignored: Find the paths that git ignores in place of the not ignored ones.
+
+    Returns:
+        The new files, and the new folders as one path each, so a large
+        install folder gives one exclude line.
+    """
+    added: set[str] = set()
+    files: set[str] | None = None
+    for path in _untracked(checkout, folders=True, ignored=ignored):
+        if not path.endswith("/"):
+            if path not in before:
+                added.add(path)
+        elif path in folders or any(old.startswith(path) for old in before):
+            # The folder was there before the setup, empty or with files of the
+            # version, so it stays: only the files the setup wrote into it are excluded.
+            files = _untracked(checkout, folders=False, ignored=ignored) if files is None else files
+            added |= {file for file in files if file.startswith(path)} - before
+        else:
+            added.add(path)
+    return added
+
+
+def _old_folders(checkout: Path) -> set[str]:
+    """List the untracked folders of a checkout, ignored and empty ones included, before a setup.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Checkout-relative folder paths that end with ``/``; a folder with only untracked content is one path.
+    """
+    listed = _untracked(checkout, folders=True, empty=True) | _untracked(
+        checkout, folders=True, ignored=True, empty=True
+    )
+    return {path for path in listed if path.endswith("/")}
+
+
+def _index_stamp(checkout: Path) -> list[int] | None:
+    """Identify the current git index file of a checkout.
+
+    Git writes a new index file with a rename, so any git command that changes the index, or
+    ``git reset --hard`` even with no change, gives it a new stamp. Reading commands keep it.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The index file's inode, modification time in nanoseconds and size, or ``None`` when it has no index.
+    """
+    try:
+        status = _index_path(checkout).stat()
+    except FileNotFoundError:
+        return None
+    return [status.st_ino, status.st_mtime_ns, status.st_size]
+
+
+def _tracked_state(checkout: Path, path: str) -> str:
+    """Describe the current content of one path of the version.
+
+    Args:
+        checkout: The checkout or worktree.
+        path: A checkout-relative path that git tracks, or an untracked file of the version.
+
+    Returns:
+        A hash of the file, or ``"missing"`` when the path is gone.
+    """
+    file = checkout / path
+    if file.is_symlink():
+        return f"link:{file.readlink()}"
+    return hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else "missing"
+
+
+def _tracked_changes(checkout: Path) -> dict[str, str]:
+    """List the tracked paths that differ from the checkout's commit, with their content.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Each changed path and its :func:`_tracked_state`.
+    """
+    paths = _checkout_git(["diff", "--name-only", "--no-renames", "-z", "HEAD"], checkout).split("\0")
+    return {path: _tracked_state(checkout, path) for path in paths if path}
+
+
+def _setup_changes(checkout: Path, tracked: dict[str, str]) -> list[str]:
+    """List the tracked paths whose content differs from their content before the setup.
+
+    Args:
+        checkout: The checkout or worktree, after the setup.
+        tracked: :func:`_tracked_changes` before the setup.
+
+    Returns:
+        The changed paths, sorted.
+    """
+    return sorted(
+        path
+        for path in tracked.keys() | _tracked_changes(checkout).keys()
+        if path not in tracked or tracked[path] != _tracked_state(checkout, path)
+    )
+
+
+def _index_path(checkout: Path) -> Path:
+    """Find the git index file of a checkout or worktree.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of its index file.
+    """
+    index = Path(_checkout_git(["rev-parse", "--git-path", "index"], checkout).strip())
+    return index if index.is_absolute() else checkout / index
+
+
+def _index_lock(checkout: Path) -> Path:
+    """Find the lock file that git makes beside the index while a command writes it.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of the lock file.
+    """
+    index = _index_path(checkout)
+    return index.with_name(index.name + ".lock")
+
+
+def _common_dir(checkout: Path) -> Path:
+    """Find the git common dir that a checkout and its worktrees share.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        The absolute path of the common dir.
+    """
+    common = Path(_checkout_git(["rev-parse", "--git-common-dir"], checkout).strip())
+    return (common if common.is_absolute() else checkout / common).resolve()
+
+
+def _branch_refs(checkout: Path) -> dict[str, str]:
+    """List every local branch of a checkout's repository with its commit.
+
+    Args:
+        checkout: The checkout or worktree.
+
+    Returns:
+        Each full branch ref name and its commit.
+    """
+    lines = _checkout_git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"], checkout).splitlines()
+    # A ref name cannot hold a space, so the first space ends it.
+    return dict(line.split(" ", 1) for line in lines if line)
+
+
+def _save_checkout(checkout: Path, common: Path, paths: Iterable[str], saved: Path) -> None:
+    """Copy the index, ``info/exclude`` and the version's changed files before a setup, so the setup can be undone.
+
+    Args:
+        checkout: The checkout or worktree.
+        common: The git common dir.
+        paths: The tracked paths the version changed and its untracked files.
+        saved: An empty folder for the copy.
+    """
+    index = _index_path(checkout)
+    if index.exists():
+        shutil.copy2(index, saved / "index")
+    exclude = common / "info" / "exclude"
+    if exclude.exists():
+        (saved / "exclude").write_bytes(exclude.read_bytes())
+    for path in paths:
+        if os.path.lexists(checkout / path):
+            _copy_path(checkout / path, saved / "files" / path, saved / "files")
+
+
+def _undo_setup(checkout: Path, common: Path, saved: Path, started: dict[str, Any], *, later: bool = False) -> None:
+    """Put a repository and the checkout of a setup back to their state before a setup that did not finish.
+
+    Args:
+        checkout: The checkout of the session that runs the undo.
+        common: The git common dir.
+        saved: The :func:`_save_checkout` copy from before the setup.
+        started: The record that :func:`ensure_setup` wrote before the setup: the setup's checkout, ``head``,
+            ``branch`` (``None`` when ``HEAD`` was detached), ``refs`` from :func:`_branch_refs`, ``tracked``
+            from :func:`_tracked_changes`, ``version_files`` with each untracked file of the version and its
+            :func:`_tracked_state`, ``ignored_before`` with every ignored file, ``folders_before`` from
+            :func:`_old_folders`, ``index_stamp`` from :func:`_index_stamp` and ``index_lock``, whether
+            the index lock file was there.
+        later: The undo runs in a later session, so the engine can have moved the checkout to another version.
+
+    Raises:
+        RuntimeError: When git fails, or an index lock file that was there before the setup is still there.
+    """
+    target = Path(started["checkout"])
+    try:
+        # A killed session can have run in another worktree of the repository, and that worktree can be gone now.
+        present = _common_dir(target) == common
+    except (RuntimeError, OSError):
+        present = False
+    # Read before the refs go back, because the restored branch would hide a move of HEAD.
+    moved = (
+        later
+        and present
+        and (
+            _checkout_git(["rev-parse", "HEAD"], target).strip() != started["head"]
+            or _index_stamp(target) != started["index_stamp"]
+        )
+    )
+    git_folder = target if present else checkout
+    refs = started["refs"]
+    current = _branch_refs(git_folder)
+    for ref in current.keys() - refs.keys():
+        _checkout_git(["update-ref", "-d", ref], git_folder)
+    for ref, commit in refs.items():
+        if current.get(ref) != commit:
+            _checkout_git(["update-ref", ref, commit], git_folder)
+    exclude = common / "info" / "exclude"
+    if (saved / "exclude").exists():
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_bytes((saved / "exclude").read_bytes())
+    elif os.path.lexists(exclude):
+        exclude.unlink()
+    if not present:
+        return
+    checkout, head, tracked = target, started["head"], started["tracked"]
+    version_files: dict[str, str] = started["version_files"]
+    if started["branch"]:
+        # The branch refs are back, so this also puts back the commit of HEAD.
+        _checkout_git(["symbolic-ref", "HEAD", started["branch"]], checkout)
+    else:
+        _checkout_git(["update-ref", "--no-deref", "HEAD", head], checkout)
+    if moved:
+        # The engine's reset_tree rewrites the index before it applies the next version; an undo now would put
+        # the old version over the new one. A setup's own git write looks the same, and its edits then stay.
+        print(
+            "claude bridge: the checkout holds another version than before the stopped setup, so its files and"
+            " index stay as they are",
+            file=sys.stderr,
+        )
+        return
+    lock = _index_lock(checkout)
+    if os.path.lexists(lock):
+        if started["index_lock"]:
+            raise RuntimeError(
+                f"The git index lock {lock} was there before the setup and is still there, so the checkout cannot"
+                " be restored. Remove that file when no git command runs in the checkout."
+            )
+        # The setup's process group is stopped, so a lock it left belongs to no running git command.
+        print(f"claude bridge: removed the git index lock {lock} that the stopped setup left", file=sys.stderr)
+        lock.unlink()
+    if (saved / "index").exists():
+        shutil.copy2(saved / "index", _index_path(checkout))
+    # Listed after the index is back, so a file the setup untracked in its commit counts as tracked again.
+    # Removed first, so a link the setup put in place of a folder is gone before the files below are restored.
+    # A path that was there before is never output: a setup that rewrites a .gitignore can unhide an old ignored file.
+    before = set(version_files) | set(started["ignored_before"])
+    folders = set(started["folders_before"])
+    for path in _setup_output(checkout, before, folders) | _setup_output(checkout, before, folders, ignored=True):
+        _remove_path(checkout / path.rstrip("/"))
+    changed = _setup_changes(checkout, tracked)
+    # Names go through a whole-tree listing and stdin, because thousands of them would pass the argument limit.
+    in_head = (
+        set(_checkout_git(["ls-tree", "-r", "-z", "--name-only", head], checkout).split("\0")) if changed else set()
+    )
+    from_head: list[str] = []
+    for path in changed:
+        _check_parents(checkout / path, checkout)
+        if path in tracked:
+            # The version had changed this file before the setup, so the commit's content is not its content.
+            _remove_path(checkout / path)
+            if os.path.lexists(saved / "files" / path):
+                _copy_path(saved / "files" / path, checkout / path, checkout)
+        elif path in in_head:
+            from_head.append(path)
+        else:
+            _remove_path(checkout / path)
+    if from_head:
+        specs = "".join(f":(literal){path}\0" for path in from_head).encode("utf-8", "surrogateescape")
+        _checkout_git(["checkout", head, "--pathspec-from-file=-", "--pathspec-file-nul"], checkout, specs)
+    for path, content in version_files.items():
+        if _tracked_state(checkout, path) != content:
+            _check_parents(checkout / path, checkout)
+            _remove_path(checkout / path)
+            _copy_path(saved / "files" / path, checkout / path, checkout)
+
+
+def _check_parents(target: Path, root: Path) -> None:
+    """Refuse a path whose parent folders do not stay plain folders inside a root.
+
+    Args:
+        target: The path to write or remove.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
+    """
+    # A version can replace a parent folder with a link; the copy would then write outside the checkout.
+    folder = root
+    for part in target.relative_to(root).parts[:-1]:
+        folder = folder / part
+        if os.path.lexists(folder) and (
+            folder.is_symlink() or not folder.is_dir() or not folder.resolve().is_relative_to(root.resolve())
+        ):
+            raise RuntimeError(
+                f"The [proposer] setup output {target} cannot be restored: its parent folder {folder} is a link,"
+                f" is not a folder or is outside {root}. Make the version keep that folder a plain folder."
+            )
+
+
+def _copy_path(source: Path, target: Path, root: Path) -> None:
+    """Copy one file, link or folder of a setup's output, with its links kept as links.
+
+    Args:
+        source: The path to copy.
+        target: The new path; its parent folders are made.
+        root: The folder that must hold ``target``.
+
+    Raises:
+        RuntimeError: When a parent folder of ``target`` is a link, is not a folder or resolves outside ``root``.
+    """
+    _check_parents(target, root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, target, symlinks=True)
+    else:
+        shutil.copy2(source, target, follow_symlinks=False)
+
+
+def _remove_path(path: Path) -> None:
+    """Remove one file, link or folder, and never follow a link.
+
+    Args:
+        path: The path to remove; a missing path is skipped.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        path.unlink()
+
+
+def _unsafe(path: str) -> bool:
+    """Tell whether no exclude line can hold a path.
+
+    Args:
+        path: A checkout-relative path; a folder ends with ``/``.
+
+    Returns:
+        True when the name is not UTF-8, holds a control character or ends in whitespace.
+    """
+    return bool(_CONTROL_CHARS.search(path)) or path.rstrip("/") != path.rstrip("/").rstrip()
+
+
+def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
+    """Turn a setup's output paths into exclude lines, and refuse a name no line can hold.
+
+    Args:
+        paths: Checkout-relative paths; a folder ends with ``/``.
+        command: The setup's argument list, for the error.
+
+    Returns:
+        One anchored exclude line per path.
+
+    Raises:
+        RuntimeError: When a name is not UTF-8, holds a control character or ends in whitespace.
+    """
+    paths = list(paths)
+    unsafe = sorted(path for path in paths if _unsafe(path))
+    if unsafe:
+        raise RuntimeError(
+            f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) wrote files whose names are"
+            " not UTF-8, hold a control character or end in whitespace:"
+            f" {', '.join(repr(path) for path in unsafe)}. The run cannot keep such a file out of the versions."
+            " Rename it in the setup."
+        )
+    return ["/" + _GLOB_CHARS.sub(r"\\\1", path) for path in paths]
+
+
+def ensure_setup(
+    command: list[str],
+    checkout: Path,
+    timeout_seconds: float = SETUP_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Run ``[proposer] setup`` once per git checkout, and give each later session in it a copy of its output.
+
+    The record is in the git common dir, so the checkout and its worktrees
+    share it, and a separate checkout (each Auto lane) runs the setup again.
+    The setup runs in the first session. Its output, ignored files
+    included, is copied into :data:`SETUP_STATE` in the git dir, and a
+    session after a reset or in a new worktree gets that copy back, without
+    a second setup. What the setup adds, ignored files included, is excluded
+    from every version, like the harness files (SKY-753).
+
+    Before the setup runs, a copy of the checkout's state and a ``started``
+    record are kept in :data:`SETUP_STATE`. A failure in this session puts
+    the repository back as it was: the branch refs, ``HEAD``, the index,
+    ``info/exclude``, the files of the version, and no setup output. A
+    session that is killed during its setup cannot do that, so the next
+    session that finds the ``started`` record and no ``done.json`` first
+    does the same undo from the kept copy, and then runs the setup again.
+    When ``HEAD`` or the index file changed since that setup started, the
+    engine moved the checkout to another version, so that undo puts back
+    only the branch refs, ``HEAD`` and ``info/exclude``.
+
+    Args:
+        command: The exact argument list from ``ascent.toml``.
+        checkout: The repository checkout or worktree the proposer command runs in.
+        timeout_seconds: Stop the setup, and every process it started, after this long.
+            The wait for another session's setup counts inside it.
+        env: The setup's environment, the same as the proposer command's.
+
+    Raises:
+        RuntimeError: When the setup or git fails, the setup changes a file of
+            the version or moves ``HEAD``, it writes a name that no exclude
+            line can hold, another session's setup holds the lock past
+            ``timeout_seconds`` or fails with no time left to run it again,
+            the setup's record is unreadable, or the undo of a setup that an
+            earlier session did not finish fails.
+    """
+    common = _common_dir(checkout)
+    state = common / SETUP_STATE
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "lock").open("a") as lock:
+        # Parallel AutoSaddler sessions share the git dir; one runs the setup, the others wait for its output.
+        # A blocking flock would wait past the session's time limit, so the wait polls up to that limit.
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish"
+                        f" in another session within {timeout_seconds:g} seconds."
+                    ) from None
+                time.sleep(0.1)
+        record = state / "done.json"
+        started = state / "started.json"
+        saved = state / "undo"
+        if record.exists():
+            try:
+                kept = json.loads(record.read_text(encoding="utf-8"))["output"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise RuntimeError(
+                    f"The record of the [proposer] setup command in ascent.toml ({shlex.join(command)}) at"
+                    f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
+                ) from error
+            # A session killed after done.json but before its clean-up left these behind.
+            _forget_setup(started, saved)
+            # The first session writes the whole copy before done.json, and nothing changes it after,
+            # so later sessions copy it unlocked and do not wait in line for each other.
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            for path in kept:
+                name = path.rstrip("/")
+                # A file that the version holds at the same path wins over the setup's copy.
+                if not os.path.lexists(checkout / name):
+                    _copy_path(state / "output" / name, checkout / name, checkout)
+            return
+        if started.exists():
+            # A session killed during its setup skipped its undo; nothing may trust the checkout until it is done.
+            try:
+                _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")), later=True)
+            except Exception as error:
+                raise RuntimeError(
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) stopped in an earlier"
+                    f" session before it finished, and its changes could not be undone: {error!r}."
+                ) from error
+        # A copy with no started record is from a session killed before its setup ran, so nothing needs it.
+        _forget_setup(started, saved)
+        # Files the parent version added are untracked too; only the setup's new paths are excluded.
+        before = _untracked(checkout, folders=False)
+        # ``git clean -fdx`` and a new worktree drop ignored files too, so the setup's ignored output is kept as well.
+        ignored_before = _untracked(checkout, folders=False, ignored=True)
+        # A folder that was there before, even an empty one, is never setup output.
+        folders_before = _old_folders(checkout)
+        version_files = {path: _tracked_state(checkout, path) for path in before}
+        head = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+        branch = _checkout_git(["rev-parse", "--symbolic-full-name", "HEAD"], checkout).strip()
+        tracked = _tracked_changes(checkout)
+        saved.mkdir()
+        # The version's own edits are only hashed above, so a failed setup could not put them back.
+        _save_checkout(checkout, common, tracked.keys() | before, saved)
+        # A waiter whose lock holder failed runs the setup itself, but only in the time its own limit has left.
+        # The copy above counts too, because a large version takes time to copy.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _forget_setup(started, saved)
+            raise RuntimeError(
+                f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish in another"
+                f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
+            )
+        start = {
+            "checkout": str(checkout.resolve()),
+            "head": head,
+            "branch": branch if branch.startswith("refs/heads/") else None,
+            "refs": _branch_refs(checkout),
+            "tracked": tracked,
+            "version_files": version_files,
+            "ignored_before": sorted(ignored_before),
+            "folders_before": sorted(folders_before),
+            # Taken after the last git command of this session, so only a later write changes it.
+            "index_stamp": _index_stamp(checkout),
+            "index_lock": os.path.lexists(_index_lock(checkout)),
+        }
+        # Written last, so a session that finds it knows the copy above is whole.
+        _write_whole(started, json.dumps(start))
+        try:
+            run_setup(command, checkout, remaining, env)
+            moved = _checkout_git(["rev-parse", "HEAD"], checkout).strip()
+            if moved != head:
+                # A commit would hide its changes from the diff below, and enter every version.
+                raise RuntimeError(
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) moved HEAD from"
+                    f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
+                    " history alone."
+                )
+            changed = _setup_changes(checkout, tracked)
+            if changed:
+                raise RuntimeError(
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed tracked files:"
+                    f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
+                    " files that git does not track."
+                )
+            # GEPA and Best-of-N check out a parent version with its new files untracked;
+            # a change to one of them would enter every version as well.
+            rewritten = sorted(
+                path for path, content in version_files.items() if _tracked_state(checkout, path) != content
+            )
+            if rewritten:
+                raise RuntimeError(
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed or removed"
+                    f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
+                    " Make the setup write only new files that git does not track."
+                )
+            added = sorted(_setup_output(checkout, before, folders_before))
+            ignored = _setup_output(checkout, ignored_before, folders_before, ignored=True)
+            # A version can drop the .gitignore line that hides an ignored output path, so it gets an exclude line
+            # too. Git ignores it now, so a name that no line can hold stays hidden by .gitignore alone.
+            lines = _excludable(added, command) + _excludable(sorted(p for p in ignored if not _unsafe(p)), command)
+            kept = sorted(set(added) | ignored)
+            output = state / "output"
+            shutil.rmtree(output, ignore_errors=True)
+            for path in kept:
+                name = path.rstrip("/")
+                # An ignored path inside a new folder is already in that folder's copy.
+                if not os.path.lexists(output / name):
+                    _copy_path(checkout / name, output / name, output)
+            exclude = common / "info" / "exclude"
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+            with exclude.open("a", encoding="utf-8") as stream:
+                stream.write("".join(f"\n{line}" for line in lines if line not in known) + "\n")
+            _write_whole(record, json.dumps({"output": kept}))
+        except BaseException as error:
+            # Any failure after the setup starts leaves the checkout as it was, so no edit becomes the baseline.
+            try:
+                _undo_setup(checkout, common, saved, start)
+                _forget_setup(started, saved)
+            except Exception as undo_error:
+                # The started record stays, so the next session tries the undo again before its setup.
+                error.add_note(f"The checkout could not be restored after the setup: {undo_error!r}")
+            raise
+        _forget_setup(started, saved)
+
+
+def _write_whole(path: Path, text: str) -> None:
+    """Replace a file whole, so a stop during the write never leaves a partial file.
+
+    Args:
+        path: The file to write.
+        text: Its new content.
+    """
+    partial = path.with_name(path.name + ".tmp")
+    partial.write_text(text, encoding="utf-8")
+    partial.replace(path)
+
+
+def _forget_setup(started: Path, saved: Path) -> None:
+    """Remove a setup's started record, and then the copy of the checkout that the undo needs.
+
+    The record goes first: a stop between the two leaves only a copy, which
+    the next session removes.
+
+    Args:
+        started: The started record.
+        saved: The :func:`_save_checkout` copy.
+    """
+    started.unlink(missing_ok=True)
+    shutil.rmtree(saved, ignore_errors=True)
+
+
 def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
     """Price a usage record with the per-token rates the parent supplied.
 
@@ -411,6 +1266,9 @@ _GUARD_DEADLINE_SECONDS = 5.0
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
 # Linux prctl option that makes a process adopt the orphans of its descendants.
 _PR_SET_CHILD_SUBREAPER = 36
+# The shell's exit codes for a command it cannot find or cannot run.
+_REAPER_NOT_FOUND = 127
+_REAPER_NOT_EXECUTABLE = 126
 # The reaper stops sweeping after this many rounds, so a descendant that keeps
 # forking cannot hold the session open.
 _REAPER_SWEEPS = 50
@@ -473,9 +1331,9 @@ def hidden_kind(path: str) -> str:
         path: Repository-relative hidden path.
 
     Returns:
-        ``"config"`` for an ``optimize.toml`` file, else ``"scoring"``.
+        ``"config"`` for an ``ascent.toml`` file, else ``"scoring"``.
     """
-    return "config" if PurePosixPath(path).name.casefold() == "optimize.toml" else "scoring"
+    return "config" if PurePosixPath(path).name.casefold() == "ascent.toml" else "scoring"
 
 
 def _path_hash(path: str) -> str:
@@ -497,7 +1355,7 @@ def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[
     Args:
         hidden_paths: Repository-relative hidden files and directories.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
 
     Returns:
         Path hashes mapped to their kind.
@@ -505,7 +1363,8 @@ def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[
     hashes = {}
     for path in hidden_paths:
         normalized = os.path.normpath(str(path).strip().strip("/"))
-        if normalized in ("", ".") or normalized.startswith(".."):
+        # Only a ``..`` part leaves the repository: ``..data`` is a plain name.
+        if normalized in ("", ".", "..") or normalized.startswith(f"..{os.sep}"):
             continue
         key = normalized.replace(os.sep, "/")
         hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
@@ -523,7 +1382,7 @@ def hashed_kind(hashes: Mapping[str, str], path: str) -> str | None:
         The hidden kind, or ``None`` when no hidden path covers ``path``.
     """
     normalized = posixpath.normpath(path.strip().strip("/"))
-    if normalized in ("", ".") or normalized.startswith(".."):
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
         return None
     parts = normalized.split("/")
     for end in range(1, len(parts) + 1):
@@ -546,7 +1405,7 @@ def guard_policy(
         hidden_paths: Repository-relative hidden files and directories.
         log: File each refusal is appended to.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
         home: The agent's home folder, for ``~`` and ``$HOME``. The default
             is this process's home folder.
 
@@ -757,7 +1616,7 @@ def _hidden_match(
             for root in roots:
                 # On a disk that ignores case, /USERS/... names the same file as /Users/....
                 relative = os.path.relpath(full.casefold(), root.casefold()) if fold else os.path.relpath(full, root)
-                if relative == "." or relative.startswith(".."):
+                if relative in (".", "..") or relative.startswith(f"..{os.sep}"):
                     continue
                 parts = PurePosixPath(Path(relative).as_posix()).parts
                 for end in range(1, len(parts) + 1):
@@ -1202,7 +2061,7 @@ class _Monitor:
             _stop_group(self.process, signal.SIGTERM, self.root_start)
 
 
-def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | None) -> None:
+def _stop_group(process: subprocess.Popen[Any], signum: int, root_start: int | None) -> None:
     """Signal the harness shell and every child it spawned, once each.
 
     Args:
@@ -1223,7 +2082,8 @@ def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | N
         # killpg already reaches the members of the shell's group.
         descendants = [pid for pid in _descendants(stats, process.pid) if stats[pid][1] != process.pid]
     # Signalling only the shell would leave a child holding the stdout pipe open.
-    with contextlib.suppress(ProcessLookupError):
+    # macOS answers EPERM, not ESRCH, when the group holds only an unreaped leader.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signum)
     for pid in descendants:
         with contextlib.suppress(OSError):
@@ -1317,7 +2177,8 @@ def reaper_main(command: list[str]) -> int:
         command: The harness shell and its arguments.
 
     Returns:
-        The shell's exit code, or 128 plus the signal number when a signal ended it.
+        The shell's exit code, or 128 plus the signal number when a signal ended it,
+        or 127 (no such file) or 126 (cannot run it) when the command cannot start.
     """
     ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
     # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
@@ -1330,7 +2191,13 @@ def reaper_main(command: list[str]) -> int:
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, _arm_stop_grace)
     signal.signal(signal.SIGALRM, _kill_descendants)
-    returncode = subprocess.Popen(command, restore_signals=True).wait()
+    try:
+        child = subprocess.Popen(command, restore_signals=True)
+    except OSError as error:
+        # The caller reads these shell codes as "could not start"; a traceback would hide the one-line reason.
+        print(error, file=sys.stderr, flush=True)
+        return _REAPER_NOT_FOUND if isinstance(error, FileNotFoundError) else _REAPER_NOT_EXECUTABLE
+    returncode = child.wait()
     for _ in range(_REAPER_SWEEPS):
         left = _descendants(_proc_stats() or {}, os.getpid())
         if not left:
@@ -1345,13 +2212,21 @@ def reaper_main(command: list[str]) -> int:
 
 
 def _arm_stop_grace(*_: Any) -> None:
-    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends.
+
+    Args:
+        *_: The signal number and frame, which the handler ignores.
+    """
     if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
         signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
 
 
 def _kill_descendants(*_: Any) -> None:
-    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    """Kill every descendant of this process, so the reaper's wait for the shell ends.
+
+    Args:
+        *_: The timer or signal values, which the handler ignores.
+    """
     for pid in _descendants(_proc_stats() or {}, os.getpid()):
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)
@@ -1386,9 +2261,20 @@ def run_session(
         proposer: Serialized launch: ``run_command``, ``files``, ``env``,
             ``output_format``, ``instructions_file`` and optional ``price``
             and ``max_tool_calls`` (stop the harness once it starts more
-            tool calls than this; its workspace edits so far stand), and
+            tool calls than this; its workspace edits so far stand),
             ``hidden_hashes`` (the parent's :func:`hidden_hashes` of the
-            scoring-side paths; every tool call that names one is refused).
+            scoring-side paths; every tool call that names one is refused),
+            ``exec_commands`` (command names the exec shim records), and
+            ``resume_command`` (:func:`main` runs it in place of
+            ``run_command`` for a ``--resume`` of a known session, so a
+            harness with native resume continues its own session state;
+            never for a ``file_command``),
+            ``setup`` (the contract file's ``[proposer] setup``, run by
+            :func:`ensure_setup` before a session in a checkout) and
+            ``file_command`` (``run_command`` is the contract file's exact
+            ``[proposer] entry``, so no key token is filled into it) and
+            ``outside_checkout`` (the default agent's launch, which answers
+            a ``file_command`` session in a folder that is not a checkout).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1397,15 +2283,60 @@ def run_session(
         timeout_seconds: Kill the harness after this many seconds.
         extra_env: Environment overrides layered on top of the launch env.
         api_key: Route key substituted for the launch's key token; defaults
-            to the proposer key in ``APP_API_KEY``.
+            to the proposer key in ``ASCENT_MODEL_KEY``.
 
     Returns:
         The parsed answer, raw transcript, usage and exit status.
+
+    Raises:
+        RuntimeError: When the setup fails or uses up the session's time, a ``file_command`` session
+            outside a checkout has no ``outside_checkout`` launch, or the launch holds a key token from
+            before SKY-776.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
+    if proposer.get("file_command") and not (workspace / ".git").exists():
+        # The file's command and its setup need the repository checkout. An
+        # AutoSaddler reflect session runs in a plain folder and edits no
+        # repository, so the default agent answers it (SKY-753).
+        fallback = proposer.get("outside_checkout")
+        if not fallback:
+            raise RuntimeError(
+                f"The [proposer] entry command in ascent.toml runs only in a repository checkout, not in {workspace}."
+            )
+        proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    _refuse_old_key_token(proposer)
     if api_key is None:
         api_key = _env(KEY_ENV)
+    env = {
+        **os.environ,
+        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
+        **(extra_env or {}),
+    }
+    hashes = dict(proposer.get("hidden_hashes") or {})
+    if hashes:
+        home = Path(env["HOME"]) if env.get("HOME") else None
+        env.update(install_guard(session_dir, workspace, hashes, home))
+    if proposer.get("setup"):
+        # The setup counts inside the session's time limit. An in-process
+        # caller (AutoSaddler) installs no SIGTERM handler; its stop kills
+        # every process it started, this setup included.
+        setup_started = time.monotonic()
+        setup_seconds = (
+            SETUP_TIMEOUT_SECONDS if timeout_seconds is None else min(SETUP_TIMEOUT_SECONDS, timeout_seconds)
+        )
+        # The setup gets the proposer command's environment and guard. The exec shim comes after it, so
+        # the exec log holds only the proposer's own commands.
+        ensure_setup(list(proposer["setup"]), workspace, setup_seconds, env)
+        if timeout_seconds is not None:
+            limit = timeout_seconds
+            timeout_seconds -= time.monotonic() - setup_started
+            if timeout_seconds <= 0:
+                # A harness with no time left would be killed at once, so the setup's overrun stops the session.
+                raise RuntimeError(
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(proposer['setup'])}) used up"
+                    f" the session's time limit of {limit:g} seconds."
+                )
     for relative_path, content in (proposer.get("files") or {}).items():
         target = contained_path(workspace, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1418,70 +2349,77 @@ def run_session(
     attempt = len(list(session_dir.glob("prompt-*.md"))) + 1
     prompt_file = session_dir / f"prompt-{attempt}.md"
     prompt_file.write_text(prompt, encoding="utf-8")
-    env = {
-        **os.environ,
-        **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
-        **(extra_env or {}),
-    }
-    hashes = dict(proposer.get("hidden_hashes") or {})
-    if hashes:
-        home = Path(env["HOME"]) if env.get("HOME") else None
-        env.update(install_guard(session_dir, workspace, hashes, home))
+    exec_commands = proposer.get("exec_commands") or []
+    if exec_commands:
+        shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
+    # The harness proposer box's proxy env has no ASCENT_MODEL, so the proxy model check does not run there
+    # and the gateway refuses other models. SKY-884 tracks that refusal text.
+    env["ASCENT_MODEL"] = model
     for name, value in (
-        ("MODEL", model),
-        ("PROMPT_FILE", str(prompt_file)),
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
+        # A harness with native resume keeps its own session state here, so the committed tree carries it.
+        ("SESSION_DIR", str(session_dir)),
     ):
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
+    env[TASK_ENV] = str(prompt_file.resolve())
     shell = shutil.which("bash") or "/bin/sh"
-    command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
+    run_command = proposer["run_command"]
+    # The file's command is the user's own text: a key token in it must stay text, not become the relay key.
+    command = [shell, "-c", run_command if proposer.get("file_command") else _with_key(run_command, api_key)]
     if sys.platform == "linux" and sys.executable:
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
     with stderr_file.open("w", encoding="utf-8") as stderr:
-        process = subprocess.Popen(
-            command,
-            cwd=workspace,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            text=True,
-            errors="replace",
-            start_new_session=True,
-        )
-        max_tool_calls = proposer.get("max_tool_calls")
-        monitor = _Monitor(
-            process,
-            proposer.get("output_format", "plain"),
-            proposer.get("price"),
-            max_cost_usd,
-            int(max_tool_calls) if max_tool_calls else None,
-            _start_time(process.pid),
-        )
-        reader = threading.Thread(target=monitor.pump, daemon=True)
-        reader.start()
-        timed_out = False
+        with _defer_stop():
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                text=True,
+                errors="replace",
+                start_new_session=True,
+            )
+            max_tool_calls = proposer.get("max_tool_calls")
+            monitor = _Monitor(
+                process,
+                proposer.get("output_format", "plain"),
+                proposer.get("price"),
+                max_cost_usd,
+                int(max_tool_calls) if max_tool_calls else None,
+                _start_time(process.pid),
+            )
+            _OWNED_GROUPS[process.pid] = (process, monitor.root_start)
         try:
-            process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _stop_group(process, signal.SIGKILL, monitor.root_start)
-            process.wait()
-        else:
-            # A job the shell left in its group would outlive the session, and
-            # the native runtime runs many sessions in one box. Without /proc
-            # (macOS) nothing proves the reaped pid is still ours, so skip it.
-            if monitor.root_start is not None:
+            reader = threading.Thread(target=monitor.pump, daemon=True)
+            reader.start()
+            timed_out = False
+            try:
+                process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
                 _stop_group(process, signal.SIGKILL, monitor.root_start)
-        # A child forked while the first signal landed can outlive the shell and
-        # keep the pipe open, so keep sweeping the group until the reader sees EOF.
-        deadline = time.monotonic() + 5.0
-        while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
-            _stop_group(process, signal.SIGKILL, monitor.root_start)
-            reader.join(timeout=0.2)
-        reader.join(timeout=30)
+                process.wait()
+            else:
+                # A job the shell left in its group would outlive the session, and
+                # the native runtime runs many sessions in one box. Without /proc
+                # (macOS) nothing proves the reaped pid is still ours, so skip it.
+                if monitor.root_start is not None:
+                    _stop_group(process, signal.SIGKILL, monitor.root_start)
+            # A child forked while the first signal landed can outlive the shell and
+            # keep the pipe open, so keep sweeping the group until the reader sees EOF.
+            deadline = time.monotonic() + 5.0
+            while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
+                _stop_group(process, signal.SIGKILL, monitor.root_start)
+                reader.join(timeout=0.2)
+            reader.join(timeout=30)
+        finally:
+            _OWNED_GROUPS.pop(process.pid, None)
     stdout = "".join(monitor.chunks)
     (session_dir / f"run-{attempt}.stdout").write_text(stdout, encoding="utf-8")
     output_format = proposer.get("output_format", "plain")
@@ -1700,6 +2638,38 @@ def install_shim(home: Path, bridge_file: Path, python: str) -> Path:
     return shim_dir
 
 
+def install_exec_shim(shim_dir: Path, names: Iterable[str], python: str) -> Path:
+    """Write one wrapper for each command name that runs it through ``exec_shim.py``.
+
+    Args:
+        shim_dir: Folder for the wrappers; it must lead ``PATH``.
+        names: Plain command names to record.
+        python: Interpreter that runs the shim.
+
+    Returns:
+        ``shim_dir``.
+
+    Raises:
+        ValueError: When a name is not a plain file name.
+        FileNotFoundError: When ``exec_shim.py`` is not next to this file.
+    """
+    shim_file = Path(__file__).resolve().with_name("exec_shim.py")
+    if not shim_file.is_file():
+        raise FileNotFoundError(f"exec shim not found: {shim_file}")
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        if name in ("", ".", "..") or "/" in name or "\0" in name:
+            raise ValueError(f"exec shim command must be a plain name: {name!r}")
+        wrapper = shim_dir / name
+        wrapper.write_text(
+            # -I: a PYTHONPATH or a json.py in the agent's folder must not shadow the shim's stdlib imports.
+            f'#!/bin/sh\nexec {shlex.join([python, "-I", str(shim_file), str(shim_dir), name])} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+    return shim_dir
+
+
 def main(argv: list[str]) -> int:
     """Answer one ``claude --print`` invocation with the configured harness.
 
@@ -1713,6 +2683,7 @@ def main(argv: list[str]) -> int:
         return guard_main(argv[1:])
     if argv[:1] == ["reaper"]:
         return reaper_main(argv[1:])
+    signal.signal(signal.SIGTERM, _stop_owned_groups)
     args, unknown = _cli_parser().parse_known_args(argv)
     if args.output_format not in (None, "json"):
         print(f"claude bridge: unsupported --output-format {args.output_format}", file=sys.stderr)
@@ -1726,14 +2697,18 @@ def main(argv: list[str]) -> int:
     proposer = json.loads(Path(config_path).read_text(encoding="utf-8"))
     resumed = args.resume or args.r
     session_id = args.session_id or resumed or uuid.uuid4().hex
-    model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
+    model = args.model or str(proposer.get("model") or _env("ASCENT_MODEL"))
     workspace = Path.cwd()
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     prompt = " ".join(args.prompt).strip() or sys.stdin.read()
     opening = session_dir / "opening-prompt.md"
-    if resumed and opening.exists():
-        # No other harness resumes a Claude session by id: the workspace carries
+    # The file's own command has no resume protocol, so its session restates the task, as a fallback harness does.
+    if resumed and opening.exists() and proposer.get("resume_command") and not proposer.get("file_command"):
+        # The harness continues its own session from the session folder, so it gets only the follow-up.
+        proposer = {**proposer, "run_command": proposer["resume_command"]}
+    elif resumed and opening.exists():
+        # This harness cannot resume a session by id: the workspace carries
         # the progress, so the follow-up restates the task before the nudge.
         prompt = opening.read_text(encoding="utf-8") + _RESUME_NOTE + prompt
     elif not opening.exists():

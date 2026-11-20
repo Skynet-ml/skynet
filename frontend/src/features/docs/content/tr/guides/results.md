@@ -64,7 +64,7 @@ def serve(input):
 
 - `input`, istekteki girdi alanlarının dict'idir.
 - Dönüş değeri JSON'a serileştirilebilir olmalıdır. Bir dict `outputs` olur. Başka herhangi bir değer `{"output": value}` olur.
-- `serve.py`, `skynet` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
+- `serve.py`, `openascent` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
 
 Skynet en iyi sürümü, çalıştırmayla aynı korumalı sandbox içinde çalıştırır. **Kullanım** sekmesinin iki bölümü vardır:
 

@@ -11,13 +11,22 @@ versions. Each box holds only the code it needs (SKY-398):
   ``--read-only``, so there is no ``docker commit``). The parent keeps the
   prepared tree's digest.
 - The metric setup step runs once in its own box. It installs only the
-  packages of ``METRIC_REQUIREMENTS`` and saves a second state that holds no
-  repository code. Its network is open only for that install.
+  packages of ``METRIC_REQUIREMENTS``, then runs the ``[metric] setup``
+  command in ``METRIC_REPO_DIR`` with the metric files there (SKY-740). It
+  removes the metric files again and saves a second state that holds no
+  repository code and no metric source; the build output stays in it. Its
+  network is open only to the package registries, and it gets no secret.
 - A candidate box C opens for each evaluation from the prepared state,
   checks the digest and lays out the version. The parent ends it after the
-  ``[run]`` entry; closing the box is the only cleanup.
+  ``[run]`` entry; closing the box is the only cleanup. No candidate box
+  serves a second version (SKY-805): a reset of a used box would have to
+  clear every state a version can leave, so each version gets a new box
+  from the saved state, and the setup does not run again.
 - A metric box M opens for each evaluation from the metric state. It holds
   only the metric files and the runner, never a repository tree.
+
+Both boxes open through the tree sandbox session API (SKY-785), so the
+acquire, start, run and release steps match every other tree sandbox box.
 """
 
 from __future__ import annotations
@@ -34,7 +43,7 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -44,9 +53,12 @@ from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.errors import is_temporary_provider_error
+from ....sandbox.grants import Grant
 from ....sandbox.snapshots import snapshot_cache_key
+from ....sandbox.trees import BoxSource
 from .repo_tree import (
     MAX_PATCH_BYTES,
+    SAFE_GIT,
     _member_path,
     archive_chunks,
     drop_paths,
@@ -55,6 +67,7 @@ from .repo_tree import (
     strip_archive,
 )
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .tree_sandbox import BoxSession, TreeSandbox
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +106,11 @@ _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=
 # git 2.47), whose lock files come and go while ``cp -a`` walks ``.git``.
 _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
 # Box git reads only the repository's own config: a filter, hook or fsmonitor
-# command in $HOME or the XDG folder must not run in a box git call.
+# command in $HOME or the XDG folder must not run in a box git call, and a
+# folder in the tree shaped as a bare repository is not a repository (SKY-812).
 GIT = (
     "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
-    " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
+    f" GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git {shlex.join(SAFE_GIT)} -c core.attributesFile=/dev/null"
     " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _HASH_TIMEOUT_SECONDS = 300.0
@@ -434,6 +448,58 @@ def box_root(session: SandboxSession) -> str:
     return root
 
 
+def _install_metric_files(session: SandboxSession, files: str | None) -> None:
+    """Put the packed metric files into ``METRIC_REPO_DIR`` at their repository paths.
+
+    Args:
+        session: The metric box or the metric setup box.
+        files: The base64 tar.gz from :func:`pack_metric_files`; ``None`` only makes the folder.
+
+    Raises:
+        RepoSetupError: When the files cannot be installed.
+    """
+    made = session.run(f"mkdir -p {METRIC_REPO_DIR}", timeout_seconds=60)
+    if not made.ok:
+        raise RepoSetupError(f"The metric folder could not be made: {_tail(made)}")
+    if files is None:
+        return
+    source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
+    session.write_files({source: files})
+    result = session.run(
+        f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
+        timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+    )
+    if not result.ok:
+        raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
+
+
+def _remove_metric_files(session: SandboxSession, files: str) -> None:
+    """Remove the packed metric files from ``METRIC_REPO_DIR`` and keep the build output.
+
+    The saved metric state must hold no metric source, so no metric box has it
+    before the candidate box ends (SKY-398); ``install_metric_files`` puts it
+    back later (SKY-740).
+
+    Args:
+        session: The metric setup box, after the build.
+        files: The base64 tar.gz from :func:`pack_metric_files`.
+
+    Raises:
+        RepoSetupError: When the files cannot be removed.
+    """
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(files)), mode="r:gz") as packed:
+        names = [member.name for member in packed.getmembers() if member.isreg()]
+    listing = f"{METRIC_DIR}/remove-{uuid.uuid4().hex}.txt"
+    session.write_files({listing: "".join(f"{name}\0" for name in names)})
+    result = session.run(
+        f"cd {METRIC_REPO_DIR} && xargs -0 rm -f -- < ../{posixpath.basename(listing)}"
+        f" && rm -f ../{posixpath.basename(listing)}",
+        timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+    )
+    if not result.ok:
+        raise RepoSetupError(f"The metric files could not be removed after the metric setup: {_tail(result)}")
+
+
 def _close_quietly(session: SandboxSession, what: str) -> None:
     """Close a box and log only a failure's type.
 
@@ -448,18 +514,80 @@ def _close_quietly(session: SandboxSession, what: str) -> None:
         logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
 
 
+class RepoBoxSource:
+    """Open a fresh evaluation box for each acquire and close it at release (SKY-718).
+
+    The repository rules accept hosts that the grant rules refuse (a port, one
+    label), so this source puts the role's hosts on the box as given, without
+    grant resolution, and a run's network stays what its ``[run]`` and
+    ``[metric]`` tables say.
+    """
+
+    def __init__(self, runtime: SandboxRuntime, spec: SandboxSpec) -> None:
+        """Bind the source to a runtime and the spec of its boxes.
+
+        Args:
+            runtime: Opens the boxes.
+            spec: The box spec; the grant hosts replace its network fields.
+        """
+        self._runtime = runtime
+        self._spec = spec
+
+    def acquire(self, agent_id: str, grants: Sequence[Grant]) -> SandboxSession:
+        """Open a new box whose allowed hosts are the grant hosts.
+
+        Args:
+            agent_id: The box role; each call gets its own box.
+            grants: The role's grants; empty keeps the box offline.
+
+        Returns:
+            The open box.
+        """
+        hosts = tuple(grant.host for grant in grants)
+        return self._runtime.open(replace(self._spec, network_disabled=not hosts, allowed_hosts=hosts))
+
+    def release(self, box: SandboxSession, healthy: bool) -> None:
+        """Close the box; a close error goes to the caller.
+
+        Args:
+            box: A box that :meth:`acquire` gave.
+            healthy: Not used: a closed box is never reused.
+        """
+        box.close()
+
+
+def _release_failed(source: BoxSource[SandboxSession], session: SandboxSession, what: str) -> None:
+    """Give a failed box that no session holds back to its source as unhealthy, and log only a failure's type.
+
+    The boxes this module opens hold a session and call
+    :meth:`BoxSession.release_failed` directly, so the session marks itself released.
+
+    Args:
+        source: The source that gave the box.
+        session: The box.
+        what: Names the box in the log line.
+
+    Raises:
+        BudgetReached: And the other budget errors of the close, in place of the box's own failure.
+    """
+    BoxSession(source, session).release_failed(what)
+
+
 class CandidateBox:
     """One evaluation's candidate box C: the prepared repository with the version laid out."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str) -> None:
+    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, box: BoxSession) -> None:
         """Bind an open, laid-out box to the workspace that checks its protected files.
 
         Args:
             workspace: The workspace that opened the box.
-            session: The box.
+            session: The box, for the protected-file checks and the relay answers.
             root: The box's working directory.
+            box: The tree sandbox session that holds ``session``; it runs the
+                ``[run]`` entry and gives the box back at close.
         """
         self._workspace = workspace
+        self.box = box
         self.session = session
         self.root = root
         self.path = WORK_DIR
@@ -468,7 +596,6 @@ class CandidateBox:
         # again: a write, even one that raised after the server did it, moves every ctime.
         self._unstamped = False
         self._lock = threading.Lock()
-        self._closed = False
 
     @property
     def unstamped(self) -> bool:
@@ -591,33 +718,33 @@ class CandidateBox:
             return changes
 
     def close(self) -> None:
-        """End the box; every process the version started ends with it."""
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-        self.session.close()
+        """Give the box back to its source once; every process the version started ends with it."""
+        self.box.release(healthy=True)
 
 
 class MetricBox:
     """One evaluation's metric box M: the metric state, the metric files and the runner, no repository."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None) -> None:
+    def __init__(
+        self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None, box: BoxSession
+    ) -> None:
         """Bind an open metric box.
 
         Args:
             workspace: The workspace that opened the box.
-            session: The box.
+            session: The box, for the metric files, the runner and its output.
             root: The box's working directory.
             key: The box's operation key, or ``None`` when the spec has none.
+            box: The tree sandbox session that holds ``session``; it runs the
+                metric and gives the box back at close.
         """
         self._workspace = workspace
+        self.box = box
         self.session = session
         self.root = root
         self.key = key
         self.repo_path = f"{root}/{METRIC_REPO_DIR}"
         self.site_path = f"{root}/{METRIC_SITE_DIR}"
-        self._closed = False
 
     def install_metric_files(self) -> None:
         """Put the metric files into ``METRIC_REPO_DIR`` at their repository paths.
@@ -627,27 +754,13 @@ class MetricBox:
         Raises:
             RepoSetupError: When the files cannot be installed.
         """
-        files = self._workspace.metric_files
-        made = self.session.run(f"mkdir -p {METRIC_REPO_DIR}", timeout_seconds=60)
-        if not made.ok:
-            raise RepoSetupError(f"The metric folder could not be made: {_tail(made)}")
-        if files is None:
-            return
-        source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
-        self.session.write_files({source: files})
-        result = self.session.run(
-            f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
-            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-        )
-        if not result.ok:
-            raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
+        # The extract overwrites the metric files and keeps the files a
+        # [metric] setup build wrote next to them (SKY-740).
+        _install_metric_files(self.session, self._workspace.metric_files)
 
     def close(self) -> None:
-        """End the box."""
-        if self._closed:
-            return
-        self._closed = True
-        self.session.close()
+        """Give the box back to its source once."""
+        self.box.release(healthy=True)
 
 
 def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
@@ -717,6 +830,7 @@ class RepoWorkspace:
         run_vcpus: int | None = None,
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
+        metric_setup: str | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -738,6 +852,8 @@ class RepoWorkspace:
             run_vcpus: The ``[run] vcpus`` of the candidate box; ``None`` keeps ``spec.vcpus``.
             metric_hosts: The ``[metric] network`` hosts of the metric box; empty keeps it offline.
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
+            metric_setup: The ``[metric] setup`` command, run once in the metric
+                setup box with the metric files; ``None`` builds nothing.
         """
         self._runtime = runtime
         self._spec = spec
@@ -746,11 +862,12 @@ class RepoWorkspace:
         self._readonly = tuple(readonly_paths)
         self._protected = tuple(protected_paths)
         self._hidden = tuple(posixpath.normpath(path) for path in hidden_paths)
-        self._run_hosts = tuple(run_hosts)
+        self._run_grants = tuple(Grant(host) for host in run_hosts)
         self._run_vcpus = run_vcpus
-        self._metric_hosts = tuple(metric_hosts)
+        self._metric_grants = tuple(Grant(host) for host in metric_hosts)
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
+        self._metric_setup = (metric_setup or "").strip() or None
         self._secrets = dict(secrets)
         self._failure: BaseException | None = None
         self._setup_log = ""
@@ -831,7 +948,7 @@ class RepoWorkspace:
             self._requirements = read_metric_requirements(self._archive)
             self.metric_files = pack_metric_files(self._archive, self._hidden) if self._hidden else None
         self._repo_state = self._setup_repository(on_output)
-        self._metric_state = self._setup_metric() if self._requirements else None
+        self._metric_state = self._setup_metric() if self._requirements or self._metric_setup else None
 
     def _next_key(self, kind: str) -> str | None:
         """Return a new operation key for one box, so each box reserves its own hold (E31).
@@ -921,13 +1038,15 @@ class RepoWorkspace:
             raise RepoSetupError("The prepared repository could not be fingerprinted.")
 
     def _setup_metric(self) -> _State:
-        """Install only the declared metric packages in a box without repository code, and save its state.
+        """Install the declared metric packages and run ``[metric] setup`` in a box without repository code.
+
+        The box holds only the metric files, and saves its state for every metric box.
 
         Returns:
             The saved state.
 
         Raises:
-            RepoSetupError: When the install fails or the state cannot be saved.
+            RepoSetupError: When the install or the build fails, or the state cannot be saved.
         """
         # The registries, also when the repository has no [setup] command: the
         # spec's own hosts are then empty, and the install would run offline.
@@ -943,20 +1062,46 @@ class RepoWorkspace:
         )
         session = self._runtime.open(spec)
         try:
-            session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
-            result = session.run(
-                f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
-                f" -r {METRIC_DIR}/requirements.txt"
-                f" && rm -f {METRIC_DIR}/requirements.txt && touch {_METRIC_READY}",
-                env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
-                timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-            )
-            if not result.ok:
-                log = redact(_tail(result), self._secrets.values())
-                raise RepoSetupError(f"The metric packages ({METRIC_REQUIREMENTS}) could not be installed.\n{log}")
+            if self._requirements:
+                session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
+                result = session.run(
+                    f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
+                    f" -r {METRIC_DIR}/requirements.txt && rm -f {METRIC_DIR}/requirements.txt",
+                    env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+                if not result.ok:
+                    log = redact(_tail(result), self._secrets.values())
+                    raise RepoSetupError(f"The metric packages ({METRIC_REQUIREMENTS}) could not be installed.\n{log}")
+            if self._metric_setup is not None:
+                self._build_metric(session)
+            ready = session.run(f"touch {_METRIC_READY}", timeout_seconds=60)
+            if not ready.ok:
+                raise RepoSetupError(f"The metric setup could not be marked ready: {_tail(ready)}")
             return self._save(session, self._metric_snapshot_key, "metric-state")
         finally:
             _close_quietly(session, "The metric setup box")
+
+    def _build_metric(self, session: SandboxSession) -> None:
+        """Run the ``[metric] setup`` command once in the metric files' folder, then remove the metric files (SKY-740).
+
+        Args:
+            session: The metric setup box, after the package install.
+
+        Raises:
+            RepoSetupError: When the files cannot be installed, or the command
+                fails or runs out of time; the error holds the output's last lines.
+        """
+        assert self._metric_setup is not None
+        _install_metric_files(session, self.metric_files)
+        build = session.run(f"cd {METRIC_REPO_DIR} && {self._metric_setup}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+        log = redact(_tail(build), self._secrets.values())
+        if build.timed_out:
+            raise RepoSetupError(f"The metric setup command ([metric] setup) ran out of time.\n{log}")
+        if not build.ok:
+            raise RepoSetupError(f"The metric setup command ([metric] setup) failed (exit {build.exit_code}).\n{log}")
+        if self.metric_files is not None:
+            _remove_metric_files(session, self.metric_files)
 
     def _save(self, session: SandboxSession, key: str, name: str) -> _State:
         """Save a box's state as a snapshot, or as a tar.gz in the parent when the runtime has none.
@@ -1022,15 +1167,17 @@ class RepoWorkspace:
                 handle.write(base64.b64decode(text.strip()))
         return path
 
-    def _open_box(self, spec: SandboxSpec, state: _State | None) -> SandboxSession:
-        """Open one box from a saved state.
+    def _open_box(self, spec: SandboxSpec, state: _State | None, role: str, grants: tuple[Grant, ...]) -> BoxSession:
+        """Open one box from a saved state through the tree sandbox session API (SKY-718, SKY-785).
 
         Args:
             spec: The box's spec without its state.
             state: The saved state; ``None`` opens the plain image.
+            role: ``candidate`` or ``metric``.
+            grants: The role's network grants; empty keeps the box offline.
 
         Returns:
-            The open box, with a tar state unpacked.
+            The session that holds the open box, with a tar state unpacked.
 
         Raises:
             RepoSetupError: When a tar state cannot be unpacked.
@@ -1040,43 +1187,53 @@ class RepoWorkspace:
             spec = replace(spec, snapshot_id=state.snapshot_id)
         elif state is not None and state.archive is not None:
             spec = replace(spec, snapshot_archive=str(state.archive))
+        archive = state.archive if state is not None else None
+        start: Callable[[SandboxSession], None] | None = None
+        if archive is not None:
+
+            def unpack(session: SandboxSession) -> None:
+                """Unpack the tar state into the new box.
+
+                Args:
+                    session: The box.
+
+                Raises:
+                    RepoSetupError: When the state cannot be unpacked.
+                """
+                parts = []
+                for index, chunk in enumerate(archive_chunks(archive)):
+                    name = f"{_STATE_DIR}/state.{index:04d}.b64"
+                    session.write_files({name: chunk})
+                    parts.append(name)
+                files = " ".join(shlex.quote(part) for part in parts)
+                result = session.run(
+                    f"set -e; cat {files} | base64 -d | tar -xzf - -C .; rm -rf {_STATE_DIR}",
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+                if not result.ok:
+                    raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
+
+            start = unpack
         try:
-            session = self._runtime.open(spec)
+            return TreeSandbox.open_session(
+                RepoBoxSource(self._runtime, spec), role, grants, start=start, what="A box from a tar state"
+            )
         except _BUDGET_ERRORS:
             raise
         except Exception as error:
+            # A saved state is a snapshot or a tar file, never both, so an error here with a snapshot is the open's.
             if spec.snapshot_id is None:
                 raise
             # Only the type: the provider's text can name the snapshot.
             logger.warning("A box did not open from its snapshot (%s)", type(error).__name__)
             self._drop_snapshots()
             raise _SnapshotLostError("A box could not open from the saved snapshot.") from None
-        if state is None or state.archive is None:
-            return session
-        try:
-            parts = []
-            for index, chunk in enumerate(archive_chunks(state.archive)):
-                name = f"{_STATE_DIR}/state.{index:04d}.b64"
-                session.write_files({name: chunk})
-                parts.append(name)
-            files = " ".join(shlex.quote(part) for part in parts)
-            result = session.run(
-                f"set -e; cat {files} | base64 -d | tar -xzf - -C .; rm -rf {_STATE_DIR}",
-                timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-            )
-            if not result.ok:
-                raise RepoSetupError(f"The saved box state could not be unpacked: {_tail(result)}")
-        except BaseException:
-            _close_quietly(session, "A box from a tar state")
-            raise
-        return session
 
-    def _box_spec(self, kind: str, hosts: tuple[str, ...], vcpus: int | None, *, services: bool) -> SandboxSpec:
-        """Return the spec of one evaluation box.
+    def _box_spec(self, kind: str, vcpus: int | None, *, services: bool) -> SandboxSpec:
+        """Return the spec of one evaluation box; the box source sets its network from the grants.
 
         Args:
             kind: ``candidate`` or ``metric``.
-            hosts: The role's ``network`` hosts; empty keeps the box offline.
             vcpus: The role's ``vcpus``; ``None`` keeps the setup's.
             services: Whether the box runs the compose services.
 
@@ -1088,8 +1245,6 @@ class RepoWorkspace:
         return replace(
             self._spec,
             operation_key=key,
-            network_disabled=not hosts,
-            allowed_hosts=hosts,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),
             private=kind == "metric",
@@ -1150,9 +1305,10 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
         """
         self.prepare()
-        spec = self._box_spec("candidate", self._run_hosts, self._run_vcpus, services=True)
+        spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
-        session = self._open_box(spec, state)
+        box = self._open_box(spec, state, "candidate", self._run_grants)
+        session = box.box
         try:
             if self._digest_prepared(session) != self._prepared_digest:
                 self._drop_snapshots()
@@ -1167,13 +1323,14 @@ class RepoWorkspace:
                 f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
-            if not applied.ok:
-                _close_quietly(session, "The candidate box")
-                return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
-            return CandidateBox(self, session, box_root(session))
+            if applied.ok:
+                return CandidateBox(self, session, box_root(session), box)
         except BaseException:
-            _close_quietly(session, "The candidate box")
+            box.release_failed("The candidate box")
             raise
+        # Outside the try: a budget error of this release must not release the box a second time.
+        box.release_failed("The candidate box")
+        return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
     def open_metric(self) -> MetricBox:
         """Open a metric box from the metric state, without any repository file.
@@ -1203,9 +1360,10 @@ class RepoWorkspace:
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the packages.
         """
         self.prepare()
-        spec = self._box_spec("metric", self._metric_hosts, self._metric_vcpus, services=False)
+        spec = self._box_spec("metric", self._metric_vcpus, services=False)
         state = self._metric_state
-        session = self._open_box(spec, state)
+        box = self._open_box(spec, state, "metric", self._metric_grants)
+        session = box.box
         try:
             if state is not None:
                 ready = session.run(f"test -f {_METRIC_READY}", timeout_seconds=60)
@@ -1215,9 +1373,9 @@ class RepoWorkspace:
                     raise (_SnapshotLostError if lost else RepoSetupError)(
                         "The metric box does not hold the metric packages."
                     )
-            return MetricBox(self, session, box_root(session), spec.operation_key)
+            return MetricBox(self, session, box_root(session), spec.operation_key, box)
         except BaseException:
-            _close_quietly(session, "The metric box")
+            box.release_failed("The metric box")
             raise
 
     def _drop_snapshots(self) -> None:

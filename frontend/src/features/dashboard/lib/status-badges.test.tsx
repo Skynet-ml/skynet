@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { buildActiveCatalog } from "@/shared/lib/messages.server";
+import { setServerMessages } from "@/shared/lib/runtime-messages";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
 
 // The classic JSX transform the test loader applies reads a global React.
@@ -54,6 +56,31 @@ void describe("formatScore", () => {
       metric_improvement: 1,
     } as OptimizationSummaryResponse;
     assert.match(renderToStaticMarkup(<>{formatScore(job)}</>), /title="0 → 1"/);
+  });
+
+  void it("SKY-750: shows a lower minimize score as a green gain, as the run page does", () => {
+    const job = {
+      optimization_type: "blackbox",
+      baseline_test_metric: 0.9,
+      optimized_test_metric: 0.75,
+      metric_improvement: 0.15,
+    } as OptimizationSummaryResponse;
+    setServerMessages(buildActiveCatalog("en"), "en");
+    const html = renderToStaticMarkup(<>{formatScore(job)}</>);
+    assert.match(html, /--success/);
+    assert.match(html, /\(\+0\.15\)/);
+    assert.match(html, /title="0\.9 → 0\.75 · Lower is better"/);
+  });
+
+  void it("SKY-750: shows no lower-is-better note for a maximize run", () => {
+    const job = {
+      optimization_type: "blackbox",
+      baseline_test_metric: 0.5,
+      optimized_test_metric: 0.84,
+      metric_improvement: 0.34,
+    } as OptimizationSummaryResponse;
+    setServerMessages(buildActiveCatalog("en"), "en");
+    assert.doesNotMatch(renderToStaticMarkup(<>{formatScore(job)}</>), /Lower is better/);
   });
 
   void it("shows a dash when the run has no score", () => {

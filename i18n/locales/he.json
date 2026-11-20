@@ -65,6 +65,7 @@
   },
   "messages": {
     "submit.preflight.scorer_model": "יש להגדיר את המודל באמצעות llm(model=...) בקוד המדד.",
+    "accounts.deletion_storage_unavailable": "החשבון לא נמחק: לא ניתן היה למחוק כרגע את נתוני הריצות השמורים שלו. נסו שוב בעוד כמה דקות.",
     "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
     "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
     "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",
@@ -109,10 +110,10 @@
     "sandbox.docker_unavailable": "Docker לא פועל במחשב הזה. הפעילו את Docker Desktop או OrbStack ונסו שוב.",
     "sandbox.docker_image_missing": "סביבת הבידוד המקומית עדיין לא נבנתה. הפעילו מחדש את האפליקציה כדי לבנות אותה.",
     "sandbox.provider_unavailable": "ספק סביבת הבידוד שנבחר אינו זמין בשרת הזה. בחרו ספק מהרשימה.",
-    "repo_gate.unenforced_local": "הקובץ optimize.toml מגדיר את {key}. ארגז החול המקומי ב-Docker עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
-    "repo_gate.unenforced_cloud": "הקובץ optimize.toml מגדיר את {key}. ארגז החול בענן עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
-    "repo_gate.missing_secret": "השירות {service} בקובץ optimize.toml צריך את הסוד {secret}, אבל בהרצה הזו אין סוד בשם הזה. הוסיפו את הסוד להרצה או הסירו את השם מהקובץ.",
-    "repo_gate.unknown_connector": "השירות {service} בקובץ optimize.toml אינו מחבר. השתמשו באחד מהשמות האלה: {known}.",
+    "repo_gate.unenforced_local": "הקובץ ascent.toml מגדיר את {key}. ארגז החול המקומי ב-Docker עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
+    "repo_gate.unenforced_cloud": "הקובץ ascent.toml מגדיר את {key}. ארגז החול בענן עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
+    "repo_gate.missing_secret": "השירות {service} בקובץ ascent.toml צריך את הסוד {secret}, אבל בהרצה הזו אין סוד בשם הזה. הוסיפו את הסוד להרצה או הסירו את השם מהקובץ.",
+    "repo_gate.unknown_connector": "השירות {service} בקובץ ascent.toml אינו מחבר. השתמשו באחד מהשמות האלה: {known}.",
     "repo_gate.draft_base_moved": "סוכן ההגדרה שינה קבצים בקומיט {base}, אבל ההרצה תתחיל מהקומיט {commit}. הענף התקדם, והקבצים שהשתנו יבטלו את הקומיטים החדשים שלו. הגדירו את ההרצה מחדש כדי שהסוכן ישנה את הקבצים בקומיט החדש.",
     "repo_gate.missing_mcp_secret": "שרת ה-MCP {server} בקובץ {path} צריך את הסוד {secret}, אבל בהרצה הזו אין סוד בשם הזה. הוסיפו את הסוד להרצה.",
     "repo_gate.secret_host_not_allowed": "הסוד {secret} יכול להישלח רק אל {allowed}, אבל המאגר שולח אותו אל {host}. הוסיפו את {host} למארחים המותרים של {secret} בהרצה, או שנו את הכתובת.",
@@ -121,13 +122,17 @@
     "optimization.not_success_status_for_serve": "ה{term.optimization} במצב '{status}' — רק {term.optimizationPlural} שהושלמו בהצלחה אפשר להגיש.",
     "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.already_terminal": "ה{term.optimization} כבר במצב סופי '{status}'.",
+    "optimization.cancel_conflict": "ה{term.optimization} שינתה את מצבה בזמן הביטול. היא כעת במצב '{status}'. אפשר לנסות לבטל אותה שוב.",
     "optimization.cannot_delete": "לא ניתן למחוק {term.optimization} במצב '{status}'. בטל/י אותה קודם.",
+    "optimization.deletion_storage_unavailable": "ה{term.optimization} לא נמחקה: לא ניתן היה למחוק כרגע את נתוני הריצה השמורים שלה. נסו שוב בעוד כמה דקות.",
     "optimization.clone_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות לשכפול.",
     "optimization.retry_no_payload": "לאופטימיזציית המקור אין הגדרות שמורות להרצה חוזרת.",
     "optimization.retry_wrong_status": "אפשר להריץ מחדש רק {term.optimizationPlural} במצב 'נכשלה' או 'בוטלה' — זו במצב '{status}'. ניתן לשכפל אותה במקום.",
     "optimization.cannot_resubmit_payload": "לא ניתן לשלוח מחדש את ההגדרות השמורות: {error}",
     "optimization.resume_wrong_status": "אפשר להמשיך רק {term.optimizationPlural} שנעצרו באמצע — זו במצב '{status}'.",
     "optimization.resume_not_resumable": "אין נקודת המשך שמורה ל{term.optimization} הזו — ניתן להריץ אותה מחדש במקום.",
+    "optimization.resume_target_retired": "כל הרצה מבצעת עכשיו אופטימיזציה למאגר קוד. ההרצה הזו, של טקסט או סוכן, נשארת בהיסטוריה, אבל אי אפשר להמשיך אותה.",
+    "optimization.restart_target_retired": "כל הרצה מבצעת עכשיו אופטימיזציה למאגר קוד. ההרצה הזו, של טקסט או סוכן, נשארת בהיסטוריה, אבל אי אפשר להריץ אותה מחדש.",
     "optimization.resume_exhausted": "ה{term.optimization} מיצתה את מספר הניסיונות המרבי ({attempts}) — ניתן להריץ אותה מחדש במקום.",
     "optimization.resume_budget_projected": "האופטימיזציה צפויה לעלות כ-{projected}, מעל התקרה של {limit}. יש להעלות את תקרת ההוצאה מעל {projected} כדי להמשיך.",
     "optimization.pause_wrong_status": "אפשר להשהות רק {term.optimizationPlural} שרצות כרגע — זו במצב '{status}'.",
@@ -313,6 +318,7 @@
     "blackbox.host_agent_failed": "הסוכן {cli} במחשב הזה לא הצליח לסיים את התור שלו: {detail}",
     "blackbox.host_agent_rate_limited": "המנוי שלך ל-{cli} הגיע למגבלת השימוש. המגבלה מתאפסת ב-{reset_at}. אפשר להפעיל את הריצה שוב אחרי מועד זה.",
     "blackbox.repo_target_unavailable": "עדיין אי אפשר לבצע אופטימיזציה למאגר קוד.",
+    "blackbox.shinka_interpreter_missing": "ה-worker הזה לא יכול להריץ את ShinkaEvolve, כי האימג' שלו לא כולל את המפרש של ShinkaEvolve. בחרו מנוע אחר, או בקשו מהמפעיל לפרוס אימג' של worker שכולל את ShinkaEvolve.",
     "notifier.body.stuck": "לא נמצא שיפור לאורך {percent}% מתקציב ההערכות של האופטימיזציה.",
     "notifier.label.best": "{term.score} מוביל",
     "notifier.label.spent": "הוצאה",
@@ -532,7 +538,7 @@
           "label": "label"
         },
         "signature_code": "import dspy\n\n\nclass ClassifySentiment(dspy.Signature):\n    \"\"\"סווג את הטקסט לאחת משלוש קטגוריות: חיובי, שלילי, נייטרלי.\"\"\"\n\n    text: str = dspy.InputField(desc=\"טקסט הביקורת\")\n    label: str = dspy.OutputField(desc=\"חיובי / שלילי / נייטרלי\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"label\", \"\")).strip().lower()\n    expected = str(getattr(example, \"label\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"label\", \"\")).strip().lower()\n    expected = str(getattr(example, \"label\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       },
       "email-triage-he": {
         "name": "מיון פניות בדוא״ל",
@@ -606,7 +612,7 @@
           "category": "category"
         },
         "signature_code": "import dspy\n\n\nclass ClassifyEmail(dspy.Signature):\n    \"\"\"סווג את הפנייה לפי המחלקה המתאימה: תמיכה, חיוב, או מכירות.\"\"\"\n\n    subject: str = dspy.InputField(desc=\"נושא ההודעה\")\n    body: str = dspy.InputField(desc=\"גוף ההודעה\")\n    category: str = dspy.OutputField(desc=\"תמיכה / חיוב / מכירות\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"category\", \"\")).strip().lower()\n    expected = str(getattr(example, \"category\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"category\", \"\")).strip().lower()\n    expected = str(getattr(example, \"category\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       },
       "qa-general-he": {
         "name": "שאלות ותשובות כלליות",
@@ -676,7 +682,7 @@
           "answer": "answer"
         },
         "signature_code": "import dspy\n\n\nclass AnswerQuestion(dspy.Signature):\n    \"\"\"ענה על השאלה בתשובה קצרה ומדויקת.\"\"\"\n\n    question: str = dspy.InputField(desc=\"השאלה\")\n    answer: str = dspy.OutputField(desc=\"תשובה קצרה\")\n",
-        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"answer\", \"\")).strip().lower()\n    expected = str(getattr(example, \"answer\", \"\")).strip().lower()\n    return predicted == expected\n"
+        "metric_code": "def metric(example, prediction, trace=None):\n    \"\"\"בודקת אם תשובת המודל זהה לתגית האמת.\"\"\"\n    predicted = str(getattr(prediction, \"answer\", \"\")).strip().lower()\n    expected = str(getattr(example, \"answer\", \"\")).strip().lower()\n    return {\"score\": 1.0 if predicted == expected else 0.0, \"feedback\": f\"expected {expected!r}, got {predicted!r}\"}\n"
       }
     }
   }

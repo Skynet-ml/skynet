@@ -57,7 +57,7 @@
 | عمق المجلدات                       | 3 مجلدات                                                                |
 | أنواع الملفات                      | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-يحتوي `scorer.py` على المُقيِّم الخاص بك. يستدعي Skynet الدالة `score(repo_path, case)` فيه لكل حالة.
+يحتوي `scorer.py` على المُقيِّم الخاص بك. يستدعي Skynet الدالة `score(repo_path, case, output=None)` فيه لكل حالة. تحمل الوسيطة `output` ما أرجعه `entry` في `[run]` لتلك الحالة.
 
 ## معدلات الطلبات
 

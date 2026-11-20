@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import dspy
 import litellm
@@ -34,10 +35,10 @@ from core.service_gateway.agents.generalist import (
     tools_for,
 )
 from core.service_gateway.agents.workspace_tools import (
+    ASCENT_TOML_EXAMPLE,
     EDIT_FILE_TOOL,
     LIST_REPO_TOOL,
     METRIC_GUIDE,
-    OPTIMIZE_TOML_EXAMPLE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
     open_repo,
@@ -67,7 +68,9 @@ _REPO_METRIC: dict[str, Any] = {
     "repository": "acme/shop",
     "github_connected": True,
 }
-_SCORER = "def score(repo_path):\n    return 1.0, 'ok'\n"
+_SCORER = "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n"
+# The metric scores only what a [run] or a target stage gives it, so a valid contract names one (SKY-761).
+_VALID_TOML = 'version = 1\n[run]\nentry = "run.py:main"\n'
 # The commit every branch resolves to in these tests, unless a test says otherwise.
 _HEAD = "a" * 40
 
@@ -228,7 +231,7 @@ async def test_a_failed_workspace_read_ends_as_an_error_step(monkeypatch: pytest
 
 @pytest.mark.asyncio
 async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A refused write or edit ends with status "error"; an optimize.toml parser error alone stays "ok".
+    """A refused write or edit ends with status "error"; an ascent.toml parser error alone stays "ok".
 
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
@@ -247,18 +250,18 @@ async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatc
             wizard_state=WizardState(**_REPO_METRIC, metric_code=_SCORER),
         )
 
-    tools = _tools({**_REPO_METRIC, "metric_code": _SCORER}, _TurnAuthoringFlag())
+    tools = _tools({**_REPO_METRIC, "metric_code": _SCORER}, _TurnAuthoringFlag(), token=lambda: "gh-token")
     # The gate replaces the tool's func in place, so each tool is wrapped once.
     write = wrap(tools[WRITE_FILE_TOOL])
     await write.func._async_body(path="run.py", text=_SCORER)
     await wrap(tools[EDIT_FILE_TOOL]).func._async_body(path="metric.py", old_text="nothing", new_text="x")
-    await write.func._async_body(path="optimize.toml", text="version = 1\n[run]\ntimeout = 30\n")
+    await write.func._async_body(path="ascent.toml", text="version = 1\n[run]\ntimeout = 30\n")
 
     ends = [event["data"] for event in events if event["event"] == "tool_end"]
     assert [end["status"] for end in ends] == ["error", "error", "ok"]
     assert ends[0]["result"]["error"].startswith("run.py cannot be written")
     assert "error" in ends[1]["result"]
-    assert "optimize_toml_error" in ends[2]["result"]
+    assert "ascent_toml_error" in ends[2]["result"]
     assert "error" not in ends[2]["result"]
 
 
@@ -268,38 +271,45 @@ def test_repo_metric_screen_needs_only_the_scorer() -> None:
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER)) == []
 
 
-def test_an_invalid_optimize_toml_holds_the_metric_screen() -> None:
-    """The Metric screen is not done while the draft's optimize.toml fails the run's parser."""
-    bad = WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml="version = 2")
+def test_an_invalid_ascent_toml_holds_the_metric_screen() -> None:
+    """The Metric screen is not done while the draft's ascent.toml fails the run's parser."""
+    bad = WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="version = 2")
     assert _screen_problems("metric", bad) == [
-        "optimize.toml is not valid: optimize.toml: version 2 is not supported; use version = 1."
+        "ascent.toml is not valid: ascent.toml: version 2 is not supported; use version = 1."
     ]
-    assert (
-        _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml="version = 1")) == []
-    )
-    assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, optimize_toml="  ")) == []
+    assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml=_VALID_TOML)) == []
+    assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER, ascent_toml="  ")) == []
+
+
+def test_a_wizard_state_with_the_retired_field_has_no_draft_contract() -> None:
+    """A wizard snapshot stored before SKY-746 keeps its text under the old field; the agent reads no draft contract."""
+    retired = "_".join(("optimize", "toml"))  # Built from parts so the tree holds no retired name.
+    state = cast(WizardState, {**_REPO_METRIC, "metric_code": _SCORER, retired: "version = 2"})
+
+    assert _screen_problems("metric", state) == []
+    assert workspace_tools.has_drafts(dict(state)) is False
 
 
 async def test_check_setup_reports_the_parser_error_and_holds_continue() -> None:
     """``check_setup`` returns the first error, and Continue refuses with it until a fix lands this turn."""
     turn = _TurnAuthoringFlag()
-    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, optimize_toml="x = [")
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
     tools = {tool.name: tool for tool in screen_nav_tools(state, turn)}
 
     result = await tools["check_setup"].acall()
     assert result["ok"] is False
-    assert result["errors"][0]["message"].startswith("optimize.toml is not valid TOML")
+    assert result["errors"][0]["message"].startswith("ascent.toml is not valid TOML")
     refused = await tools["continue_to_next_screen"].acall()
     assert isinstance(refused, str)
-    assert "optimize.toml is not valid" in refused
+    assert "ascent.toml is not valid" in refused
 
-    turn.wizard_patch["optimize_toml"] = "version = 1"
+    turn.wizard_patch["ascent_toml"] = _VALID_TOML
     assert await tools["check_setup"].acall() == {"ok": True, "errors": []}
     assert (await tools["continue_to_next_screen"].acall())["screen_nav"]["action"] == "continue"
 
 
 def test_check_setup_is_offered_only_on_the_metric_screen() -> None:
-    """Only the Metric screen, where optimize.toml is written, gets ``check_setup``."""
+    """Only the Metric screen, where ascent.toml is written, gets ``check_setup``."""
     names = [tool.name for tool in screen_nav_tools(WizardState(wizard_screen="brief"), _TurnAuthoringFlag())]
     assert "check_setup" not in names
 
@@ -398,7 +408,7 @@ def test_open_repo_keeps_reading_the_base_of_the_drafts(
     drafted = {**_REPO_METRIC, "repo_branch": "main", "workspace_base": base}
 
     with_drafts, _ = open_repo({**drafted, "workspace_files": {"app.py": "x = 2\n"}}, lambda: "gh-token")
-    with_toml, _ = open_repo({**drafted, "optimize_toml": "version = 1\n"}, lambda: "gh-token")
+    with_toml, _ = open_repo({**drafted, "ascent_toml": "version = 1\n"}, lambda: "gh-token")
     without_drafts, _ = open_repo(drafted, lambda: "gh-token")
 
     assert with_drafts is not None
@@ -582,32 +592,43 @@ async def test_read_tools_return_why_the_repository_cannot_be_read() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_puts_the_file_into_the_turn_and_the_editor() -> None:
-    """A write lands in the turn's patch and comes back as a wizard_state patch for the editor."""
+async def test_write_puts_the_file_into_the_turn_and_the_editor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write lands in the turn's patch and comes back as a wizard_state patch for the editor.
+
+    The first ascent.toml write reads the repository for a current file, so it records that commit.
+    """
+    _fake_github(monkeypatch, [])
     turn = _TurnAuthoringFlag()
-    tools = _tools(_REPO_METRIC, turn)
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
 
     result = await tools[WRITE_FILE_TOOL].acall(path="metric.py", text=_SCORER)
-    toml_result = await tools[WRITE_FILE_TOOL].acall(path="/optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
+    toml_result = await tools[WRITE_FILE_TOOL].acall(path="/ascent.toml", text=ASCENT_TOML_EXAMPLE)
 
     assert result == {"wizard_state": {"metric_code": _SCORER}}
-    assert toml_result == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
-    assert turn.wizard_patch == {"metric_code": _SCORER, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}
+    assert toml_result == {"wizard_state": {"workspace_base": _HEAD, "ascent_toml": ASCENT_TOML_EXAMPLE}}
+    assert turn.wizard_patch == {
+        "metric_code": _SCORER,
+        "workspace_base": _HEAD,
+        "ascent_toml": ASCENT_TOML_EXAMPLE,
+    }
 
 
 @pytest.mark.asyncio
-async def test_write_reports_the_parser_error_of_optimize_toml() -> None:
+async def test_write_reports_the_parser_error_of_ascent_toml(monkeypatch: pytest.MonkeyPatch) -> None:
     """A file the parser refuses still reaches the draft, with the error and its place for the agent."""
+    _fake_github(monkeypatch, [])
     turn = _TurnAuthoringFlag()
     toml_text = "version = 1\n[run]\ntimeout = 30\n"
 
-    result = await _tools(_REPO_METRIC, turn)[WRITE_FILE_TOOL].acall(path="optimize.toml", text=toml_text)
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=toml_text
+    )
 
-    assert result["wizard_state"] == {"optimize_toml": toml_text}
-    error = result["optimize_toml_error"]
+    assert result["wizard_state"] == {"workspace_base": _HEAD, "ascent_toml": toml_text}
+    error = result["ascent_toml_error"]
     assert (error["section"], error["key"]) == ("run", "entry")
     assert "[run] entry is missing" in error["message"]
-    assert turn.wizard_patch["optimize_toml"] == toml_text
+    assert turn.wizard_patch["ascent_toml"] == toml_text
 
 
 @pytest.mark.asyncio
@@ -657,6 +678,410 @@ async def test_edit_replaces_one_exact_part_of_the_current_file() -> None:
     assert no_old["error"].startswith("Empty old_text")
     assert blank["error"].startswith("The edit leaves the file empty")
     assert turn.wizard_patch == {"metric_code": edited}
+
+
+_NO_RULES_TOML = ASCENT_TOML_EXAMPLE.replace('instructions = "docs/intent.md"\n', "").replace(
+    'illegal = "docs/rules.md"\n', ""
+)
+
+
+@pytest.mark.asyncio
+async def test_write_and_edit_refuse_an_ascent_toml_that_drops_the_intent_or_rules_file() -> None:
+    """A write or edit that stops naming the intent or rules file is refused by name, and the draft keeps it (SKY-794)."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "ascent_toml": ASCENT_TOML_EXAMPLE}, turn)
+
+    written = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_NO_RULES_TOML)
+    edited = await tools[EDIT_FILE_TOOL].acall(path="ascent.toml", old_text='illegal = "docs/rules.md"\n', new_text="")
+
+    assert list(written) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in written["error"]
+    assert list(edited) == ["error"]
+    assert "drops [proposer] illegal = 'docs/rules.md'," in edited["error"]
+    assert "docs/intent.md" not in edited["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_an_ascent_toml_that_moves_a_rules_file_or_cannot_be_checked() -> None:
+    """Moving a rules file to another setting, or sending text that is not TOML, is refused (fail closed)."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "ascent_toml": ASCENT_TOML_EXAMPLE}, turn)
+    moved = ASCENT_TOML_EXAMPLE.replace('illegal = "docs/rules.md"\n', "").replace(
+        "timeout = 300\n", 'timeout = 300\nillegal = "docs/rules.md"\n'
+    )
+
+    moved_result = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=moved)
+    broken = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text="version = 1\n[run\n")
+
+    assert "drops [proposer] illegal = 'docs/rules.md'" in moved_result["error"]
+    assert "instructions" not in moved_result["error"].split(", which")[0]
+    assert broken["error"].startswith("The new ascent.toml is not valid TOML")
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_the_guard_reads_the_rules_files_of_a_current_file_the_parser_refuses() -> None:
+    """A current ascent.toml with a parser error still guards the rules files it names."""
+    current = ASCENT_TOML_EXAMPLE.replace('entry = ["sh", "run.sh"]\n', "")
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "ascent_toml": current}, turn)[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_VALID_TOML
+    )
+
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_write_keeps_an_ascent_toml_that_still_names_the_intent_and_rules_file() -> None:
+    """A rewrite that keeps both references lands; a first ascent.toml with no references lands too."""
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "ascent_toml": ASCENT_TOML_EXAMPLE}, turn)
+    kept = ASCENT_TOML_EXAMPLE.replace("timeout = 300", "timeout = 120")
+
+    result = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=kept)
+    edited = await tools[EDIT_FILE_TOOL].acall(path="ascent.toml", old_text="target = 0.9", new_text="target = 0.8")
+    first = await _tools({**_REPO_METRIC, "ascent_toml": _VALID_TOML}, _TurnAuthoringFlag())[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_NO_RULES_TOML
+    )
+
+    assert result == {"wizard_state": {"ascent_toml": kept}}
+    assert edited == {"wizard_state": {"ascent_toml": kept.replace("target = 0.9", "target = 0.8")}}
+    assert first == {"wizard_state": {"ascent_toml": _NO_RULES_TOML}}
+
+
+def _fake_repo_with_toml(monkeypatch: pytest.MonkeyPatch, reads: list[str]) -> None:
+    """Stand in for a GitHub repository whose ascent.toml is the guide's example.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        reads: Collects every file path read from the host.
+    """
+    paths = ["ascent.toml", "src/app.py"]
+    monkeypatch.setattr(
+        workspace_tools.github,
+        "tree_entries",
+        lambda token, full_name, branch: {
+            "entries": [{"path": path, "type": "file", "size": 10} for path in paths],
+            "truncated": False,
+        },
+    )
+
+    def read_text_file(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Return the example for ascent.toml and a stub for any other file."""
+        reads.append(path)
+        return (ASCENT_TOML_EXAMPLE if path == "ascent.toml" else "x = 1\n"), False
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", read_text_file)
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_dropping_the_rules_file_that_the_repository_ascent_toml_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no draft ascent.toml yet, the write is checked against the repository's file."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_blank_draft_ascent_toml_still_checks_the_repository_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft ascent.toml of only whitespace is no file, so the write is checked against the repository's."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "ascent_toml": "\n"}, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_blank_draft_ascent_toml_still_checks_the_repository_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit of a whitespace-only draft is checked against the repository's ascent.toml, not the blank draft."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "ascent_toml": "\n"}, turn, token=lambda: "gh-token")[EDIT_FILE_TOOL].acall(
+        path="ascent.toml", old_text="\n", new_text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_the_guard_reads_a_repository_chosen_in_this_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repository the agent set earlier in this turn is the one the write is checked against."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+    turn.wizard_patch["repository"] = "acme/shop"
+    state = {key: value for key, value in _REPO_METRIC.items() if key != "repository"}
+
+    result = await _tools(state, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_NO_RULES_TOML
+    )
+
+    assert list(result) == ["error"]
+    assert "drops instructions = 'docs/intent.md', [proposer] illegal = 'docs/rules.md'" in result["error"]
+    assert "ascent_toml" not in turn.wizard_patch
+
+
+@pytest.mark.asyncio
+async def test_the_guard_checks_the_repository_file_after_the_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard's read of the repository's ascent.toml works after the agent used every read of its turn."""
+    _fake_repo_with_toml(monkeypatch, [])
+    turn = _TurnAuthoringFlag()
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
+    for _ in range(repo_browser.READS_PER_TURN):
+        await tools[READ_REPO_TOOL].acall(path="src/app.py")
+    assert "Read limit" in (await tools[READ_REPO_TOOL].acall(path="src/app.py"))["error"]
+
+    refused = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_NO_RULES_TOML)
+    kept = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=ASCENT_TOML_EXAMPLE)
+
+    assert "drops instructions = 'docs/intent.md'" in refused["error"]
+    assert kept["wizard_state"]["ascent_toml"] == ASCENT_TOML_EXAMPLE
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_refusal_is_refused_again_without_a_new_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal leaves the draft empty; each retry checks the same repository text and reads it only once."""
+    reads: list[str] = []
+    _fake_repo_with_toml(monkeypatch, reads)
+    turn = _TurnAuthoringFlag()
+    tools = _tools(_REPO_METRIC, turn, token=lambda: "gh-token")
+
+    results = [
+        await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_NO_RULES_TOML)
+        for _ in range(repo_browser.READS_PER_TURN + 2)
+    ]
+
+    assert all("drops instructions = 'docs/intent.md'" in result["error"] for result in results)
+    assert reads.count("ascent.toml") == 1
+    assert turn.wizard_patch == {}
+    assert "error" not in str(await tools[READ_REPO_TOOL].acall(path="src/app.py"))
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_an_ascent_toml_when_the_repository_cannot_open() -> None:
+    """With no draft, a repository that cannot open leaves the write unchecked, so it is refused with the reason."""
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "repo_provider": "gitlab"}, turn)[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_VALID_TOML
+    )
+
+    assert result["error"].startswith("ascent.toml cannot be checked against the repository's file")
+    assert "GitLab is not linked" in result["error"]
+    # The repository stays closed for the turn, so a retry cannot work.
+    assert result["error"].endswith("Ask the user.")
+    assert "Try again" not in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_host_read_failure_says_a_retry_can_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed host read is not cached, so its refusal tells the agent to try again."""
+    _fake_repo_with_toml(monkeypatch, [])
+
+    def refuse(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Fail the way a host error does."""
+        raise RuntimeError("host down")
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", refuse)
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_VALID_TOML
+    )
+
+    assert "the host refused the read. Try again, or ask the user." in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_the_repository_ascent_toml_reads_it_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no draft, the edit's base and the guard share one host read of ascent.toml."""
+    reads: list[str] = []
+    _fake_repo_with_toml(monkeypatch, reads)
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[EDIT_FILE_TOOL].acall(
+        path="ascent.toml", old_text="target = 0.9", new_text="target = 0.8"
+    )
+
+    assert result["wizard_state"]["ascent_toml"] == ASCENT_TOML_EXAMPLE.replace("target = 0.9", "target = 0.8")
+    assert reads == ["ascent.toml"]
+
+
+@pytest.mark.parametrize("raw", ["./docs/intent.md", "docs/./intent.md", "docs//intent.md", "/docs/intent.md"])
+def test_a_rules_path_the_parser_refuses_can_be_written_in_its_clean_form(raw: str) -> None:
+    """The fix of a path the parser refuses keeps the same file, so the guard lets it through."""
+    current = ASCENT_TOML_EXAMPLE.replace('instructions = "docs/intent.md"', f'instructions = "{raw}"')
+    assert current != ASCENT_TOML_EXAMPLE
+
+    assert workspace_tools.dropped_rule_files(current, ASCENT_TOML_EXAMPLE) is None
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_an_ascent_toml_when_the_repository_file_is_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repository ascent.toml over the size cap cannot be checked, and a retry would read the same file."""
+    _fake_repo_with_toml(monkeypatch, [])
+    monkeypatch.setattr(repo_browser.github, "read_text_file", lambda *args: ("x" * 10, True))
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=_VALID_TOML
+    )
+
+    assert f"larger than {DRAFT_FILE_BYTES} bytes" in result["error"]
+    assert result["error"].endswith(" Ask the user.")
+    assert "Try again" not in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> None:
+    """A current text that is not TOML keeps the paths of its instructions and illegal lines."""
+    current = 'instructions = "docs/intent.md"\n[proposer\nillegal = "docs/rules.md"\n'
+    turn = _TurnAuthoringFlag()
+    tools = _tools({**_REPO_METRIC, "ascent_toml": current}, turn)
+
+    refused = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=_VALID_TOML)
+    kept = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=ASCENT_TOML_EXAMPLE)
+
+    assert "drops 'docs/intent.md', 'docs/rules.md'. The current ascent.toml is not valid TOML" in refused["error"]
+    assert "names as its" not in refused["error"]
+    assert kept == {"wizard_state": {"ascent_toml": ASCENT_TOML_EXAMPLE}}
+
+
+def test_rule_text_in_the_format_before_sky_380_can_move_into_a_rules_file() -> None:
+    """A list of rule text names no file, so the agent can make the move the parser asks for."""
+    current = 'version = 1\n[proposer]\nillegal = ["no cheating"]\n'
+
+    assert workspace_tools.dropped_rule_files(current, 'version = 1\n[proposer]\nillegal = "docs/rules.md"\n') is None
+
+
+def test_an_old_instructions_table_still_names_the_kept_rules_file() -> None:
+    """A valid TOML file with an old [instructions] table names its rules file in the normal refusal."""
+    current = 'version = 1\n[proposer]\nillegal = "docs/rules.md"\n[instructions]\nintent = "x"\n'
+
+    refusal = workspace_tools.dropped_rule_files(current, "version = 1\n")
+
+    assert refusal is not None
+    assert "drops [proposer] illegal = 'docs/rules.md', which the current ascent.toml names" in refusal
+    assert "not valid TOML" not in refusal
+
+
+def test_a_long_run_of_backslashes_does_not_stall_the_guard() -> None:
+    """The escaped-key search stays linear, so a large broken draft cannot block the event loop."""
+    current = 'x = "' + "\\" * 200_000 + "\n"
+    started = time.monotonic()
+
+    workspace_tools.dropped_rule_files(current, ASCENT_TOML_EXAMPLE)
+
+    assert time.monotonic() - started < 1
+
+
+def test_a_commented_rules_path_in_a_broken_current_text_is_not_called_a_named_file() -> None:
+    """A raw-search match in a comment gives a refusal that does not claim the file names the path."""
+    refusal = workspace_tools.dropped_rule_files('# illegal = "docs/old.md"\n[broken\n', _VALID_TOML)
+
+    assert refusal is not None
+    assert "drops 'docs/old.md'" in refusal
+    assert "maybe in a comment" in refusal
+    assert "names as its" not in refusal
+
+
+def test_a_new_text_that_is_not_toml_is_refused_when_the_current_text_is_not_toml_either() -> None:
+    """A commented-out rules path in a broken new text does not keep the broken current text's rules file."""
+    refusal = workspace_tools.dropped_rule_files(
+        'illegal = "docs/rules.md"\n[broken\n', '# illegal = "docs/rules.md"\n[broken\n'
+    )
+
+    assert refusal is not None
+    assert "not valid TOML, so it cannot keep 'docs/rules.md'" in refusal
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'proposer.illegal = "rules.md"',
+        '"illegal" = "rules.md"',
+        "target.'a.b'.illegal = 'rules.md'",
+        'proposer = { illegal = "rules.md" }',
+        'illegal = """rules.md"""',
+        "illegal = '''rules.md'''",
+    ],
+)
+def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line: str) -> None:
+    """A dotted, quoted, inline-table or triple-quoted ``illegal`` key in a non-TOML text still guards its path."""
+    refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", "version = 1\n")
+
+    assert refusal is not None
+    assert "'rules.md'" in refusal
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'illegal = """\nrules.md"""',
+        'illegal = "rules\\\n.md"',
+        '"\\u0069llegal" = "rules.md"',
+        "illegal = rules.md",
+        'instructions = ["docs/intent.md"]',
+        'illegal = "docs/ru\\"les.md"',
+    ],
+)
+def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(line: str) -> None:
+    """A non-TOML current text whose rules path spans lines, has an escaped key or no string, refuses any new text."""
+    refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", ASCENT_TOML_EXAMPLE)
+
+    assert refusal is not None
+    assert "cannot be read" in refusal
+
+
+def test_the_raw_search_decodes_basic_string_escapes() -> None:
+    """A backslash escape in a non-TOML current text decodes as TOML does, so a kept path matches."""
+    current = 'instructions = "docs/intent.md"\n[proposer]\nillegal = "docs\\\\rules.md"\n[broken\n'
+
+    assert workspace_tools.dropped_rule_files(current, ASCENT_TOML_EXAMPLE) is None
+    assert workspace_tools.dropped_rule_files(current, _NO_RULES_TOML) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_raw_fallback_cleans_paths_the_way_the_parser_does() -> None:
+    """A raw path with a backslash, spaces or slashes compares equal to the parser's clean path."""
+    current = ASCENT_TOML_EXAMPLE.replace('entry = ["sh", "run.sh"]\n', "").replace(
+        'illegal = "docs/rules.md"', 'illegal = " docs\\\\rules.md/ "'
+    )
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools({**_REPO_METRIC, "ascent_toml": current}, turn)[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text=ASCENT_TOML_EXAMPLE
+    )
+
+    assert "docs\\\\rules.md" in current
+    assert result == {"wizard_state": {"ascent_toml": ASCENT_TOML_EXAMPLE}}
 
 
 class _Spec:
@@ -780,25 +1205,42 @@ def test_guide_has_the_run_entry_write_the_metric_reads_output() -> None:
     assert "score(repo_path, case, output=None)" in prompt
     assert "and ``None`` when nothing ran, so always give it the ``None`` default" in prompt
     assert "never imports or calls the candidate's code" in prompt
+    # The runner passes output only to a scorer with three positional
+    # arguments, so a two-argument metric with a [run] entry scores every
+    # version alike (SKY-761).
+    assert (
+        "With a ``[run]`` entry, ``metric.py`` defines ``score(repo_path, case, output=None)`` and scores"
+        " ``output``; a metric with fewer arguments never gets the output." in prompt
+    )
+    assert "Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define" in prompt
+    assert "``from openascent import call``" in prompt
+    assert "``score(repo_path)``, or ``score(repo_path, case)`` when the run has data" not in prompt
 
 
-def test_guide_puts_the_test_command_in_the_run_entry() -> None:
-    """A repository scored by its own tests runs them from [run] entry; the metric only reads the report (E40)."""
+def test_guide_puts_the_test_command_in_a_script_with_the_wrapper_line() -> None:
+    """A repository scored by its own tests runs them from a script whose wrapper line writes the exit code (SKY-757)."""
     prompt = _guide()
 
-    assert 'entry = ["pytest", "-q", "--junitxml=out.xml"]' in prompt
-    assert "only reads the saved report" in prompt
-    assert "the metric never runs the tests itself" in prompt
+    assert 'entry = ["sh", "run.sh"]' in prompt
+    assert 'entry = ["pytest", "-q"]' not in prompt
+    assert (
+        '``pytest -q > log.txt`` and then ``echo "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"``' in prompt
+    )
+    assert 'The metric reads ``output["exit_code"]`` and never runs the tests itself.' in prompt
+    assert "junitxml" not in prompt
+    assert 'output["stdout"]' not in prompt
 
 
-def test_guide_treats_a_nonzero_exit_code_as_output() -> None:
-    """A command entry's nonzero exit code is output that the metric judges, like pytest's 1 on failed tests (E43)."""
+def test_guide_teaches_the_one_call_rule_for_command_entries() -> None:
+    """A command entry reads ASCENT_INPUT, writes ASCENT_OUTPUT, and its prints only reach the logs (SKY-757)."""
     prompt = _guide()
 
-    assert "a nonzero exit code is normal output" in prompt
-    assert "the metric gets ``exit_code`` and decides what it means" in prompt
-    assert "pytest exits 1 when some tests fail" in prompt
-    assert "partial credit" in prompt
+    assert 'reads ``{"input": <the case input>}`` from the JSON file at ``ASCENT_INPUT``' in prompt
+    assert 'writes ``{"output": <any JSON>}`` to the JSON file at ``ASCENT_OUTPUT``' in prompt
+    assert "What it prints goes only to the logs." in prompt
+    assert "A nonzero exit, a missing output file or bad JSON fails the call" in prompt
+    assert "a nonzero exit code is normal output" not in prompt
+    assert "pytest exits 1 when some tests fail" not in prompt
 
 
 def test_guide_places_metric_secrets_and_candidate_mcp_servers() -> None:
@@ -826,11 +1268,11 @@ def test_guide_writes_secrets_only_as_placeholders() -> None:
 
 
 def test_guide_writes_the_rules_into_files_and_their_paths_into_the_toml() -> None:
-    """The agent writes the intent and rules into markdown files and names them in optimize.toml (E48)."""
+    """The agent writes the intent and rules into markdown files and names them in ascent.toml (E48)."""
     prompt = _guide()
 
-    assert "Never put rule text in optimize.toml" in prompt
-    assert 'set ``instructions = "docs/intent.md"`` at the top of optimize.toml, before any section' in prompt
+    assert "Never put rule text in ascent.toml" in prompt
+    assert 'set ``instructions = "docs/intent.md"`` at the top of ascent.toml, before any section' in prompt
     assert "one top-level ``- `` bullet for each rule" in prompt
     assert 'set ``illegal = "docs/rules.md"`` in ``[proposer]``' in prompt
     assert "[instructions]" not in prompt
@@ -860,7 +1302,7 @@ def test_guide_writes_the_cases_into_a_jsonl_file_named_in_data() -> None:
 
 
 def _schema_bullets() -> dict[str, str]:
-    """Split the guide's optimize.toml schema block into its bullets.
+    """Split the guide's ascent.toml schema block into its bullets.
 
     Returns:
         Each bullet's text by the table it starts with, such as ``[run]``; ``top`` for the top-level keys.
@@ -874,7 +1316,7 @@ def _schema_bullets() -> dict[str, str]:
     return bullets
 
 
-def test_guide_names_every_optimize_toml_section_and_key() -> None:
+def test_guide_names_every_ascent_toml_section_and_key() -> None:
     """Each schema bullet lists the keys the parser accepts for its table (SKY-184)."""
     bullets = _schema_bullets()
 
@@ -894,20 +1336,24 @@ def test_guide_names_every_optimize_toml_section_and_key() -> None:
     assert len(bullets) == len(repo_constraints._SECTIONS) + len(repo_constraints._NAMED_SECTIONS) + 1
 
 
-def test_guide_example_is_a_valid_optimize_toml() -> None:
+def test_guide_example_is_a_valid_ascent_toml() -> None:
     """The example in the guide passes the parser, so the agent never copies a broken file (SKY-184)."""
-    constraints = repo_constraints.parse_constraints(OPTIMIZE_TOML_EXAMPLE.encode())
+    constraints = repo_constraints.parse_constraints(ASCENT_TOML_EXAMPLE.encode())
 
-    assert OPTIMIZE_TOML_EXAMPLE in METRIC_GUIDE
-    assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
+    assert ASCENT_TOML_EXAMPLE in METRIC_GUIDE
+    assert constraints.run_entry == ("sh", "run.sh")
     assert constraints.editable_paths == ("src",)
-    assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
+    assert (constraints.outcome_target, constraints.outcome_limits) == (0.9, {"pass_rate": 0.8})
 
 
-def test_guide_says_the_target_stops_the_search_and_the_run_end_checks_the_minimums() -> None:
-    """The guide tells the agent the run stops at the target and judges the minimums at its end (SKY-692)."""
+def test_guide_says_the_target_stops_the_search_and_the_run_end_checks_the_limits() -> None:
+    """The guide tells the agent the run stops at the target and judges the limits at its end (SKY-692)."""
     assert "A run stops its search when the score reaches ``target``." in METRIC_GUIDE
-    assert "each ``[outcome.require]`` minimum" in METRIC_GUIDE
+    assert "each ``[outcome.require]`` limit" in METRIC_GUIDE
+    # SKY-775: a limit follows its score's [metric.scores] direction, so it is not always a minimum.
+    assert "``[metric.scores]``" in METRIC_GUIDE
+    assert "a maximum for a minimize score" in METRIC_GUIDE
+    assert "its minimum score" not in METRIC_GUIDE
     assert "cannot check ``[outcome.require]``" not in METRIC_GUIDE
     assert "cannot use ``[outcome]``" not in METRIC_GUIDE
 
@@ -935,7 +1381,7 @@ def test_metric_snapshot_shows_what_the_code_work_needs() -> None:
         task_background="CI is slow",
         data_mode="none",
         dataset_columns=["a"],
-        optimize_toml="version = 1",
+        ascent_toml="version = 1",
         repo_provider="github",
         metric_code=_SCORER,
     )
@@ -944,7 +1390,7 @@ def test_metric_snapshot_shows_what_the_code_work_needs() -> None:
         "task_background",
         "data_mode",
         "dataset_columns",
-        "optimize_toml",
+        "ascent_toml",
         "repo_provider",
         "github_connected",
     ):
@@ -953,7 +1399,7 @@ def test_metric_snapshot_shows_what_the_code_work_needs() -> None:
 
 @pytest.mark.asyncio
 async def test_write_puts_any_repository_file_into_the_draft_files() -> None:
-    """A file outside metric.py and optimize.toml lands in workspace_files; the turn keeps the whole map."""
+    """A file outside metric.py and ascent.toml lands in workspace_files; the turn keeps the whole map."""
     turn = _TurnAuthoringFlag()
     tools = _tools({**_REPO_METRIC, "workspace_files": {"README.md": "old"}}, turn)
 
@@ -969,12 +1415,12 @@ async def test_write_puts_any_repository_file_into_the_draft_files() -> None:
 
 @pytest.mark.asyncio
 async def test_write_refuses_files_too_large_together_for_the_run_request() -> None:
-    """A write that takes the draft files and optimize.toml over the request's total cap is refused."""
+    """A write that takes the draft files and ascent.toml over the request's total cap is refused."""
     big = "x" * (DRAFT_FILE_BYTES - 10)
     count = DRAFT_FILES_TOTAL_BYTES // len(big)
     files = {f"src/f{index}.py": big for index in range(count)}
     turn = _TurnAuthoringFlag()
-    tools = _tools({**_REPO_METRIC, "workspace_files": files, "optimize_toml": "version = 1\n"}, turn)
+    tools = _tools({**_REPO_METRIC, "workspace_files": files, "ascent_toml": "version = 1\n"}, turn)
 
     result = await tools[WRITE_FILE_TOOL].acall(path="src/new.py", text=big)
     replaced = await tools[WRITE_FILE_TOOL].acall(path="src/f0.py", text="y = 1\n")
@@ -1025,12 +1471,12 @@ async def test_a_draft_written_after_a_read_records_the_commit_it_read(monkeypat
 
     await tools[READ_REPO_TOOL].acall(path="README.md")
     metric = await tools[WRITE_FILE_TOOL].acall(path="metric.py", text=_SCORER)
-    toml = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
+    toml = await tools[WRITE_FILE_TOOL].acall(path="ascent.toml", text=ASCENT_TOML_EXAMPLE)
 
     assert "workspace_base" not in blind["wizard_state"]
     assert "workspace_base" not in blind_turn.wizard_patch
     assert metric == {"wizard_state": {"metric_code": _SCORER}}
-    assert toml == {"wizard_state": {"workspace_base": _HEAD, "optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
+    assert toml == {"wizard_state": {"workspace_base": _HEAD, "ascent_toml": ASCENT_TOML_EXAMPLE}}
     assert turn.wizard_patch["workspace_base"] == _HEAD
 
 

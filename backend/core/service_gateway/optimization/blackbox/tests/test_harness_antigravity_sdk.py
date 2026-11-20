@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import os
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
 
-from ..harness import GatewayConfig, build_launch, pinned_harness_check
+from ..harness import GatewayConfig
 from ..harness_bridge import parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.antigravity_sdk import (
@@ -27,10 +23,8 @@ from ..harnesses.antigravity_sdk import (
     SPEC,
 )
 from ..harnesses.base import _version_check
-from ..native_runtime import _bootstrap_command
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
-_RELAY = "http://127.0.0.1:3210/v1"
 _DIRECT_KEYS = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS")
 # Synthetic stdout of one runner turn: uv and SDK noise around the single
 # Pi-shaped event the runner prints. No real model, key or account produced it.
@@ -214,9 +208,9 @@ def test_launch_routes_through_the_gateway_without_a_direct_key() -> None:
     """The env carries the gateway token and blanks every direct Gemini or Google credential."""
     launch = SPEC.launch("gemini-3-pro", _GATEWAY)
 
-    assert launch.env["APP_MODEL"] == "gemini-3-pro"
-    assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "gemini-3-pro"
+    assert launch.env["ASCENT_MODEL_URL"] == _GATEWAY.url
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert "GOOGLE_GEMINI_BASE_URL" not in launch.env
@@ -266,7 +260,12 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
     [("minimal", "MINIMAL"), ("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH"), ("xhigh", "EXTRA_HIGH")],
 )
 def test_supported_effort_maps_to_its_own_gemini_thinking_level(effort: str, level: str) -> None:
-    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20."""
+    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20.
+
+    Args:
+        effort: The Skynet effort.
+        level: The name of the ``ThinkingLevel`` member it must map to.
+    """
     assert effort in SPEC.supported_efforts
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_THINKING_LEVEL] == level
 
@@ -278,14 +277,22 @@ def test_spec_declares_one_level_per_gemini_thinking_level() -> None:
 
 @pytest.mark.parametrize("effort", ["none", "max", "HIGH", "turbo"])
 def test_unsupported_effort_is_refused_at_launch(effort: str) -> None:
-    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop."""
+    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop.
+
+    Args:
+        effort: An effort with no Gemini thinking level.
+    """
     with pytest.raises(ServiceError, match="does not support the effort level"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
-    """No effort sets no thinking level, so the SDK keeps its own default."""
+    """No effort sets no thinking level, so the SDK keeps its own default.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_THINKING_LEVEL not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
@@ -306,67 +313,21 @@ def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
     ],
 )
 def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
-    """No gateway URL means no launch; the harness never falls back to a direct key."""
+    """No gateway URL means no launch; the harness never falls back to a direct key.
+
+    Args:
+        url: A gateway URL that is missing, relative or not clean.
+    """
     with pytest.raises(ServiceError, match="Antigravity SDK"):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 
 
-def test_protected_launch_checks_the_pin_offline_and_rewrites_the_runner_to_the_relay(tmp_path: Path) -> None:
-    """Protected mode uses the version probe, offline uv env, and points the runner at the local relay."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True)
-
-    assert launch.install_command is not None
-    assert launch.install_command == pinned_harness_check(HARNESS_ID)
-    assert "pip install" not in launch.install_command
-    assert launch.env["UV_OFFLINE"] == "1"
-    assert launch.env["DO_NOT_TRACK"] == "1"
-    for name in _DIRECT_KEYS:
-        assert launch.env[name] == ""
-    for name, content in launch.files.items():
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    subprocess.run(
-        launch.run_command,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
-        timeout=10,
-        check=True,
-    )
-    runner = (tmp_path / RUNNER_FILE).read_text()
-    assert _GATEWAY.url not in runner
-    assert f"GATEWAY_URL = {_RELAY!r}" in runner
-
-
-@pytest.mark.parametrize(("reported", "ok"), [("0.1.20", True), ("0.1.21", False), ("10.1.20", False)])
-def test_pinned_check_accepts_only_the_exact_sdk_version(tmp_path: Path, reported: str, ok: bool) -> None:
-    """The offline probe passes only when the warmed script reports the pinned SDK release."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text(f"#!/bin/sh\necho {reported}\n")
-    fake_uv.chmod(0o755)
-    check = pinned_harness_check(HARNESS_ID)
-    assert check is not None
-
-    result = subprocess.run(
-        check,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
-        timeout=10,
-        check=False,
-    )
-
-    assert (result.returncode == 0) is ok
-
-
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output."""
+    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("gemini-3-pro", _GATEWAY, reasoning_effort="high")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -377,7 +338,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         launch.files,
         **{
             **launch.env,
-            "APP_PROMPT_FILE": str(prompt),
+            "ASCENT_TASK": str(prompt),
             "GEMINI_API_KEY": "leaked-direct-key",
             "GOOGLE_API_KEY": "leaked-direct-key",
             "FAKE_SDK_RECORD": str(record),
@@ -400,45 +361,6 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     assert (tmp_path / "ws" / ".app/antigravity/session").is_dir()
 
 
-def test_protected_runner_gives_the_agent_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
-    """With proposer MCP servers, the relay rewrite points each server at the relay and no token is in the runner."""
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=True, mcp_servers=("search", "my_tools"))
-    workspace = tmp_path / "ws"
-    for name, content in launch.files.items():
-        path = workspace / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    subprocess.run(
-        launch.run_command.split(" && ", 1)[0],
-        shell=True,
-        cwd=workspace,
-        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
-        timeout=10,
-        check=True,
-    )
-    runner = (workspace / RUNNER_FILE).read_text()
-    assert _GATEWAY.url not in runner
-    assert _GATEWAY.api_key not in runner
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("Fix the bug.\n")
-    record = tmp_path / "record.json"
-
-    result = _run_runner(
-        tmp_path,
-        {RUNNER_FILE: runner},
-        **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(record.read_text())["mcp_servers"] == [
-        {"name": "search", "url": f"{_RELAY}/mcp/search"},
-        {"name": "my_tools", "url": f"{_RELAY}/mcp/my_tools"},
-    ]
-
-
 def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
     """No proposer MCP servers leaves the runner exactly as before, with an empty server list."""
     runner = SPEC.launch("m", _GATEWAY, mcp_servers=()).files[RUNNER_FILE]
@@ -448,11 +370,17 @@ def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any SDK call when the gateway token is missing."""
+    """The runner exits before any SDK call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 
-    result = _run_runner(tmp_path, launch.files, **{**launch.env, "APP_API_KEY": "", "FAKE_SDK_RECORD": str(record)})
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_SDK_RECORD": str(record)}
+    )
 
     assert result.returncode != 0
     assert "gateway" in result.stderr
@@ -471,86 +399,6 @@ case " $* " in
 esac
 echo 0.1.20
 """
-
-
-def _native_workspace(tmp_path: Path) -> tuple[Path, Path]:
-    """Write the fake uv, node and python3 tools and an empty workspace with the source archive.
-
-    Args:
-        tmp_path: Test directory.
-
-    Returns:
-        ``(bin_dir, workspace)``: the tool directory for ``PATH`` and the bootstrap's working directory.
-    """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for name, content in {
-        "uv": _FAKE_UV,
-        "node": "#!/bin/sh\nexit 0\n",
-        "python3": f'#!/bin/sh\nexec {sys.executable} "$@"\n',
-    }.items():
-        tool = bin_dir / name
-        tool.write_text(content)
-        tool.chmod(0o755)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    archive = io.BytesIO()
-    with tarfile.open(fileobj=archive, mode="w:gz"):
-        pass
-    (workspace / "native_source.tar.gz.b64").write_text(base64.b64encode(archive.getvalue()).decode())
-    return bin_dir, workspace
-
-
-def _run_native_bootstrap(tmp_path: Path, *, protected: bool, warmed: bool) -> tuple[subprocess.CompletedProcess, Path]:
-    """Run the native proposer bootstrap for this harness against the fake tools.
-
-    Args:
-        tmp_path: Test directory.
-        protected: Whether to build the protected (offline image) bootstrap.
-        warmed: Whether the fake uv cache already holds the pinned SDK.
-
-    Returns:
-        The finished process and the fake uv cache marker.
-    """
-    target = BlackboxTarget.model_construct(
-        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
-    )
-    launch = build_launch(target, _GATEWAY, protected=protected)
-    bin_dir, workspace = _native_workspace(tmp_path)
-    cache = tmp_path / "uv-cache"
-    if warmed:
-        cache.touch()
-    command = _bootstrap_command(
-        "vercel", protected=protected, harness=HARNESS_ID, install_command=launch.install_command
-    )
-    result = subprocess.run(
-        ["sh", "-c", command],
-        cwd=workspace,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "FAKE_UV_CACHE": str(cache), **launch.env},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert not (workspace / RUNNER_FILE).exists()
-    return result, cache
-
-
-@pytest.mark.parametrize("protected", [False, True])
-def test_native_bootstrap_passes_before_the_launch_files_exist(tmp_path: Path, protected: bool) -> None:
-    """The native proposer bootstrap installs and checks the harness in a workspace without the runner."""
-    result, cache = _run_native_bootstrap(tmp_path, protected=protected, warmed=protected)
-
-    assert result.returncode == 0, result.stderr
-    assert cache.exists()
-
-
-def test_native_bootstrap_fails_when_the_protected_image_lacks_the_sdk(tmp_path: Path) -> None:
-    """Protected mode never downloads: an image without the warmed SDK fails the pinned check."""
-    result, cache = _run_native_bootstrap(tmp_path, protected=True, warmed=False)
-
-    assert result.returncode != 0
-    assert not cache.exists()
 
 
 def test_recorded_output_sample_parses_to_the_final_answer_and_usage() -> None:

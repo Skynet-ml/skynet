@@ -15,6 +15,7 @@ import type { ExperienceLevel } from "@/features/experience";
 import type { ExecutionBudget } from "@/shared/types/execution-budget";
 import {
   optimizersFor,
+  resolveOptimizer,
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
@@ -199,9 +200,9 @@ export function initialWizardV2State(
       budget: { max_scorer_runs: maxScorerRuns ?? 200, max_iterations: null },
       maxCostCents: null,
       budgetUncapped: false,
-      // Same defaults as the legacy wizard's DEFAULT_PROPOSER.
+      // DEFAULT_PROPOSER without the harness: a harness the user did not pick
+      // would replace the repository's [proposer] entry (SKY-753).
       proposer: {
-        harness: "codex",
         max_candidates_per_iter: 3,
         ralph: true,
         max_no_eval_seconds: 1_800,
@@ -493,7 +494,7 @@ const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
   ".cfg",
 ];
 const PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
-const RESERVED_TOP_LEVEL = new Set([RUN_FILE, METRIC_FILE, "skynet", "skynet.py"]);
+const RESERVED_TOP_LEVEL = new Set([RUN_FILE, METRIC_FILE, "openascent", "openascent.py"]);
 
 /**
  * Why a path cannot name a new extra file, as an i18n key, or null when it
@@ -545,6 +546,33 @@ export function deleteWorkspaceFile(
   return Object.keys(files).length === 0 ? { files, filesBase: undefined } : { files };
 }
 
+/**
+ * The contract file's proposer command when it is the run's proposer (SKY-771).
+ *
+ * Only a single AutoResearch or Meta-Harness run gives the file's command to
+ * its tool loop; the server refuses it for every other engine (SKY-816).
+ *
+ * Args:
+ *   proposer: The wizard's proposer settings.
+ *   proposerCommand: The `[proposer] entry` command from the contract check.
+ *   choice: The run's optimizer choice.
+ *
+ * Returns:
+ *   The command while the engine runs it and the user picked no built-in agent
+ *   and no host CLI, else null: a picked agent replaces the file's command (SKY-753).
+ */
+export function fileProposerCommand(
+  proposer: BlackboxProposer,
+  proposerCommand: readonly string[] | null,
+  choice: OptimizerChoice,
+): readonly string[] | null {
+  if (!FILE_PROPOSER_OPTIMIZERS.has(resolveOptimizer(choice))) return null;
+  if (proposer.harness || proposer.host_cli || !proposerCommand?.length) return null;
+  return proposerCommand;
+}
+
+const FILE_PROPOSER_OPTIMIZERS: ReadonlySet<string> = new Set(["autoresearch", "meta_harness"]);
+
 export interface WizardV2Context {
   state: WizardV2State;
   goTo(step: WizardStepId): void;
@@ -567,6 +595,17 @@ export interface WizardV2Context {
   optimizerCatalogLoading: boolean;
   /** An i18n key or the exact error text. */
   runBlockedReason: string | null;
+  /**
+   * The command that the run's ascent.toml names in `[metric] entry`, from
+   * the server's contract check; null for a Python entry, no entry, or no
+   * answer yet. A command needs no metric.py (SKY-770).
+   */
+  metricCommand: readonly string[] | null;
+  /**
+   * The command that the run's ascent.toml names in `[proposer] entry`, from
+   * the same contract check; null for no entry or no answer yet (SKY-771).
+   */
+  proposerCommand: readonly string[] | null;
   /** The wizard's execution budget, created on first use. */
   ensureBudget(): Promise<ExecutionBudget>;
   submit(): Promise<void>;

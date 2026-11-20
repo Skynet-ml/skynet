@@ -378,9 +378,9 @@ def test_crossover_prompts_compare_the_two_versions_file_by_file(bundle: RepoBun
 
 
 # The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
-_HIDDEN = ["optimize.toml", "src/metric", ".optimize/exploits", "src/reference.json", "src/cases.jsonl"]
+_HIDDEN = ["ascent.toml", "src/metric", ".optimize/exploits", "src/reference.json", "src/cases.jsonl"]
 _HIDDEN_FILES = [
-    "optimize.toml",
+    "ascent.toml",
     "src/metric/score.py",
     ".optimize/exploits/log.md",
     "src/reference.json",
@@ -401,7 +401,7 @@ def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
     files = {**_FILES, **dict.fromkeys(_HIDDEN_FILES, "secret = 1\n")}
     repo = {
         "chunks": _chunks(tmp_path, files),
-        "editable_paths": ["src", ".optimize", "optimize.toml"],
+        "editable_paths": ["src", ".optimize", "ascent.toml"],
         "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN),
     }
     return RepoBundle.prepare(repo, "", tmp_path / "checkout", on_refusal=refusals.append), refusals
@@ -411,7 +411,7 @@ def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
 def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reported(tmp_path: Path, path: str) -> None:
     """Refuse an open or an edit of each hidden path by exact name, show no content, and report the tool and kind."""
     bundle, refusals = _hidden_bundle(tmp_path)
-    kind = "config" if path == "optimize.toml" else "scoring"
+    kind = "config" if path == "ascent.toml" else "scoring"
 
     _, _, message = bundle.apply({}, f"<OPEN>{path}</OPEN>")
     assert harness_bridge.GUARD_REFUSAL in str(message)
@@ -422,7 +422,7 @@ def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reporte
     assert refusals == [{"tool": "open", "kind": kind}, {"tool": "edit", "kind": kind}]
 
 
-@pytest.mark.parametrize("path", ["./optimize.toml", "src/../optimize.toml", ".//optimize.toml", "/optimize.toml"])
+@pytest.mark.parametrize("path", ["./ascent.toml", "src/../ascent.toml", ".//ascent.toml", "/ascent.toml"])
 def test_another_form_of_a_hidden_path_is_refused_and_reported(tmp_path: Path, path: str) -> None:
     """Refuse and report an open or an edit of a hidden path written in a form that normalizes to it."""
     bundle, refusals = _hidden_bundle(tmp_path)
@@ -446,3 +446,34 @@ def test_hidden_paths_stay_out_of_the_file_list_and_other_files_still_open(tmp_p
     _, _, message = bundle.apply({}, "<OPEN>src/util.py</OPEN>")
     assert "SCALE = 2" in str(message)
     assert refusals == []
+
+
+def test_bundle_git_reads_nothing_from_a_bare_repository_layout(
+    planted_bare_repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each direct git call of the bundle refuses a bare-repository layout (SKY-812).
+
+    The bundle is built without ``SAFE_GIT``, so the same calls read the
+    commit when the flag is gone: the layout is a working repository.
+
+    Args:
+        planted_bare_repo: Fixture.
+        monkeypatch: Pytest fixture.
+    """
+    repo, _ = planted_bare_repo
+    safe = repo_tree.SAFE_GIT
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    bundle = RepoBundle(repo, ["."], [])
+    assert bundle.paths() == ["x"]
+    # Not ``monkeypatch.undo()``: that would also drop the fixture's git config isolation.
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", safe)
+
+    assert bundle.start_text("x") is None
+    assert not bundle.exists_at_start("x")
+    assert bundle._grep_text_files() == []
+
+    monkeypatch.setattr(repo_tree, "SAFE_GIT", ())
+    bundle._texts.clear()
+    assert bundle.start_text("x") == "hi\n"
+    assert bundle.exists_at_start("x")
+    assert bundle._grep_text_files() == [f"{bundle.start}:x"]

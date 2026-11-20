@@ -150,6 +150,9 @@ class HardeningJob(BaseModel):
     parallel_sessions: int = Field(default=HARDENING_DEFAULT_SESSIONS, ge=1)
     live_sessions: list[HardeningSession] = Field(default_factory=list)
     noise: HardeningNoise | None = None
+    # ``[metric] direction = "minimize"`` (SKY-867). The worker sets it after
+    # staging, so the page picks the lowest score as the best one.
+    minimize: bool = False
 
 
 # Body of POST /hardening/jobs. ``target`` has the run submit's repository

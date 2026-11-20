@@ -1,3 +1,4 @@
+import type { OptimizationStatusResponse } from "@/shared/types/api";
 import type { CandidateMetrics, RejectedMetrics, RejectedNode, TrajectoryNode } from "./types";
 
 const NODE_GAP_X = 96;
@@ -34,9 +35,22 @@ function buildSpine(byId: Map<string, TrajectoryNode>, winnerId: string | null):
   return spine;
 }
 
+// SKY-750: a live run has no result yet, so its candidate events carry the
+// direction of a minimize run.
+export function minimizesRun(
+  job: Pick<OptimizationStatusResponse, "blackbox_result" | "progress_events">,
+): boolean {
+  return (
+    job.blackbox_result?.direction === "minimize" ||
+    (job.progress_events ?? []).some((e) => e.metrics.direction === "minimize")
+  );
+}
+
 export function layoutTrajectory(
   candidates: CandidateMetrics[],
   rejected: RejectedMetrics[] = [],
+  // SKY-750: a minimize run's winner is its lowest score.
+  minimize = false,
 ): LayoutResult {
   if (candidates.length === 0) {
     return {
@@ -172,9 +186,9 @@ export function layoutTrajectory(
   }
 
   let winnerId: string | null = null;
-  let bestScore = -Infinity;
+  let bestScore = minimize ? Infinity : -Infinity;
   for (const node of byId.values()) {
-    if (node.score > bestScore) {
+    if (minimize ? node.score < bestScore : node.score > bestScore) {
       bestScore = node.score;
       winnerId = node.candidate_id;
     }

@@ -169,6 +169,22 @@ class JobStore(Protocol):
         """
         ...
 
+    def payload_targets(self, optimization_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Read only the ``target`` and ``judge`` members of each payload, in one query.
+
+        The list rows load without the payload. This read gives the retired-target
+        check what it needs, without the multi-MB training set (SKY-834).
+
+        Args:
+            optimization_ids: Jobs to read.
+
+        Returns:
+            For each id found, a payload that holds only its ``target`` and ``judge``
+            members, or ``None`` when the job has no payload. A SQL ``NULL`` and a
+            JSON ``null`` payload both give ``None``, as the full row reads them.
+        """
+        ...
+
     def delete_jobs(self, optimization_ids: list[str]) -> int:
         """Hard-delete a batch of jobs and their associated rows.
 

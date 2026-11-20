@@ -107,7 +107,7 @@ def test_a_rest_run_cannot_store_an_mcp_contract(client_and_store: tuple[Any, _F
     """Only the MCP draft flow stores ``mcp``; a REST draft contract is the setup screen's (SKY-693)."""
     client, store = client_and_store
     body = repo_payload()
-    body["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    body["target"]["repo"]["draft_files"] = {"ascent.toml": "version = 1\n"}
     body["target"]["repo"]["draft_base"] = "0" * 40
     body["target"]["repo"]["contract_source"] = "mcp"
 
@@ -153,13 +153,20 @@ def test_repo_run_without_a_setup_chat_binds_nothing(
     assert binds == []
 
 
-def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore]) -> None:
-    """Text targets submit to ``/optimize``; this route turns them away."""
+@pytest.mark.parametrize("target", [{"kind": "text"}, {"kind": "agent", "model": "m"}])
+def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore], target: dict[str, str]) -> None:
+    """Refuse a text or agent target with a 422 that says every run optimizes a repository (SKY-834).
+
+    Args:
+        client_and_store: The API client and its job store.
+        target: The retired target that the request names.
+    """
     client, store = client_and_store
 
-    resp = client.post("/blackbox/run", json=repo_payload(target={"kind": "text"}))
+    resp = client.post("/blackbox/run", json=repo_payload(target=target))
 
-    assert resp.status_code == 400
+    assert resp.status_code == 422
+    assert "Every run optimizes a repository" in resp.text
     assert store._jobs == {}
 
 

@@ -165,7 +165,10 @@ void describe("tool result cards", () => {
     const whole = JSON.stringify({
       sha: "abcdef1234",
       commit: { message: "Big change" },
-      files: Array.from({ length: 500 }, (_, i) => ({ filename: `f${i}.py`, patch: "x".repeat(200) })),
+      files: Array.from({ length: 500 }, (_, i) => ({
+        filename: `f${i}.py`,
+        patch: "x".repeat(200),
+      })),
     });
     const tail = `\n\n[Truncated: the result has ${whole.length} characters and only the first 40000 are shown. Ask for a narrower path, file or query to see the rest.]`;
     const html = renderOpen(
@@ -259,7 +262,7 @@ void describe("tool result cards", () => {
   });
 
   void it("a write the tool refuses shows its refusal as a failure", () => {
-    const error = "Not a file you can write: 'run.py'. Write one of metric.py, optimize.toml.";
+    const error = "Not a file you can write: 'run.py'. Write one of metric.py, ascent.toml.";
     const html = renderOpen(
       <WorkspaceWriteCard call={call("write_workspace_file", { error }, { path: "run.py" })} />,
     );
@@ -267,15 +270,15 @@ void describe("tool result cards", () => {
     assert.match(html, /Not a file you can write/);
   });
 
-  void it("a saved optimize.toml with a parser error shows the error, yet the write succeeds", () => {
+  void it("a saved ascent.toml with a parser error shows the error, yet the write succeeds", () => {
     const text = "[run]\nname = 1\n";
     const result = {
-      wizard_state: { optimize_toml: text },
-      optimize_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
+      wizard_state: { ascent_toml: text },
+      ascent_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
     };
     const html = renderOpen(
       <WorkspaceWriteCard
-        call={call("write_workspace_file", result, { path: "optimize.toml", text })}
+        call={call("write_workspace_file", result, { path: "ascent.toml", text })}
       />,
     );
     assert.match(
@@ -513,6 +516,20 @@ void describe("tool result cards", () => {
     assert.match(all, />1 runs</);
     assert.doesNotMatch(all, / of /);
     assert.match(all, /<span dir="auto">My run<\/span>/);
+  });
+
+  void it("a run list shows a better minimize run as a gain (SKY-750)", () => {
+    const rows = [
+      {
+        optimization_id: "0123456789ab",
+        baseline_test_metric: 10,
+        optimized_test_metric: 5,
+        metric_improvement: 5,
+      },
+    ];
+    const html = renderOpen(<JobListCard call={call("list_jobs", { items: rows, total: 1 })} />);
+    assert.match(html, /\+5\.0%/);
+    assert.doesNotMatch(html, /-5\.0%/);
   });
 
   void it("job logs show only the newest 400 lines but count all of them", () => {

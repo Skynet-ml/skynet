@@ -260,6 +260,24 @@ def test_analytics_models_aggregates_correctly(client: TestClient, job_store: Fa
     assert item["avg_improvement"] == pytest.approx(0.25, abs=1e-5)
 
 
+def test_analytics_improvement_counts_a_lower_minimize_score_as_a_gain(
+    client: TestClient, job_store: FakeJobStore
+) -> None:
+    """A minimize run that drops from 0.5 to 0.3 counts as +0.2 in every aggregate (SKY-750)."""
+    job_store.seed_job(
+        "min1",
+        status="success",
+        payload_overview={"job_type": "run", "optimizer_name": "gepa", "model_name": "gpt-4o-mini"},
+        result={"baseline_score": 0.5, "best_score": 0.3, "direction": "minimize"},
+    )
+    summary = client.get("/analytics/summary").json()
+    assert summary["avg_improvement"] == pytest.approx(0.2, abs=1e-5)
+    assert summary["max_improvement"] == pytest.approx(0.2, abs=1e-5)
+    assert summary["min_improvement"] == pytest.approx(0.2, abs=1e-5)
+    assert client.get("/analytics/optimizers").json()["items"][0]["avg_improvement"] == pytest.approx(0.2, abs=1e-5)
+    assert client.get("/analytics/models").json()["items"][0]["avg_improvement"] == pytest.approx(0.2, abs=1e-5)
+
+
 def test_analytics_dashboard_empty_store(client: TestClient) -> None:
     """An empty store yields a zeroed dashboard payload."""
     r = client.get("/analytics/dashboard")

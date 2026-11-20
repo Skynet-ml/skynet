@@ -106,7 +106,7 @@ _TELEMETRY_ENV = {
 }
 # SWE-agent and LiteLLM read these keys for their other routes. A protected run
 # blanks them, so an inherited key never gives SWE-agent a route around the
-# gateway. The gateway key reaches SWE-agent as a ``$APP_API_KEY`` reference.
+# gateway. The gateway key reaches SWE-agent as a ``$ASCENT_MODEL_KEY`` reference.
 _PROTECTED_ENV = {
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
@@ -203,7 +203,7 @@ def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     run's shell exits, and the next run removes it when a timeout's SIGKILL
     skipped the trap. AGENTS.md and the prompt reach the task file through
     ``cat``, never through shell words. The key stays in the environment:
-    SWE-agent reads ``$APP_API_KEY`` itself. The command keeps SWE-agent's
+    SWE-agent reads ``$ASCENT_MODEL_KEY`` itself. The command keeps SWE-agent's
     exit status and prints the submitted patch.
 
     Args:

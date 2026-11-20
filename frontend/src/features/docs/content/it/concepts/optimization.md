@@ -2,26 +2,29 @@ Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Un motore 
 
 ## Il contratto comune
 
-Ogni esecuzione ha un repository e uno scorer. Lo scorer è una funzione Python che riceve il percorso di una versione del repository e un caso.
+Ogni esecuzione ha un repository, un file `ascent.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` è la cartella di una versione del repository, dopo l'esecuzione del comando di configurazione.
-- `case` è un dict. `case["input"]` contiene i campi di input di un caso. `case["expected"]` contiene il valore atteso, oppure `None` quando il caso non ne ha.
-- `score` restituisce una coppia: un numero e un dict con una stringa `"feedback"`.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-Il repository ha un file `serve.py` nella radice con `def serve(input)`. Lo scorer può chiamarlo, e Skynet lo usa per servire la versione migliore dopo l'esecuzione.
+- `output` è ciò che la voce `[run]` ha restituito per il caso.
+- `case` è un dict. `case["input"]` contiene i campi di input di un caso. `case["expected"]` contiene il valore atteso, oppure `None` quando il caso non ne ha.
+- `repo_path` è una cartella che contiene solo i tuoi file della metrica.
+- `score` restituisce un oggetto: un numero in `"score"` e una stringa `"feedback"` facoltativa.
+
+Il repository ha un file `serve.py` nella radice con `def serve(input)`. La voce `[run]` lo chiama nel proprio box della sandbox. Skynet lo usa per servire la versione migliore dopo l'esecuzione.
+
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from openascent import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `ascent.toml`.
 
 > [!NOTE]
 > L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer, i valori attesi né i segreti dell'esecuzione.
@@ -34,9 +37,9 @@ Il codice del tuo repository e il tuo scorer possono chiamare un modello tramite
 
 | Variabile            | Che cosa contiene                                                          |
 | -------------------- | -------------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | L'URL del gateway. `APP_GATEWAY_URL` contiene lo stesso valore.            |
-| `APP_API_KEY`        | Un token solo per questa esecuzione. Non è una chiave del provider.        |
-| `APP_MODEL`          | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
+| `OPENAI_BASE_URL`    | L'URL del gateway. `ASCENT_MODEL_URL` contiene lo stesso valore.           |
+| `ASCENT_MODEL_KEY`   | Un token solo per questa esecuzione. Non è una chiave del provider.        |
+| `ASCENT_MODEL`       | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
 | `ANTHROPIC_BASE_URL` | L'URL del gateway per gli SDK di Anthropic.                                |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione.
 - Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider. Skynet non applica costi per il modello.
 - Il gateway rifiuta le richieste per qualsiasi altro modello.
-- I segreti dell'esecuzione arrivano al tuo codice e al tuo scorer come variabili d'ambiente. Il nome della variabile è il nome del segreto. Skynet nasconde i valori dei segreti nell'output.
+- Il tuo codice e il tuo scorer non ricevono i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva a un ruolo solo tramite una tabella `[services.<name>]` che il ruolo elenca in `[run] services` o `[metric] services`, o tramite un server del file `mcp` del ruolo. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Skynet aggiunge il segreto fuori dalla sandbox e nasconde i valori dei segreti nell'output.
 
 La sandbox non ha altri accessi alla rete.
 

@@ -71,7 +71,7 @@ from ..sandbox.bridge import default_provider
 from ..sandbox.errors import SandboxTransientError, is_temporary_provider_error, sandbox_api_error
 from ..service_gateway.optimization.blackbox.agent_runs import PHASE_FINAL
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds
-from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
+from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, MAXIMIZE, MINIMIZE
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, patch_violations
 from ..service_gateway.optimization.blackbox.scorer import normalize_score
 from ..service_gateway.optimization.blackbox.service import (
@@ -566,11 +566,11 @@ def _score(staged: StagedRepository, patch: str, cases: list[Any], *, label: str
         reply = scorer.dispatch({"candidate": candidate, "case": case})
         if reply.status != 200:
             raise ServiceError(reply.body.decode(errors="replace"))
-        return normalize_score(json.loads(reply.body))
+        return normalize_score(json.loads(reply.body), own_keys=True)
 
     try:
         # A repository target scores one case at a time, as in a run.
-        return _final_run(score, patch, cases, label=label, phase=PHASE_FINAL, concurrency=1, repo_scorer=True)
+        return _final_run(score, patch, cases, label=label, phase=PHASE_FINAL)
     except ServiceError as error:
         # _final_run quotes the text of any error; an unexpected type must reach the handlers raw,
         # so they show only its type name and log it. The raw error keeps its own cause: the SDK
@@ -1211,12 +1211,13 @@ def _ending_answer(job_store: Any, job: dict[str, Any], final_row: Any) -> dict[
     return _ended_answer(session_id, str(job_store.get_job(session_id)["status"]))
 
 
-def _best_call(engine: Any, budget_id: str) -> tuple[dict[str, Any] | None, int]:
+def _best_call(engine: Any, budget_id: str, *, minimize: bool = False) -> tuple[dict[str, Any] | None, int]:
     """Find the session's best scored call: the highest score, the earliest on a tie.
 
     Args:
         engine: Database that holds the evidence.
         budget_id: The session's budget.
+        minimize: Pick the lowest score instead, for ``[metric] direction = "minimize"`` (SKY-750).
 
     Returns:
         The best call's stored result (``None`` without a scored call), and
@@ -1227,7 +1228,8 @@ def _best_call(engine: Any, budget_id: str) -> tuple[dict[str, Any] | None, int]
     scored = [row for row in done if isinstance(row.result["judge_result"].get("score"), int | float)]
     if not scored:
         return None, len(done)
-    best = min(scored, key=lambda row: (-float(row.result["judge_result"]["score"]), row.started_at))
+    sign = 1.0 if minimize else -1.0
+    best = min(scored, key=lambda row: (sign * float(row.result["judge_result"]["score"]), row.started_at))
     return best.result, len(done)
 
 
@@ -1290,7 +1292,8 @@ def _final_result(
         The result as JSON.
     """
     search = best["judge_result"]
-    verdict = _outcome_verdict((protected.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}, final)
+    outcome = (protected.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}
+    verdict = _outcome_verdict(outcome, final)
     case_results = _case_results(None, final)
     named = final.named
     feedback = final.feedback
@@ -1326,6 +1329,7 @@ def _final_result(
         best_candidate=best["_patch"],
         runtime_seconds=time.perf_counter() - started,
         details=details,
+        direction=outcome.get("direction") or MAXIMIZE,
     )
     result = response.model_dump(mode="json")
     add_run_record(result, protected, staged, image=image)
@@ -1470,6 +1474,10 @@ def end_session(job_store: Any, job: dict[str, Any], *, ended_by: str) -> JobCan
                     engine=job_store.engine,
                     case_count=len(payload.get("cases") or []),
                 ) as (protected, staged, _gateway):
+                    outcome = (protected.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}
+                    if outcome.get("direction") == MINIMIZE:
+                        # Only the staged contract names the direction, so a minimize session picks its best again.
+                        best, calls = _best_call(job_store.engine, budget.id, minimize=True)
                     cases = list(protected.get("cases") or [])
                     seed = payload.get("seed")
                     final_cases, held_out = _final_cases(cases, seed)

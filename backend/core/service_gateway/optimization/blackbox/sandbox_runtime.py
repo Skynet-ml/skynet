@@ -76,7 +76,7 @@ _LOCAL_ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _LOCAL_KILLED_EXIT_CODE = 137
 _BUDGET_RELAY_ENV = "APP_BUDGET_RELAY_URL"
 _TOOL_RELAY_ENV = "APP_TOOL_RELAY_TOKEN"
-_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "APP_GATEWAY_URL")
+_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "ASCENT_MODEL_URL")
 
 
 # Scorer workspaces live under their own root, apart from proposer workspaces
@@ -95,7 +95,11 @@ _RUNTIME_OVERRIDE: contextvars.ContextVar[SandboxRuntime | None] = contextvars.C
 
 
 def current_sandbox_runtime() -> SandboxRuntime | None:
-    """Return the trusted runtime bound to this isolated child or setup request."""
+    """Return the trusted runtime bound to this isolated child or setup request.
+
+    Returns:
+        The bound runtime, or None when no runtime is bound.
+    """
     return _RUNTIME_OVERRIDE.get()
 
 
@@ -197,7 +201,11 @@ class LocalSubprocessSession:
 
     @property
     def path(self) -> Path:
-        """Return the working directory."""
+        """Return the working directory.
+
+        Returns:
+            The working directory.
+        """
         return self._dir
 
     def _resolve(self, path: str) -> Path:
@@ -321,6 +329,21 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
+def _refuse_gpu(spec: SandboxSpec, runtime: str) -> None:
+    """Refuse a spec with a GPU type on a runtime that cannot start a GPU box.
+
+    Args:
+        spec: The box spec.
+        runtime: Names the runtime in the error.
+
+    Raises:
+        ServiceError: The spec asks for a GPU.
+    """
+    if spec.gpu is not None:
+        # Refused, not ignored: a box without its GPU would run the step on the wrong hardware.
+        raise ServiceError(f"The {runtime} sandbox cannot start a box with GPU type {spec.gpu!r}.")
+
+
 class LocalSubprocessRuntime:
     """Sandbox runtime whose boxes are temp directories on the worker host."""
 
@@ -334,7 +357,11 @@ class LocalSubprocessRuntime:
 
         Returns:
             The session over the new directory.
+
+        Raises:
+            ServiceError: The spec asks for a GPU.
         """
+        _refuse_gpu(spec, "local")
         return LocalSubprocessSession(spec)
 
 
@@ -355,8 +382,9 @@ class ContainedSubprocessRuntime:
             A temporary subprocess session inside the current sandbox.
 
         Raises:
-            ServiceError: When the outer supervisor did not install its model mailbox.
+            ServiceError: When the spec asks for a GPU, or the outer supervisor did not install its model mailbox.
         """
+        _refuse_gpu(spec, "contained")
         relay = app_env(_BUDGET_RELAY_ENV)
         if not relay:
             raise ServiceError("Contained execution requires the protected model mailbox.")
@@ -605,12 +633,18 @@ class AsyncBridgeRuntime:
         # whether this provider can start them.
         self._runs_services = "services" in inspect.signature(provider_class).parameters
         self.injects_headers = self._capabilities.injects_headers
+        # The warm box lease reads this to refuse a GPU step before it claims a box (SKY-804).
+        self.gpu_types = self._capabilities.gpu_types
         self._sweep_options: dict[str, Any] = {} if docker_bin is None else {"docker_bin": docker_bin}
         self._options: dict[str, Any] = {**self._sweep_options, **({} if image is None else {"image": image})}
 
     @property
     def supports_snapshots(self) -> bool:
-        """Return whether this provider can save and start from after-setup snapshots."""
+        """Return whether this provider can save and start from after-setup snapshots.
+
+        Returns:
+            True when the provider supports after-setup snapshots.
+        """
         return self._capabilities.snapshots
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
@@ -677,8 +711,8 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         spec: The blackbox spec.
 
     Returns:
-        The same sandbox, with ``vcpus`` moved into the resource request and
-        the Skynet sandbox tag added.
+        The same sandbox, with ``vcpus`` moved into the resource request,
+        ``gpu`` as the GPU type and the Skynet sandbox tag added.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,
@@ -692,6 +726,7 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         allowed_hosts=spec.allowed_hosts,
         operation_key=spec.operation_key,
         private=spec.private,
+        gpu_type=spec.gpu,
     )
 
 

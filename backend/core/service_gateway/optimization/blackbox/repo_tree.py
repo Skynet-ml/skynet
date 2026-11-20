@@ -25,6 +25,17 @@ REPO_SNAPSHOT_KEY = "_repo_snapshot"
 # Uploads are text and capped at 16 MiB per request: 9 MiB of bytes is 12 MiB of base64.
 ARCHIVE_CHUNK_BYTES = 9 * 1024 * 1024
 _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", "commit.gpgsign=false"]
+# A stored tree may hold a folder shaped as a bare repository (``HEAD``,
+# ``objects/``, ``refs/``, ``config``). Git would read that folder's config, and
+# a filter, hook or fsmonitor in it would run code when git runs there. Every
+# git call in the scorer, workspace, staging and engine runner paths that can
+# run in a tree with no ``.git`` of its own sets this, so git refuses such a
+# folder. The harness shell lines are out of scope: the agent runs its own code
+# in that box anyway. A ``git -C repo`` call on a checkout with its
+# own ``.git`` does not need it: git finds that ``.git`` first. Git reads
+# ``safe.bareRepository`` only from protected config, so a repository's own
+# config cannot turn it off (SKY-812).
+SAFE_GIT = ("-c", "safe.bareRepository=explicit")
 
 # A run with a constraints file answers every refused action with this fixed
 # text, both in the sandbox and in the parent, and logs the reason as a
@@ -34,7 +45,7 @@ ILLEGAL_ACTION_MESSAGE = (
     " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
-PATH_RULE = "optimize.toml [paths]"
+PATH_RULE = "ascent.toml [paths]"
 
 
 def rule_block_record(reason: str) -> dict[str, Any]:
@@ -446,7 +457,9 @@ def _git(arguments: Sequence[str], cwd: Path) -> str:
     Raises:
         RuntimeError: When git fails.
     """
-    result = subprocess.run(["git", *_GIT_IDENTITY, *arguments], cwd=cwd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", *SAFE_GIT, *_GIT_IDENTITY, *arguments], cwd=cwd, capture_output=True, text=True, check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: {(result.stderr or result.stdout).strip()[-2000:]}")
     return result.stdout
@@ -536,6 +549,19 @@ def version_patch(checkout: Path) -> str:
     )
 
 
+def forget_file_stats(checkout: Path) -> None:
+    """Reload the index from the shipped tree so git hashes every file again.
+
+    Use it after files were replaced in place with the same mtime. Linux can
+    reuse the freed inode, so a same-size edit keeps the stat that git cached,
+    and ``git add`` skips it (SKY-843).
+
+    Args:
+        checkout: Folder made by :func:`unpack_tree`.
+    """
+    _git(["read-tree", BASE_REF], checkout)
+
+
 def reset_tree(checkout: Path) -> None:
     """Throw away every change in a checkout made by :func:`unpack_tree`.
 
@@ -559,7 +585,7 @@ def apply_patch(checkout: Path, patch: str) -> None:
     if not patch.strip():
         return
     result = subprocess.run(
-        ["git", "apply", "--binary", "--whitespace=nowarn", "-"],
+        ["git", *SAFE_GIT, "apply", "--binary", "--whitespace=nowarn", "-"],
         cwd=checkout,
         input=patch,
         capture_output=True,

@@ -221,7 +221,15 @@ def _repo_job(
         "payload": {
             "username": "alice",
             "strategy": {"engine": "gepa"},
-            "target": {"kind": "repo", "repo": {"repository": "acme/app", "commit": commit, "ref": "main"}},
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "repository": "acme/app",
+                    "commit": commit,
+                    "ref": "main",
+                    "environment": {"protected_paths": ["ascent.toml"]},
+                },
+            },
             "scorer": {"model": {"name": "fixture/model"}},
             "token_source": "managed",
         },
@@ -382,10 +390,10 @@ def test_repo_serve_reports_a_sandbox_failure(
     assert response.json()["code"] == "serve.protected_interaction_failed"
 
 
-def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
+def test_repo_serve_refuses_a_run_whose_ascent_toml_uses_a_removed_form(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A run pinned to an old ``optimize.toml`` form gets a clear 502 and opens no sandbox.
+    """A run pinned to an old ``ascent.toml`` form gets a clear 502 and opens no sandbox.
 
     Args:
         repo_serve: Client, ledger harness and captured sandbox calls.
@@ -398,7 +406,7 @@ def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
         """Pack a commit pinned while ``[proposer] illegal`` still took inline rules."""
         archive = workdir / "tree.tgz"
         with tarfile.open(archive, "w:gz") as tree:
-            member = tarfile.TarInfo("optimize.toml")
+            member = tarfile.TarInfo("ascent.toml")
             member.size = len(legacy)
             tree.addfile(member, io.BytesIO(legacy))
         return SimpleNamespace(archive=archive, commit=commit)

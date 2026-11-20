@@ -65,7 +65,7 @@ import type {
 } from "@/shared/types/api";
 import type { SharedOptimizationData } from "@/shared/lib/api";
 import { extractBlackboxScorePoints } from "../lib/blackbox";
-import { extractCandidates, scopeToLatestLane } from "@/features/trajectory";
+import { ReplayViewer, extractCandidates, minimizesRun, scopeToLatestLane } from "@/features/trajectory";
 import {
   rememberRunKind,
   measureOverview,
@@ -304,6 +304,115 @@ function FailureCopyButton({ text }: { text: string }) {
       copiedAriaLabel={msg("shared.code_editor.copied")}
       className="-me-1 shrink-0 text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
     />
+  );
+}
+
+/**
+ * Decides which header actions the run page shows, and counts them for the
+ * loading skeleton.
+ */
+export function runHeaderActions({
+  job,
+  source,
+  isShare,
+  shareCanInteract,
+}: {
+  job: Pick<
+    OptimizationStatusResponse,
+    "status" | "stop_reason" | "effective_role" | "pausable" | "resumable"
+  >;
+  source: ApiSource;
+  isShare: boolean;
+  shareCanInteract: boolean;
+}) {
+  const isActive = ACTIVE_STATUSES.has(job.status);
+  const isTerminal = TERMINAL_STATUSES.has(job.status);
+  // Effective role on the normal (non-share) route. null = the caller's own run
+  // or an owner-tier grant (full control); "editor"/"viewer" = a member reached
+  // it via sharing. Mutations gate on this so a viewer can't cancel/delete/manage.
+  const effectiveRole = job.effective_role ?? null;
+  const canEditRun = effectiveRole == null || effectiveRole === "editor";
+  // Delete and share call local-only routes, so a hosted run hides them.
+  const canDeleteRun = effectiveRole == null && source === "local";
+  // Clone and Retry open the local submit form, which cannot read a hosted run.
+  // Resume calls the run's own source, so it stays for hosted runs.
+  const canClone = source === "local";
+  // Sharing is owner-only: members (even editors) can't invite, change roles,
+  // or set general access. null = the owner's own run / admin / co-owner.
+  // Never on the public /share/<token> route: there the job is seeded from
+  // shareData and carries no effective_role, so it would read as owner-level
+  // and leak the management controls to viewers (even anonymous visitors).
+  const canManageShare = !isShare && effectiveRole == null && source === "local";
+  const canRestart =
+    canEditRun &&
+    (job.status === "failed" || job.status === "cancelled" || job.status === "paused") &&
+    !isBudgetPause(job);
+  const showResume = canRestart && !!job.resumable;
+  const showRetry = canRestart && !job.resumable && canClone;
+  // A paused run has no worker, but the cancel route still cancels it (SKY-800),
+  // so Cancel stays for a manual pause and a budget pause alike. A share view
+  // carries no effective_role, so it would read as owner-level: never there.
+  const canCancel = !isShare && canEditRun && (isActive || job.status === "paused");
+  const canPause = !isShare && canEditRun && isActive && !!job.pausable;
+  // The phone shell keeps only share and cancel; a share view has just the
+  // clone button, on wide screens, and otherwise no action row.
+  const headerActionCounts = isShare
+    ? { wide: shareCanInteract ? 1 : null, phone: null }
+    : {
+        wide:
+          Number(canManageShare) +
+          Number(canClone) +
+          Number(showResume || showRetry) +
+          Number(canPause) +
+          Number(canCancel) +
+          Number(canDeleteRun && isTerminal),
+        phone: Number(canManageShare) + Number(canCancel),
+      };
+  return {
+    canEditRun,
+    canDeleteRun,
+    canClone,
+    canManageShare,
+    showResume,
+    showRetry,
+    canCancel,
+    canPause,
+    headerActionCounts,
+  };
+}
+
+/** The run page's Cancel button: cancels an active or paused run. */
+export function CancelRunButton({
+  id,
+  source,
+  onCancelled,
+}: {
+  id: string;
+  source: ApiSource;
+  onCancelled: () => void;
+}) {
+  const handleCancel = async () => {
+    try {
+      await cancelJob(id, source);
+      toast.success(msg("optimization.cancel.sent"));
+      window.dispatchEvent(new Event("optimizations-changed"));
+      onCancelled();
+    } catch (err) {
+      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
+    }
+  };
+  return (
+    <TooltipButton tooltip={msg("auto.app.optimizations.id.page.5")}>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+        onClick={handleCancel}
+        aria-label={msg("auto.app.optimizations.id.page.literal.5")}
+      >
+        <XCircle className="size-4" />
+      </Button>
+    </TooltipButton>
   );
 }
 
@@ -593,17 +702,6 @@ export function OptimizationDetailView({
     };
   }, [id, fetchJob, skipNetwork]);
 
-  const handleCancel = async () => {
-    if (skipNetwork) return;
-    try {
-      await cancelJob(id, source);
-      toast.success(msg("optimization.cancel.sent"));
-      void fetchJob();
-    } catch (err) {
-      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
-    }
-  };
-
   const handleRetry = () => {
     if (skipNetwork) return;
     router.push(`/submit?clone=${id}`);
@@ -662,9 +760,18 @@ export function OptimizationDetailView({
     () => (jobIsBlackbox ? extractCandidates(scopeToLatestLane(jobProgressEvents ?? [])) : []),
     [jobIsBlackbox, jobProgressEvents],
   );
+  const jobBlackboxResult = job?.blackbox_result;
+  const jobMinimizes = useMemo(
+    () =>
+      minimizesRun({
+        blackbox_result: jobBlackboxResult ?? null,
+        progress_events: jobProgressEvents ?? [],
+      }),
+    [jobBlackboxResult, jobProgressEvents],
+  );
   const scorePoints = useMemo(
-    () => (jobIsBlackbox ? extractBlackboxScorePoints(blackboxCandidates) : []),
-    [jobIsBlackbox, blackboxCandidates],
+    () => (jobIsBlackbox ? extractBlackboxScorePoints(blackboxCandidates, jobMinimizes) : []),
+    [jobIsBlackbox, blackboxCandidates, jobMinimizes],
   );
 
   // A schedule set up in the submit wizard stays on its run when the run fails,
@@ -714,22 +821,18 @@ export function OptimizationDetailView({
   }
 
   const isTerminal = TERMINAL_STATUSES.has(job.status);
-  // Effective role on the normal (non-share) route. null = the caller's own run
-  // or an owner-tier grant (full control); "editor"/"viewer" = a member reached
-  // it via sharing. Mutations gate on this so a viewer can't cancel/delete/manage.
   const effectiveRole = job.effective_role ?? null;
-  const canEditRun = effectiveRole == null || effectiveRole === "editor";
-  // Delete and share call local-only routes, so a hosted run hides them.
-  const canDeleteRun = effectiveRole == null && source === "local";
-  // Clone and Retry open the local submit form, which cannot read a hosted run.
-  // Resume calls the run's own source, so it stays for hosted runs.
-  const canClone = source === "local";
-  // Sharing is owner-only: members (even editors) can't invite, change roles,
-  // or set general access. null = the owner's own run / admin / co-owner.
-  // Never on the public /share/<token> route: there the job is seeded from
-  // shareData and carries no effective_role, so it would read as owner-level
-  // and leak the management controls to viewers (even anonymous visitors).
-  const canManageShare = !isShare && effectiveRole == null && source === "local";
+  const {
+    canEditRun,
+    canDeleteRun,
+    canClone,
+    canManageShare,
+    showResume,
+    showRetry,
+    canCancel,
+    canPause,
+    headerActionCounts,
+  } = runHeaderActions({ job, source, isShare, shareCanInteract });
   // Share banner: surface the caller's granted tier whenever they're NOT the
   // owner — both the public /share link and an explicit member grant. "viewer"
   // maps to the viewer tier, "editor" to the editor tier. null / "owner" is the
@@ -737,30 +840,8 @@ export function OptimizationDetailView({
   const callerRole = isShare ? shareRole : effectiveRole;
   const sharedTier = callerRole === "editor" ? "editor" : callerRole === "viewer" ? "viewer" : null;
   const sharedByOwner = isShare ? shareData?.owner : job.username;
-  // The header's icon actions below, counted for the loading skeleton. The
-  // phone shell keeps only share and cancel; a share view has just the clone
-  // button, on wide screens, and otherwise no action row.
-  const canRestart =
-    canEditRun &&
-    (job.status === "failed" || job.status === "cancelled" || job.status === "paused") &&
-    !isBudgetPause(job);
-  const showResume = canRestart && !!job.resumable;
-  const showRetry = canRestart && !job.resumable && canClone;
-  const canCancel = canEditRun && isActive;
   // /storage lists the local account's storage, which has no hosted view.
   const showStorageLink = source === "local" && (job.stored_bytes ?? 0) > 0;
-  const headerActionCounts = isShare
-    ? { wide: shareCanInteract ? 1 : null, phone: null }
-    : {
-        wide:
-          Number(canManageShare) +
-          Number(canClone) +
-          Number(showResume || showRetry) +
-          Number(canCancel && !!job.pausable) +
-          Number(canCancel) +
-          Number(canDeleteRun && isTerminal),
-        phone: Number(canManageShare) + Number(canCancel),
-      };
   // The level trims desk tabs, but a deep link to one still opens it: the
   // linked tab is kept rather than stranding the link on Overview.
   const levelShowsTab = (tab: string) => isShare || levelTabGate(tab) || tab === linkedDetailTab;
@@ -772,6 +853,8 @@ export function OptimizationDetailView({
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
   // The billing reads behind it have no hosted route.
   const showUsageTab = !skipNetwork && source === "local";
+  // The steps route is owner only, so a shared viewer or editor never asks for it.
+  const showReplay = !skipNetwork && source === "local" && sharedTier === null;
   // Continuous optimization starts from the owner's own successful repository
   // run; the backend still decides whether this run can carry a plan.
   const showContinuousTab =
@@ -916,7 +999,7 @@ export function OptimizationDetailView({
                     </Button>
                   </TooltipButton>
                 )}
-                {!isPhone && canEditRun && isActive && job.pausable && (
+                {!isPhone && canPause && (
                   <TooltipButton tooltip={msg("optimization.pause_tooltip")}>
                     <Button
                       variant="ghost"
@@ -929,18 +1012,8 @@ export function OptimizationDetailView({
                     </Button>
                   </TooltipButton>
                 )}
-                {canEditRun && isActive && (
-                  <TooltipButton tooltip={msg("auto.app.optimizations.id.page.5")}>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                      onClick={handleCancel}
-                      aria-label={msg("auto.app.optimizations.id.page.literal.5")}
-                    >
-                      <XCircle className="size-4" />
-                    </Button>
-                  </TooltipButton>
+                {canCancel && (
+                  <CancelRunButton id={id} source={source} onCancelled={() => void fetchJob()} />
                 )}
                 {!isPhone && canDeleteRun && isTerminal && (
                   <DeleteJobDialog
@@ -1145,6 +1218,13 @@ export function OptimizationDetailView({
                 payload={payload}
                 source={source}
               />
+              {showReplay && (
+                <ReplayViewer
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
+              )}
             </TabsContent>
 
             {showBestVersionTab && job.blackbox_result && (
@@ -1193,6 +1273,7 @@ export function OptimizationDetailView({
                   key={`${source}:${job.optimization_id}`}
                   optimizationId={job.optimization_id}
                   source={source}
+                  minimize={jobMinimizes}
                 />
               </TabsContent>
             )}

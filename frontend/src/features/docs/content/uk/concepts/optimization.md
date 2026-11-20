@@ -2,26 +2,29 @@ Skynet — це Optimize Anything: кожен запуск оптимізує р
 
 ## Спільний контракт
 
-Кожен запуск має репозиторій і оцінювач. Оцінювач — це функція Python, яка отримує шлях до однієї версії репозиторію й один кейс.
+Кожен запуск має репозиторій, файл `ascent.toml` з точкою входу `[run]` або етапом `[target.<name>]` і оцінювач. Точка входу `[run]` запускає одну версію репозиторію на одному кейсі. Оцінювач — це функція Python, яка отримує вивід точки входу й кейс.
 
-```python tab="scorer.py"
-import importlib.util
+```toml tab="ascent.toml"
+version = 1
 
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    output = module.serve(case["input"])
-    ok = output == case["expected"]
-    return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
+[run]
+entry = "serve.py:serve"
 ```
 
-- `repo_path` — це папка однієї версії репозиторію після виконання команди налаштування.
-- `case` — це словник. `case["input"]` містить вхідні поля одного кейсу. `case["expected"]` містить очікуване значення або `None`, якщо кейс його не має.
-- `score` повертає пару: число й словник із рядком `"feedback"`.
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    ok = output == case["expected"]
+    return {"score": 1.0 if ok else 0.0, "feedback": "Match." if ok else "No match."}
+```
 
-Репозиторій має в корені файл `serve.py` з `def serve(input)`. Оцінювач може його викликати, а Skynet використовує його, щоб обслуговувати найкращу версію після запуску.
+- `output` — це те, що точка входу `[run]` повернула для кейсу.
+- `case` — це словник. `case["input"]` містить вхідні поля одного кейсу. `case["expected"]` містить очікуване значення або `None`, якщо кейс його не має.
+- `repo_path` — це папка, у якій є лише ваші файли метрики.
+- `score` повертає один об'єкт: число під ключем `"score"` і необов'язковий рядок `"feedback"`.
+
+Репозиторій має в корені файл `serve.py` з `def serve(input)`. Точка входу `[run]` викликає його у власній окремій пісочниці. Skynet використовує його, щоб обслуговувати найкращу версію після запуску.
+
+Оцінювач виконується в окремій пісочниці. У ній є лише ваші файли метрики й немає коду версії, тому оцінювач не може імпортувати `serve.py`. Він бачить версію лише через `output` або через `call()` до етапу `[target.<name>]`. Імпортуйте `call` так: `from openascent import call`. Без точки входу `[run]` або етапу `[target.<name>]` Skynet відхиляє файл `ascent.toml`.
 
 > [!NOTE]
 > Агент програмування, який пише версії, не бачить вихідного коду оцінювача, очікуваних значень і секретів запуску.
@@ -34,9 +37,9 @@ def score(repo_path, case):
 
 | Змінна               | Що вона містить                                                  |
 | -------------------- | ---------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | URL шлюзу. `APP_GATEWAY_URL` містить те саме значення.           |
-| `APP_API_KEY`        | Токен лише для цього запуску. Це не ключ провайдера.             |
-| `APP_MODEL`          | Назва моделі, яку треба надсилати. Це модель оцінювача запуску.  |
+| `OPENAI_BASE_URL`    | URL шлюзу. `ASCENT_MODEL_URL` містить те саме значення.          |
+| `ASCENT_MODEL_KEY`   | Токен лише для цього запуску. Це не ключ провайдера.             |
+| `ASCENT_MODEL`       | Назва моделі, яку треба надсилати. Це модель оцінювача запуску.  |
 | `ANTHROPIC_BASE_URL` | URL шлюзу для SDK Anthropic.                                     |
 
 ```python tab="pipeline.py"
@@ -44,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
@@ -58,7 +61,7 @@ def label(message):
 - Виклики на ключах Skynet враховуються в бюджеті запуску.
 - З вашим власним ключем (BYOK) виклик іде на ключ вашого провайдера. Skynet не стягує плату за модель.
 - Шлюз відхиляє запити до будь-якої іншої моделі.
-- Секрети запуску потрапляють у ваш код і ваш оцінювач як змінні середовища. Назва змінної — це назва секрету. Skynet приховує значення секретів у виводі.
+- Ваш код і ваш оцінювач не отримують секрети запуску як змінні середовища. Секрет потрапляє в роль лише через таблицю `[services.<name>]`, яку роль перелічує в `[run] services` або `[metric] services`, або через сервер із файлу `mcp` цієї ролі. Запишіть секрет у `headers` таблиці як `${NAME}`. Skynet додає секрет поза пісочницею і приховує значення секретів у виводі.
 
 Пісочниця не має іншого доступу до мережі.
 

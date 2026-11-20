@@ -117,16 +117,49 @@ void test("the third answer sends what the agent should do instead", async () =>
   await React.act(async () => root.unmount());
 });
 
-void test("an auto-review denial shows the fixed reason and 'Approve anyway' runs the call", async () => {
-  const { container, calls, root } = await mount({
-    tool: "rename_job_optimizations",
-    auto_review: { denied: true },
-  });
-  assert.match(container.textContent ?? "", /Auto-review denied/);
-  assert.match(container.textContent ?? "", /does not match your request\./);
-  const approve = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve anyway");
-  assert.ok(approve, container.innerHTML);
-  await React.act(async () => approve.click());
-  assert.deepEqual(calls, [[true]]);
+void test("an auto-review denial: key 1 keeps it denied, key 2 approves it anyway", async () => {
+  for (const [key, expected] of [["1", [[false]]], ["2", [[true]]]] as const) {
+    const { container, calls, root } = await mount({
+      tool: "rename_job_optimizations",
+      auto_review: { denied: true },
+    });
+    assert.match(container.textContent ?? "", /Auto-review denied: /);
+    assert.doesNotMatch(container.textContent ?? "", /does not match your request/);
+    await press(container, key);
+    assert.deepEqual(calls, expected);
+    await React.act(async () => root.unmount());
+  }
+});
+
+void test("the header opens and closes the arguments; a call with no arguments has no toggle", async () => {
+  const { container, root } = await mount({ arguments: { job_id: "j1" } });
+  const toggle = container.querySelector("button[aria-expanded]");
+  assert.ok(toggle, container.innerHTML);
+  assert.match(toggle.textContent ?? "", /Details/);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  const panel = document.getElementById(toggle.getAttribute("aria-controls") ?? "");
+  assert.ok(panel?.hasAttribute("inert"));
+  await React.act(async () => (toggle as HTMLButtonElement).click());
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(!panel?.hasAttribute("inert"));
+  await React.act(async () => (toggle as HTMLButtonElement).click());
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  await React.act(async () => root.unmount());
+
+  const bare = await mount({ arguments: {} });
+  assert.equal(bare.container.querySelector("button[aria-expanded]"), null);
+  await React.act(async () => bare.root.unmount());
+});
+
+void test("multi-line text keeps its own direction; only code keys are forced left-to-right", async () => {
+  // Built from code points: the lint rule bans Hebrew literals outside the message catalogs.
+  const hebrew = (...cps: number[]) => String.fromCodePoint(...cps);
+  const shin = hebrew(0x5e9);
+  const reason = `${hebrew(0x5e9, 0x5dc, 0x5d5, 0x5dd)}\n${hebrew(0x5e2, 0x5d5, 0x5dc, 0x5dd)}`;
+  const { container, root } = await mount({ arguments: { reason, code: "a = 1\nb = 2" } });
+  const blocks = [...container.querySelectorAll("pre")];
+  assert.equal(blocks.length, 2, container.innerHTML);
+  assert.equal(blocks.find((b) => b.textContent?.startsWith(shin))?.getAttribute("dir"), "auto");
+  assert.equal(blocks.find((b) => b.textContent?.startsWith("a ="))?.getAttribute("dir"), "ltr");
   await React.act(async () => root.unmount());
 });

@@ -35,6 +35,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "agent_settings.invalid_value": "The value for {field} is not valid.",
     "agent_settings.missing_target": "The {action} action needs a target.",
     "agent_settings.not_writable": "The chat cannot change {key}. Change it on the {tab} tab.",
+    "accounts.deletion_storage_unavailable": (
+        "Your account was not deleted: its stored run data could not be removed right now. Try again in a few minutes."
+    ),
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",
@@ -211,10 +214,17 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "hosted_link.linked_unknown_account": "your account",
     "notifier.body.stuck": "No improvement over the last {percent}% of the optimization's evaluation budget.",
     "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
+    "optimization.cancel_conflict": (
+        "The optimization changed its state during the cancel. It is now in '{status}'. Try to cancel it again."
+    ),
     "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",
     "optimization.cannot_resubmit_payload": "Cannot resubmit the saved payload: {error}",
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
+    "optimization.deletion_storage_unavailable": (
+        "The optimization was not deleted: its stored run data could not be removed right now. "
+        "Try again in a few minutes."
+    ),
     "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
     "optimization.no_result_pending": "Optimization has no result yet.",
     "optimization.not_found": "Optimization not found: '{optimization_id}'.",
@@ -222,10 +232,10 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "serve.caller_tool_connection_required": "This optimization uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
     "serve.protected_interaction_failed": "The sandboxed request failed: {error}",
     "serve.not_enabled": "Serving is off for this run. Turn it on in the run's Serve tab first.",
-    "repo_gate.unenforced_local": "optimize.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
-    "repo_gate.unenforced_cloud": "optimize.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
-    "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
-    "repo_gate.unknown_connector": "The service {service} in optimize.toml is not a connector. Use one of these names: {known}.",
+    "repo_gate.unenforced_local": "ascent.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.unenforced_cloud": "ascent.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.missing_secret": "The service {service} in ascent.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
+    "repo_gate.unknown_connector": "The service {service} in ascent.toml is not a connector. Use one of these names: {known}.",
     "repo_gate.draft_base_moved": "The setup agent changed files on commit {base}, but the run would start from commit {commit}. The branch moved, and the changed files would undo its new commits. Set up the run again so the agent changes the files on the new commit.",
     "repo_gate.missing_mcp_secret": "The MCP server {server} in {path} needs the secret {secret}, but this run has no secret with that name. Add the secret to the run.",
     "repo_gate.secret_host_not_allowed": "The secret {secret} may go only to {allowed}, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run, or change the url.",
@@ -242,6 +252,8 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.retry_wrong_status": "Only optimizations in 'failed' or 'cancelled' state can be retried — this one is in '{status}'. Clone it instead.",
     "optimization.resume_wrong_status": "Only optimizations that stopped partway through can be resumed — this one is in '{status}'.",
     "optimization.resume_not_resumable": "This optimization has no saved resume point — run it again instead.",
+    "optimization.resume_target_retired": "Every run now optimizes a repository. This text or agent run stays in your history, but it cannot resume.",
+    "optimization.restart_target_retired": "Every run now optimizes a repository. This text or agent run stays in your history, but it cannot restart.",
     "optimization.resume_exhausted": "This optimization reached its maximum attempts ({attempts}) — run it again instead.",
     "optimization.resume_budget_projected": "The optimization is on track to cost about {projected}, above its {limit} limit. Raise the spending limit above {projected} to continue.",
     "optimization.pause_wrong_status": "Only running optimizations can be paused — this one is in '{status}'.",

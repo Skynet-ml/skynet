@@ -65,7 +65,7 @@ def upstream_server(
     Args:
         task: Optimization inputs.
         server: Skynet's accounting and scorer boundary.
-        ctx: Workspace and concurrency settings.
+        ctx: Workspace settings.
         on_eval: Called with the candidate, case and score (``None`` after a metric error) after each scorer run, if given.
 
     Returns:
@@ -99,7 +99,7 @@ def upstream_server(
         upstream_task(task, Path(ctx.run_dir).name),
         evaluate,
         BudgetTracker(max_evals=server.remaining),
-        max_concurrency=ctx.concurrency,
+        max_concurrency=1,
         output_dir=Path(ctx.run_dir),
     )
     upstream.platform_budget_stops = stops

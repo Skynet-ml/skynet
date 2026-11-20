@@ -57,7 +57,7 @@ Kayıtları içe aktaran bağlayıcılar arasında veritabanı tabloları, LLM i
 | Klasör derinliği                   | 3 klasör                                                                |
 | Dosya türleri                      | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`scorer.py` puanlayıcınızı içerir. Skynet her vaka için onun `score(repo_path, case)` fonksiyonunu çağırır.
+`scorer.py` puanlayıcınızı içerir. Skynet her vaka için onun `score(repo_path, case, output=None)` fonksiyonunu çağırır. `output` argümanı, `[run]` giriş noktasının o vaka için döndürdüğü değeri tutar.
 
 ## İstek hızları
 

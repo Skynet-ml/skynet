@@ -31,11 +31,11 @@ An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services"
 lets the scorer reach the run's ``[target.<name>]`` stages through the
 parent's relay with ``call(name, input)``. Its optional ``services`` list
 names the ``[services.<name>]`` with a url that the metric may reach: each
-gets ``SKYNET_SERVICE_<NAME>_URL``, a loopback address in the box whose
+gets ``ASCENT_SERVICE_<NAME>_URL``, a loopback address in the box whose
 requests go through the same relay, so the service's key stays with the
 parent. Its optional ``mcp`` list names the http servers of the role's own
-MCP file: each gets ``SKYNET_MCP_<NAME>_URL`` on the same loopback port, and
-``SKYNET_MCP_CONFIG`` names the role's own ``.mcp.json`` in the checkout. The
+MCP file: each gets ``ASCENT_MCP_<NAME>_URL`` on the same loopback port, and
+``ASCENT_MCP_CONFIG`` names the role's own ``.mcp.json`` in the checkout. The
 parent replaced that file before the box opened: each entry is a loopback url
 on ``RELAY_PORT``, never the real url, a header or a secret. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
@@ -43,11 +43,14 @@ one stage call and writes ``{"output": ...}`` or ``{"error": ...}``. When the
 stage's own MCP file holds a server, the parent also writes ``relay.json``
 (the same relay config, with the call's own prefix and answer folder) into
 the call's folder: the call then gets its own loopback relay on a free port,
-checked against the stage's own role, and a command stage runs as
-``--stage-command <call_dir> <command> [<arg> ...]`` behind it. Parallel
+checked against the stage's own role. A command stage runs as
+``--stage-command <call_dir> <package> <timeout> <command> [<arg> ...]``,
+behind that relay when it has one, and writes the same ``{"output": ...}``
+or ``{"error": ...}`` as a Python stage, with the failed command's
+``stderr`` and ``stdout`` tails next to the error (SKY-757). Parallel
 calls share the stage box, so the tree's MCP file, which names
 ``RELAY_PORT``, reaches no call; each call gets ``mcp.json`` in its folder
-with its own port, and ``SKYNET_MCP_CONFIG`` names that copy (SKY-624).
+with its own port, and ``ASCENT_MCP_CONFIG`` names that copy (SKY-624).
 
 A repository with a ``[run]`` entry runs the candidate first, in its own
 candidate box (SKY-398). ``python3 app_runner.py --candidate <call_dir>``
@@ -57,9 +60,13 @@ its own session with only the case's input (E42), and writes
 every process the entry left ends with it; the metric runs in another box
 that never holds the candidate's code.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
-<entry>`` and its output is its JSON return value; a command entry
-(``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
-``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
+<entry>`` and its output is its JSON return value. A command entry
+(``["sh", "run.sh"]``) runs as ``--run-command <dir> <package> <timeout>
+<command> [<arg> ...]``: OpenAscent's ``call_run`` writes ``{"input": ...}``
+to the file that ``ASCENT_INPUT`` names, starts the command with an empty
+stdin, and takes the ``output`` value of the JSON object that the command
+writes to the file that ``ASCENT_OUTPUT`` names (SKY-757). The command's
+printed text goes to the run logs only. The metric call then gets that output as
 ``score(repo_path, case, output)``, and may start no process of its own (E40).
 Each relay frame names the box's role (``run`` or ``metric``), and the
 parent refuses a frame whose role is not the box's own.
@@ -68,17 +75,29 @@ the entry's run time in seconds as ``elapsed_s=...`` (SKY-642). The
 supervisor measures it in its own process, from just before the entry
 starts until the entry exits and its process group is killed, so the
 candidate's code cannot patch the clock it reads.
+
+A command ``[metric] entry`` cannot import ``call``, ``llm`` or ``log``, so
+the runner serves them to it on a loopback port of its own, in the
+OpenAscent wire form (SKY-767): ``ASCENT_STAGE_<NAME>_URL`` for each stage,
+through the same relay as ``call()``; ``ASCENT_MODEL_URL`` with
+``ASCENT_MODEL`` and an empty ``ASCENT_MODEL_KEY`` only with a judge model,
+through the same client as ``llm()``; and ``ASCENT_LOG_URL``, which writes
+the same event as ``log()``. The command's environment holds no model key.
+A Python metric gets none of these helper URLs; it reads the box's own
+``ASCENT_MODEL_KEY`` through ``llm()``.
 """
 
 from __future__ import annotations
 
 import base64
 import ctypes
+import difflib
 import http.server
 import importlib.util
 import inspect
 import io
 import json
+import math
 import os
 import pwd
 import shutil
@@ -96,7 +115,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -104,11 +123,15 @@ from typing import Any
 INPUT_FILE = "input.json"
 CODE_FILE = "app_scorer_code.txt"
 OUTPUT_FILE = "output.json"
+# A command metric's model key: the scorer writes it, and the runner reads and
+# deletes it before the command starts (SKY-767).
+MODEL_KEY_FILE = "model_key"
 SCORER_FILENAME = "<scorer_code>"
 # Names the scorer namespace binds the model helper and the image wrapper to.
 LLM_HELPER_NAME = "llm"
-# The gateway key rides in the environment so it never touches the box filesystem.
-ENV_API_KEY = "APP_API_KEY"
+# The gateway key rides in the environment so it never touches the box
+# filesystem, except for a command metric (``MODEL_KEY_FILE``).
+ENV_API_KEY = "ASCENT_MODEL_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
 # The image's box PATH, with /app/.venv/bin first after the sudo guard folder.
 # sudo gives a root supervisor a secure PATH without the venv, so the entry
@@ -117,26 +140,64 @@ ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 # This file runs alone in the box, without ``core.config``; boxes started by an
 # older control plane still carry only the pre-rename spellings.
 _LEGACY_ENV_PREFIX = "SKYNET_"
+# A command metric reaches the model and the stages only through its helper
+# URLs (SKY-767), which meter each call and check each stage. These names hold
+# the model key, the protected model mailbox and the tool relay token that the
+# box (or a contained session, ``sandbox_runtime._contained_environment``)
+# sets, so they stay out of the command's environment, the ``APP_*`` names in
+# both spellings. The box's own ``ASCENT_MODEL*`` values go too: the command
+# gets these names only from its helpers, and only with a judge model.
+_COMMAND_HIDDEN_ENV = (
+    *(
+        name
+        for base in (ENV_BUDGET_RELAY_URL, "APP_TOOL_RELAY_TOKEN")
+        for name in (base, _LEGACY_ENV_PREFIX + base.removeprefix("APP_"))
+    ),
+    "ASCENT_MODEL_URL",
+    "ASCENT_MODEL",
+    ENV_API_KEY,
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+)
 IMAGE_HELPER_NAME = "Image"
 LOG_HELPER_NAME = "log"
-# ``from skynet import call, StageError`` reaches the run's ``[target.<name>]`` stages.
+# ``from openascent import call, StageError`` reaches the run's ``[target.<name>]`` stages.
 STAGE_HELPER_NAME = "call"
 STAGE_ERROR_NAME = "StageError"
 # ``app_runner.py --stage <call_dir> <path/file.py:function>`` runs one stage call.
 STAGE_FLAG = "--stage"
-# ``app_runner.py --stage-command <call_dir> <command> [<arg> ...]`` runs one
-# command stage call behind the stage's relay (SKY-611).
+# ``app_runner.py --stage-command <call_dir> <package> <timeout> <command> [<arg> ...]``
+# runs one command stage call, behind the stage's relay when the call has one (SKY-611).
 STAGE_COMMAND_FLAG = "--stage-command"
+# ``app_runner.py --run-command <dir> <package> <timeout> <command> [<arg> ...]`` is
+# the candidate process of a command entry. Both command modes run the command
+# through OpenAscent's ``call_run``, so this file holds no second copy of the
+# two-file rule (SKY-757).
+RUN_COMMAND_FLAG = "--run-command"
 # A stage call's relay config, next to its input; only a stage whose own MCP file holds a server gets one.
 STAGE_RELAY_FILE = "relay.json"
 # The stage call's own MCP file, next to its input, with the call's own relay port (SKY-624).
 _STAGE_MCP_FILE = "mcp.json"
 # The metric reaches each listed service at this variable's loopback address (E45).
-SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
+SERVICE_ENV_PREFIX = "ASCENT_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
-MCP_ENV_PREFIX = "SKYNET_MCP_"
+MCP_ENV_PREFIX = "ASCENT_MCP_"
 # Names the role's own ``.mcp.json``, for MCP clients that read a config file.
-MCP_CONFIG_ENV = "SKYNET_MCP_CONFIG"
+MCP_CONFIG_ENV = "ASCENT_MCP_CONFIG"
+# A command metric reaches its helpers at these loopback addresses (SKY-767),
+# in the form the OpenAscent helpers use: ``ASCENT_STAGE_<NAME>_URL`` for each
+# stage, the judge model's chat endpoint, and the log.
+STAGE_ENV_PREFIX = "ASCENT_STAGE_"
+MODEL_URL_ENV = "ASCENT_MODEL_URL"
+MODEL_ENV = "ASCENT_MODEL"
+# Always empty: the runner adds the gateway's key itself, so the command never holds it.
+MODEL_KEY_ENV = "ASCENT_MODEL_KEY"
+LOG_URL_ENV = "ASCENT_LOG_URL"
+# The largest helper request body; a stage input or a chat request is far smaller.
+_HELPER_BODY_BYTES = 16 * 1024 * 1024
+# The chat request fields the model helper passes on. Each other field is refused,
+# so the command cannot reach a field that changes the route or its cost bound.
+_MODEL_REQUEST_KEYS = frozenset({"model", "messages", "max_tokens", "temperature", "reasoning_effort", "stream"})
 # The box's loopback relay port. It is fixed because the parent writes each
 # role's .mcp.json with loopback urls before the box opens (E49, E53).
 RELAY_PORT = 47_311
@@ -152,13 +213,54 @@ RUN_FLAG = "--run"
 WRAPPER_FOLDER_PREFIX = "/tmp/.app-root-output-"
 WRAPPER_OUTPUT_NAME = "output.out"
 WRAPPER_EXIT_NAME = "exit"
+# The largest output file that a command entry or a command stage may write (SKY-757).
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
+# A command entry's own process gets this much time after the command's time
+# limit, so that ``call_run`` stops the command and reports the limit itself.
+_COMMAND_STOP_SECONDS = 10.0
+# The largest ``output.json`` the supervisor reads from a command entry's
+# process. That process writes the checked output again with ``json.dumps``
+# and ``ensure_ascii=False``. No string grows then: strict JSON already escapes
+# each character that the dump escapes. Only a number grows, at most 3.8
+# times: ``1e15,`` (5 bytes) becomes ``1000000000000000.0,`` (19 bytes). The
+# cap stops a process that left the entry's session from making the supervisor
+# read a huge file in its place (SKY-757).
+_COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
+# The characters of a failed command's stderr and of its stdout that its error
+# shows (SKY-757).
+COMMAND_LOG_CHARS = 800
+# The characters of a failed command's cause that its error shows. The cause
+# and the two tails fit in the [run] feedback, which keeps only its last 1,988
+# characters, so the feedback always names the cause (SKY-757).
+COMMAND_CAUSE_CHARS = 300
+# The characters of each log that the box sends to the parent. The bound keeps
+# the answer file small. The box knows no secrets, so this cut can split one:
+# the box marks each log it cut, and the parent drops the cut edge before it
+# masks the log (SKY-757).
+_COMMAND_LOG_BOUND = 4_000
+# OpenAscent's invalid-JSON cause can quote the output file: the first 40
+# characters of a number, or a key as a repr. The mask can miss both, so a
+# failed command or command metric gets this fixed cause instead (SKY-757).
+INVALID_JSON_CAUSE = (
+    "The output file is not valid JSON. Write one strict JSON value to ASCENT_OUTPUT: "
+    "UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate escape."
+)
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
 # The metric input key that names the folder the metric setup step installed
 # the metric's packages into. ``-I`` reads no user or PYTHONPATH folder, and
 # the image's venv has no system site, so the runner adds this one (SKY-398).
 METRIC_SITE_PARAM = "metric_site"
+# A command [metric] entry (SKY-738): the input keys that carry the command, its
+# time limit and the folder the parent copied the OpenAscent package into. The
+# package's call_metric runs the command under the two-file rule, so this file
+# holds no second copy of that rule. A command [run] entry's input also names
+# that folder with ASCENT_PACKAGE_PARAM (SKY-757).
+METRIC_ENTRY_PARAM = "metric_entry"
+METRIC_TIMEOUT_PARAM = "metric_timeout"
+ASCENT_PACKAGE_PARAM = "ascent_package"
+# The function a "path.py:function" [metric] entry names; absent keeps the default lookup.
+METRIC_FUNCTION_PARAM = "function"
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
 RERUN_REFUSED = (
@@ -177,13 +279,12 @@ EVENT_PREFIX = "APP_SCORER_EVENT "
 # unlike a file it can write (SKY-398).
 RESULT_PREFIX = "APP_RUN_RESULT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
-# The module scorer code imports those helpers from: ``from skynet import llm, Image``.
-# Saved user scorers import it by this name, so it stays as it is.
-HELPER_MODULE_NAME = "skynet"
+# The module scorer code imports those helpers from: ``from openascent import llm, Image``.
+# A neutral name, so a contract holds no product name (SKY-768). No other name works.
+HELPER_MODULE_NAME = "openascent"
 # Where Vercel's egress proxy leaves its CA when a network policy rewrites headers.
 PROXY_CA_PATH = "/usr/local/share/ca-certificates/vercel-proxy-ca.crt"
 _ENTRYPOINT_NAMES = ("score", "metric")
-_NUMBER_TYPES = (bool, int, float)
 _RETRY_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 _ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
@@ -218,6 +319,10 @@ SideInfo = dict[str, Any]
 
 class ScorerError(Exception):
     """A mistake in the scorer or its use of the helpers, reported to the user verbatim."""
+
+
+class MissingScorerError(ScorerError):
+    """The scorer code loads but defines none of the functions the default entry looks for."""
 
 
 class GatewayControl(BaseException):
@@ -370,7 +475,7 @@ def service_env_name(name: str) -> str:
         name: The ``[services.<name>]`` name.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+        ``ASCENT_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
     return SERVICE_ENV_PREFIX + _env_part(name) + "_URL"
 
@@ -382,13 +487,38 @@ def mcp_env_name(name: str) -> str:
         name: The server's name in the role's MCP file.
 
     Returns:
-        ``SKYNET_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+        ``ASCENT_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
     return MCP_ENV_PREFIX + _env_part(name) + "_URL"
 
 
+def stage_env_name(name: str) -> str:
+    """Return the variable that holds one stage's loopback address for a command metric.
+
+    The OpenAscent ``call`` helper reads the same name, so the rule is its
+    rule: each ASCII letter in upper case, each ASCII digit unchanged, and
+    each other character as ``_``. ``str.upper()`` alone can turn one
+    character into ASCII letters (``ß`` into ``SS``).
+
+    Args:
+        name: The ``[target.<name>]`` name.
+
+    Returns:
+        ``ASCENT_STAGE_<NAME>_URL``.
+    """
+    part = "".join(char.upper() if char.isascii() and char.isalnum() else "_" for char in name)
+    return STAGE_ENV_PREFIX + part + "_URL"
+
+
 def _env_part(name: str) -> str:
-    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``."""
+    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``.
+
+    Args:
+        name: The name to convert.
+
+    Returns:
+        The name in upper case, with ``_`` for each other character.
+    """
     return "".join(char if char.isalnum() else "_" for char in name.upper())
 
 
@@ -414,11 +544,11 @@ def start_service_proxy(
         port: The loopback port; ``0`` picks a free one.
         mcp_file: The role's ``.mcp.json``, relative to the working directory.
         own_mcp_file: A file to write with this proxy's servers and name in
-            ``SKYNET_MCP_CONFIG`` instead of ``mcp_file``.
+            ``ASCENT_MCP_CONFIG`` instead of ``mcp_file``.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL`` for each service, ``SKYNET_MCP_<NAME>_URL``
-        for each server, and ``SKYNET_MCP_CONFIG`` when there is a server and a file.
+        ``ASCENT_SERVICE_<NAME>_URL`` for each service, ``ASCENT_MCP_<NAME>_URL``
+        for each server, and ``ASCENT_MCP_CONFIG`` when there is a server and a file.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -501,7 +631,12 @@ def start_service_proxy(
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = relay  # noqa: N815
 
         def log_message(self, format: str, *args: Any) -> None:
-            """Keep the access log out of the scorer's stderr, where log() events travel."""
+            """Keep the access log out of the scorer's stderr, where log() events travel.
+
+            Args:
+                format: The log format string.
+                *args: The values for the format string.
+            """
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
@@ -550,6 +685,10 @@ def _relay_env(client: StageClient, stages: dict[str, Any], own_mcp_file: Path |
 def missing_stage(name: Any = None, input: Any = None) -> Any:
     """Refuse a stage call in a run that has no ``[target.<name>]`` stages.
 
+    Args:
+        name: The stage name of the call.
+        input: The stage input of the call.
+
     Raises:
         StageError: Always.
     """
@@ -558,7 +697,7 @@ def missing_stage(name: Any = None, input: Any = None) -> Any:
 
 @dataclass
 class Image:
-    """An image a scorer hands to ``llm()`` or puts in side info for the optimizer to look at.
+    """An image a scorer hands to ``llm()``.
 
     Mirrors ``gepa.image.Image`` so a scorer written against the optimizer's
     wrapper works unchanged inside the box.
@@ -592,15 +731,18 @@ class Image:
 
 
 def env_value(name: str) -> str | None:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
+        name: Variable name.
 
     Returns:
-        The first non-empty value, or ``None`` when neither name is set.
+        The first non-empty value, or ``None`` when no name is set.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_ENV_PREFIX + name[len("APP_") :]) or None
+    legacy = os.environ.get(_LEGACY_ENV_PREFIX + name[len("APP_") :]) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or None
 
 
 def _data_url(data: bytes, media_type: str) -> str:
@@ -727,7 +869,7 @@ def missing_llm(prompt: Any = None, input: Any = None, **kwargs: Any) -> str:
 
 
 def side_info_json_default(value: Any) -> str:
-    """JSON fallback for side info: images become data URLs, anything else ``str()``.
+    """JSON fallback for scorer payloads and log fields: an image becomes a data URL, anything else ``str()``.
 
     Args:
         value: A side-info value ``json.dumps`` cannot encode.
@@ -762,7 +904,7 @@ def _json_plain(value: Any) -> Any:
 def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) -> None:
     """Send one named event to the run's log the moment it happens.
 
-    Scorer code calls it as ``from skynet import log`` then
+    Scorer code calls it as ``from openascent import log`` then
     ``log("judge.retry", attempt=2, reason="rate limited")``. The host shows
     it live, tagged with the candidate and case being scored.
 
@@ -780,10 +922,25 @@ def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) 
     name = str(level).upper()
     if name not in _EVENT_LEVELS:
         raise ValueError(f"log() level must be one of {', '.join(_EVENT_LEVELS)}, not {level!r}.")
+    _emit_event(event, event if message is None else str(message), name, fields)
+
+
+def _emit_event(event: str, message: str, level: str, fields: dict[str, Any]) -> None:
+    """Write one checked event line to the real stderr, where the host reads ``log()`` events.
+
+    A command metric's log helper writes through here too, so its events
+    are the same lines, and a field named ``level`` or ``message`` stays a field.
+
+    Args:
+        event: The event name.
+        message: The line shown in the log.
+        level: One of the four levels.
+        fields: Details shown with the event; values that are not JSON become text.
+    """
     line = {
-        "level": name,
+        "level": level,
         "logger": "scorer",
-        "message": event if message is None else str(message),
+        "message": message,
         "event": event,
         "fields": _json_plain(json.loads(json.dumps(fields, default=side_info_json_default))) if fields else None,
     }
@@ -793,101 +950,180 @@ def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) 
     stream.flush()
 
 
-FEEDBACK_REQUIRED = (
-    'The scorer must return feedback: return {"score": <number>, "feedback": "<why it scored that>"}, '
-    'optionally with "scores": {"<name>": {"score": <number>, "feedback": "<why>"}} for each thing you '
-    'measure, or a (score, "feedback") pair. The optimizer learns from the feedback, so say what was wrong '
-    "or missing."
+# The one form of a metric answer (SKY-769). Every answer error ends with it.
+ANSWER_FORM = (
+    'Return one object: {"score": <number>, "feedback": "<optional text>", '
+    '"scores": {"<name>": {"score": <number>, "feedback": "<optional text>"}}}. '
+    'Only "score" is required.'
 )
+_ANSWER_KEYS = ("score", "feedback", "scores")
+_NAMED_SCORE_KEYS = ("score", "feedback")
+# Keys of an older answer form, and the key that replaced each one.
+_REPLACED_KEYS = {"cases": "scores"}
 
 
-def _feedback(value: Any, where: str) -> str:
-    """Return a non-empty feedback string or explain what is missing.
+def _answer_error(problem: str) -> ScorerError:
+    """Build the error for a wrong metric answer: the wrong part, then the valid form.
 
     Args:
-        value: The feedback the scorer gave.
+        problem: What is wrong, and where.
+
+    Returns:
+        The error to raise.
+    """
+    return ScorerError(f"{problem} {ANSWER_FORM}")
+
+
+def _kind(value: Any) -> str:
+    """Name the kind of a value for an answer error, without its content.
+
+    Args:
+        value: A part of the metric answer.
+
+    Returns:
+        A short name such as ``a bare number`` or ``a pair``.
+    """
+    if isinstance(value, (bool, int, float)):
+        return "a bare number"
+    if isinstance(value, (tuple, list)):
+        return "a pair" if len(value) == 2 else type(value).__name__
+    return type(value).__name__
+
+
+def _finite(value: Any, where: str) -> float:
+    """Return a score as a float when it is a finite number.
+
+    Args:
+        value: The score the metric gave.
+        where: Names the score, for the error.
+
+    Returns:
+        The score as a float.
+
+    Raises:
+        ScorerError: When the score is not a number, is a boolean, or is not finite.
+    """
+    # A bool is an int in Python, but True is not a measurement.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _answer_error(f"{where} must be a finite number, not {type(value).__name__}.")
+    if not math.isfinite(value):
+        raise _answer_error(f"{where} must be a finite number, not {value!r}.")
+    return float(value)
+
+
+def _check_keys(entry: dict, allowed: Sequence[str], where: str) -> None:
+    """Refuse each key of an answer object that the answer form does not have.
+
+    Args:
+        entry: The answer object or one named score.
+        allowed: The keys the object may hold.
+        where: Names the object, for the error.
+
+    Raises:
+        ScorerError: At the first unknown key, with the nearest valid key when one is close.
+    """
+    for key in entry:
+        if key in allowed:
+            continue
+        name = str(key)
+        replaced = _REPLACED_KEYS.get(name)
+        if replaced in allowed:
+            raise _answer_error(f"{where} has the unknown key `{name}`. Use `{replaced}`.")
+        close = difflib.get_close_matches(name, allowed, n=1)
+        hint = f" Did you mean `{close[0]}`?" if close else ""
+        raise _answer_error(f"{where} has the unknown key `{name}`.{hint}")
+
+
+def feedback(value: Any, where: str) -> str:
+    """Return the feedback text, or an empty string when there is none.
+
+    Feedback is optional: absent feedback, ``None`` and a blank string all
+    mean no feedback, stored as ``""``.
+
+    Args:
+        value: The feedback the metric gave.
         where: Names the score the feedback belongs to, for the error.
 
     Returns:
-        The feedback text.
+        The feedback text, or ``""``.
 
     Raises:
-        ScorerError: When the feedback is absent, not text, or blank.
+        ScorerError: When the feedback is given but is not text.
     """
-    if isinstance(value, str) and value.strip():
-        return value
-    raise ScorerError(f"{FEEDBACK_REQUIRED} ({where} has no feedback.)")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _answer_error(f"The feedback of {where} must be text, not {type(value).__name__}.")
+    return value if value.strip() else ""
 
 
 def named_scores(raw: Any) -> dict[str, dict[str, Any]]:
     """Validate the optional named scores into ``{name: {"score", "feedback"}}``.
 
     Args:
-        raw: The scorer's ``scores`` value.
+        raw: The metric's ``scores`` value.
 
     Returns:
-        Each named score with its float score and feedback.
+        Each named score with its float score and its feedback (``""`` when none).
 
     Raises:
-        ScorerError: When ``scores`` is not a mapping, or a named score lacks a number or feedback.
+        ScorerError: When ``scores`` is not an object, or a named score is not
+            an object with a finite ``score``, optional text ``feedback`` and no other key.
     """
     if not isinstance(raw, dict):
-        raise ScorerError(f'{FEEDBACK_REQUIRED} ("scores" must map each name to a score and feedback.)')
+        raise _answer_error(f'"scores" must be an object that maps each name to a score object, not {_kind(raw)}.')
     named: dict[str, dict[str, Any]] = {}
     for name, entry in raw.items():
-        if isinstance(entry, (tuple, list)) and len(entry) == 2:
-            entry = {"score": entry[0], "feedback": entry[1]}
-        value = entry.get("score") if isinstance(entry, dict) else None
-        if not isinstance(value, _NUMBER_TYPES):
-            raise ScorerError(f"{FEEDBACK_REQUIRED} (The named score {name!r} has no numeric score.)")
+        where = f"the named score {name!r}"
+        if not isinstance(entry, dict):
+            raise _answer_error(f'A named score is an object such as {{"score": 1.0}}; {where} is {_kind(entry)}.')
+        _check_keys(entry, _NAMED_SCORE_KEYS, f"The named score {name!r}")
+        if "score" not in entry:
+            raise _answer_error(f'The named score {name!r} has no "score".')
         named[str(name)] = {
-            "score": float(value),
-            "feedback": _feedback(entry.get("feedback"), f"The named score {name!r}"),
+            "score": _finite(entry["score"], f'The "score" of {where}'),
+            "feedback": feedback(entry.get("feedback"), where),
         }
     return named
 
 
-def normalize_score(raw: Any) -> tuple[float, SideInfo]:
-    """Coerce a scorer's return value into ``(score, side_info)``, feedback included.
+def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float, SideInfo]:
+    """Check a metric answer and split it into ``(score, side_info)``.
 
-    Accepted shapes: a mapping ``{"score", "feedback", "scores"?, ...}``
-    (other keys stay in the side info); a ``(score, feedback)`` pair whose
-    second item is the feedback text or a mapping holding it; an object
-    with numeric ``score`` and text ``feedback`` attributes. Every score
-    carries feedback, the top-level one and each named score, because the
-    engines' proposers learn from it.
+    The answer is one object: ``score`` (a finite number) is required,
+    ``feedback`` (text) and ``scores`` (named score objects) are optional,
+    and every other key is an error. A bare number, a pair and an object
+    with ``score`` attributes are errors too.
 
     Args:
-        raw: Whatever the scorer returned.
+        raw: The metric's answer.
+        own_keys: Keep the keys Skynet adds after the check (``status``,
+            ``error`` and others). Set it only for a document Skynet built
+            from an answer it already checked.
 
     Returns:
-        The float score and side info with ``feedback`` and, when given,
-        ``scores`` as ``{name: {"score": float, "feedback": str}}``.
+        The float score and side info with ``feedback`` (``""`` when none)
+        and, when given, ``scores`` as ``{name: {"score": float, "feedback": str}}``.
 
     Raises:
-        ScorerError: When the value has none of the accepted shapes or lacks feedback.
+        ScorerError: When the answer does not have the one valid form.
     """
-    if isinstance(raw, (tuple, list)) and len(raw) == 2 and isinstance(raw[0], _NUMBER_TYPES):
-        score, side = raw
-        side_info = dict(side) if isinstance(side, dict) else {"feedback": side}
-    elif isinstance(raw, dict) and isinstance(raw.get("score"), _NUMBER_TYPES):
-        score = raw["score"]
-        side_info = {key: value for key, value in raw.items() if key != "score"}
-    elif isinstance(getattr(raw, "score", None), _NUMBER_TYPES):
-        score = raw.score
-        side_info = {"feedback": getattr(raw, "feedback", None)}
-    elif isinstance(raw, _NUMBER_TYPES):
-        raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned a bare number.)")
-    else:
-        raise ScorerError(f"{FEEDBACK_REQUIRED} (It returned {type(raw).__name__}.)")
-    side_info["feedback"] = _feedback(side_info.get("feedback"), "The score")
+    if not isinstance(raw, dict):
+        raise _answer_error(f"The metric answer must be an object, not {_kind(raw)}.")
+    if not own_keys:
+        _check_keys(raw, _ANSWER_KEYS, "The metric answer")
+    if "score" not in raw:
+        raise _answer_error('The metric answer has no "score".')
+    score = _finite(raw["score"], 'The "score" of the metric answer')
+    side_info = {key: value for key, value in raw.items() if key != "score"}
+    side_info["feedback"] = feedback(raw.get("feedback"), "the metric answer")
     if "scores" in side_info:
         side_info["scores"] = named_scores(side_info["scores"])
-    return float(score), side_info
+    return score, side_info
 
 
 def helper_module(helpers: dict[str, Any]) -> types.ModuleType:
-    """Build the ``skynet`` module scorer code imports its helpers from.
+    """Build the ``openascent`` module scorer code imports its helpers from.
 
     Args:
         helpers: Helper names and the objects behind them.
@@ -904,7 +1140,9 @@ def helper_module(helpers: dict[str, Any]) -> types.ModuleType:
     return module
 
 
-def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -> Callable[..., Any]:
+def load_scorer_from_code(
+    code: str, *, helpers: dict[str, Any] | None = None, entrypoint: str | None = None
+) -> Callable[..., Any]:
     """Execute scorer source and return the callable it defines.
 
     Looks for ``score`` then ``metric``, then falls back to the single
@@ -912,16 +1150,19 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
 
     Args:
         code: User-authored python source.
-        helpers: Names the scorer may import from the ``skynet`` module. They
+        helpers: Names the scorer may import from the ``openascent`` module. They
             are also bound in its namespace, for scorers written before the
             import existed.
+        entrypoint: The function that ``[metric] entry`` names. ``None`` and
+            ``score``, the default entry's function, keep the lookup above.
 
     Returns:
         The scorer callable.
 
     Raises:
         ScorerError: When the code fails to compile or load, or defines no
-            unambiguous scorer function.
+            unambiguous scorer function. ``MissingScorerError`` marks the
+            default lookup that finds no function.
     """
     namespace: dict[str, Any] = dict(helpers or {})
     sys.modules[HELPER_MODULE_NAME] = helper_module(namespace)
@@ -934,6 +1175,11 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
         raise ScorerError(f"scorer code has a syntax error: {exc}") from exc
     except Exception as exc:
         raise ScorerError(f"scorer code failed to load: {type(exc).__name__}: {exc}") from exc
+    if entrypoint not in (None, "score"):
+        named = namespace.get(entrypoint)
+        if not callable(named):
+            raise ScorerError(f"scorer code defines no function '{entrypoint}', which [metric] entry names.")
+        return named
     for name in _ENTRYPOINT_NAMES:
         candidate = namespace.get(name)
         if callable(candidate):
@@ -943,7 +1189,7 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
     ]
     if len(defined) == 1:
         return defined[0]
-    raise ScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
+    raise MissingScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
 
 
 def _takes_positional(fn: Callable[..., Any], count: int) -> bool:
@@ -1063,7 +1309,14 @@ def model_matches_bound(model: str, bound: str, declared: str | None = None) -> 
     """
 
     def normalized(value: str) -> str:
-        """Remove transport prefixes without changing the provider model id."""
+        """Remove transport prefixes without changing the provider model id.
+
+        Args:
+            value: A model name.
+
+        Returns:
+            The model name without its transport prefixes.
+        """
         return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
 
     return normalized(model) == normalized(bound) or bool(declared and normalized(model) == normalized(declared))
@@ -1163,6 +1416,49 @@ class GatewayClient:
             messages = scorer_messages(prompt, input, images)
         elif not isinstance(messages, list):
             raise ScorerError("llm(messages=...) takes a list of chat messages.")
+        return _completion_text(
+            self.complete(messages, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+        )
+
+    def serves(self, model: str) -> bool:
+        """Return whether a model name names the model bound to this client.
+
+        Args:
+            model: The model a request names.
+
+        Returns:
+            Whether it matches the bound or the declared model.
+        """
+        return model_matches_bound(model, self._model, self._declared_model)
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> Any:
+        """Send one chat completion with the bound model and record its usage.
+
+        ``llm()`` and a command metric's model helper both send through here,
+        so both get the same model, limits, metering and budget stop.
+
+        Args:
+            messages: The chat messages, in OpenAI form.
+            temperature: Per-call sampling override.
+            max_tokens: Per-call output limit.
+            reasoning_effort: Per-call reasoning level.
+
+        Returns:
+            The gateway's decoded answer.
+
+        Raises:
+            ScorerError: When the gateway refuses the call.
+            GatewayControl: When the run's budget stopped this or an earlier call.
+        """
+        if self.control is not None:
+            raise GatewayControl(**self.control)
         body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -1188,7 +1484,7 @@ class GatewayClient:
                     "total_tokens": usage.get("total_tokens"),
                 }
             )
-        return _completion_text(payload)
+        return payload
 
     def _post(self, data: bytes) -> Any:
         """Send one protected attempt or retry transient legacy gateway failures.
@@ -1253,6 +1549,32 @@ class GatewayClient:
         raise ScorerError(last_error)
 
 
+def _gateway_client(gateway: Any) -> GatewayClient | None:
+    """Build the model client from a call's ``gateway`` section.
+
+    Args:
+        gateway: The ``gateway`` value of the call's input.
+
+    Returns:
+        The client, or ``None`` when the run has no model route.
+    """
+    if not isinstance(gateway, dict):
+        return None
+    return GatewayClient(
+        str(gateway["url"]),
+        str(gateway["model"]),
+        api_key=gateway.get("api_key") or env_value(ENV_API_KEY),
+        temperature=gateway.get("temperature"),
+        max_tokens=gateway.get("max_tokens"),
+        reasoning_effort=gateway.get("reasoning_effort"),
+        timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
+        protected=bool(gateway.get("protected")),
+        declared_model=gateway.get("declared_model"),
+        subscription=bool(gateway.get("subscription")),
+        gateway_reasoning=bool(gateway.get("gateway_reasoning")),
+    )
+
+
 def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     """Load the scorer and either verify readiness or score its real candidate.
 
@@ -1268,21 +1590,7 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     if relay is not None:
         # Set before the scorer loads, so its imports and child processes see the addresses.
         os.environ.update(_relay_env(relay, stages))
-    llm: GatewayClient | None = None
-    if isinstance(gateway, dict):
-        llm = GatewayClient(
-            str(gateway["url"]),
-            str(gateway["model"]),
-            api_key=gateway.get("api_key") or env_value(ENV_API_KEY),
-            temperature=gateway.get("temperature"),
-            max_tokens=gateway.get("max_tokens"),
-            reasoning_effort=gateway.get("reasoning_effort"),
-            timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
-            protected=bool(gateway.get("protected")),
-            declared_model=gateway.get("declared_model"),
-            subscription=bool(gateway.get("subscription")),
-            gateway_reasoning=bool(gateway.get("gateway_reasoning")),
-        )
+    llm = _gateway_client(gateway)
     helpers = {
         LLM_HELPER_NAME: llm if llm is not None else missing_llm,
         IMAGE_HELPER_NAME: Image,
@@ -1292,7 +1600,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     }
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     try:
-        fn = load_scorer_from_code(str(payload.get("code") or ""), helpers=helpers)
+        fn = load_scorer_from_code(
+            str(payload.get("code") or ""), helpers=helpers, entrypoint=payload.get(METRIC_FUNCTION_PARAM)
+        )
         if payload.get("mode") == "readiness":
             result["readiness"] = {
                 "ready": True,
@@ -1322,6 +1632,398 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         if llm.control is not None:
             result.update(score=None, side_info={}, error=None, control=llm.control)
     return result
+
+
+def _load_openascent(folder: Any) -> types.ModuleType:
+    """Import the OpenAscent package from the folder the parent copied it into.
+
+    The runner starts with ``-I`` and the image may not install the package,
+    so it loads the folder by path; no ``sys.path`` entry lets a planted
+    module shadow a standard one.
+
+    Args:
+        folder: The package folder from the metric input.
+
+    Returns:
+        The ``openascent`` package.
+
+    Raises:
+        ScorerError: When the input names no package folder.
+    """
+    init = Path(str(folder or "")) / "__init__.py"
+    if not folder or not init.is_file():
+        raise ScorerError("The box has no OpenAscent package, so the command cannot run.")
+    spec = importlib.util.spec_from_file_location("openascent", init, submodule_search_locations=[str(init.parent)])
+    if spec is None or spec.loader is None:
+        raise ScorerError("The box has no OpenAscent package, so the command cannot run.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["openascent"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class _HelperError(Exception):
+    """A helper request that gets an error answer with this status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        """Bind the answer's status and error text.
+
+        Args:
+            status: The HTTP status, not 2xx.
+            message: The ``error`` text of the answer.
+        """
+        super().__init__(message)
+        self.status = status
+
+
+def _refuse_constant(name: str) -> Any:
+    """Refuse ``NaN``, ``Infinity`` and ``-Infinity``, which strict JSON does not allow.
+
+    Args:
+        name: The constant that ``json.loads`` found.
+
+    Raises:
+        ValueError: Always.
+    """
+    raise ValueError(f"{name} is not JSON.")
+
+
+class _QuietHTTPServer(http.server.ThreadingHTTPServer):
+    """A loopback HTTP server that prints nothing when a request fails."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Drop the error report of a failed request.
+
+        The default prints a traceback to stderr, where log() events travel. A
+        metric command that leaves early (``curl --max-time``) breaks the
+        answer write, and ``do_POST`` already answers every other failure.
+
+        Args:
+            request: The failed request's socket.
+            client_address: The client's address.
+        """
+
+
+class MetricHelpers:
+    """Serve a command metric's stages, judge model and log on one loopback port (SKY-767).
+
+    A command metric cannot import ``call``, ``llm`` or ``log``, so the runner
+    serves them in the OpenAscent wire form. The server is a thread of this
+    process and starts no process, so the one-process rule of the metric box
+    stays as it is. Each stage request goes through the same relay as a
+    Python metric's ``call()``, and each model request through the same
+    client as ``llm()``, which adds the key, meters the call and keeps a
+    budget stop.
+    """
+
+    def __init__(
+        self, relay: StageClient | None, names: Sequence[str], gateway: GatewayClient | None, model: str | None
+    ) -> None:
+        """Start the server on a free loopback port.
+
+        Args:
+            relay: The call's stage relay, or ``None`` without stages.
+            names: The stages the metric may call.
+            gateway: The model client, or ``None`` when the run has no judge model.
+            model: The model name that ``ASCENT_MODEL`` gives the metric.
+        """
+        self._relay = relay
+        self._names = tuple(names)
+        self._gateway = gateway
+        self._model = model
+        self.stops: list[dict[str, str]] = []
+        helpers = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer each helper request with a JSON body."""
+
+            def do_POST(self) -> None:
+                """Read one JSON request, run its helper and write the answer."""
+                try:
+                    status, document = 200, helpers.answer(self.path, self.read_json())
+                except _HelperError as exc:
+                    status, document = exc.status, {"error": str(exc)}
+                except Exception as exc:
+                    # socketserver would print a traceback to stderr, where
+                    # log() events travel, and the client would get no answer.
+                    status, document = 500, {"error": f"The helper failed: {type(exc).__name__}."}
+                data = json.dumps(document).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def read_json(self) -> Any:
+                """Read the request body as JSON, without ``NaN`` or ``Infinity``.
+
+                Returns:
+                    The decoded body.
+
+                Raises:
+                    _HelperError: When the body is too large, not JSON, too
+                        deeply nested or holds a non-finite number.
+                """
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    raise _HelperError(400, "The request has no valid Content-Length.") from None
+                if length > _HELPER_BODY_BYTES:
+                    # The unread body would be taken as the next request.
+                    self.close_connection = True
+                    raise _HelperError(413, f"The request body is larger than {_HELPER_BODY_BYTES} bytes.")
+                try:
+                    return json.loads(self.rfile.read(length) if length > 0 else b"", parse_constant=_refuse_constant)
+                except (ValueError, RecursionError):
+                    raise _HelperError(400, "The request body is not JSON.") from None
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the access log out of the scorer's stderr, where log() events travel.
+
+                Args:
+                    format: The log format string.
+                    *args: The values for the format string.
+                """
+
+        self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()
+        base = f"http://127.0.0.1:{self._server.server_address[1]}"
+        variables = [stage_env_name(name) for name in names]
+        # Two names with one variable (``a-b`` and ``a_b``) get none, so a call
+        # fails as an absent stage and never reaches the other stage.
+        self.env: dict[str, str] = {}
+        for name in names:
+            variable = stage_env_name(name)
+            if variables.count(variable) == 1:
+                self.env[variable] = f"{base}/stage/{urllib.parse.quote(name, safe='')}"
+        self.env[LOG_URL_ENV] = f"{base}/log"
+        if gateway is not None and model:
+            self.env.update({MODEL_URL_ENV: f"{base}/model", MODEL_ENV: model, MODEL_KEY_ENV: ""})
+
+    def close(self) -> None:
+        """Stop the server and free its port."""
+        self._server.shutdown()
+        self._server.server_close()
+
+    def answer(self, path: str, body: Any) -> dict[str, Any]:
+        """Run the helper that a request path names.
+
+        Args:
+            path: The request path.
+            body: The decoded request body.
+
+        Returns:
+            The answer body of a success.
+
+        Raises:
+            _HelperError: When the path names no helper, or the helper refused or failed.
+        """
+        route = urllib.parse.urlsplit(path).path
+        if route.startswith("/stage/"):
+            return self._stage(urllib.parse.unquote(route[len("/stage/") :]), body)
+        if route == "/model/chat/completions" and self._gateway is not None:
+            return self._chat(self._gateway, body)
+        if route == "/log":
+            return self._log(body)
+        raise _HelperError(404, f"No helper is at {route}.")
+
+    def _stage(self, name: str, body: Any) -> dict[str, Any]:
+        """Call one stage through the relay.
+
+        Args:
+            name: The stage name from the path.
+            body: ``{"input": <any JSON>}``.
+
+        Returns:
+            ``{"output": <the stage's output>}``.
+
+        Raises:
+            _HelperError: When the stage is not in the run, the body is not
+                the stage form, the stage failed, or the budget stopped the call.
+        """
+        if self._relay is None or name not in self._names:
+            known = ", ".join(self._names) or "none"
+            raise _HelperError(404, f"Unknown stage {name!r}; the stages of this run are: {known}.")
+        if not isinstance(body, dict) or set(body) != {"input"}:
+            raise _HelperError(400, 'A stage request is one object with only the key "input".')
+        try:
+            return {"output": self._relay(name, body["input"])}
+        except StageError as exc:
+            raise _HelperError(502, str(exc)) from None
+        except GatewayControl as exc:
+            self.stops.append({"code": exc.code, "message": str(exc)})
+            raise _HelperError(503, str(exc)) from None
+
+    def _chat(self, gateway: GatewayClient, body: Any) -> dict[str, Any]:
+        """Send one chat completion through the run's model client.
+
+        Args:
+            gateway: The run's model client.
+            body: An OpenAI chat request for the ``ASCENT_MODEL`` model.
+
+        Returns:
+            The gateway's answer.
+
+        Raises:
+            _HelperError: When the request names another model, has a field
+                the helper does not pass on, asks for a stream, the gateway
+                refused it, or the budget stopped the call.
+        """
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise _HelperError(400, 'A model request is one object with a "messages" list.')
+        extra = sorted(set(body) - _MODEL_REQUEST_KEYS)
+        if extra:
+            allowed = ", ".join(sorted(_MODEL_REQUEST_KEYS))
+            raise _HelperError(400, f"The model helper does not take {', '.join(extra)}; it takes {allowed}.")
+        if body.get("stream"):
+            raise _HelperError(400, "The model helper does not stream; send the request without stream.")
+        requested = body.get("model")
+        if requested is not None and not (isinstance(requested, str) and gateway.serves(requested)):
+            raise _HelperError(
+                400, f"The model {requested!r} is not the judge model; send the model that {MODEL_ENV} names."
+            )
+        try:
+            answer = gateway.complete(
+                body["messages"],
+                temperature=body.get("temperature"),
+                max_tokens=body.get("max_tokens"),
+                reasoning_effort=body.get("reasoning_effort"),
+            )
+        except GatewayControl as exc:
+            self.stops.append({"code": exc.code, "message": str(exc)})
+            raise _HelperError(503, str(exc)) from None
+        except ScorerError as exc:
+            raise _HelperError(502, str(exc)) from None
+        if not isinstance(answer, dict):
+            raise _HelperError(502, "The model gave an answer that is not a JSON object.")
+        return answer
+
+    def _log(self, body: Any) -> dict[str, Any]:
+        """Write one event to the run log, the same line as ``log(event, **fields)``.
+
+        Args:
+            body: ``{"event": <name>, "fields": {...}}``.
+
+        Returns:
+            An empty object.
+
+        Raises:
+            _HelperError: When the body is not the log form.
+        """
+        if not isinstance(body, dict) or not set(body) <= {"event", "fields"}:
+            raise _HelperError(400, 'A log request is one object with the keys "event" and "fields".')
+        event, fields = body.get("event"), body.get("fields", {})
+        if not isinstance(event, str) or not event.strip():
+            raise _HelperError(400, 'A log request needs a non-empty "event" name.')
+        if not isinstance(fields, dict):
+            raise _HelperError(400, 'The "fields" of a log request must be an object.')
+        _emit_event(event, event, "INFO", fields)
+        return {}
+
+
+def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) -> dict[str, Any]:
+    """Call a command ``[metric] entry`` once, through OpenAscent's ``call_metric`` (SKY-738).
+
+    The command gets ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and runs in this
+    process's box, folder and environment, so it has the same network,
+    services, vCPUs and time limit as a Python metric. It also gets the
+    :class:`MetricHelpers` addresses (SKY-767), and its environment has no
+    model key.
+
+    Args:
+        payload: The decoded ``input.json``, with ``metric_entry``.
+        call_dir: The call's folder, which can hold ``MODEL_KEY_FILE``.
+
+    Returns:
+        The ``output.json`` contents: score, side info and error, and
+        ``cause``, the package's short name of a failed call's cause.
+    """
+    result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
+    stages = payload.get("stages")
+    # The command runs as this process's user, and this process holds the
+    # model key in memory and the relay values in its environment. So this
+    # process's /proc/<pid>/mem and environ must not be readable. The flag
+    # does not reach the command (execve resets it), and it does not cover a
+    # parent process that a contained session keeps alive.
+    _block_tracing()
+    key = _take_model_key(call_dir)
+    relay = StageClient(stages) if isinstance(stages, dict) else None
+    if relay is not None:
+        os.environ.update(_relay_env(relay, stages))
+    gateway = payload.get("gateway")
+    if key and isinstance(gateway, dict):
+        gateway = {**gateway, "api_key": key}
+    llm = _gateway_client(gateway)
+    names = [str(name) for name in stages.get("names") or ()] if isinstance(stages, dict) else []
+    model = (gateway.get("declared_model") or gateway.get("model")) if isinstance(gateway, dict) else None
+    helpers = MetricHelpers(relay, names, llm, str(model) if model else None)
+    env = {name: value for name, value in os.environ.items() if name not in _COMMAND_HIDDEN_ENV}
+    env.update(helpers.env)
+    case = payload.get("case")
+    case = case if isinstance(case, dict) else {"input": case}
+    metric_input: dict[str, Any] = {"input": case.get("input"), "output": payload.get("output")}
+    if "expected" in case:
+        metric_input["expected"] = case["expected"]
+    if ELAPSED_PARAM in payload:
+        metric_input[ELAPSED_PARAM] = payload[ELAPSED_PARAM]
+    ascent: types.ModuleType | None = None
+    try:
+        ascent = _load_openascent(payload.get(ASCENT_PACKAGE_PARAM))
+        call = ascent.call_metric(
+            tuple(payload[METRIC_ENTRY_PARAM]),
+            metric_input,
+            timeout_s=float(payload[METRIC_TIMEOUT_PARAM]),
+            cwd=str(Path.cwd()),
+            env=env,
+        )
+        score, side_info = normalize_score(call.result.to_dict())
+        result.update(score=score, side_info=side_info)
+    except BaseException as exc:  # the metric is arbitrary — any failure is reported, not raised
+        invalid = ascent is not None and isinstance(exc, ascent.InvalidJsonError)
+        result["error"] = f"{type(exc).__name__}: {INVALID_JSON_CAUSE if invalid else exc}"
+        if ascent is not None and isinstance(exc, ascent.AscentError):
+            result["cause"] = exc.code
+            if getattr(exc, "exit_code", None) is not None:
+                result["exit_code"] = exc.exit_code
+            if exc.stderr:
+                result["error"] += f"\nstderr: {exc.stderr[-2_000:]}"
+    finally:
+        helpers.close()
+    if llm is not None:
+        result["usage"] = llm.usage
+    # A budget stop wins over the command's answer, as it does for a Python metric.
+    control = (llm.control if llm is not None else None) or (helpers.stops[0] if helpers.stops else None)
+    if control is not None:
+        result = {"score": None, "side_info": {}, "error": None, "usage": result["usage"], "control": control}
+    return result
+
+
+def _take_model_key(call_dir: Path | None) -> str | None:
+    """Read a command metric's model key file and delete it.
+
+    The command runs as this process's user, so the delete, not the file
+    mode, keeps the key from the command. The scorer starts no other process
+    in the metric box between its write and this delete.
+
+    Args:
+        call_dir: The call's folder, or ``None``.
+
+    Returns:
+        The key, or ``None`` when the call has no key file.
+
+    Raises:
+        OSError: When the file cannot be deleted, so the command never starts
+            while the key is on disk.
+    """
+    if call_dir is None:
+        return None
+    path = call_dir / MODEL_KEY_FILE
+    try:
+        key = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    path.unlink()
+    return key or None
 
 
 def _keep_user_site() -> None:
@@ -1369,8 +2071,8 @@ def main(argv: list[str] | None = None) -> int:
         _keep_user_site()
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
-    if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
-        return run_stage_command(Path(args[1]), args[2:])
+    if len(args) >= 5 and args[0] in (STAGE_COMMAND_FLAG, RUN_COMMAND_FLAG):
+        return run_stage_command(Path(args[1]), args[2], float(args[3]), args[4:])
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
         refused = unsafe_output()
         if refused:
@@ -1394,8 +2096,10 @@ def main(argv: list[str] | None = None) -> int:
     if "code" not in payload:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
-    refused = refuse_processes() if "output" in payload else None
-    result = run_call(payload)
+    command = payload.get(METRIC_ENTRY_PARAM)
+    allowed = [str(part) for part in command] if isinstance(command, list) else None
+    refused = refuse_processes(allow=allowed) if "output" in payload else None
+    result = run_metric_command(payload, call_dir) if allowed is not None else run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)
@@ -1431,17 +2135,24 @@ def _print_result(text: str) -> None:
     stream.flush()
 
 
-def refuse_processes() -> list[bool]:
+def refuse_processes(allow: Sequence[str] | None = None) -> list[bool]:
     """Refuse every process the metric starts from now on in this process (E40).
 
     The metric reads the candidate's report; it must not run the candidate
     again. An audit hook stays for the life of the process, so only the
     metric call's own process installs it.
 
+    Args:
+        allow: A command ``[metric] entry`` (SKY-738): the one process start
+            this process may make, once, for exactly this argument list. The
+            metric box holds no candidate code, so the command cannot run the
+            candidate again.
+
     Returns:
         A list that gets an entry each time a process start was refused.
     """
     refused: list[bool] = []
+    pending = [list(allow)] if allow is not None else []
 
     def hook(event: str, args: tuple[Any, ...]) -> None:
         """Abort a process start with the refusal message.
@@ -1454,6 +2165,9 @@ def refuse_processes() -> list[bool]:
             ScorerError: When the event starts a process.
         """
         if event in _PROCESS_EVENTS:
+            if event == "subprocess.Popen" and pending and list(args[1]) == pending[0]:
+                pending.clear()
+                return
             refused.append(True)
             raise ScorerError(RERUN_REFUSED)
 
@@ -1606,15 +2320,16 @@ def _block_privilege_gain() -> None:
         raise EntryUserError("The supervisor cannot set no_new_privs, so it does not start the [run] entry.")
 
 
-def _read_answer(path: Path, user: Any) -> dict[str, Any]:
-    """Read a function entry's ``output.json`` without following a link the entry left.
+def _read_answer(path: Path, user: Any, limit: int | None = None) -> dict[str, Any]:
+    """Read an entry's ``output.json`` without following a link the entry left.
 
     Args:
         path: The answer file.
         user: The entry's uid, or ``None`` when it runs as the supervisor's user.
+        limit: The largest file in bytes, or ``None`` for no limit.
 
     Returns:
-        The answer document.
+        The answer document, or ``{"error"}`` when the file is over ``limit``.
 
     Raises:
         OSError: When the file is missing, a link, not a file, or not the entry's own.
@@ -1625,7 +2340,10 @@ def _read_answer(path: Path, user: Any) -> dict[str, Any]:
         # A root supervisor must not pass on a root file that the entry hard-linked here.
         if not stat.S_ISREG(info.st_mode) or (user is not None and info.st_uid != user):
             raise OSError(f"{path} is not the entry's own file")
-        answer = json.loads(handle.read().decode("utf-8"))
+        data = handle.read() if limit is None else handle.read(limit + 1)
+        if limit is not None and len(data) > limit:
+            return {"error": f"The command's answer file is larger than {limit} bytes."}
+        answer = json.loads(data.decode("utf-8"))
     return answer if isinstance(answer, dict) else {}
 
 
@@ -1638,13 +2356,14 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     the only cleanup of every other process (SKY-398).
 
     Args:
-        payload: ``{"entry", "input", "timeout", "stages"}``.
+        payload: ``{"entry", "input", "timeout", "stages"}``, and
+            ``ascent_package`` for a command entry.
         call_dir: The candidate call's folder.
 
     Returns:
         ``{"output", "error", "elapsed_s"}``: the entry's output, why the run
         failed, and the entry's run time in seconds, measured here, outside
-        its processes.
+        its processes. A failed command also gives ``stderr`` and ``stdout``.
     """
     entry = payload["entry"]
     timeout = float(payload["timeout"])
@@ -1658,122 +2377,155 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     # call's folder, so a root supervisor must not write or chown there.
     run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
     try:
-        return _run_entry(entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")))
+        return _run_entry(
+            entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")), payload.get(ASCENT_PACKAGE_PARAM)
+        )
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def _run_entry(
-    entry: Any, timeout: float, env: dict[str, str], switch: dict[str, Any], run_dir: Path, body: str
+    entry: Any,
+    timeout: float,
+    env: dict[str, str],
+    switch: dict[str, Any],
+    run_dir: Path,
+    body: str,
+    package: Any = None,
 ) -> dict[str, Any]:
     """Start the entry, wait for it, kill its process group, and read its output.
+
+    A command entry runs in a ``--run-command`` process of this file, as the
+    entry's user. That process calls OpenAscent's ``call_run``, which needs
+    no root and has no user switch of its own (SKY-757).
 
     Args:
         entry: A ``path/file.py:function`` string or a command list.
         timeout: The entry's time limit in seconds.
         env: The entry's environment.
         switch: The ``subprocess.Popen`` arguments that switch the user.
-        run_dir: A new folder for a function entry's input and output.
+        run_dir: A new folder for the entry's input and output.
         body: The case input as JSON.
+        package: The OpenAscent package folder for a command entry.
 
     Returns:
-        ``{"output", "error", "elapsed_s"}``.
+        ``{"output", "error", "elapsed_s"}``, and ``stderr`` and ``stdout``
+        when a command failed.
     """
     user = switch.get("user")
-    captured: list[bytes] = []
-    readers: list[threading.Thread] = []
+    wait = timeout
     try:
+        (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
+        if user is not None:
+            os.chown(run_dir, user, switch["group"])
+            os.chown(run_dir / INPUT_FILE, user, switch["group"])
         if isinstance(entry, str):
-            (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
-            if user is not None:
-                os.chown(run_dir, user, switch["group"])
-                os.chown(run_dir / INPUT_FILE, user, switch["group"])
             # The supervisor runs on the base interpreter without site-packages;
             # the entry is candidate code and needs the box's python3 from PATH,
             # where [setup] installed its packages (SKY-642).
             python = shutil.which("python3", path=env.get("PATH")) or sys.executable
             argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
-            # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
-            started = time.monotonic()
-            # Its prints go to stderr: the parent reads relay frames on stdout.
-            child = subprocess.Popen(
-                argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch
-            )
+            limit = None
         else:
-            started = time.monotonic()
-            child = subprocess.Popen(
-                [str(part) for part in entry],
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=2,
-                start_new_session=True,
-                **switch,
-            )
-            readers = [
-                threading.Thread(target=_feed, args=(child.stdin, body.encode("utf-8")), daemon=True),
-                threading.Thread(target=_capture, args=(child.stdout, captured), daemon=True),
-            ]
-            for reader in readers:
-                reader.start()
+            # The command's own process needs only the standard library and the
+            # copied OpenAscent package, which a python3 from PATH may be too old
+            # to load. The supervisor's interpreter is the image's root-owned,
+            # world-executable base python3 (or the PATH one where the image has
+            # none), so the entry's user can run it and cannot replace it. The
+            # command still finds python3 on PATH (SKY-757).
+            argv = [sys.executable, str(Path(__file__).resolve()), RUN_COMMAND_FLAG, str(run_dir)]
+            argv += [str(package or ""), f"{timeout:g}", *(str(part) for part in entry)]
+            wait = timeout + _COMMAND_STOP_SECONDS
+            limit = _COMMAND_ANSWER_BYTES
+        # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
+        started = time.monotonic()
+        # Its prints go to stderr: the parent reads relay frames on stdout.
+        child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch)
     except OSError as exc:
         return {"output": None, "error": f"The command could not start: {exc}"}
     try:
-        code: int | None = child.wait(timeout=timeout)
+        code: int | None = child.wait(timeout=wait)
     except subprocess.TimeoutExpired:
         code = None
     with _quiet():
         os.killpg(child.pid, signal.SIGKILL)
     if code is None:
         child.wait()
-    for reader in readers:
-        reader.join(timeout=5)
     elapsed = time.monotonic() - started
     result: dict[str, Any] = {"output": None, "error": None, ELAPSED_PARAM: round(elapsed, 6)}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
         result["error"] = f"killed by signal {_signal_name(-code)}"
-    elif isinstance(entry, str):
+    else:
         try:
-            answer = _read_answer(run_dir / OUTPUT_FILE, user)
+            answer = _read_answer(run_dir / OUTPUT_FILE, user, limit)
         except (OSError, ValueError):
             answer = {"error": f"exited with code {code} before it returned"}
         if "output" in answer:
             result["output"] = answer["output"]
         else:
             result["error"] = str(answer.get("error") or "returned nothing")
-    else:
-        stdout = b"".join(captured)[:MAX_RUN_STDOUT_BYTES].decode("utf-8", errors="replace")
-        result["output"] = {"exit_code": code, "stdout": stdout}
+            result.update((stream, str(answer[stream])) for stream in ("stderr", "stdout") if answer.get(stream))
+            result.update((key, True) for key in ("stderr_cut", "stdout_cut") if answer.get(key))
     return result
 
 
-def _feed(stream: Any, data: bytes) -> None:
-    """Write the case input to a command's stdin and close it, whether or not the command reads it.
+def command_error(document: dict[str, Any], mask: Callable[[str], str], secrets: Iterable[str]) -> str:
+    """Join a failed call's cause and the tails of its stderr and its stdout.
+
+    stderr comes first: a stage error keeps only its head, and a command's
+    stdout is often progress output (SKY-757).
 
     Args:
-        stream: The command's stdin pipe.
-        data: The input as JSON bytes.
+        document: ``{"error"}``, and ``stderr`` and ``stdout`` from a failed
+            command, with ``stderr_cut`` or ``stdout_cut`` when the box cut that log.
+        mask: Removes the secrets from a text. It runs before each cut here,
+            so a secret across one of these cuts leaves no part of itself.
+        secrets: The values that ``mask`` removes, to find the edge of a log the box cut.
+
+    Returns:
+        The first ``COMMAND_CAUSE_CHARS`` of the masked cause, then the last
+        ``COMMAND_LOG_CHARS`` of each masked log.
     """
-    with _quiet():
-        stream.write(data)
-    with _quiet():
-        stream.close()
+    error = mask(str(document["error"]))
+    if len(error) > COMMAND_CAUSE_CHARS:
+        error = error[: COMMAND_CAUSE_CHARS - 1] + "…"
+    for stream in ("stderr", "stdout"):
+        if document.get(stream):
+            text = str(document[stream])
+            if document.get(f"{stream}_cut"):
+                text = _drop_cut_edge(text, secrets)
+            error += f"\n{stream}: {mask(text)[-COMMAND_LOG_CHARS:]}"
+    return error
 
 
-def _capture(stream: Any, chunks: list[bytes]) -> None:
-    """Keep the first ``MAX_RUN_STDOUT_BYTES`` of a command's stdout and drain the rest.
+def _drop_cut_edge(text: str, secrets: Iterable[str]) -> str:
+    """Drop the start of a log the box cut, so no part of a split secret stays.
+
+    The cut can leave the end of a secret at the start, which no mask finds.
+    That end is shorter than the longest secret. The drop also covers each
+    whole secret that it would split, so the mask still finds the rest.
 
     Args:
-        stream: The command's stdout pipe.
-        chunks: Receives the kept bytes.
+        text: The log after the box's cut.
+        secrets: The values to hide.
+
+    Returns:
+        The log without its first characters.
     """
-    kept = 0
-    for block in iter(lambda: stream.read(1 << 16), b""):
-        if kept < MAX_RUN_STDOUT_BYTES:
-            chunks.append(block[: MAX_RUN_STDOUT_BYTES - kept])
-            kept += len(chunks[-1])
+    values = [value for value in set(secrets) if value]
+    edge = max((len(value) for value in values), default=1) - 1
+    moved = True
+    while moved:
+        moved = False
+        for value in values:
+            start = text.find(value, max(0, edge - len(value) + 1))
+            while 0 <= start < edge:
+                if start + len(value) > edge:
+                    edge, moved = start + len(value), True
+                start = text.find(value, start + 1)
+    return text[edge:]
 
 
 class _quiet:  # noqa: N801
@@ -1859,25 +2611,96 @@ def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:
     return 0
 
 
-def run_stage_command(call_dir: Path, command: Sequence[str]) -> int:
-    """Run one command stage call behind the stage's relay: ``input.json`` on stdin, stdout into ``output.json``.
+def run_stage_command(call_dir: Path, package: str, timeout: float, command: Sequence[str]) -> int:
+    """Run one command call through OpenAscent's ``call_run``: ``input.json`` in, ``output.json`` out.
+
+    A command stage and a command ``[run]`` entry both run here (SKY-757).
+    ``call_run`` writes ``{"input": ...}`` to a new folder, starts the
+    command with ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and an empty stdin,
+    and checks the ``{"output": ...}`` file the command writes. The text the
+    command prints goes to this process's stderr, the run logs, only.
 
     Args:
-        call_dir: The call's folder in the stage box.
-        command: The stage's command and its arguments.
+        call_dir: The call's folder: the stage call's folder in the stage
+            box, or the candidate's new run folder.
+        package: The folder the parent copied the OpenAscent package into.
+        timeout: The command's time limit in seconds.
+        command: The command and its arguments.
 
     Returns:
-        The command's exit code, ``128 + n`` when signal ``n`` killed it, or
-        127 when it could not start.
+        The process exit code: 0 whenever the output was written.
     """
-    env = {**os.environ, **_stage_relay_env(call_dir)}
-    with (call_dir / INPUT_FILE).open("rb") as stdin, (call_dir / OUTPUT_FILE).open("wb") as stdout:
-        try:
-            code = subprocess.run(list(command), env=env, stdin=stdin, stdout=stdout, check=False).returncode
-        except OSError as exc:
-            sys.stderr.write(f"The command could not start: {exc}\n")
-            return 127
-    return code if code >= 0 else 128 - code
+    ascent: types.ModuleType | None = None
+    try:
+        env = {**os.environ, **_stage_relay_env(call_dir)}
+        value = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+        ascent = _load_openascent(package)
+        call = ascent.call_run(
+            tuple(command),
+            value,
+            timeout_s=timeout,
+            cwd=str(Path.cwd()),
+            env=env,
+            max_output_bytes=MAX_RUN_STDOUT_BYTES,
+        )
+        sys.stderr.write(_join_logs(_whole_lines(ascent, call.stdout), _whole_lines(ascent, call.stderr)))
+        # Compact, so the supervisor's answer cap holds for any output under the package limit.
+        text = json.dumps({"output": call.output}, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+    except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
+        if ascent is not None and isinstance(exc, ascent.AscentError):
+            # The same logs as a passed call: stdout, then stderr (SKY-757).
+            sys.stderr.write(_join_logs(_whole_lines(ascent, exc.stdout), _whole_lines(ascent, exc.stderr)))
+            # The parent masks the secrets and only then cuts each log to
+            # COMMAND_LOG_CHARS. It drops the edge of a log cut here (SKY-757).
+            cause = INVALID_JSON_CAUSE if isinstance(exc, ascent.InvalidJsonError) else str(exc)
+            document: dict[str, Any] = {"error": cause}
+            for stream, log in (("stderr", exc.stderr), ("stdout", exc.stdout)):
+                if log:
+                    document[stream] = log[-_COMMAND_LOG_BOUND:]
+                if len(log) > _COMMAND_LOG_BOUND:
+                    document[f"{stream}_cut"] = True
+        else:
+            document = {"error": f"{type(exc).__name__}: {exc}"}
+        text = json.dumps(document)
+    _write_output(call_dir, text)
+    return 0
+
+
+def _whole_lines(ascent: types.ModuleType, log: str) -> str:
+    """Drop the first line of a log that OpenAscent may have cut.
+
+    OpenAscent keeps only the last ``LOG_TAIL_BYTES`` of each log, cut at any
+    byte and with no mark. The run-log scrubber masks only whole secrets, so a
+    cut through a secret would log its end. The first line holds that cut
+    (SKY-757). A replaced bad byte encodes longer, so a log at the limit may
+    also be one that OpenAscent did not cut: it loses its first line too.
+
+    Args:
+        ascent: The loaded OpenAscent package.
+        log: One log of the call, as OpenAscent returned it.
+
+    Returns:
+        The log, without its first line when it may be cut: empty when it has no line break.
+    """
+    if len(log.encode("utf-8")) < ascent.component.LOG_TAIL_BYTES:
+        return log
+    _, newline, rest = log.partition("\n")
+    return rest if newline else ""
+
+
+def _join_logs(stdout: str, stderr: str) -> str:
+    """Join a command's stdout and stderr for the logs, with a line break between them.
+
+    Args:
+        stdout: The command's stdout.
+        stderr: The command's stderr.
+
+    Returns:
+        stdout, then a line break when stdout does not end with one, then stderr.
+    """
+    if stdout and not stdout.endswith("\n"):
+        stdout += "\n"
+    return stdout + stderr
 
 
 def _stage_relay_env(call_dir: Path) -> dict[str, str]:
@@ -1892,7 +2715,7 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
 
     Returns:
         The proxy's variables, or nothing when the call has no relay config.
-        ``SKYNET_MCP_CONFIG`` names the call's own MCP file.
+        ``ASCENT_MCP_CONFIG`` names the call's own MCP file.
     """
     path = call_dir / STAGE_RELAY_FILE
     if not path.is_file():

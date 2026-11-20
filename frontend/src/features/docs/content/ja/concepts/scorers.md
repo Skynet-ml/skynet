@@ -3,44 +3,55 @@
 ## コントラクト
 
 ```python
-def score(repo_path, case):
+def score(repo_path, case, output=None):
     ...
-    return score_value, {"feedback": "..."}
+    return {"score": score_value, "feedback": "..."}
 ```
 
 | 引数        | 保持する内容                                                                     |
 | ----------- | -------------------------------------------------------------------------------- |
-| `repo_path` | セットアップコマンドの実行後の、リポジトリの 1 つのバージョンのフォルダー        |
+| `repo_path` | メトリクスファイルだけを保持するフォルダー。ほかのリポジトリのファイルとバージョンのコードは保持しません |
 | `case`      | dict。`case["input"]` は入力フィールドを保持します。`case["expected"]` は期待値、または `None` を保持します |
+| `output`    | `[run]` エントリーがそのケースに対して返した値。ファイルに `[run]` がない場合は `None` |
 
-関数が引数を 1 つしか受け取らない場合、Skynet は `score(repo_path)` を呼び出します。スコアラーが独自のテストを実行し、ケースが不要な場合は、この形を使います。
+リポジトリの `ascent.toml` ファイルには、`[run]` セクションまたは `[target.<name>]` ステージが必要です。`[run]` の `entry` は、1 つのバージョンを 1 つのケースで、専用のサンドボックスで実行します。どちらもないファイルは Skynet が拒否します。すべてのバージョンが同じスコアになるからです。
 
-スコアラーは、サンドボックス内のバージョンのフォルダーで実行されます。リポジトリのコードをインポートすることも、コマンドを実行することも、`serve.py` の `serve()` を呼び出すこともできます。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
+- 関数エントリー（例: `entry = "serve.py:serve"`）は、`case["input"]` を引数として受け取ります。`output` はその戻り値です。
+- コマンドエントリー（例: `entry = ["python", "run_tests.py"]`）は、`ASCENT_INPUT` のパスにある JSON ファイルから `{"input": ...}` を読みます。`ASCENT_OUTPUT` のパスに `{"output": ...}` を書きます。`output` は `"output"` の下の値です。コマンドが表示する内容はログにだけ送られます。
+
+スコアラーは別のサンドボックスで実行されます。そのサンドボックスはメトリクスファイルだけを保持します。スコアラーはバージョンのコードをインポートすることも、実行することもできません。スコアラーには `output` を通してだけ、または `[target.<name>]` ステージへの `call()` を通してだけバージョンが見えます。`call` は `from openascent import call` でインポートします。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
 
 ## 戻り値
 
-`score` は、フィードバック付きのスコアを返す必要があります。次の形が有効です。
+`score` は 1 つのオブジェクトを返します。
 
-1. ペア: 数値と、フィードバックの文字列または `"feedback"` キーを持つ dict。
-2. `"score"` の下に数値、`"feedback"` の下に文字列を持つ dict。
+```python
+{
+    "score": 0.78,
+    "feedback": "Misses short names.",
+    "scores": {
+        "precision": {"score": 0.90},
+        "recall": {"score": 0.69, "feedback": "Misses names under 4 letters."},
+    },
+}
+```
 
-フィードバックは空でない文字列である必要があります。
+- `"score"` は必須です。有限の数値です。バージョンの順位を決めるのはこのスコアだけです。
+- `"feedback"` は任意のテキストです。GEPA と Auto はこれから学ぶので、付けることをお勧めします。フィードバックがないと、エンジンはスコアだけを見ます。実行ログはそのことを 1 回だけ伝えます。
+- `"scores"` は任意です。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自の `"score"` と任意の `"feedback"` を持つオブジェクトです。すべてのエンジンは、各名前付きスコアをそれぞれ独自の目的として使います。
 
-付加情報には `"scores"` キーを含めることもできます。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自のスコアとフィードバックを持ちます。例: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
+ほかの形やキーはすべてエラーです。チェックは、誤った部分と有効な形を表示します。
 
-付加情報には、同じ形の `"cases"` キーを含めることもできます。各エントリは 1 つのケースの結果です。すべてのエンジンは、各ケースをそれぞれ独自の目的として使います。
-
-戻り値の形が異なる場合、チェックは失敗し、その理由を表示します。
-
-| 戻り値                                                                          | 有効か                                       |
-| ------------------------------------------------------------------------------- | -------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`                               | はい                                         |
-| `(0.8, "Close. Missing the date.")`                                             | はい                                         |
-| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | はい                              |
-| `0.8`                                                                           | いいえ。フィードバックがありません。         |
-| `(0.8, {})`                                                                     | いいえ。フィードバックの文字列がありません。 |
-| `("0.8", {"feedback": "OK"})`                                                   | いいえ。スコアが文字列です。                 |
-| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | いいえ。名前付きスコアが数値ではありません。 |
+| 戻り値 | 有効か |
+| --- | --- |
+| `{"score": 0.8, "feedback": "Close. Missing the date."}` | はい |
+| `{"score": 0.8}` | はい。フィードバックはありません。 |
+| `{"score": 1.0, "scores": {"format": {"score": 1.0}}}` | はい |
+| `0.8` | いいえ。値がオブジェクトではありません。 |
+| `(0.8, "Close. Missing the date.")` | いいえ。値がオブジェクトではありません。 |
+| `{"score": "0.8"}` | いいえ。スコアが文字列です。 |
+| `{"score": 0.8, "scores": {"format": 1.0}}` | いいえ。名前付きスコアはオブジェクトである必要があります。 |
+| `{"score": 0.8, "feedbak": "OK"}` | いいえ。キー `feedbak` は不明です。 |
 
 ## 役に立つフィードバックを書く
 
@@ -58,67 +69,86 @@ GEPA と Auto は、フィードバックの文章を読んで次のバージョ
 
 ### 完全一致
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 ```python tab="scorer.py"
-import importlib.util
-
-
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    got = module.serve(case["input"])
+def score(repo_path, case, output=None):
     want = case["expected"]["label"]
-    if got == want:
-        return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
+    if output == want:
+        return {"score": 1.0, "feedback": "Correct."}
+    return {"score": 0.0, "feedback": f"Expected {want!r}, got {output!r}."}
 ```
 
 `case["expected"]` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
 
 ### リポジトリのテストを実行する
 
-```python tab="scorer.py"
+`[run]` エントリーがテストを実行します。テストが失敗すると `pytest` は 0 以外の終了コードで終わり、0 以外の終了コードはケースを失敗にします。そのため、ラッパー `run_tests.py` が結果を `ASCENT_OUTPUT` に書き、0 で終了します。スコアラーはその結果を読みます。
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = ["python", "run_tests.py"]
+timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
 import subprocess
 
-
-def score(repo_path):
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
-    if result.returncode == 0:
-        return 1.0, {"feedback": "All tests pass."}
-    return 0.0, {"feedback": result.stdout[-2000:]}
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
+
+```python tab="scorer.py"
+def score(repo_path, case, output=None):
+    if output["passed"]:
+        return {"score": 1.0, "feedback": "All tests pass."}
+    return {"score": 0.0, "feedback": output["log"]}
+```
+
+`[run]` エントリーがあるケースで失敗すると、そのケースにはスコアがありません。エントリーが起動できない、タイムアウトする、シグナルで止まる、または関数エントリーが値を返す前に例外を送出するか終了すると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。コマンドエントリーは、0 以外の終了コードで終わったとき、または有効な出力ファイルを書かなかったときにも失敗します。そのようなケースを持つバージョンにはスコアがありません。そのバージョンは最良のバージョンにならず、どの `[outcome] target` にも届かず、pull request も開きません。失敗を数値として数える必要がある場合は、プログラムの中で失敗を捕捉し、出力を書き、スコアラーにその出力を採点させてください。[リポジトリのルール](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) をお読みください。
 
 ### 審査員としてのモデル
 
-スコアラーはモデルを呼び出せます。`skynet` ヘルパーモジュールから `llm` をインポートします。呼び出しは Skynet のモデルゲートウェイを通り、実行のスコアラーモデルに送られます。
+スコアラーはモデルを呼び出せます。`openascent` ヘルパーモジュールから `llm` をインポートします。呼び出しは Skynet のモデルゲートウェイを通り、実行のスコアラーモデルに送られます。
+
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
 
 ```python tab="scorer.py"
-import importlib.util
-
-from skynet import llm
+from openascent import llm
 
 
-def score(repo_path, case):
-    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    answer = module.serve(case["input"])
+def score(repo_path, case, output=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
+        input=f"Question: {case['input']['question']}\nAnswer: {output}",
         temperature=0,
         max_tokens=512,
     )
     passed = str(verdict).strip().upper().startswith("PASS")
-    return (1.0 if passed else 0.0), {"feedback": str(verdict)}
+    return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-スコアラーは、`OPENAI_BASE_URL`、`APP_API_KEY`、`APP_MODEL` の環境変数を使って、任意の OpenAI 互換クライアントを使うこともできます。ゲートウェイは、実行のスコアラーモデルだけを受け付けます。
+スコアラーは、`OPENAI_BASE_URL`、`ASCENT_MODEL_KEY`、`ASCENT_MODEL` の環境変数を使って、任意の OpenAI 互換クライアントを使うこともできます。ゲートウェイは、実行のスコアラーモデルだけを受け付けます。
 
 ## モデル呼び出しとシークレット
 
 - Skynet のキーによる呼び出しは、実行予算に対して計測されます。独自のキー (BYOK) では、呼び出しはあなたのプロバイダーキーに送られ、Skynet のモデル料金はかかりません。[請求](/docs/concepts/billing) をお読みください。
-- 実行シークレットは、環境変数としてスコアラーに届きます。変数名はシークレット名です。例: `os.environ["SEARCH_API_KEY"]`。
+- スコアラーは、実行シークレットを環境変数として受け取りません。シークレットがスコアラーに届くのは、`[metric] services` が挙げる `[services.<name>]` テーブルか、`[metric] mcp` ファイルにあるサーバーを通る場合だけです。シークレットは、テーブルの `headers` に `${NAME}` として書きます。スコアラーは、`ASCENT_SERVICE_<NAME>_URL` の URL にリクエストを送ります。Skynet はサンドボックスの外でシークレットを追加します。
 - Skynet は、スコアラーの出力とログの中のシークレットの値を隠します。
 
 ## 制限

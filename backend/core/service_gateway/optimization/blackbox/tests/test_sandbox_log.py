@@ -185,7 +185,7 @@ def test_forward_ignores_anything_but_a_record(captured: _Capture) -> None:
 
 
 def _event_line(**fields: Any) -> str:
-    """Frame one scorer event the way ``skynet.log`` writes it."""
+    """Frame one scorer event the way ``openascent.log`` writes it."""
     return EVENT_PREFIX + json.dumps({"level": "INFO", "logger": "scorer", "message": "m", **fields}) + "\n"
 
 

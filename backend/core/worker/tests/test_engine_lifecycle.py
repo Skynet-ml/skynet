@@ -9,6 +9,7 @@ Methods tested (no real subprocesses, no real multiprocessing.Queue):
   reset_worker_for_tests                    — clears the module-level singleton
   BackgroundWorker._process_job             — run_completed / run_failed telemetry facts
   BackgroundWorker._sandbox_sweep_loop      — a failed sweep does not end the sweeper
+  BackgroundWorker.park_job                 — frees the claim; a stale generation keeps it
 
 Methods intentionally NOT tested here:
   start() / _worker_loop()                  — require real threads + real mp.Process
@@ -19,17 +20,19 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from sqlalchemy.orm import Session
 
 import core.worker.engine as engine_module
 from core.exceptions import INFRASTRUCTURE_INTERRUPTION
 from core.storage.base import JobStore
+from core.storage.models import JobModel
 from core.worker.constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_LOG,
     EVENT_PROGRESS,
@@ -39,6 +42,7 @@ from core.worker.engine import BackgroundWorker, get_worker, reset_worker_for_te
 
 from .conftest import FakeJobStore
 from .mocks import REAL_RUN_PAYLOAD, fake_mp_process, make_mp_context, protect_dispatch
+from .test_step_recovery import RUN, StepJobStore, _claim, _funded_run, make_sqlite_store
 
 
 @pytest.fixture(autouse=True)
@@ -103,29 +107,6 @@ def test_drain_routes_progress_event_to_record_progress(
     assert opt_id == "opt-1"
     assert evt_name == "iter_done"
     assert metrics == {"score": 0.8}
-
-
-def test_drain_routes_agent_run_rows_and_deltas_to_the_store(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A run row is saved, a transcript delta appended, and a malformed run ignored."""
-    store.seed_job("opt-1")
-    q = _make_fake_queue(
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": 1, "status": "running", "transcript": ""}},
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": 1, "transcript_delta": "hi\n"}},
-        {"type": EVENT_AGENT_RUN, "run": {"run_id": "bogus"}},
-        {"type": EVENT_AGENT_RUN, "run": None},
-    )
-
-    _result, error, drained = worker._drain_subprocess_events("opt-1", q)
-
-    assert error is None
-    assert drained == 4
-    assert store.agent_run_calls == [
-        ("opt-1", "save", {"run_id": 1, "status": "running", "transcript": ""}),
-        ("opt-1", "append", (1, "hi\n")),
-    ]
 
 
 def test_drain_routes_log_event_to_append_log(
@@ -653,6 +634,500 @@ def test_renewing_lease_touches_activity_while_a_blocking_step_runs(
     assert touches[-1][1] == job_thread
     assert sum(name == "lease-renew-1" for _, name in touches) >= 3
     assert {worker_id for worker_id, _ in touches} == {1}
+
+
+def _claimed_worker(tmp_path: Path) -> tuple[BackgroundWorker, StepJobStore, int, threading.Event]:
+    """Build a worker on a real store whose thread 0 holds the claim on a running run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The worker, its store, the claimed generation, and the run's cancel event.
+    """
+    job_store = make_sqlite_store(tmp_path)
+    _funded_run(job_store)
+    w = BackgroundWorker(job_store=cast(JobStore, job_store), num_workers=1, poll_interval=1.0, pod_name="pod-a")
+    generation = _claim(job_store, "pod-a")
+    cancel = threading.Event()
+    w._claimed_jobs.add(RUN)
+    w._cancel_events[RUN] = cancel
+    w._thread_current_job[0] = RUN
+    # A running worker, so a failed park restores the cancel event unset, as in production.
+    w._running = True
+    return w, job_store, generation, cancel
+
+
+def test_park_job_frees_the_claim_so_the_heartbeat_does_not_cancel_the_run(tmp_path: Path) -> None:
+    """A parked run leaves the worker's claims, and the next heartbeat does not treat it as stolen."""
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC) + timedelta(hours=1))
+    assert RUN not in w._claimed_jobs
+    w._touch_activity(0)
+    assert not cancel.is_set()
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
+def test_park_job_on_a_stale_generation_keeps_the_claim(tmp_path: Path) -> None:
+    """A worker that lost the generation does not park the run and keeps its claim for the heartbeat."""
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
+
+    w._processing_jobs.add(RUN)
+
+    assert not w.park_job(0, RUN, generation - 1, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is cancel
+    assert not cancel.is_set()
+    assert not w._parked_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_a_park_that_raises_gives_the_worker_state_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the park raises, the run is back in the three maps with its own cancel event, and no pair stays."""
+    w, job_store, generation, cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    def broken_park(*args: Any, **kwargs: Any) -> bool:
+        """Fail as a park with a lost database connection would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(engine_module, "park_run", broken_park)
+
+    with pytest.raises(RuntimeError):
+        w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is cancel
+    assert not cancel.is_set()
+    assert not w._parked_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_a_park_that_commits_then_raises_counts_as_parked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the park commits and then raises, the maps stay clear and the pair stays, so no later lease is released."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    real_park = engine_module.park_run
+
+    def commit_then_raise(*args: Any, **kwargs: Any) -> bool:
+        """Park for real, then fail as a connection that drops after the commit would.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Raises:
+            RuntimeError: Always, after the real park commits.
+        """
+        assert real_park(*args, **kwargs)
+        raise RuntimeError("connection dropped after commit")
+
+    monkeypatch.setattr(engine_module, "park_run", commit_then_raise)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN not in w._claimed_jobs
+    assert RUN not in w._processing_jobs
+    assert RUN not in w._cancel_events
+    assert w._parked_jobs == {(0, RUN)}
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
+def test_a_park_that_commits_and_raises_after_a_reclaim_keeps_the_new_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A park that commits, then sees a wake and a reclaim on this pod, then raises, leaves the new claim alone."""
+    w, job_store, generation, old_cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    real_park = engine_module.park_run
+    claimed: list[str | None] = []
+
+    def commit_reclaim_then_raise(*args: Any, **kwargs: Any) -> bool:
+        """Park for real, let the sweep wake the run and another worker claim it, then fail.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Raises:
+            RuntimeError: Always, after the reclaim.
+        """
+        assert real_park(*args, **kwargs)
+        assert job_store._wake_waiting_runs() == 1
+        other = threading.Thread(target=lambda: claimed.append(w._claim_job_from_store()))
+        other.start()
+        other.join()
+        raise RuntimeError("connection dropped after commit")
+
+    monkeypatch.setattr(engine_module, "park_run", commit_reclaim_then_raise)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert claimed == [RUN]
+    new_cancel = w._cancel_events[RUN]
+    assert new_cancel is not old_cancel
+
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is new_cancel
+    assert not new_cancel.is_set()
+    assert not w._parked_jobs
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.status == "validating"
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
+
+
+def test_a_park_that_raises_before_its_commit_with_a_failed_read_leaves_the_lease_to_expire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the park and the read both failing, the run leaves the worker, no release runs, and the sweep requeues it."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    released: list[str] = []
+
+    def raise_before_commit(*args: Any, **kwargs: Any) -> bool:
+        """Fail as a park that loses its connection before the commit would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("connection dropped before commit")
+
+    def broken_read(*args: Any, **kwargs: Any) -> bool:
+        """Fail as the ownership read on a lost connection would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(engine_module, "park_run", raise_before_commit)
+    monkeypatch.setattr(engine_module, "still_owns_run", broken_read)
+    monkeypatch.setattr(job_store, "release_job", lambda optimization_id, pod: released.append(optimization_id))
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    w._mark_job_done(RUN, 0)
+
+    assert released == []
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.status == "running"
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        session.commit()
+    assert job_store.recover_orphaned_jobs() == 1
+    assert job_store.get_job(RUN)["status"] == "pending"
+
+
+def test_a_park_whose_ownership_read_fails_restores_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the park commits and raises and the ownership read also fails, the worker state does not come back."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    real_park = engine_module.park_run
+
+    def commit_then_raise(*args: Any, **kwargs: Any) -> bool:
+        """Park for real, then fail as a connection that drops after the commit would.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Raises:
+            RuntimeError: Always, after the real park commits.
+        """
+        assert real_park(*args, **kwargs)
+        raise RuntimeError("connection dropped after commit")
+
+    def broken_read(*args: Any, **kwargs: Any) -> bool:
+        """Fail as the ownership read on a lost connection would.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(engine_module, "park_run", commit_then_raise)
+    monkeypatch.setattr(engine_module, "still_owns_run", broken_read)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN not in w._claimed_jobs
+    assert RUN not in w._processing_jobs
+    assert RUN not in w._cancel_events
+    assert w._parked_jobs == {(0, RUN)}
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
+def test_a_slow_park_holds_no_worker_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the park waits on the database, other threads take the queue and activity locks."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    real_park = engine_module.park_run
+
+    def slow_park(*args: Any, **kwargs: Any) -> bool:
+        """Wait inside the park until the test lets it go, then park for real.
+
+        Args:
+            *args: Passed to the real park.
+            **kwargs: Passed to the real park.
+
+        Returns:
+            The real park's result.
+        """
+        entered.set()
+        assert release.wait(5.0)
+        return real_park(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "park_run", slow_park)
+    parked: list[bool] = []
+    parker = threading.Thread(target=lambda: parked.append(w.park_job(0, RUN, generation, datetime.now(UTC))))
+    parker.start()
+    assert entered.wait(5.0)
+    try:
+        assert w._queue_lock.acquire(timeout=1.0)
+        w._queue_lock.release()
+        assert w._activity_lock.acquire(timeout=1.0)
+        w._activity_lock.release()
+    finally:
+        release.set()
+        parker.join()
+    assert parked == [True]
+    assert job_store.get_job(RUN)["status"] == "paused"
+
+
+def test_park_job_refuses_a_worker_that_does_not_process_the_run(tmp_path: Path) -> None:
+    """A park for a worker that does not process the run leaves the run, the claim and the lease as they are."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+
+    assert not w.park_job(1, RUN, generation, datetime.now(UTC))
+    assert RUN in w._claimed_jobs
+    assert not w._parked_jobs
+    assert job_store.get_job(RUN)["status"] == "running"
+
+
+def test_parked_thread_cleanup_keeps_a_later_claim_of_the_woken_run(tmp_path: Path) -> None:
+    """A park from a helper thread still makes the worker's ``_mark_job_done`` leave a later claim and lease."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    parked: list[bool] = []
+
+    def park_on_helper_thread() -> None:
+        """Park the run for worker 0 from a thread that is not the worker's own."""
+        parked.append(w.park_job(0, RUN, generation, datetime.now(UTC)))
+
+    helper = threading.Thread(target=park_on_helper_thread)
+    helper.start()
+    helper.join()
+    assert parked == [True]
+    assert job_store._wake_waiting_runs() == 1
+    claimed: list[str | None] = []
+
+    def claim_on_other_thread() -> None:
+        """Claim the woken run the way another worker thread does."""
+        claimed.append(w._claim_job_from_store())
+
+    other = threading.Thread(target=claim_on_other_thread)
+    other.start()
+    other.join()
+    assert claimed == [RUN]
+
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
+    assert not w._parked_jobs
+
+
+def test_a_second_park_keeps_the_pair_so_a_later_claim_survives(tmp_path: Path) -> None:
+    """A second park of a parked run does nothing, so the worker's cleanup still leaves a later claim."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert not w.park_job(0, RUN, generation + 1, datetime.now(UTC))
+    assert w._parked_jobs == {(0, RUN)}
+    assert job_store._wake_waiting_runs() == 1
+    assert w._claim_job_from_store() == RUN
+
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+    assert not w._parked_jobs
+
+
+def test_a_stop_during_a_failing_park_leaves_the_restored_event_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that runs while the park is out of the maps still cancels the run once the undo restores it."""
+    w, _, generation, cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    def stop_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Stop the worker during the park, then report that the park failed.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        w.stop(timeout=0.1)
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", stop_then_fail)
+
+    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert w._cancel_events[RUN] is cancel
+    assert cancel.is_set()
+
+
+def test_mark_job_done_with_no_worker_id_honors_a_park(tmp_path: Path) -> None:
+    """A cleanup with no worker id still treats a parked run as parked and leaves a later claim."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert job_store._wake_waiting_runs() == 1
+    assert w._claim_job_from_store() == RUN
+
+    w._mark_job_done(RUN)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert RUN in w._cancel_events
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+    assert not w._parked_jobs
+
+
+def test_a_park_that_fails_after_the_worker_finished_releases_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the worker finishes during a park that then fails, the undo releases the claim and restores nothing."""
+    w, job_store, generation, _ = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+
+    def finish_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Let the worker finish the run during the park, then report that the park failed.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        w._mark_job_done(RUN, 0)
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", finish_then_fail)
+
+    assert not w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert RUN not in w._claimed_jobs
+    assert RUN not in w._processing_jobs
+    assert RUN not in w._cancel_events
+    assert not w._parked_jobs
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by is None
+
+
+def test_a_failed_park_keeps_the_cancel_event_of_a_claim_made_during_the_park(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When another thread claims the requeued run during a failed park, the undo keeps that claim's cancel event."""
+    w, job_store, generation, old_cancel = _claimed_worker(tmp_path)
+    w._processing_jobs.add(RUN)
+    claimed: list[str | None] = []
+
+    def requeue_claim_then_fail(*args: Any, **kwargs: Any) -> bool:
+        """Requeue the run as the lease sweep does, claim it on a second thread, then report a failed park.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        with Session(job_store.engine) as session:
+            row = session.get(JobModel, RUN)
+            assert row is not None
+            row.status = "pending"
+            row.claimed_by = None
+            row.lease_expires_at = None
+            session.commit()
+        other = threading.Thread(target=lambda: claimed.append(w._claim_job_from_store()))
+        other.start()
+        other.join()
+        return False
+
+    monkeypatch.setattr(engine_module, "park_run", requeue_claim_then_fail)
+
+    assert w.park_job(0, RUN, generation, datetime.now(UTC))
+    assert claimed == [RUN]
+    new_cancel = w._cancel_events[RUN]
+    assert new_cancel is not old_cancel
+    assert not new_cancel.is_set()
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._parked_jobs == {(0, RUN)}
+
+    # The old worker's next fenced commit fails, and its cleanup must leave the later claim and its lease.
+    w._mark_job_done(RUN, 0)
+
+    assert RUN in w._claimed_jobs
+    assert RUN in w._processing_jobs
+    assert w._cancel_events[RUN] is new_cancel
+    assert not w._parked_jobs
+    with Session(job_store.engine) as session:
+        row = session.get(JobModel, RUN)
+        assert row is not None
+        assert row.claimed_by == "pod-a"
+        assert row.lease_expires_at is not None
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]

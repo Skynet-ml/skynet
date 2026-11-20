@@ -49,9 +49,9 @@ Skynet size ayrıca kurtarma kodları verir. Bunları güvenli bir yerde saklay�
 
 ## Kodunuz nerede çalışır
 
-Kullanıcı iş yükleri yalıtılmış sandbox'larda çalışır. Barındırılan üründe yürütme sınırı Vercel Sandbox'tır. Bu; kurulum kontrollerini, optimizasyon çalıştırmalarını, kurtarmayı ve tamamlanmış çalıştırmalar üzerindeki işleri kapsar.
+Kodunuz yalnızca yalıtılmış sandbox'larda çalışır. Sandbox, yürütme sınırıdır. Barındırılan ürün bugün Vercel Sandbox kullanır. Diğer sağlayıcılar ortak bir sandbox arayüzü üzerinden bağlanır. Her aday kendi sandbox'ında çalışır. Metrik onu ayrı bir sandbox'ta puanlar. Bu; kurulum kontrollerini, optimizasyon çalıştırmalarını, kurtarmayı ve tamamlanmış çalıştırmalar üzerindeki işleri kapsar.
 
-Skynet çalışanları (worker) kodunuzu çalıştırmaz. Onlar kontrol düzlemidir. İşleri başlatır, bütçeleri ayırır ve kapatır, sandbox'lara kapsamı sınırlı kimlik bilgileri verir ve kontrol noktalarını kaydeder.
+Skynet çalışanları (worker) kodunuzu çalıştırmaz. Onlar kontrol düzlemidir. İşleri başlatır, bütçeleri ayırır ve kapatır, sandbox'lara kapsamı sınırlı kimlik bilgileri verir ve çalıştırmanın her adımını kaydeder.
 
 Skynet ücretli işe başlamadan önce cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
 

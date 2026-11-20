@@ -5,7 +5,8 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 conflicts = [[
     { package = "skynet", extra = "e2b" },
@@ -832,7 +833,8 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 dependencies = [
     { name = "protobuf-py", version = "0.1.1", source = { registry = "https://pypi.org/simple" } },
@@ -851,7 +853,8 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 dependencies = [
     { name = "protobuf-py", version = "0.6.0", source = { registry = "https://pypi.org/simple" } },
@@ -3250,6 +3253,15 @@ wheels = [
 ]
 
 [[package]]
+name = "openascent"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/52/cddbcf45a784638c0f78847c2eff06cc71e6c3d134ff1ebdb07d9b9a6072/openascent-0.4.3.tar.gz", hash = "sha256:3979413a14938e5b501a4ba08fce36e75e66eddc24a98f6e80dcd92a427bbdda", size = 85386, upload-time = "2026-11-20T18:21:55.773Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/8b/e81c69d0ef8a8cc3fbd5a82cbb2c6519d36c175fdb5d4090ea34fd1ba267/openascent-0.4.3-py3-none-any.whl", hash = "sha256:fe00a5ebdf67ac0ebe06ac13f43de60c79b423fb2259ccfe345bd07292320873", size = 81750, upload-time = "2026-11-20T18:21:54.31Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3812,7 +3824,8 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 dependencies = [
     { name = "protobuf-py-ext", version = "0.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_machine == 'ARM64' and platform_python_implementation == 'CPython' and sys_platform == 'win32')" },
@@ -3830,7 +3843,8 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 dependencies = [
     { name = "protobuf-py-ext", version = "0.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_machine == 'ARM64' and platform_python_implementation == 'CPython' and sys_platform == 'win32')" },
@@ -3848,7 +3862,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2f/05/6dc9ccff1e8159eb9a144e6d3c4acfd2211cd4fcd20c34fe9155d17d6a7f/protobuf_py_ext-0.1.1.tar.gz", hash = "sha256:e85bfdfdb3ed50634db8ccc7429dd9286520109489c735463971a418707b4fef", size = 31912, upload-time = "2026-06-24T19:02:16.321Z" }
 wheels = [
@@ -3888,7 +3903,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
-    "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten'",
+    "python_full_version < '3.12'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b4/6c/a1f6a1a50dfc3f14ddb9e54f9a769bc589b85b5e394bab2bb78f67d2dc42/protobuf_py_ext-0.6.0.tar.gz", hash = "sha256:03f61ccfcad52a2d784aec9bb0b6088e0e32f144a6c3ab3deed12f17f1f0d0bb", size = 58124, upload-time = "2026-09-30T06:45:42.602Z" }
 wheels = [
@@ -5357,6 +5373,7 @@ dependencies = [
     { name = "ldap3" },
     { name = "litellm" },
     { name = "numpy" },
+    { name = "openascent" },
     { name = "pgvector" },
     { name = "pip" },
     { name = "prometheus-client" },
@@ -5475,6 +5492,7 @@ requires-dist = [
     { name = "mosaic-sandbox", marker = "extra == 'mosaic'", specifier = ">=0.15.1,<0.16" },
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "openascent", specifier = "==0.4.3" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "pillow", marker = "extra == 'render'", specifier = ">=13.0.0" },
     { name = "pip", specifier = "==26.2.1" },

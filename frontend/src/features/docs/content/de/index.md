@@ -11,7 +11,7 @@ Jeder Durchlauf optimiert ein Repository. Sie können auf zwei Arten beginnen:
 
 Der Code im Repository kann alles sein: eine Anwendung, ein Dienst, ein Skript oder eine Bibliothek. Er kann jede Bibliothek verwenden.
 
-Jeder Durchlauf nutzt denselben Vertrag. Ihr Scorer definiert `score(repo_path, case)`. Er gibt einen Score und schriftliches Feedback zurück. Der Optimierer liest das Feedback, um die nächste Version zu verbessern.
+Jeder Durchlauf nutzt denselben Vertrag. Ihr Scorer definiert `score(repo_path, case, output=None)`. Der Scorer liest `output`: das, was der `[run]`-Eintrag für den Fall zurückgegeben hat. Er läuft nicht im Ordner der Version und importiert keinen Code aus dem Repository. Er gibt einen Score und schriftliches Feedback zurück. Der Optimierer liest das Feedback, um die nächste Version zu verbessern.
 
 > [!NOTE]
 > Jede Version läuft in einer Sandbox. Der Coding-Agent, der die Versionen schreibt, sieht weder den Quelltext des Scorers noch die erwarteten Werte.

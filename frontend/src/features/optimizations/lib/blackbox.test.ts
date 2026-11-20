@@ -36,6 +36,14 @@ describe("extractBlackboxScorePoints", () => {
     ]);
   });
 
+  it("keeps the lowest mean so far for a minimize run", () => {
+    const points = extractBlackboxScorePoints([candidate("0", 0.5), candidate("1", 0.7), candidate("2", 0.2)], true);
+    assert.deepEqual(
+      points.map((p) => p.best),
+      [0.5, 0.5, 0.2],
+    );
+  });
+
   it("numbers versions by their id, falling back to their position", () => {
     const points = extractBlackboxScorePoints([candidate("0", 0.2), candidate("gepa-a", 0.4)]);
     assert.deepEqual(

@@ -224,7 +224,7 @@ def test_engine_catalog_names_the_docker_proposer_runtime_in_local_mode(
     settings, _ = local_settings
     monkeypatch.setattr(blackbox_service, "settings", settings)
 
-    (runtime,) = blackbox_service.engine_catalog("text").proposer_runtimes
+    (runtime,) = blackbox_service.engine_catalog().proposer_runtimes
 
     assert runtime.id == "docker"
     assert runtime.cost.maximum_session_cents == "0"
@@ -251,7 +251,7 @@ def test_engine_catalog_reports_the_docker_sandbox_available_in_local_mode(
     )
     monkeypatch.setattr(blackbox_service, "settings", settings)
 
-    catalog = blackbox_service.engine_catalog("agent")
+    catalog = blackbox_service.engine_catalog()
 
     assert catalog.sandbox_available is True
     assert catalog.sandbox_reason is None
@@ -263,7 +263,7 @@ def test_engine_catalog_still_needs_a_gateway_on_hosted(monkeypatch: pytest.Monk
     monkeypatch.setattr(blackbox_service, "settings", settings)
     monkeypatch.setattr(agent_eval, "sandbox_unavailable_reason", lambda settings: None)
 
-    catalog = blackbox_service.engine_catalog("agent")
+    catalog = blackbox_service.engine_catalog()
 
     assert catalog.sandbox_available is False
     assert catalog.sandbox_reason == agent_eval._GATEWAY_MISSING

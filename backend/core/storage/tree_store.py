@@ -9,8 +9,8 @@ id.
 
 Objects travel through the :class:`StepLogStore` buffer, in the same packs
 and flushes as the steps, and each one counts toward its account's stored
-bytes. Nothing deletes them yet; the tree retention issue (SKY-733) adds
-deletion, also on account deletion. A read names its run: before the
+bytes. A run delete and an account delete erase them through ``tree_purge``
+and the compactor's rewrite of marked packs (SKY-733). A read names its run: before the
 flush only that run sees the object, after it every run of the same account.
 """
 
@@ -21,7 +21,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .step_log_store import OBJECT_ID, StepLogStore
+from .step_log_store import OBJECT_ID, ObjectTooLargeError, StepLogStore
 
 TREE_MODES = frozenset({"file", "exec", "symlink", "tree"})
 _BLOB_HEADER = b"blob\0"
@@ -49,6 +49,22 @@ def object_id_of(stored: bytes) -> str:
     return hashlib.sha256(stored).hexdigest()
 
 
+def is_git_part(name: str) -> bool:
+    """Tell whether a path part is ``.git`` in any letter case.
+
+    Case-insensitive file systems (macOS, Windows) treat ``.GIT`` as ``.git``
+    (SKY-810). New trees refuse such a part; writers of stored trees leave it
+    out, because a tree stored before SKY-810 can hold one.
+
+    Args:
+        name: One path part.
+
+    Returns:
+        Whether the part is a ``.git`` name.
+    """
+    return name.lower() == ".git"
+
+
 def encode_blob(data: bytes) -> bytes:
     """Return the stored form of a file's bytes.
 
@@ -71,15 +87,16 @@ def encode_tree(entries: Iterable[TreeEntry]) -> bytes:
         The tree header and the sorted JSON entry list.
 
     Raises:
-        ValueError: When a name is empty, repeated, ``.``, ``..`` or holds
-            ``/`` or a NUL byte, or a mode or object id is not valid.
+        ValueError: When a name is empty, repeated, ``.``, ``..``, ``.git`` in
+            any letter case or holds ``/`` or a NUL byte, or a mode or object
+            id is not valid.
     """
     rows = sorted((entry.name, entry.mode, entry.object_id) for entry in entries)
     names = [name for name, _, _ in rows]
     if len(set(names)) != len(names):
         raise ValueError("a tree holds the same name twice")
     for name, mode, object_id in rows:
-        if name in {"", ".", ".."} or "/" in name or "\0" in name:
+        if name in {"", ".", ".."} or "/" in name or "\0" in name or is_git_part(name):
             raise ValueError(f"bad tree entry name: {name!r}")
         if mode not in TREE_MODES:
             raise ValueError(f"bad tree entry mode: {mode!r}")
@@ -154,20 +171,27 @@ class TreeStore:
         self._step_log.put_object(run_id, object_id, stored)
         return object_id
 
-    def get_blob(self, run_id: str, object_id: str) -> bytes | None:
+    def get_blob(self, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
         """Return a blob's file bytes for a run, from the buffer before its flush.
 
         Args:
             run_id: The job that reads the blob.
             object_id: The blob's object id.
+            max_bytes: The most file bytes to load; ``None`` loads the blob at any size. The step log compares
+                the stored length to the cap plus the blob header before it loads, so a larger blob never loads.
 
         Returns:
             The file bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
+            ObjectTooLargeError: When the blob has more than ``max_bytes`` file bytes; its ``size`` is the file
+                length.
             ValueError: When the stored bytes do not match the id or are not a blob.
         """
-        stored = self._get(run_id, object_id)
+        try:
+            stored = self._get(run_id, object_id, None if max_bytes is None else max_bytes + len(_BLOB_HEADER))
+        except ObjectTooLargeError as error:
+            raise ObjectTooLargeError(object_id, error.size - len(_BLOB_HEADER)) from None
         if stored is None:
             return None
         if not stored.startswith(_BLOB_HEADER):
@@ -190,20 +214,22 @@ class TreeStore:
         stored = self._get(run_id, object_id)
         return None if stored is None else decode_tree(stored)
 
-    def _get(self, run_id: str, object_id: str) -> bytes | None:
+    def _get(self, run_id: str, object_id: str, max_bytes: int | None = None) -> bytes | None:
         """Return an object's stored bytes for a run after a check that they hash to the id.
 
         Args:
             run_id: The job that reads the object.
             object_id: The object id.
+            max_bytes: The most stored bytes to load; ``None`` loads the object at any size.
 
         Returns:
             The stored bytes, or ``None`` when the run cannot see such an object.
 
         Raises:
+            ObjectTooLargeError: When the stored bytes are longer than ``max_bytes``.
             ValueError: When the bytes do not hash to the id.
         """
-        stored = self._step_log.get_object(run_id, object_id)
+        stored = self._step_log.get_object(run_id, object_id, max_bytes)
         if stored is not None and object_id_of(stored) != object_id:
             raise ValueError(f"object {object_id} does not match its content")
         return stored

@@ -90,7 +90,7 @@ curl https://api.skynetml.com/blackbox/run \
   "expected_field": "label",
   "scorer": {
     "kind": "python",
-    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "metric_code": "def score(repo_path, case, output=None):\n    ok = str(output).strip().lower() == case[\"expected\"][\"label\"]\n    return {\"score\": 1.0 if ok else 0.0, \"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
     "model": { "name": "<model from GET /models>" }
   },
   "strategy": { "mode": "auto" },
@@ -100,13 +100,20 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
+```toml tab="ascent.toml"
+version = 1
+
+[run]
+entry = "serve.py:serve"
+```
+
 Важные поля:
 
 - `target.repo.repository` — репозиторий GitHub в виде `owner/name`. Сначала подключите GitHub в разделе **Настройки → Коннекторы**.
 - `target.repo.editable_paths` перечисляет файлы и папки, которые оптимизатор может менять. `"."` означает весь репозиторий.
 - `target.repo.commit` необязателен. Это SHA из 40 символов. Без него Skynet использует последний коммит ветки.
-- `target.repo.secrets` необязателен. У каждого секрета есть `name` и `value`. Секрет попадает в ваш код и ваш оценщик как переменная окружения.
-- `scorer.metric_code` определяет `score(repo_path, case)`. `scorer.model` — модель, которую ваш код и ваш оценщик могут вызывать через шлюз моделей.
+- `target.repo.secrets` необязателен. У каждого секрета есть `name` и `value`. Секрет попадает в ваш код или ваш оценщик только через заголовок `[services.<name>]` или через сервер из файла `mcp` роли, никогда как переменная окружения.
+- `scorer.metric_code` определяет `score(repo_path, case, output=None)`. `output` — то, что точка входа `[run]` вернула для примера. Вкладка `ascent.toml` показывает точку входа `[run]` репозитория из примера. `scorer.model` — модель, которую ваш код и ваш оценщик могут вызывать через шлюз моделей.
 - `strategy.mode` — это `auto` (по умолчанию) или `single`. При `single` задайте в `strategy.engine` имя одного движка из `GET /blackbox/engines`.
 - `max_cost_cents` — лимит расходов для этого запуска в центах США.
 - `is_private` по умолчанию равно `false`. Установите `true`, чтобы запуск был приватным.

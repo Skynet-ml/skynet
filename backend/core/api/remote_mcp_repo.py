@@ -58,8 +58,13 @@ from ..models.blackbox import (
     BlackboxRepoSource,
     BlackboxRunRequest,
 )
-from ..service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE, optimize_toml_error
-from ..service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, CONSTRAINTS_REQUIRED
+from ..service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE, ascent_toml_error
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
+    CONSTRAINTS_REQUIRED,
+    ConstraintsError,
+    parse_constraints,
+)
 from ..service_gateway.optimization.blackbox.service import engine_catalog, validate_job
 from ..storage.models import McpRunDraftModel
 from .auth import AuthenticatedUser
@@ -210,7 +215,7 @@ def _remaining(spec: dict[str, Any]) -> list[str]:
     """List the required steps the draft does not have yet.
 
     The contract step is required until the repository step finds an
-    ``optimize.toml`` in the repository, so a draft with no repository step
+    ``ascent.toml`` in the repository, so a draft with no repository step
     needs it. ``None`` means unknown: the tree was too large to list whole, or
     the draft is older than the field. Then the step is not required here, and
     the review reads the tree for the file.
@@ -221,7 +226,7 @@ def _remaining(spec: dict[str, Any]) -> list[str]:
     Returns:
         The missing required steps, in step order.
     """
-    repo_file = spec["repository"].get("has_optimize_toml") if spec.get("repository") else False
+    repo_file = spec["repository"].get("has_ascent_toml") if spec.get("repository") else False
     return [
         step for step in _REQUIRED_STEPS if step not in spec and not (step == "contract" and repo_file is not False)
     ]
@@ -291,7 +296,7 @@ def repository_issues(
 
     Returns:
         The issues, the notes, a sample of the repository's top-level paths, and
-        whether the repository has an ``optimize.toml`` (``None`` when unknown).
+        whether the repository has an ``ascent.toml`` (``None`` when unknown).
     """
     provider = repo_hosts.provider_of(repo)
     host = label(provider)
@@ -344,7 +349,59 @@ def case_shape_issues(cases: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[str]]:
+def draft_metric_entry(spec: dict[str, Any]) -> str | tuple[str, ...] | None:
+    """Read the ``[metric] entry`` of the draft's own ``ascent.toml``.
+
+    Args:
+        spec: The whole draft.
+
+    Returns:
+        The entry, or ``None`` when the draft has no valid contract, as the
+        repository's own file is not read here.
+    """
+    text = (spec.get("contract") or {}).get("ascent_toml")
+    if not text:
+        return None
+    try:
+        return parse_constraints(str(text).encode("utf-8", "surrogatepass")).metric.entry
+    except ConstraintsError:
+        return None
+
+
+def draft_scorer_issues(metric_code: str, spec: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Check the scorer step against the draft's ``[metric] entry`` (SKY-738).
+
+    A command entry needs no metric code. Without the draft's own contract, the
+    run's staging checks the repository's entry.
+
+    Args:
+        metric_code: The scorer source; empty for a command metric.
+        spec: The whole draft.
+
+    Returns:
+        The issues and the notes.
+    """
+    entry = draft_metric_entry(spec)
+    if isinstance(entry, tuple):
+        note = "The metric box runs the [metric] entry command, so it does not use the metric code."
+        return [], [note] if metric_code.strip() else []
+    if metric_code.strip():
+        function = entry.rsplit(":", 1)[1] if entry else None
+        return scorer_issues(metric_code, bool(spec.get("data")), function=function, entry_known=entry is not None)
+    if entry is not None:
+        return [
+            f"The [metric] entry {entry} names a Python function, so the scorer needs metric code."
+            " Set it with repo_draft_set_scorer, or make the entry a command."
+        ], []
+    return [], [
+        f"The scorer has no metric code, so the repository's {CONSTRAINTS_FILE} must give [metric] entry as a"
+        " command. The run's setup checks it."
+    ]
+
+
+def scorer_issues(
+    metric_code: str, has_cases: bool, *, function: str | None = None, entry_known: bool = True
+) -> tuple[list[str], list[str]]:
     """Check scorer code statically: it parses and defines the scorer function.
 
     The code never runs here. The run's setup check runs it in the sandbox.
@@ -352,6 +409,11 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     Args:
         metric_code: The scorer source.
         has_cases: Whether the draft has data, so the scorer can get a case.
+        function: The function that ``[metric] entry`` names. ``None`` and
+            ``score``, the default entry's function, keep the default lookup.
+        entry_known: ``False`` when the draft has no ``ascent.toml`` of its
+            own. The repository's file can then name another function, so a
+            missing default function is a note, not an issue.
 
     Returns:
         The issues and the notes.
@@ -364,13 +426,22 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         # Very deep nesting makes the parser give up without a SyntaxError.
         return ["Skynet cannot parse the scorer. Make it simpler."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
-    bound, named = _scorer_binding(tree)
+    names = _SCORER_NAMES if function in (None, "score") else (function,)
+    bound, named = _scorer_binding(tree, names)
     if bound and named is None:
         # The runner takes any callable bound to the name, such as an import,
         # an instance or a decorated function, so only the run's setup check
         # can check it.
         return [], ["Skynet cannot check an imported, assigned or decorated scorer before the run's setup check."]
+    if names != _SCORER_NAMES and not bound:
+        # Like the runner, a named entry function has no fallback to the single function.
+        return [f"The scorer must define {function}(...), the function that [metric] entry names."], []
     scorer = named or (functions[0] if len(functions) == 1 else None)
+    if scorer is None and not entry_known:
+        return [], [
+            "The scorer defines no score(...) or metric(...). The run's setup checks the function that the"
+            f" repository's {CONSTRAINTS_FILE} [metric] entry names."
+        ]
     if scorer is None:
         return [
             "The scorer must define score(repo_path), score(repo_path, case) or score(repo_path, case, output=None)."
@@ -400,8 +471,18 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     notes: list[str] = []
     if _returns_bare_number(scorer):
         issues.append(
-            f"The scorer function {scorer.name} returns a bare number. Return (score, feedback) "
-            "or {'score': ..., 'feedback': ...}, because the engines learn from the feedback."
+            f"The scorer function {scorer.name} returns a bare number. Return an object with score: "
+            "{'score': ..., 'feedback': ...}. The feedback is optional."
+        )
+    if _returns_pair(scorer):
+        issues.append(
+            f"The scorer function {scorer.name} returns a pair. Return an object with score: "
+            "{'score': ..., 'feedback': ...}. The feedback is optional."
+        )
+    if _gives_no_feedback(scorer):
+        notes.append(
+            f"The scorer function {scorer.name} returns no feedback, so the proposer sees only the scores. "
+            "Add 'feedback' to say what was wrong or missing."
         )
     if has_cases and args.vararg is None and positional < 2:
         # The runner calls a one-argument scorer without the case, so this runs.
@@ -409,20 +490,23 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     return issues, notes
 
 
-def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.AsyncFunctionDef | None]:
+def _scorer_binding(
+    tree: ast.Module, candidates: tuple[str, ...]
+) -> tuple[bool, ast.FunctionDef | ast.AsyncFunctionDef | None]:
     """Find the top-level binding the runner uses as the scorer.
 
-    Like the runner, ``score`` wins over ``metric``, and the last top-level
+    Like the runner, an earlier name in ``candidates`` wins, and the last top-level
     binding of the name wins.
 
     Args:
         tree: The parsed scorer module.
+        candidates: The scorer names to look for, in order.
 
     Returns:
         Whether a scorer name is bound, and the function when that binding is
         a plain ``def`` without decorators.
     """
-    for name in _SCORER_NAMES:
+    for name in candidates:
         bound = False
         function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
         for node in tree.body:
@@ -448,9 +532,8 @@ def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.Async
 def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Tell whether ``function`` has a ``return`` of a number literal.
 
-    The first bare-number score stops the whole run, also on an error path,
-    so this catches the mistake before the paid run. Nested functions are
-    not checked.
+    A bare number is not a metric answer, also on an error path, so this
+    catches the mistake before the paid run. Nested functions are not checked.
 
     Args:
         function: The scorer function node.
@@ -467,6 +550,43 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
             if isinstance(value, ast.Constant) and isinstance(value.value, int | float):
                 return True
     return False
+
+
+def _returns_pair(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Tell whether ``function`` has a ``return`` of a two-item tuple literal.
+
+    A pair is not a metric answer (SKY-769). Nested functions are not checked.
+
+    Args:
+        function: The scorer function node.
+
+    Returns:
+        True when one of its own ``return`` statements gives a two-item tuple.
+    """
+    return any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2
+        for node in _own_nodes(function)
+    )
+
+
+def _gives_no_feedback(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Tell whether every ``return`` of ``function`` is a dict literal with no ``feedback`` key.
+
+    Any other return value, a ``**`` unpacking, or a key that is not a literal
+    can hold feedback, so it gives no note. Nested functions are not checked.
+
+    Args:
+        function: The scorer function node.
+
+    Returns:
+        True when the function returns only dict literals and none names ``feedback``.
+    """
+    values = [node.value for node in _own_nodes(function) if isinstance(node, ast.Return)]
+    if not values or not all(
+        isinstance(value, ast.Dict) and all(isinstance(key, ast.Constant) for key in value.keys) for value in values
+    ):
+        return False
+    return not any(key.value == "feedback" for value in values for key in value.keys)
 
 
 def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
@@ -561,7 +681,7 @@ def engine_issues(spec: dict[str, Any]) -> list[str]:
         The issues.
     """
     engine = spec["engine"]["engine"]
-    catalog = {entry.id: entry for entry in engine_catalog("repo").engines}
+    catalog = {entry.id: entry for entry in engine_catalog().engines}
     entry = catalog.get(engine)
     if entry is None:
         return [f"Unknown engine '{engine}'. Use one of: {', '.join(sorted(catalog))}."]
@@ -579,7 +699,7 @@ def engine_choices() -> list[dict[str, Any]]:
     """List the repository engines with their availability, for the agent to offer."""
     return [
         {"id": entry.id, "label": entry.label, "description": entry.description, "available": entry.available}
-        for entry in engine_catalog("repo").engines
+        for entry in engine_catalog().engines
     ]
 
 
@@ -598,7 +718,8 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
     data = spec.get("data") or {}
     models = spec["models"]
     scorer = spec["scorer"]
-    contract = spec.get("contract")
+    # A draft stored before SKY-746 keeps its text under the old key; it reads as no draft contract.
+    contract = (spec.get("contract") or {}).get("ascent_toml")
     entries = _model_entries(models)
     extra_count = len(models.get("extra_models", []))
     body: dict[str, Any] = {
@@ -608,7 +729,9 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
         "recipe": "repo",
         "scorer": {
             "kind": "python",
-            "metric_code": scorer["metric_code"],
+            "metric_code": scorer.get("metric_code") or None,
+            # No code means a command [metric] entry; staging refuses a Python entry without code (SKY-738).
+            "command_metric": not (scorer.get("metric_code") or "").strip(),
             "timeout_seconds": scorer["timeout_seconds"],
             **({"model": _model_config(entries[-1])} if models.get("scorer_model") else {}),
         },
@@ -628,7 +751,7 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
                 # commit is the tree the agent wrote it for, a branch has none.
                 **(
                     {
-                        "draft_files": {CONSTRAINTS_FILE: contract["optimize_toml"]},
+                        "draft_files": {CONSTRAINTS_FILE: contract},
                         "draft_base": spec["repository"].get("commit"),
                         "contract_source": "mcp",
                     }
@@ -697,7 +820,7 @@ def _missing_step_issue(step: str) -> str:
 
 
 def contract_issues(text: str) -> tuple[list[str], list[str]]:
-    """Parse the contract step's ``optimize.toml`` the way a run reads it.
+    """Parse the contract step's ``ascent.toml`` the way a run reads it.
 
     Args:
         text: The file text.
@@ -705,7 +828,7 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
     Returns:
         The parser's first error as an issue, and the notes.
     """
-    error = optimize_toml_error(text)
+    error = ascent_toml_error(text)
     if error is not None:
         return [error["message"]], []
     return [], [f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged."]
@@ -730,8 +853,8 @@ def review_draft(
         return [_missing_step_issue(step) for step in missing], [], {}
     repo_problems, notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
     issues = list(repo_problems)
-    if spec.get("contract"):
-        issues += contract_issues(spec["contract"]["optimize_toml"])[0]
+    if contract := (spec.get("contract") or {}).get("ascent_toml"):
+        issues += contract_issues(contract)[0]
     elif has_contract is False:
         issues.append(_missing_step_issue("contract"))
     data = spec.get("data") or {}
@@ -748,7 +871,7 @@ def review_draft(
             notes.append(f"The staged dataset has {len(rows)} cases.")
         except DomainError as error:
             issues.append(f"The staged dataset cannot be read ({error.code}). Stage it again and set the data step.")
-    scorer_found, scorer_notes = scorer_issues(spec["scorer"]["metric_code"], bool(data))
+    scorer_found, scorer_notes = draft_scorer_issues(spec["scorer"].get("metric_code") or "", spec)
     issues += scorer_found
     notes += scorer_notes
     issues += model_issues(spec["models"], http_client)[0]
@@ -1226,7 +1349,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Start a repository run draft. This is the first step of a repository optimization.
 
         The steps follow the run wizard: repository, data (optional), scorer,
-        contract (unless the repository has an optimize.toml), models, engine,
+        contract (unless the repository has an ascent.toml), models, engine,
         budget (optional), then review and submit. Every step
         answers with the issues it found and the next tool to call.
         """
@@ -1295,7 +1418,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         # The contract step is required only without a repository file, so the
         # draft keeps what the host showed; a review reads the tree again.
         try:
-            issues, notes, top_level, part["has_optimize_toml"] = repository_issues(
+            issues, notes, top_level, part["has_ascent_toml"] = repository_issues(
                 job_store, _user(SCOPE_WRITE).username, part
             )
         except DomainError as error:
@@ -1368,18 +1491,20 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         metric_code: Annotated[
             str,
             Field(
-                min_length=1,
                 max_length=200_000,
-                description="Python that defines score(repo_path), score(repo_path, case) or "
-                "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
+                description="Leave empty when the ascent.toml [metric] entry is a command, such as "
+                'entry = ["./metric.sh"]: the metric box runs that command. Otherwise Python that defines '
+                "score(repo_path), score(repo_path, case) or "
+                "score(repo_path, case, output=None), where output is what the ascent.toml [run] entry "
                 "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
-                "entry's run time in seconds, which Skynet measures outside the version's code. It returns a "
-                "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
+                "entry's run time in seconds, which Skynet measures outside the version's code. It returns one "
+                "object: {'score': float, 'feedback': str, 'scores': {name: {'score': float, 'feedback': str}}}. "
+                "Only score is required; feedback is recommended. Any other form or key is an error.",
             ),
         ],
         timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 60,
     ) -> dict[str, Any]:
-        """Set the Python scorer that grades each version of the repository.
+        """Set the scorer that grades each version of the repository: Python metric code, or none for a command.
 
         Skynet checks the code statically. It does not run it before the run starts.
         """
@@ -1387,53 +1512,53 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
 
         def check(spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
             """Check the scorer code without running it."""
-            issues, notes = scorer_issues(metric_code, bool(spec.get("data")))
+            issues, notes = draft_scorer_issues(metric_code, spec)
             return issues, notes, {}
 
         return save_step(draft_id, "scorer", part, check)
 
     @mcp.tool(name="repo_draft_contract_guide", annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def repo_draft_contract_guide() -> dict[str, Any]:
-        """Return the guide to the optimize.toml contract and a valid example file. It changes nothing.
+        """Return the guide to the ascent.toml contract and a valid example file. It changes nothing.
 
         Read it before repo_draft_set_contract.
         """
         _user(SCOPE_READ)
         return {
             "note": "This is the guide of the app's setup agent. Read the repository with your own tools, and send "
-            "the whole optimize.toml text to repo_draft_set_contract instead of the guide's write tools.",
+            "the whole ascent.toml text to repo_draft_set_contract instead of the guide's write tools.",
             "guide": METRIC_GUIDE,
-            "example": OPTIMIZE_TOML_EXAMPLE,
+            "example": ASCENT_TOML_EXAMPLE,
             "next_tool": "repo_draft_set_contract",
         }
 
     @mcp.tool(name="repo_draft_set_contract", annotations=writes)
     def repo_draft_set_contract(
         draft_id: Annotated[str, Field(max_length=64)],
-        optimize_toml: Annotated[
+        ascent_toml: Annotated[
             str,
             Field(
                 min_length=1,
                 max_length=DRAFT_FILE_BYTES,
-                description="The whole optimize.toml text, starting with version = 1. "
+                description="The whole ascent.toml text, starting with version = 1. "
                 "repo_draft_contract_guide gives the format.",
             ),
         ],
     ) -> dict[str, Any]:
-        """Set the run's optimize.toml contract. Every run needs one, in the draft or in the repository.
+        """Set the run's ascent.toml contract. Every run needs one, in the draft or in the repository.
 
         Skynet parses the file the way a run reads it. The run writes it over
         the repository's own file; the repository stays unchanged.
         """
-        if not optimize_toml.strip():
+        if not ascent_toml.strip():
             raise ToolError(CONSTRAINTS_REQUIRED)
 
         def check(_spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
             """Parse the file the way a run reads it."""
-            issues, notes = contract_issues(optimize_toml)
+            issues, notes = contract_issues(ascent_toml)
             return issues, notes, {}
 
-        return save_step(draft_id, "contract", {"optimize_toml": optimize_toml}, check)
+        return save_step(draft_id, "contract", {"ascent_toml": ascent_toml}, check)
 
     @mcp.tool(name="repo_draft_set_models", annotations=writes)
     def repo_draft_set_models(
@@ -1492,7 +1617,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Set how long the run searches. Optional: the default is 200 scorer runs.
 
         The money limit is not set here. repo_draft_submit takes it. The run
-        stops early at the ``[outcome] target`` score in optimize.toml.
+        stops early at the ``[outcome] target`` score in ascent.toml.
         """
         try:
             budget = BlackboxBudget(max_scorer_runs=max_scorer_runs, max_iterations=max_iterations)
@@ -1645,7 +1770,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         call opens a judge session with one budget of max_cost_cents, at
         least two times the draft's minimum (one call and the final score);
         later calls with the same draft_id and max_cost_cents score in it. Skynet
-        reads optimize.toml at the base commit and refuses a version that
+        reads ascent.toml at the base commit and refuses a version that
         changes it or a protected path. The answer has the score, the named
         scores and the feedback on the search cases only. A retry with the
         same arguments does not pay twice. An answer with status in_progress

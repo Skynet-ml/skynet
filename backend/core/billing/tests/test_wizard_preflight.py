@@ -39,7 +39,7 @@ from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
-from core.worker.repo_gate import GateFailure
+from core.worker.repo_gate import GateFailure, check_repository
 
 PAYLOAD = {
     "seed_candidate": "A real starting candidate",
@@ -47,6 +47,7 @@ PAYLOAD = {
     "reflection_model_config": {"name": "fixture/text"},
     "strategy": {"mode": "single", "engine": "gepa"},
     "max_cost_cents": 20,
+    "target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
 }
 
 
@@ -97,6 +98,21 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
         )
         return {"checks": [{"key": "scorer", "status": "succeeded"}]}
 
+    def stage(payload: dict, **kwargs) -> tuple[dict, SimpleNamespace]:
+        """Stage no checkout: these scenarios test the paid setup ledger, not the repository."""
+        repo = {**payload["target"]["repo"], "environment": {}}
+        staged = SimpleNamespace(
+            snapshot=SimpleNamespace(archive=tmp_path / "tree.tgz"),
+            secrets={},
+            close_scorers=lambda: None,
+            cleanup=lambda: None,
+        )
+        return {**payload, "target": {**payload["target"], "repo": repo}}, staged
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", stage)
+    monkeypatch.setattr(wizard_preflight, "check_repository", lambda *args, **kwargs: [])
+    monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wizard_preflight, "bind_repo_scorer", lambda *args, **kwargs: None)
     monkeypatch.setattr(wizard_preflight, "ModelGateway", _Gateway)
     monkeypatch.setattr(wizard_preflight, "bind_protected_sandbox", lambda *args, **kwargs: None)
     monkeypatch.setattr(wizard_preflight, "_verify_anything", verify)
@@ -451,7 +467,7 @@ def test_unresolved_paid_usage_blocks_stage_advancement(setup_client, monkeypatc
 def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Refuse an unenforceable optimize.toml in the setup check, in the user's language, before the setup model runs."""
+    """Refuse an unenforceable ascent.toml in the setup check, in the user's language, before the setup model runs."""
     client, _engine, calls = setup_client
     archive = tmp_path / "tree.tgz"
     raw = (
@@ -460,7 +476,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
     )
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
     cleaned = []
@@ -474,6 +490,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
     monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
     monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "check_repository", check_repository)
     monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args: inferred.append(args))
 
     response = client.post("/wizard/preflight", json={**_request(_budget(client)), "locale": "he"})
@@ -500,7 +517,7 @@ def test_the_rest_setup_check_rewrites_an_mcp_contract_source(
     archive = tmp_path / "tree.tgz"
     raw = b'version = 1\n[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
     staged = SimpleNamespace(
@@ -516,11 +533,12 @@ def test_the_rest_setup_check_rewrites_an_mcp_contract_source(
     monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
     monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
     monkeypatch.setattr(wizard_preflight, "stage_repository", stage)
+    monkeypatch.setattr(wizard_preflight, "check_repository", check_repository)
     repo = {
         "repository": "example/site",
         "commit": "0" * 40,
         "editable_paths": ["src"],
-        "draft_files": {"optimize.toml": "version = 1\n"},
+        "draft_files": {"ascent.toml": "version = 1\n"},
         "draft_base": "0" * 40,
         "contract_source": "mcp",
     }

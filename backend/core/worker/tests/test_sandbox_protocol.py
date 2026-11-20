@@ -35,8 +35,18 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     15: {"blackbox": "05f352755db27ac1"},
     # The same request; the image writes the run end verdict of the outcome (SKY-692).
     16: {"blackbox": "05f352755db27ac1"},
-    # target.repo.contract_source: where the run's optimize.toml comes from (SKY-693).
+    # target.repo.contract_source: where the run's ascent.toml comes from (SKY-693).
     17: {"blackbox": "f9cc6701c073a012"},
+    # proposer.host_cli_auto: a host_cli that local mode filled in (SKY-753).
+    18: {"blackbox": "21df1d4329719130"},
+    # scorer.command_metric: a command [metric] entry needs no metric_code (SKY-738).
+    19: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's direction (SKY-750).
+    20: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's named-score directions (SKY-775).
+    21: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; every box gets the ASCENT_MODEL* and ASCENT_TASK names (SKY-776).
+    22: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

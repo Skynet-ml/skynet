@@ -514,7 +514,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     "optimizer_name",
     "run_code",
     "metric_code",
-    "optimize_toml",
+    "ascent_toml",
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }

@@ -27,11 +27,16 @@ import httpx
 import pytest
 from vercel.sandbox import SandboxApiError, SandboxFilesystemWriteError
 
+from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.sandbox.grants import Grant
 from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.providers.vercel import VercelEnvironment
 
-from .. import repo_workspace
+from .. import repo_tree, repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_tree import unpack_tree, version_patch
@@ -41,7 +46,9 @@ from ..repo_workspace import (
     PREPARED_DIR,
     WORK_DIR,
     CandidateBox,
+    Checkout,
     MetricBox,
+    RepoBoxSource,
     RepoSetupError,
     RepoWorkspace,
     read_metric_requirements,
@@ -50,6 +57,7 @@ from ..repo_workspace import (
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import ParentSandboxSession
 from ..sandbox_runtime import AsyncBridgeSession
+from ..tree_sandbox import BoxSession
 
 # The metric setup step's pip install, which the fake box answers without the network.
 _PIP_INSTALL = re.compile(r"python3 -m pip install [^&]*")
@@ -308,14 +316,14 @@ def test_protected_paths_win_over_editable_ones_before_the_box_opens(tmp_path: P
     """Lay out an allowed edit, but refuse one to a protected judge file inside an editable folder."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/judge.py": "ok = True\n"})
     runtime = _Runtime()
-    space = _space(archive, runtime, setup=None, protected_paths=["optimize.toml", "src/judge.py"])
+    space = _space(archive, runtime, setup=None, protected_paths=["ascent.toml", "src/judge.py"])
     try:
         rigged = space.open_candidate(_patch(tmp_path / "rigged", archive, {"src/judge.py": "ok = 'always'\n"}))
         assert not isinstance(rigged, CandidateBox)
         assert rigged.problems == ("'src/judge.py' is protected by the repository rules ([paths] protected).",)
         assert runtime.boxes == []
         rules = space.open_candidate(
-            _patch(tmp_path / "rules", archive, {"optimize.toml": "[paths]\neditable = ['.']\n"})
+            _patch(tmp_path / "rules", archive, {"ascent.toml": "[paths]\neditable = ['.']\n"})
         )
         assert not isinstance(rules, CandidateBox)
         allowed = _open(space, _patch(tmp_path / "allowed", archive, {"src/app.py": "x = 2\n"}))
@@ -335,7 +343,7 @@ def _guarded(tmp_path: Path) -> tuple[RepoWorkspace, Path]:
         The workspace and its archive.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n", "eval/judge.py": "ok = True\n"})
-    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "optimize.toml"])
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "ascent.toml"])
     return space, archive
 
 
@@ -573,7 +581,7 @@ def test_a_temporary_answer_file_write_error_goes_up_raw(status: int) -> None:
 def test_an_unwatched_candidate_answer_raises_a_temporary_write_error_and_reports_a_lasting_one() -> None:
     """With no protected files, a 429 on the answer write goes up raw; a 404 still gives an unchecked answer."""
     session = _RefusingSession(_write_error(429))
-    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace")  # type: ignore[arg-type]
+    box = CandidateBox(SimpleNamespace(watched=()), session, "/workspace", None)  # type: ignore[arg-type]
     with pytest.raises(SandboxFilesystemWriteError) as raised:
         box.answer("calls/000001/stages/a.json", "{}")
     assert raised.value is session.error
@@ -1381,7 +1389,7 @@ _SCORING_TOML = (
     '[data]\ncases = "data/cases.jsonl"\n'
 )
 _SCORING_SIDE = {
-    "optimize.toml": _SCORING_TOML,
+    "ascent.toml": _SCORING_TOML,
     "eval/scorer.py": "def score(): return 0.1\n",
     "eval/reference.json": "{}\n",
     "docs/metric_rules.md": "- No cheating.\n",
@@ -1410,7 +1418,7 @@ def _scoring_space(tmp_path: Path, runtime: _Runtime, **options: Any) -> tuple[R
 def test_the_candidate_box_never_holds_the_scoring_side_files(tmp_path: Path) -> None:
     """The setup box and the candidate box get the tree without the metric files (E61, SKY-398)."""
     assert scorer_only_paths(parse_constraints(_SCORING_TOML.encode())) == (
-        "optimize.toml",
+        "ascent.toml",
         "eval/scorer.py",
         ".optimize/exploits",
         "eval/reference.json",
@@ -1508,6 +1516,248 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert candidate.spec.operation_key != metric.spec.operation_key
 
 
+def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each evaluation box opens through the evaluation box source, with the role's hosts as grants (SKY-718)."""
+    calls: list[tuple[str, tuple[Grant, ...]]] = []
+    acquire = RepoBoxSource.acquire
+
+    def recorded(self: RepoBoxSource, agent_id: str, grants: Any) -> Any:
+        """Record the role and grants, then open the box.
+
+        Args:
+            self: The box source.
+            agent_id: The box role.
+            grants: The role's grants.
+
+        Returns:
+            The open box.
+        """
+        calls.append((agent_id, tuple(grants)))
+        return acquire(self, agent_id, grants)
+
+    monkeypatch.setattr(RepoBoxSource, "acquire", recorded)
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=["api.example.com"], metric_hosts=["judge.example.com"])
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert calls == [("candidate", (Grant("api.example.com"),)), ("metric", (Grant("judge.example.com"),))]
+    _, candidate, metric = runtime.boxes
+    assert (candidate.spec.network_disabled, candidate.spec.allowed_hosts) == (False, ("api.example.com",))
+    assert (metric.spec.network_disabled, metric.spec.allowed_hosts) == (False, ("judge.example.com",))
+
+
+def test_the_candidate_and_metric_boxes_go_back_through_their_box_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing an evaluation box releases it through the box source as healthy (SKY-718)."""
+    released: list[bool] = []
+    release = RepoBoxSource.release
+
+    def recorded(self: RepoBoxSource, box: Any, healthy: bool) -> None:
+        """Record the health, then release the box.
+
+        Args:
+            self: The box source.
+            box: The box.
+            healthy: Whether the box is still good.
+        """
+        released.append(healthy)
+        release(self, box, healthy)
+
+    monkeypatch.setattr(RepoBoxSource, "release", recorded)
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert released == [True, True]
+
+
+def test_a_port_host_and_a_one_label_host_reach_the_boxes_as_given(tmp_path: Path) -> None:
+    """Hosts that the repository rules accept but the grant rules refuse still open the boxes (SKY-718)."""
+    runtime = _Runtime()
+    hosts = ["api.example.com:8443", "redis"]
+    space, _ = _scoring_space(tmp_path, runtime, run_hosts=hosts, metric_hosts=hosts)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    _, candidate, metric = runtime.boxes
+    for box in (candidate, metric):
+        assert (box.spec.network_disabled, box.spec.allowed_hosts) == (False, tuple(hosts))
+
+
+def test_a_close_error_of_an_evaluation_box_goes_to_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing a candidate or metric box raises the box's close error, as a plain session close does."""
+    space, _ = _scoring_space(tmp_path, _Runtime())
+    try:
+        candidate = _open(space, "")
+        metric = space.open_metric()
+
+        def broken(self: _Box) -> None:
+            """Close the box, then fail as a settlement can.
+
+            Args:
+                self: The box.
+            """
+            self._inner.close()
+            raise RuntimeError("settlement failed")
+
+        monkeypatch.setattr(_Box, "close", broken)
+        for box in (candidate, metric):
+            with pytest.raises(RuntimeError, match="settlement failed"):
+                box.close()
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetReached("stopped"),
+        BudgetError("no room"),
+        UsagePendingError("pending"),
+        UnpricedOperationError("unpriced"),
+    ],
+)
+def test_a_budget_error_of_a_failed_box_release_is_raised(
+    error: BaseException, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every budget error of a failed box's close stops the caller; another close error is only logged.
+
+    Args:
+        error: The budget error the close raises.
+        caplog: Captures the log line of the other close error.
+    """
+
+    class _Source:
+        """Fail each release with the next error."""
+
+        def __init__(self, failure: BaseException) -> None:
+            """Keep the error to raise.
+
+            Args:
+                failure: The release error.
+            """
+            self.failure = failure
+
+        def release(self, box: Any, healthy: bool) -> None:
+            """Raise the error.
+
+            Args:
+                box: The box.
+                healthy: The box's health.
+            """
+            raise self.failure
+
+    with pytest.raises(type(error)):
+        repo_workspace._release_failed(_Source(error), None, "The candidate box")  # type: ignore[arg-type]
+    caplog.clear()
+    raised: list[BaseException] = []
+    with caplog.at_level(logging.WARNING, logger=repo_workspace.logger.name):
+        try:
+            repo_workspace._release_failed(_Source(RuntimeError("gone")), None, "The candidate box")  # type: ignore[arg-type]
+        except BaseException as other:
+            raised.append(other)
+    assert raised == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "The candidate box did not close cleanly (RuntimeError)"
+    ]
+
+
+def test_a_budget_error_of_the_close_after_a_failed_apply_closes_the_box_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version that does not apply releases its box once, even when that close raises a budget error."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    closes: list[_Box] = []
+    try:
+        space.prepare()
+
+        def pending(self: _Box) -> None:
+            """Close the box, then fail as a settlement that is still pending.
+
+            Args:
+                self: The box.
+
+            Raises:
+                UsagePendingError: Always.
+            """
+            closes.append(self)
+            self._inner.close()
+            raise UsagePendingError("pending")
+
+        monkeypatch.setattr(_Box, "close", pending)
+        with pytest.raises(UsagePendingError):
+            space.open_candidate(
+                "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
+            )
+    finally:
+        monkeypatch.undo()
+        space.close()
+    assert len(closes) == 1
+
+
+def test_a_failed_apply_marks_its_box_session_released_so_a_later_release_does_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure path releases through the box session, so the session cannot release the box again (SKY-785)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    opened: list[BoxSession] = []
+    releases: list[bool] = []
+    open_box = RepoWorkspace._open_box
+    release = RepoBoxSource.release
+
+    def recorded_open(self: RepoWorkspace, *args: Any) -> BoxSession:
+        """Open the box and keep its session.
+
+        Args:
+            self: The workspace.
+            *args: The open's arguments.
+
+        Returns:
+            The session.
+        """
+        box = open_box(self, *args)
+        opened.append(box)
+        return box
+
+    def recorded_release(self: RepoBoxSource, box: Any, healthy: bool) -> None:
+        """Record the health, then release the box.
+
+        Args:
+            self: The box source.
+            box: The box.
+            healthy: The box's health.
+        """
+        releases.append(healthy)
+        release(self, box, healthy)
+
+    try:
+        space.prepare()
+        monkeypatch.setattr(RepoWorkspace, "_open_box", recorded_open)
+        monkeypatch.setattr(RepoBoxSource, "release", recorded_release)
+        checkout = space.open_candidate(
+            "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-y\n+z\n"
+        )
+        assert isinstance(checkout, Checkout)
+        assert releases == [False]
+        opened[0].release(healthy=True)
+        assert releases == [False]
+    finally:
+        monkeypatch.undo()
+        space.close()
+
+
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
     tmp_path: Path,
 ) -> None:
@@ -1559,6 +1809,90 @@ def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_r
     assert setup.closed
     assert metric_setup.closed
     assert not metric_box.online
+
+
+def _build_space(tmp_path: Path, runtime: _Runtime, build: str) -> RepoWorkspace:
+    """Build a workspace whose ``[metric] setup`` command is ``build`` and whose metric files are ``eval``.
+
+    Args:
+        tmp_path: Scratch folder.
+        runtime: Where its boxes open.
+        build: The ``[metric] setup`` command.
+
+    Returns:
+        The workspace.
+    """
+    archive = _archive(
+        tmp_path, {"src/app.py": "SOURCE = 1\n", "eval/metric.sh": "cat bin/metric.txt\n", "eval/source.txt": "v1\n"}
+    )
+    return _space(archive, runtime, setup=None, hidden_paths=["eval"], metric_setup=build)
+
+
+def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(tmp_path: Path) -> None:
+    """``[metric] setup`` runs once with the metric files, offline but for the registries and with no secret (SKY-740)."""
+    runtime = _Runtime()
+    build = 'mkdir -p eval/bin && cp eval/source.txt eval/bin/metric.txt && echo "${API_KEY:-unset}" > eval/bin/key.txt'
+    space = _build_space(tmp_path, runtime, build)
+    try:
+        space.prepare()
+        boxes = [space.open_metric() for _ in range(2)]
+        for metric in boxes:
+            # The saved state holds the build output but no metric source (SKY-398).
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") is None
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") is None
+            metric.install_metric_files()
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/key.txt") == "unset\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") == "cat bin/metric.txt\n"
+            metric.close()
+    finally:
+        space.close()
+    _, metric_setup, *metric_boxes = runtime.boxes
+    assert len(metric_boxes) == 2
+    builds = [command for each in runtime.boxes for command, _ in each.commands if build in command]
+    assert builds == [f"cd {METRIC_REPO_DIR} && {build}"]
+    [(_, env)] = [(command, env) for command, env in metric_setup.commands if build in command]
+    assert env is None
+    assert metric_setup.spec.operation_key == "op:metric-setup-1"
+    assert metric_setup.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
+    assert metric_setup.spec.services == ()
+    assert metric_setup.spec.private
+    assert metric_setup.online
+    # The box has no requirements file, so no pip install runs.
+    assert not [command for command, _ in metric_setup.commands if "pip install" in command]
+    texts = [*metric_setup.writes.values(), *(command for command, _ in metric_setup.commands)]
+    assert not [text for text in texts if "SOURCE" in text or "very-secret-value" in text]
+
+
+def test_a_failed_metric_setup_command_stops_the_run_before_any_candidate_box(tmp_path: Path) -> None:
+    """A broken build fails ``prepare`` with its last lines, and no candidate box opens (SKY-740)."""
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "echo the-build-broke; exit 3")
+    archive = _archive(tmp_path / "other", {"src/app.py": "SOURCE = 1\n"})
+    try:
+        with pytest.raises(RepoSetupError, match=r"\[metric\] setup\) failed \(exit 3\)") as raised:
+            space.prepare()
+        assert "the-build-broke" in str(raised.value)
+        with pytest.raises(RepoSetupError, match="exit 3"):
+            space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
+    finally:
+        space.close()
+    assert [box.spec.operation_key for box in runtime.boxes] == ["op:setup-0", "op:metric-setup-1"]
+
+
+def test_a_metric_setup_command_that_runs_out_of_time_fails_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build has the setup time limit (SKY-740)."""
+    monkeypatch.setattr(repo_workspace, "_SETUP_TIMEOUT_SECONDS", 1.0)
+    space = _build_space(tmp_path, _Runtime(), "sleep 5")
+    try:
+        with pytest.raises(RepoSetupError, match="ran out of time"):
+            space.prepare()
+    finally:
+        space.close()
 
 
 @pytest.mark.parametrize("line", ["-r other.txt", "--index-url https://x.example.com", "./local", "git+https://x/y"])
@@ -1686,7 +2020,7 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
-        box = CandidateBox(space, session, "/workspace")
+        box = CandidateBox(space, session, "/workspace", None)  # type: ignore[arg-type]
         assert box.stamp_before_run() is None
         assert box.answer(f"{call}/stages/x.json", '{"output": 1}') == ()
         assert session.read_file(f"{call}/stages/x.json") == '{"output": 1}'
@@ -1713,3 +2047,38 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
     finally:
         session.close()
     assert _containers(tag) == []
+
+
+def test_box_git_apply_runs_no_filter_from_a_bare_repository_layout(planted_bare_repo: tuple[Path, Path]) -> None:
+    """The box ``GIT`` prefix gives ``git apply`` no config from a bare-repository layout (SKY-812).
+
+    The candidate and stage boxes apply a version with this prefix. The same
+    command without the flag runs the planted filter, so the plant is live.
+
+    Args:
+        planted_bare_repo: Fixture.
+    """
+    repo, marker = planted_bare_repo
+    (repo.parent / "version.patch").write_text(
+        "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+hi\n"
+    )
+
+    def apply(git: str) -> None:
+        """Apply the version in the bare layout with one git prefix.
+
+        Args:
+            git: The git command prefix.
+        """
+        (repo / "y").unlink(missing_ok=True)
+        subprocess.run(
+            ["bash", "-c", f"{git} apply --binary --whitespace=nowarn ../version.patch"], cwd=repo, check=True
+        )
+
+    apply(repo_workspace.GIT)
+    assert (repo / "y").read_text() == "hi\n"
+    assert not marker.exists()
+
+    unsafe = repo_workspace.GIT.replace(f" {shlex.join(repo_tree.SAFE_GIT)}", "")
+    assert unsafe != repo_workspace.GIT
+    apply(unsafe)
+    assert marker.exists()

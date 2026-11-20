@@ -101,7 +101,7 @@ def test_registry_requires_native_proposer_availability() -> None:
 @pytest.mark.parametrize("sandbox", [False, True])
 def test_registry_native_algorithms_do_not_depend_on_candidate_target(sandbox: bool) -> None:
     """Allow native proposal execution for scored code once its runtime is ready."""
-    caps = EngineCapabilities(sandbox=sandbox, agent_target=False, proposer_available=True)
+    caps = EngineCapabilities(sandbox=sandbox, proposer_available=True)
     assert available_engine_ids(caps) == [
         BLACKBOX_ENGINE_GEPA,
         BLACKBOX_ENGINE_BEST_OF_N,
@@ -112,16 +112,6 @@ def test_registry_native_algorithms_do_not_depend_on_candidate_target(sandbox: b
     ]
     assert isinstance(get_engine(BLACKBOX_ENGINE_META_HARNESS, caps), MetaHarnessEngine)
     assert isinstance(get_engine(BLACKBOX_ENGINE_AUTORESEARCH, caps), AutoResearchEngine)
-
-
-def test_registry_filters_multi_part_engines() -> None:
-    """Expose named-component inputs only for engines whose pinned adapter supports them."""
-    assert available_engine_ids(parts=True) == [BLACKBOX_ENGINE_GEPA]
-    assert available_engine_ids(_NATIVE_CAPS, parts=True) == [
-        BLACKBOX_ENGINE_GEPA,
-        BLACKBOX_ENGINE_AUTOSADDLER,
-        BLACKBOX_ENGINE_SHINKA_EVOLVE,
-    ]
 
 
 def test_registry_rejects_unknown_engine() -> None:
@@ -409,6 +399,92 @@ def test_gepa_engine_ranks_by_scored_cases_when_one_case_always_crashes(tmp_path
     assert math.isfinite(seed_score)
     assert child_score > seed_score
     assert server.metric_error("aeiou") is not None
+
+
+def test_gepa_engine_never_rewards_a_version_with_a_failed_run_case(tmp_path: Path) -> None:
+    """A version whose [run] fails on one case loses to a lower, fully scored version (SKY-751).
+
+    Args:
+        tmp_path: Artifact directory.
+    """
+
+    def run_fails_on_case_two(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Fail the [run] entry of "aeiou" on case 2, else score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            No score with a ``run_failed`` status, or vowel density and side information.
+        """
+        if candidate == "aeiou" and case == {"i": 2}:
+            return None, {"feedback": "Run failed: boom", "status": "run_failed"}
+        return vowel_scorer(candidate, case)
+
+    server = EvalServer(run_fails_on_case_two, max_evals=16)
+    task = Task(seed_candidate="hello world", objective="more vowels", cases=[{"i": 0}, {"i": 1}, {"i": 2}])
+
+    result = GepaEngine().run(task, server, make_ctx(str(tmp_path)))
+
+    # "aeiou" scores far higher on its two scored cases, but the seed must win.
+    assert vowel_scorer("aeiou")[0] > vowel_scorer("hello world")[0]
+    assert server.metric_error("aeiou") is not None
+    assert result.best_candidate == "hello world"
+    tree = result.metadata["candidate_tree"]
+    assert all(node["candidate"] != "aeiou" for node in tree)
+
+
+def test_gepa_single_pair_evaluator_keeps_a_failed_run_version_unscored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single-pair call gives a version with an earlier failed [run] entry UNSCORED, as a batch does (SKY-751).
+
+    Args:
+        tmp_path: Artifact directory.
+        monkeypatch: Replaces upstream GEPA to call its single-pair evaluator.
+    """
+    seen: list[float] = []
+
+    def run_fails_on_case_zero(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Fail the [run] entry of "aeiou" on case 0, else score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            No score with a ``run_failed`` status, or vowel density and side information.
+        """
+        if candidate == "aeiou" and case == {"i": 0}:
+            return None, {"feedback": "Run failed: boom", "status": "run_failed"}
+        return vowel_scorer(candidate, case)
+
+    def fake_optimize(**kwargs: Any) -> Any:
+        """Score each version case by case through the single-pair evaluator, then stop.
+
+        Args:
+            **kwargs: What GepaEngine passes to upstream GEPA.
+
+        Raises:
+            BudgetExhaustedError: Always, to end the run after the calls.
+        """
+        seen.extend(
+            kwargs["evaluator"](candidate, case)[0]
+            for candidate in ("aeiou", "hello world")
+            for case in kwargs["dataset"]
+        )
+        raise BudgetExhaustedError("done")
+
+    monkeypatch.setattr(gepa_mod, "optimize_anything", fake_optimize)
+    server = EvalServer(run_fails_on_case_zero, max_evals=8)
+    task = Task(seed_candidate="hello world", objective="vowels", cases=[{"i": 0}, {"i": 1}])
+
+    GepaEngine().run(task, server, make_ctx(str(tmp_path)))
+
+    # "aeiou" scores 1.0 on case 1 alone, but its failed case 0 keeps it UNSCORED.
+    assert seen[:2] == [UNSCORED, UNSCORED]
+    assert seen[2:] == [vowel_scorer("hello world")[0]] * 2
 
 
 def _crash_off_seed(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:

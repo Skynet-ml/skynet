@@ -92,7 +92,7 @@ class UnifiedCase(BaseModel):
     expected: Any | None = None
 
 
-# ``task_model`` is what ``skynet.llm`` calls inside run code;
+# ``task_model`` is what ``openascent.llm`` calls inside run code;
 # ``metric_model`` is derived from the metric code and used inside the metric.
 class UnifiedModels(BaseModel):
     task_model: ModelConfig | None = None

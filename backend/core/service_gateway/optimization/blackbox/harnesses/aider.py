@@ -12,7 +12,7 @@ import json
 
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
 AIDER_ID = "aider"
 AIDER_PACKAGE = "aider-chat"
@@ -137,8 +137,8 @@ def _aider_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         files={AIDER_CONFIG_FILE: _aider_config(gateway, reasoning_effort)},
         run_command=(
             f"{_AIDER_PATH}; {_SNAPSHOT_UNTRACKED_WORKSPACE}"
-            f'OPENAI_API_KEY="$APP_API_KEY" aider --config {AIDER_CONFIG_FILE} '
-            f'--model "{_LITELLM_PREFIX}$APP_MODEL" --message-file "${ENV_PROMPT_FILE}"'
+            f'OPENAI_API_KEY="${ENV_API_KEY}" aider --config {AIDER_CONFIG_FILE} '
+            f'--model "{_LITELLM_PREFIX}${ENV_MODEL}" --message-file "${ENV_PROMPT_FILE}"'
         ),
         env=_base_env(model, gateway),
         parse_output=parse_plain_output,

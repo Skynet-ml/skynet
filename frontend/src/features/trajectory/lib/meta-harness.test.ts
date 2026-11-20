@@ -209,6 +209,24 @@ describe("extractCaseScores", () => {
 });
 
 describe("buildClimb", () => {
+  it("SKY-750: marks the versions that go lower for a minimize run", () => {
+    const model = buildClimb(
+      [candidate("0", 0.5, null, []), candidate("1", 0.3, "0", []), candidate("2", 0.4, "1", [])],
+      [],
+      [],
+      true,
+    );
+    assert.deepEqual(
+      model.versions.map((v) => [v.index, v.improved]),
+      [
+        [0, true],
+        [1, true],
+        [2, false],
+      ],
+    );
+    assert.equal(model.bestId, "1");
+  });
+
   it("marks the versions that beat the best before them and keeps the first best", () => {
     const model = buildClimb(
       [

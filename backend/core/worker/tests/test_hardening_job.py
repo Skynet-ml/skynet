@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from core.i18n_keys import I18nKey
-from core.models.hardening import HardeningJob, HardeningNoise
+from core.models.hardening import HardeningJob, HardeningJobModel, HardeningNoise
 from core.service_gateway.optimization.blackbox.hardening import (
     AttackResult,
     Candidate,
@@ -27,7 +29,9 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
 )
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, strip_archive
+from core.storage.models import Base
 from core.worker.hardening_job import HardeningWorkspace, required_reservation, run_hardening_job
+from core.worker.hardening_runner import store_job_direction
 from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
@@ -59,7 +63,7 @@ _EXPLOIT = {"label": "exploit", "confidence": 0.95, "reason": "Games the metric.
 _FAILURE = GateFailure(
     key="[proposer] tools",
     place="local",
-    reason="optimize.toml sets [proposer] tools.",
+    reason="ascent.toml sets [proposer] tools.",
     code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
 )
 
@@ -162,7 +166,7 @@ class Recorder:
         workdir.mkdir()
         full = _archive(workdir / "tree.tgz", self.files, self.links)
         require_version = not kwargs["started"]
-        constraints = read_constraints(full, require_version=require_version)
+        constraints = read_constraints(full, require_version=require_version, legacy_forms=not require_version)
         assert constraints is not None
         hidden = (*constraints.metric.files, constraints.metric.exploits)
         agent = strip_archive(full, hidden, workdir / "agent-tree.tgz")
@@ -395,7 +399,9 @@ def test_the_attacker_tree_has_no_metric_files_or_exploits(tmp_path: Path) -> No
 
 def test_the_job_reads_the_default_exploits_folder_without_a_metric_section(tmp_path: Path) -> None:
     """A repository without [metric] uses the default suite folder and no reference."""
-    recorder = Recorder(tmp_path, files={CONSTRAINTS_FILE: b"version = 1\n", "bot/app.py": b"x = 1\n"})
+    recorder = Recorder(
+        tmp_path, files={CONSTRAINTS_FILE: b'version = 1\n[run]\nentry = "run.py:main"\n', "bot/app.py": b"x = 1\n"}
+    )
 
     _run(recorder, _cloud_job(), local_mode=False)
 
@@ -403,6 +409,90 @@ def test_the_job_reads_the_default_exploits_folder_without_a_metric_section(tmp_
     assert workspace is not None
     assert workspace.exploits_path == workspace.trusted_root / ".optimize/exploits"
     assert workspace.reference is None
+    assert workspace.minimize is False
+
+
+def test_the_job_reads_a_minimize_metric_direction(tmp_path: Path) -> None:
+    """``[metric] direction = "minimize"`` reaches the fix checks through the workspace (SKY-750)."""
+    toml = _TOML + b'direction = "minimize"\n'
+    recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: toml})
+
+    _run(recorder, _cloud_job(), local_mode=False)
+
+    workspace = recorder.workspace
+    assert workspace is not None
+    assert workspace.minimize is True
+
+
+def test_the_job_saves_the_metric_direction_for_the_page(tmp_path: Path) -> None:
+    """The returned job says the metric direction, so the hardening tree picks the best score by it (SKY-867)."""
+    toml = _TOML + b'direction = "minimize"\n'
+    (tmp_path / "min").mkdir()
+    (tmp_path / "max").mkdir()
+    minimized = _run(
+        Recorder(tmp_path / "min", files={**_FILES, CONSTRAINTS_FILE: toml}), _cloud_job(), local_mode=False
+    )
+    maximized = _run(Recorder(tmp_path / "max"), _cloud_job(), local_mode=False)
+
+    assert minimized.status == maximized.status == "waiting_review"
+    assert minimized.minimize is True
+    assert maximized.minimize is False
+
+
+def test_the_stored_job_has_the_direction_before_the_pass_result(tmp_path: Path) -> None:
+    """The row says ``minimize`` before any sandbox opens, so the live tree picks the lowest score (SKY-867)."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'jobs.db'}")
+    Base.metadata.create_all(engine)
+    job = _cloud_job()
+    claim = "pod-a:claim"
+    with Session(engine) as session:
+        session.add(
+            HardeningJobModel(
+                id=job.id,
+                username="alice",
+                draft_id="draft-1",
+                status=job.status,
+                job=job.model_dump(mode="json"),
+                claimed_by=claim,
+            )
+        )
+        session.commit()
+    recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: _TOML + b'direction = "minimize"\n'})
+    stored: list[Any] = []
+
+    def factory(workspace: HardeningWorkspace, factory_job: HardeningJob) -> Any:
+        """Read the stored row as the pass opens its sandbox, then open the fake runner.
+
+        Args:
+            workspace: The pass's trees.
+            factory_job: The job.
+
+        Returns:
+            The fake runner's context manager.
+        """
+        with Session(engine) as session:
+            row = session.get(HardeningJobModel, job.id)
+            assert row is not None
+            stored.append(row.job.get("minimize"))
+        return recorder.runner_factory(workspace, factory_job)
+
+    run_hardening_job(
+        job,
+        payload=_PAYLOAD,
+        binding_id="budget-1",
+        username="alice",
+        engine=None,
+        local_mode=False,
+        runner_factory=factory,
+        reserve=recorder.reserve,
+        stage=recorder.stage,
+        gate=recorder.gate,
+        on_staged=lambda staged_job: store_job_direction(engine, job.id, minimize=staged_job.minimize, claim=claim),
+    )
+
+    assert stored == [True]
+    assert store_job_direction(engine, job.id, minimize=False, claim="pod-b:other") is False
+    engine.dispose()
 
 
 def test_staging_gets_the_run_shaped_target_and_binding(tmp_path: Path) -> None:
@@ -688,7 +778,7 @@ def test_a_gate_that_raises_fails_the_job(tmp_path: Path) -> None:
 
 
 def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> None:
-    """A bad optimize.toml found by the gate is a preflight failure with its reason, not a failed job."""
+    """A bad ascent.toml found by the gate is a preflight failure with its reason, not a failed job."""
     recorder = Recorder(tmp_path)
 
     def refuse(archive: Path, secret_names: Any, *, place: str, require_version: bool) -> list[GateFailure]:
@@ -703,13 +793,13 @@ def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> No
         Raises:
             ConstraintsError: Always.
         """
-        raise ConstraintsError("optimize.toml is not valid TOML.")
+        raise ConstraintsError("ascent.toml is not valid TOML.")
 
     recorder.gate = refuse  # type: ignore[method-assign]
 
     job = _run(recorder, _cloud_job(), local_mode=False)
 
-    assert (job.status, job.preflight_failures) == ("preflight_failed", ["optimize.toml is not valid TOML."])
+    assert (job.status, job.preflight_failures) == ("preflight_failed", ["ascent.toml is not valid TOML."])
     assert job.reserved_usd == 0
     assert "sandbox" not in recorder.events
     assert not recorder.staged.workdir.exists()
@@ -728,13 +818,13 @@ def test_the_gate_gets_secret_names_only(tmp_path: Path) -> None:
     ("error", "failures"),
     [
         (RepoGateError([_FAILURE]), [_FAILURE.reason]),
-        (ConstraintsError("optimize.toml is not valid TOML."), ["optimize.toml is not valid TOML."]),
+        (ConstraintsError("ascent.toml is not valid TOML."), ["ascent.toml is not valid TOML."]),
     ],
 )
 def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
     tmp_path: Path, error: Exception, failures: list[str]
 ) -> None:
-    """A hidden-file leak or a bad optimize.toml found while staging is a preflight failure with its reasons."""
+    """A hidden-file leak or a bad ascent.toml found while staging is a preflight failure with its reasons."""
     recorder = Recorder(tmp_path)
 
     def refuse(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], StagedRepository]:
@@ -768,7 +858,7 @@ def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
     assert "sandbox" not in recorder.events
 
 
-def test_a_new_job_refuses_an_optimize_toml_with_no_version(tmp_path: Path) -> None:
+def test_a_new_job_refuses_an_ascent_toml_with_no_version(tmp_path: Path) -> None:
     """The first pass of a job is strict: a file with no version is a preflight failure (SKY-690)."""
     recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: _TOML.replace(b"version = 1\n", b"")})
 
@@ -779,7 +869,7 @@ def test_a_new_job_refuses_an_optimize_toml_with_no_version(tmp_path: Path) -> N
     assert "version is missing" in job.preflight_failures[0]
 
 
-def test_a_started_job_reads_an_optimize_toml_with_no_version_as_version_1(tmp_path: Path) -> None:
+def test_a_started_job_reads_an_ascent_toml_with_no_version_as_version_1(tmp_path: Path) -> None:
     """A job past its preflight may predate the version key, so every read of its tree in the pass is lenient."""
     (tmp_path / "first").mkdir()
     (tmp_path / "later").mkdir()
@@ -795,6 +885,28 @@ def test_a_started_job_reads_an_optimize_toml_with_no_version_as_version_1(tmp_p
     assert recorder.gate_require_version is False
     assert recorder.workspace is not None
     assert recorder.workspace.require_version is False
+
+
+def test_a_started_job_reads_an_older_form_and_a_new_job_refuses_it(tmp_path: Path) -> None:
+    """A job past its preflight passed the older reader, so its workspace reads ``"eval/exploits/"`` (SKY-760)."""
+    older = {**_FILES, CONSTRAINTS_FILE: _TOML.replace(b'"eval/exploits"', b'"eval/exploits/"')}
+    (tmp_path / "new").mkdir()
+    (tmp_path / "first").mkdir()
+    (tmp_path / "later").mkdir()
+
+    refused = _run(Recorder(tmp_path / "new", files=older), _cloud_job(), local_mode=False)
+    assert refused.status == "preflight_failed"
+    assert "must be written 'eval/exploits'" in refused.preflight_failures[0]
+
+    job = _run(Recorder(tmp_path / "first"), _cloud_job(), local_mode=False)
+    job = record_verdict(job, job.rounds_detail[0].exploits[0].id, confirmed=True)
+    recorder = Recorder(tmp_path / "later", files=older)
+
+    job = _run(recorder, job, local_mode=False)
+
+    assert job.status == "waiting_fix"
+    assert recorder.workspace is not None
+    assert recorder.workspace.exploits_path == recorder.workspace.trusted_root / "eval/exploits"
 
 
 def test_a_later_pass_restores_the_suite_and_fixes_of_earlier_rounds(tmp_path: Path) -> None:

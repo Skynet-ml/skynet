@@ -277,6 +277,13 @@ void describe("node helpers", () => {
     assert.equal(bestScore(session(1, "running"), []), null);
   });
 
+  void it("takes the lowest score as the best one for a minimize metric", () => {
+    const s = session(1, "running", [call("run_metric", "done", 0.4), call("run_metric", "running", 0.01)]);
+    assert.equal(bestScore(s, [exploit({ exploit_score: 0.7 })], true), 0.4);
+    assert.equal(bestScore(s, [exploit({ exploit_score: 0.2 })], true), 0.2);
+    assert.equal(bestScore(session(1, "running"), [], true), null);
+  });
+
   void it("asks for a review of open exploits and unsure claims, unsure first", () => {
     assert.equal(needsReview(exploit()), true);
     assert.equal(needsReview(exploit({ label: "valid" })), false);
@@ -292,7 +299,7 @@ void describe("node helpers", () => {
 });
 
 void describe("HardenTree", () => {
-  function render(noise: HardeningNoise | null = null) {
+  function render(noise: HardeningNoise | null = null, minimize = false) {
     setClientLocale("en");
     const round = {
       index: 1,
@@ -305,9 +312,31 @@ void describe("HardenTree", () => {
       live: false,
     };
     return renderToStaticMarkup(
-      <HardenTree round={round} job={job()} selected={1} noise={noise} onOpen={() => {}} t={t} />,
+      <HardenTree round={round} job={job({ minimize })} selected={1} noise={noise} onOpen={() => {}} t={t} />,
     );
   }
+
+  void it("does not mark a higher score as beating the base for a minimize metric", () => {
+    const html = render(null, true);
+    assert.doesNotMatch(html, /data-beats/);
+    assert.match(html, /submit\.v2\.harden\.node\.vs_base\(0\.5\)/);
+  });
+
+  void it("marks a lower score as beating the base for a minimize metric", () => {
+    setClientLocale("en");
+    const round = {
+      index: 1,
+      sessions: [session(1, "done", [call("run_metric", "done", 0.8), call("run_metric", "done", 0.2)])],
+      exploits: [exploit({ exploit_score: 0.3, base_score: 0.5 })],
+      briefs: ["Brief 1"],
+      live: false,
+    };
+    const html = renderToStaticMarkup(
+      <HardenTree round={round} job={job({ minimize: true })} selected={1} noise={null} onOpen={() => {}} t={t} />,
+    );
+    assert.match(html, /data-beats="true"/);
+    assert.match(html, /<bdi dir="ltr">0\.2<\/bdi>/);
+  });
 
   void it("draws the lead and each session with its status, score and review badge", () => {
     const html = render();

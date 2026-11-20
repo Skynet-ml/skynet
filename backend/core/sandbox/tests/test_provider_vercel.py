@@ -9,10 +9,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1750,7 +1751,13 @@ def test_policy_confirmed_rules() -> None:
 
 
 GRANT_TOKEN = "Bearer fake-token-not-a-secret"
-GRANT_REGISTRY = {"api.github.example": {"Authorization": GRANT_TOKEN}}
+GRANT_REGISTRY = {
+    "api.github.example": {"/": {"Authorization": GRANT_TOKEN}},
+    "mcp.example.com": {
+        "/team": {"Authorization": "Bearer fake-team"},
+        "/team-web": {"Authorization": "Bearer fake-web"},
+    },
+}
 
 
 def _granted(*grants: Grant) -> dict[str, Any]:
@@ -1797,6 +1804,85 @@ async def test_granted_headers_reach_only_the_credential_host(client: FakeClient
     assert policy.allow["files.example.org"] == ()
     (rule,) = policy.allow["api.github.example"]
     assert [dict(transform.headers) for transform in rule.transform] == [{"Authorization": GRANT_TOKEN}]
+    await env.stop()
+
+
+def _edge_headers(rules: Sequence[Any], path: str) -> list[dict[str, str]]:
+    """Apply a host's SDK rules to one request path as the edge does, and return the headers it adds.
+
+    Args:
+        rules: The host's ``NetworkPolicyRule`` values.
+        path: The request path.
+
+    Returns:
+        The headers of each rule that matches the path.
+    """
+    added = []
+    for rule in rules:
+        matcher = rule.match.path if rule.match is not None else None
+        if (
+            matcher is None
+            or (matcher.kind == "exact" and path == matcher.value)
+            or (matcher.kind == "starts_with" and path.startswith(matcher.value))
+            or (matcher.kind == "regex" and re.search(matcher.value, path) is not None)
+        ):
+            added += [dict(transform.headers) for transform in rule.transform]
+    return added
+
+
+async def test_granted_headers_reach_only_their_server_path(client: FakeClient, log: list[str]) -> None:
+    """Check that a server's headers reach its path and the paths below it, and no other path (SKY-833)."""
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+    rules = client.create_kwargs[0]["network_policy"].allow["mcp.example.com"]
+    assert [rule.match.path.kind for rule in rules] == ["regex"]
+    team = [{"Authorization": "Bearer fake-team"}]
+    for path in ("/team", "/team/", "/team/sse", "/team/v1/.well-known", "/team/a.b/c"):
+        assert _edge_headers(rules, path) == team
+    for other in ("/team-web/messages", "/teams", "/", "/admin"):
+        assert _edge_headers(rules, other) == []
+    await env.stop()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/team/../admin",
+        "/team/./sse",
+        "/team/..",
+        "/team//admin",
+        "/team/%2e%2e/admin",
+        "/team/%2E%2E/admin",
+        "/team/.%2e/admin",
+        "/team/%2fadmin",
+        "/team/..%5cadmin",
+        "/team/x/../../admin",
+        "/team\\..\\admin",
+        "/team/..;/admin",
+        "/team/.;/admin",
+        "/team/%2e%2e;/admin",
+        "/team/..;x=1/admin",
+        "/team/..,x/admin",
+        "/team/..=x/admin",
+        "/team/sse;jsessionid=1",
+    ],
+)
+async def test_granted_headers_skip_a_path_that_leaves_the_prefix(
+    path: str, client: FakeClient, log: list[str]
+) -> None:
+    """Check that a dot, empty, percent-encoded, backslash or path-parameter segment gets no headers (SKY-728).
+
+    Args:
+        path: A raw request path that a normalizing server could serve outside ``/team``.
+        client: The fake Vercel client.
+        log: The provider log.
+    """
+    client.readback = readback("custom", ("mcp.example.com",))
+    env = make_env(client, log, protected=False, **_granted(Grant("mcp.example.com", credential=True, path="/team")))
+    await env.start()
+
+    assert _edge_headers(client.create_kwargs[0]["network_policy"].allow["mcp.example.com"], path) == []
     await env.stop()
 
 
@@ -2904,7 +2990,7 @@ async def test_a_recorded_box_routes_commands_through_the_in_box_proxy(client: F
     box = client.boxes[env.name]
     [start] = box.current_session.scripts
     [script] = [path for path, text in box.fs.files.items() if text == egress_record.PROXY_SOURCE]
-    assert f"python3 -I {script} {vercel.EGRESS_PROXY_PORT}" in start
+    assert f"python3 -I -c {shlex.quote(vercel.PROXY_LAUNCHER)} {script} {vercel.EGRESS_PROXY_PORT}" in start
     assert "'*'" in start
     await env.exec("pip download x")
     proxy_env = box.create_calls[-1]["env"]
@@ -2932,6 +3018,80 @@ async def test_stop_records_the_in_box_proxy_requests_as_cooperative(client: Fak
     # The store masks each box env secret in the row.
     assert _BOX_VALUE in call["secrets"]
     assert json.loads(call["request"])["source"] == egress_record.VERCEL_SOURCE
+
+
+# A stand-in for ctypes: its prctl appends its arguments to the shared log and returns PRCTL_RESULT.
+_FAKE_CTYPES = """import os
+
+
+class _Lib:
+    def prctl(self, *args):
+        with open(os.environ["LAUNCH_LOG"], "a") as log:
+            log.write(f"prctl {args}\\n")
+        return int(os.environ["PRCTL_RESULT"])
+
+
+def CDLL(name, use_errno=False):
+    return _Lib()
+"""
+# A stand-in for the proxy file: it appends its argv to the shared log when it starts to serve.
+_FAKE_PROXY = """import os, sys
+
+if __name__ == "__main__":
+    with open(os.environ["LAUNCH_LOG"], "a") as log:
+        log.write(f"serve {sys.argv[1:]}\\n")
+"""
+
+
+@pytest.mark.parametrize(("result", "served"), [(0, True), (-1, False)], ids=["prctl-ok", "prctl-fails"])
+def test_the_proxy_launcher_makes_the_proxy_non_dumpable_before_it_serves(
+    tmp_path: Path, result: int, served: bool
+) -> None:
+    """Call prctl(PR_SET_DUMPABLE, 0) before the proxy runs, and start no proxy when the call fails (SKY-732).
+
+    Args:
+        tmp_path: Scratch folder; it holds the fake ctypes, the fake proxy and the shared log.
+        result: The return value of the fake prctl.
+        served: The proxy runs after the prctl call.
+    """
+    (tmp_path / "ctypes.py").write_text(_FAKE_CTYPES)
+    proxy = tmp_path / "proxy.py"
+    proxy.write_text(_FAKE_PROXY)
+    log = tmp_path / "launch.log"
+    # No -I here, so PYTHONPATH can put the fake ctypes first; the box runs the same code with -I.
+    done = subprocess.run(
+        [sys.executable, "-c", vercel.PROXY_LAUNCHER, str(proxy), "18443", "60", "*"],
+        env={"PYTHONPATH": str(tmp_path), "LAUNCH_LOG": str(log), "PRCTL_RESULT": str(result)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    lines = log.read_text().splitlines()
+    assert lines[0] == "prctl (4, 0, 0, 0, 0)"
+    if served:
+        assert done.returncode == 0
+        assert lines[1:] == ["serve ['18443', '60', '*']"]
+    else:
+        assert done.returncode != 0
+        assert lines[1:] == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl exists only on Linux")
+def test_the_proxy_launcher_runs_the_proxy_not_dumpable_on_linux(tmp_path: Path) -> None:
+    """On a Linux host the real prctl runs, and the proxy reads PR_GET_DUMPABLE (3) as 0.
+
+    Args:
+        tmp_path: Scratch folder; it holds the stand-in proxy and its output.
+    """
+    out = tmp_path / "dumpable.txt"
+    proxy = tmp_path / "proxy.py"
+    proxy.write_text(
+        f"import ctypes, sys\nopen({str(out)!r}, 'w').write(str(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)))\n"
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", vercel.PROXY_LAUNCHER, str(proxy)], timeout=30, check=False)
+    assert done.returncode == 0
+    assert out.read_text() == "0"
 
 
 def _run_start_script(start: str, tools: Path, python: str | None, missing: str | None = None) -> tuple[int, float]:

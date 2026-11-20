@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from core.api.submission_idempotency import resolve_submission_replay_keys
 from core.models import BlackboxRunRequest
+from core.models.blackbox import STORED_PAYLOAD_CONTEXT
 
 
 def _run_request() -> BlackboxRunRequest:
     """Build one canonical black-box request with a scorer secret."""
+    # A legacy stored request: the replay key reads the whole payload, whatever its target.
     return BlackboxRunRequest.model_validate(
         {
             "seed_candidate": "first",
@@ -18,7 +20,8 @@ def _run_request() -> BlackboxRunRequest:
             },
             "reflection_model_config": {"name": "fixture/text"},
             "strategy": {"mode": "single", "engine": "gepa"},
-        }
+        },
+        context=STORED_PAYLOAD_CONTEXT,
     )
 
 

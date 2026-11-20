@@ -188,7 +188,7 @@ def host_cli_argv(
 
 
 # The host agent runs on macOS, whose default file system ignores case, so
-# OPTIMIZE.TOML opens optimize.toml; the guard compares names without case.
+# ASCENT.TOML opens ascent.toml; the guard compares names without case.
 _FOLD_CASE = sys.platform == "darwin"
 
 

@@ -49,9 +49,9 @@ Skynet gibt Ihnen außerdem Wiederherstellungscodes. Bewahren Sie sie an einem s
 
 ## Wo Ihr Code läuft
 
-Nutzer-Workloads laufen in isolierten Sandboxes. Im gehosteten Produkt ist Vercel Sandbox die Ausführungsgrenze. Das umfasst Konfigurationsprüfungen, Optimierungsdurchläufe, Wiederherstellung und Arbeit an abgeschlossenen Durchläufen.
+Ihr Code läuft nur in isolierten Sandboxes. Die Sandbox ist die Ausführungsgrenze. Das gehostete Produkt nutzt heute Vercel Sandbox. Andere Anbieter docken über eine gemeinsame Sandbox-Schnittstelle an. Jeder Kandidat läuft in seiner eigenen Sandbox. Die Metrik bewertet ihn in einer separaten Sandbox. Das umfasst Konfigurationsprüfungen, Optimierungsdurchläufe, Wiederherstellung und Arbeit an abgeschlossenen Durchläufen.
 
-Skynet-Worker führen Ihren Code nicht aus. Sie sind die Steuerungsebene. Sie starten Jobs, reservieren und verrechnen Budgets, geben Sandboxes eingeschränkte Anmeldedaten und speichern Checkpoints.
+Skynet-Worker führen Ihren Code nicht aus. Sie sind die Steuerungsebene. Sie starten Jobs, reservieren und verrechnen Budgets, geben Sandboxes eingeschränkte Anmeldedaten und speichern jeden Schritt des Durchlaufs.
 
 Bevor Skynet kostenpflichtige Arbeit startet, reserviert es Spielraum in Ihrem Wallet und im Budget des Durchlaufs. Siehe [Budgets und Abrechnung](/docs/concepts/billing).
 

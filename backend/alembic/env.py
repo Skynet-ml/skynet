@@ -15,6 +15,7 @@ from sqlalchemy import engine_from_config, pool
 
 import core.storage.preflights  # noqa: F401  # registers WizardPreflightModel on Base.metadata
 from alembic import context
+from core.storage.migrate import cli_upgrades_shards, upgrade_step_log_shards
 from core.storage.models import Base
 
 config = context.config
@@ -103,6 +104,10 @@ def run_migrations_online() -> None:
     that connection already owns the transaction, so no ``begin_transaction`` is
     started here. A bare ``alembic`` CLI invocation has no such attribute and
     builds its own engine from ``REMOTE_DB_URL`` instead.
+
+    The step log shards (SKY-731) migrate after the main transaction commits.
+    On the boot path, ``core/storage/migrate.py`` runs them after it releases
+    the lock. On the CLI path, this function runs them after its own commit.
     """
     shared = config.attributes.get("connection")
     if shared is not None:
@@ -118,6 +123,8 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata, include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
+    if cli_upgrades_shards(config.cmd_opts):
+        upgrade_step_log_shards()
 
 
 if context.is_offline_mode():

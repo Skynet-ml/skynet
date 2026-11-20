@@ -43,6 +43,7 @@ from ..billing import (
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
 from ..billing.byok_vault import byok_provider_for_litellm
+from ..billing.data_policy import data_policy_for
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
@@ -78,14 +79,14 @@ from ..constants import (
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
 from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
-from ..models.blackbox import STORED_PAYLOAD_CONTEXT
+from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PAYLOAD_CONTEXT, TARGET_RETIRED
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway.embedding_pipeline import embed_finished_job
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
+from ..service_gateway.optimization.blackbox.service import has_loop_route, validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..storage import JobStore
 from ..storage.models import JobModel
@@ -106,7 +107,6 @@ from .checkpoint_compat import (
     validate_checkpoint,
 )
 from .constants import (
-    EVENT_AGENT_RUN,
     EVENT_ERROR,
     EVENT_HEARTBEAT,
     EVENT_LOG,
@@ -116,6 +116,7 @@ from .constants import (
 )
 from .hardening_runner import process_next_hardening_job
 from .log_handler import route_sandbox_logs
+from .loop_host import LOOP_HOST_KEY, run_loop_job
 from .memory_guard import memory_usage_fraction
 from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
@@ -126,11 +127,12 @@ from .repo_staging import (
     infer_repo_setup,
     is_repo_payload,
     publish_improvement,
+    runs_proposer_entry,
     stage_repository,
 )
+from .step_recovery import park_run, still_owns_run
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
 from .unified_aliases import alias_blackbox_metric_model
-from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +286,8 @@ class BackgroundWorker:
         self._processing_jobs: set[str] = set()
         self._claimed_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
+        # (worker id, run id) for each run that its worker parked and has not yet marked done.
+        self._parked_jobs: set[tuple[int, str]] = set()
         self._queue_lock = threading.Lock()
         poll_raw = str(settings.cancel_poll_interval)
         try:
@@ -499,14 +503,26 @@ class BackgroundWorker:
             )
         return True
 
-    def _mark_job_done(self, optimization_id: str) -> None:
+    def _mark_job_done(self, optimization_id: str, worker_id: int | None = None) -> None:
         """Release the claim and clean up per-job worker state.
 
         Args:
             optimization_id: ID of the job that just finished.
+            worker_id: The worker thread that processed the job, when known.
+                When ``None``, the run counts as parked if any pair in
+                ``_parked_jobs`` has this run id, so a caller with no worker
+                id still honors a park.
         """
         was_claimed = False
         with self._queue_lock:
+            if worker_id is None:
+                parked = next((pair for pair in self._parked_jobs if pair[1] == optimization_id), None)
+            else:
+                parked = (worker_id, optimization_id)
+            if parked is not None and parked in self._parked_jobs:
+                # park_job already freed this worker's claim; the maps and the lease may belong to a later claim.
+                self._parked_jobs.discard(parked)
+                return
             self._processing_jobs.discard(optimization_id)
             self._cancel_events.pop(optimization_id, None)
             if optimization_id in self._claimed_jobs:
@@ -519,6 +535,134 @@ class BackgroundWorker:
                 pass
             except Exception:
                 logger.exception("release_job failed for %s", optimization_id)
+
+    def park_job(self, worker_id: int, optimization_id: str, generation: int, wake_at: datetime) -> bool:
+        """Put a waiting run in the wait state and free this worker's claim on it.
+
+        The worker ``worker_id`` must be processing the run now. Its later
+        ``_mark_job_done`` for the run then does nothing.
+
+        A user can cancel a waiting run. The cancel clears ``wake_at`` and
+        frees the run's unstarted budget holds (SKY-800).
+
+        Args:
+            worker_id: The worker thread that processes the run.
+            optimization_id: The run that waits.
+            generation: The execution generation this worker owns.
+            wake_at: When the orphan sweep makes the run claimable again.
+
+        Returns:
+            ``True`` when the run left this worker, so the worker must stop
+            work on it. That is a park that succeeds, and also a park that
+            raises when this worker no longer owns the run or cannot read
+            whether it does; it logs the error. It is also a park that fails
+            while a later claim of the run on this pod holds the run; that
+            claim keeps the maps and the lease. ``False`` when the worker
+            does not process the run, when this worker already parked the
+            run, or when another owner changed the run first; the worker
+            state then comes back. If the worker finished the run during a
+            failed park, the claim is released and no state comes back.
+
+        Raises:
+            Exception: The park's error, when the park raises and the run is
+                still validating or running at ``generation``. The worker
+                state then comes back.
+        """
+        pair = (worker_id, optimization_id)
+        # The maps change before the park, so a thread that claims the woken run
+        # adds it to the maps only after this pop. The activity lock keeps the
+        # worker from finishing the run between the check and the pair.
+        with self._queue_lock, self._activity_lock:
+            # A second park of a parked run would fail and its undo would drop the pair.
+            if self._thread_current_job.get(worker_id) != optimization_id or pair in self._parked_jobs:
+                return False
+            was_claimed = optimization_id in self._claimed_jobs
+            was_processing = optimization_id in self._processing_jobs
+            cancel = self._cancel_events.pop(optimization_id, None)
+            # The run has no lease after the park: a heartbeat would find no claim and cancel the job as stolen.
+            self._claimed_jobs.discard(optimization_id)
+            self._processing_jobs.discard(optimization_id)
+            self._parked_jobs.add(pair)
+        parked = False
+        try:
+            # No lock is held here: a slow database must not block the other workers and their leases.
+            # If the worker finishes the run now, its _mark_job_done takes the pair and does nothing:
+            # the maps are already clear, and a park that succeeds clears the lease itself.
+            parked = park_run(self._job_store.engine, optimization_id, expected_generation=generation, wake_at=wake_at)
+        except Exception:
+            # A park can commit and raise, and the run can then wake and be claimed again before
+            # this read. Only a run still at this worker's generation gets its state back; in any
+            # other case a restore would let this thread's _mark_job_done release a later claim's
+            # lease. The pair stays, and a lease of this generation that nobody renews expires.
+            try:
+                owns: bool | None = still_owns_run(self._job_store.engine, optimization_id, generation)
+            except Exception:
+                logger.exception(
+                    "park_run raised for %s and the ownership read failed; the run leaves this worker",
+                    optimization_id,
+                )
+                owns = None
+            if owns:
+                raise
+            parked = True
+            if owns is False:
+                logger.exception("park_run raised for %s and this worker no longer owns the run", optimization_id)
+        finally:
+            if not parked:
+                parked = self._undo_park(pair, was_claimed=was_claimed, was_processing=was_processing, cancel=cancel)
+        return parked
+
+    def _undo_park(
+        self, pair: tuple[int, str], *, was_claimed: bool, was_processing: bool, cancel: threading.Event | None
+    ) -> bool:
+        """Give a run that did not park its worker state back.
+
+        If the worker finished the run during the park, its ``_mark_job_done``
+        took the pair and skipped the release. The run is not parked, so this
+        method then releases the claim in its place, and restores no state.
+
+        If another claim of the run on this pod happened during the park, that
+        claim owns the maps and the lease. This method then restores and
+        releases nothing, and keeps the pair, so the old worker's
+        ``_mark_job_done`` does nothing.
+
+        Args:
+            pair: The (worker id, run id) that ``park_job`` recorded.
+            was_claimed: Whether this pod held the claim before the park.
+            was_processing: Whether the run was in the processing set before the park.
+            cancel: The run's cancel event before the park.
+
+        Returns:
+            ``True`` when a later claim holds the run, so the run left this worker.
+        """
+        optimization_id = pair[1]
+        with self._queue_lock:
+            finished = pair not in self._parked_jobs
+            # park_job removed the run from the claims, so a claim here is a later one. release_job
+            # matches only the pod, so a restore and a release would take that claim's lease.
+            if optimization_id in self._claimed_jobs:
+                return True
+            self._parked_jobs.discard(pair)
+            if not finished:
+                if was_claimed:
+                    self._claimed_jobs.add(optimization_id)
+                if was_processing:
+                    self._processing_jobs.add(optimization_id)
+                # A claim made during the unlocked park owns the newer event; keep it so a cancel reaches that worker.
+                if cancel is not None:
+                    restored = self._cancel_events.setdefault(optimization_id, cancel)
+                    # stop() clears _running before it sets the events under this lock, so a stop
+                    # during the park either sets the restored event itself or leaves _running False.
+                    # A user cancel in that window finds no event; the heartbeat's store poll
+                    # (_raise_if_store_cancelled) still stops the run.
+                    if not self._running:
+                        restored.set()
+        if finished and was_claimed:
+            try:
+                self._job_store.release_job(optimization_id, self._pod_name)
+            except Exception:
+                logger.exception("release_job failed for %s", optimization_id)
+        return False
 
     def _worker_loop(self, worker_id: int) -> None:
         """Poll for jobs and process them until stopped.
@@ -562,7 +706,7 @@ class BackgroundWorker:
                 finally:
                     with self._activity_lock:
                         self._thread_current_job.pop(worker_id, None)
-                    self._mark_job_done(optimization_id)
+                    self._mark_job_done(optimization_id, worker_id)
         except Exception:
             logger.exception("Worker %d died unexpectedly", worker_id)
 
@@ -656,6 +800,9 @@ class BackgroundWorker:
             if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
                 raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
             execution_payload = BlackboxRunRequest.model_validate(payload_dict, context=STORED_PAYLOAD_CONTEXT)
+            # A stored text or agent run loads for its history, but it never runs again (SKY-834).
+            if execution_payload.target.kind != BLACKBOX_TARGET_REPO:
+                raise ValueError(TARGET_RETIRED)
 
             self._update_owned_job(
                 optimization_id,
@@ -849,9 +996,16 @@ class BackgroundWorker:
                 if payload_dict.get("max_cost_cents") is None:
                     payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
                 host = host_proposer(payload_dict)
+                # A host CLI that local mode filled in gives way to the file's
+                # [proposer] entry at staging (SKY-753), so only staging can say
+                # whether this run uses it.
+                proposer_settings = payload_dict.get("proposer")
+                staging_decides_host = is_repo_payload(payload_dict) and bool(
+                    isinstance(proposer_settings, dict) and proposer_settings.get(HOST_CLI_AUTO_KEY)
+                )
                 # The bind waits for the staged hidden paths, but a host proposer
                 # it would refuse must fail before setup and the scorer cost money.
-                if host is not None:
+                if host is not None and not staging_decides_host:
                     check_host_agent(settings, cli=host[0], permission=host[1])
                 if is_repo_payload(payload_dict):
                     with self._renewing_lease(worker_id):
@@ -865,6 +1019,10 @@ class BackgroundWorker:
                             engine=byok_engine,
                             require_constraints=True,
                         )
+                        if staging_decides_host:
+                            host = host_proposer(payload_dict)
+                            if host is not None:
+                                check_host_agent(settings, cli=host[0], permission=host[1])
                         self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
                         # Before the setup model and the scorer box, so a refused run costs nothing.
                         gate_failures = check_repository(
@@ -877,7 +1035,7 @@ class BackgroundWorker:
                         )
                         if gate_failures:
                             raise RepoGateError(gate_failures)
-                        # The broker was bound before staging read optimize.toml, so the
+                        # The broker was bound before staging read ascent.toml, so the
                         # proposer's hosts are granted only now; with none it stays offline.
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
@@ -923,12 +1081,39 @@ class BackgroundWorker:
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
+                if not has_loop_route(execution_payload):
+                    # Every engine has a loop route since the cutover (SKY-728); a stored job of an engine
+                    # without one has no other place to run.
+                    raise ValueError("The stored job names an engine that the worker engine loop does not run.")
+                # Staging at each claim refuses this too. A job stored before the cutover must never reach the
+                # loop with the file's command, because the loop would run the built-in proposer in silence (SKY-728).
+                staged_snapshot = payload_dict.get(REPO_SNAPSHOT_KEY) or {}
+                if staged_snapshot.get("file_proposer") and not runs_proposer_entry(payload_dict.get("strategy") or {}):
+                    raise ValueError(
+                        "The stored job runs the [proposer] entry command of ascent.toml, but only a single"
+                        " AutoResearch or Meta-Harness run can use it now. Remove [proposer] entry, or choose"
+                        " one of those engines, and start the run again."
+                    )
+                # After the exposure check: the worker's own child runs this run, not a guest box, so it may
+                # hold the proposer model's resolved key. The run and budget fields come from the claimed row.
+                payload_dict[LOOP_HOST_KEY] = {
+                    "run_id": optimization_id,
+                    "username": execution_payload.username,
+                    "budget_id": job_data["execution_budget_id"],
+                    "budget_generation": job_data["execution_budget_generation"],
+                    "execution_generation": execution_generation,
+                    "worker_id": self._pod_name,
+                    "reflection_model": dict(parent_payload.get("reflection_model_config") or {}),
+                    "token_source": parent_payload.get("token_source"),
+                    # The child has no database for the owner's setting, so the parent reads it.
+                    "data_policy": data_policy_for(execution_payload.username),
+                }
 
                 execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
                 budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_vercel_dspy,
+                    target=run_loop_job,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"
@@ -1139,6 +1324,7 @@ class BackgroundWorker:
                             message=final_message,
                             baseline_score=_baseline,
                             optimized_score=_optimized,
+                            direction=result_dict.get("direction") if isinstance(result_dict, dict) else None,
                         )
                         self._record_run_outcome(
                             optimization_id,
@@ -2029,13 +2215,12 @@ class BackgroundWorker:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
         """Drain all pending events from the subprocess queue, routing each by type.
 
-        Handles the event types emitted by ``run_vercel_dspy``:
+        Handles the event types emitted by ``run_loop_job``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
-        ``job_store.append_log``; ``EVENT_AGENT_RUN`` → ``job_store.save_agent_run``
-        or ``append_agent_run_transcript`` (on stores that keep agent runs);
-        ``EVENT_RESULT`` → captured as the return value; ``EVENT_ERROR`` →
-        captured as the error return value.  Store errors are swallowed so a DB
-        hiccup cannot abort an otherwise-healthy optimization.
+        ``job_store.append_log``; ``EVENT_RESULT`` → captured as the return
+        value; ``EVENT_ERROR`` → captured as the error return value.  Store
+        errors are swallowed so a DB hiccup cannot abort an otherwise-healthy
+        optimization.
 
         Args:
             optimization_id: ID the events are persisted under.
@@ -2098,7 +2283,12 @@ class BackgroundWorker:
                         if incumbent is not None:
                             incumbents = checkpoint_tracker.setdefault("_incumbents", {})
                             previous = incumbents.get(-1)
-                            if previous is None or incumbent["selection_score"] > previous["selection_score"]:
+                            # A minimize run's candidate events say so, and its lowest score is the incumbent (SKY-750).
+                            sign = -1.0 if metrics.get("direction") == "minimize" else 1.0
+                            if (
+                                previous is None
+                                or sign * incumbent["selection_score"] > sign * previous["selection_score"]
+                            ):
                                 incumbents[-1] = incumbent
                     fenced_progress = getattr(self._job_store, "record_progress_for_generation", None)
                     if generation is not None and callable(fenced_progress):
@@ -2132,8 +2322,6 @@ class BackgroundWorker:
                         **run_log.normalize(event),
                     }
                 )
-            elif event_type == EVENT_AGENT_RUN:
-                self._persist_agent_run_event(optimization_id, event.get("run"))
             elif event_type == EVENT_RESULT:
                 payload = event.get("result")
                 if isinstance(payload, dict):
@@ -2159,28 +2347,6 @@ class BackgroundWorker:
                     "Optimization %s: failed to persist %d subprocess log entries", optimization_id, len(log_batch)
                 )
         return result_payload, error_payload, drained_count
-
-    def _persist_agent_run_event(self, optimization_id: str, run: Any) -> None:
-        """Store one agent run record or transcript delta, on stores that keep agent runs.
-
-        Args:
-            optimization_id: The job the run belongs to.
-            run: The event's ``run`` payload.
-        """
-        if not isinstance(run, dict) or not isinstance(run.get("run_id"), int):
-            return
-        save_run = getattr(self._job_store, "save_agent_run", None)
-        append_transcript = getattr(self._job_store, "append_agent_run_transcript", None)
-        if save_run is None or append_transcript is None:
-            return
-        try:
-            delta = run.get("transcript_delta")
-            if isinstance(delta, str):
-                append_transcript(optimization_id, run["run_id"], delta)
-            else:
-                save_run(optimization_id, run)
-        except Exception:
-            logger.exception("Optimization %s: failed to persist agent run %s", optimization_id, run.get("run_id"))
 
     def _checkpoints_enabled(self, optimization_type: str) -> bool:
         """Return whether this job is a GEPA run on a checkpoint-capable store.

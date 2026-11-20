@@ -98,6 +98,11 @@ dependencies = [
     # sync bridge into the async sandbox interface, and it came in only
     # through httpx.
     "anyio>=4.14",
+    # OpenAscent reference package (SKY-738): the metric box calls its
+    # call_metric for a command [metric] entry, and repo_constraints reads
+    # ascent.toml with its parser (SKY-760). Exact pin, as the standard's
+    # behaviour must not move under a run.
+    "openascent==0.4.3",
 ]
 
 [project.optional-dependencies]

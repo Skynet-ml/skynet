@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from .. import protocol
 from ..protocol import (
     METRIC_ERROR,
+    NO_FEEDBACK_WARNING,
+    RUN_FAILED_STATUS,
+    STATUS_KEY,
+    TOO_DEEP_ARGUMENTS,
     UNSCORED,
     BudgetExhaustedError,
     EvalServer,
@@ -17,9 +24,14 @@ from ..protocol import (
     candidate_key,
     engine_score,
     fill_unscored,
+    openai_tools,
+    safe_tool_call,
     score_batch,
+    tool_calls_from_openai,
+    warn_once_without_feedback,
 )
 from ..runner import normalize_score
+from ..scorer import normalize_score as scorer_normalize_score
 from .mocks import vowel_scorer
 
 
@@ -266,25 +278,91 @@ def test_scorer_abort_is_not_floored() -> None:
         server.evaluate("anything")
 
 
-def test_a_scorer_without_feedback_stops_the_run() -> None:
-    """Missing feedback is a scorer error that ends the run with the contract message, not a silent zero."""
+def _wrong_form_after_good(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Score "good" with a valid answer; read every other version's bare number as a wrong answer form.
 
-    def bare(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Return a bare number the way a scorer without feedback would.
+    Args:
+        candidate: The version.
+        case: Ignored.
 
-        Args:
-            candidate: Ignored.
-            case: Ignored.
+    Returns:
+        The checked answer.
 
-        Returns:
-            Never; the contract check raises.
-        """
-        return normalize_score(0.5)
+    Raises:
+        ServiceError: For every version other than "good".
+    """
+    return scorer_normalize_score({"score": 1.0} if candidate == "good" else 0.5)
 
-    server = EvalServer(bare, max_evals=5)
 
-    with pytest.raises(ScorerAbortError, match="The scorer must return feedback"):
-        server.evaluate("anything")
+def test_a_wrong_answer_form_before_any_score_stops_the_run() -> None:
+    """The first answer has a wrong form, so the run stops instead of spending its budget on errors (SKY-769)."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    with pytest.raises(ScorerAbortError, match=r"bare number\. Return one object"):
+        server.evaluate("bad")
+
+    assert server.used == 1
+
+
+def test_a_wrong_answer_form_after_a_score_is_one_versions_metric_error() -> None:
+    """After a version has a score, a wrong answer form gives that version a metric error, and the run goes on."""
+    server = EvalServer(_wrong_form_after_good, max_evals=5)
+
+    good = server.lane(2).evaluate("good")
+    score, side_info = server.evaluate("bad")
+
+    assert good[0] == 1.0
+    assert score is None
+    assert side_info[STATUS_KEY] == METRIC_ERROR
+    assert "bare number" in side_info["error"]
+    assert server.used == 2
+
+
+def _scores_without_feedback(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Score like a metric whose answer has no feedback, only a named score without feedback.
+
+    Args:
+        candidate: The version; its length is the score.
+        case: Ignored.
+
+    Returns:
+        The checked answer.
+    """
+    return normalize_score({"score": len(candidate) / 10, "scores": {"format": {"score": 1.0}}})
+
+
+def test_a_metric_without_feedback_runs_and_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    """A metric with no feedback scores every version, and the run log says so one time (SKY-769)."""
+    server = EvalServer(warn_once_without_feedback(_scores_without_feedback), max_evals=5)
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):
+        results = [server.evaluate("ab"), server.evaluate("abc"), server.lane(2).evaluate("abcd")]
+
+    assert [score for score, _ in results] == [pytest.approx(0.2), pytest.approx(0.3), pytest.approx(0.4)]
+    assert results[0][1]["feedback"] == ""
+    assert [record.getMessage() for record in caplog.records] == [NO_FEEDBACK_WARNING]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"score": 0.5, "feedback": "Close.", "scores": {"format": {"score": 1.0}}},
+        {"score": None, "feedback": "", "status": RUN_FAILED_STATUS},
+    ],
+)
+def test_no_warning_for_feedback_or_a_failed_run(caplog: pytest.LogCaptureFixture, answer: dict[str, Any]) -> None:
+    """Feedback on the main score, even with a named score that has none, or a run with no score gives no line.
+
+    Args:
+        caplog: Pytest fixture.
+        answer: What the scorer returns.
+    """
+    scorer = warn_once_without_feedback(lambda candidate, case=None: (answer["score"], dict(answer)))
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.protocol"):
+        scorer("x")
+
+    assert NO_FEEDBACK_WARNING not in [record.getMessage() for record in caplog.records]
 
 
 def test_on_eval_fires_only_at_the_root() -> None:
@@ -353,6 +431,102 @@ def test_fill_unscored_gives_a_null_case_its_versions_scored_mean() -> None:
     assert fill_unscored(candidates, [0.2, None, 0.6, None, None]) == pytest.approx([0.2, 0.4, 0.6, UNSCORED, UNSCORED])
 
 
+def test_fill_unscored_gives_a_failed_run_version_no_score() -> None:
+    """A version with a failed [run] case is UNSCORED on every case and ranks below a lower scored version (SKY-751)."""
+    candidates = ["crash", "crash", "crash", "low", "low", "low"]
+    failed = {"status": RUN_FAILED_STATUS}
+    infos = [{}, {}, failed, {}, {}, {}]
+
+    filled = fill_unscored(candidates, [0.9, 0.9, None, 0.3, 0.3, 0.3], infos)
+
+    assert filled[:3] == [UNSCORED] * 3
+    assert filled[3:] == pytest.approx([0.3] * 3)
+    assert sum(filled[3:]) > sum(filled[:3])
+
+
+def test_fill_unscored_keeps_a_scorers_own_run_failed_status_with_a_score() -> None:
+    """A scorer's own ``run_failed`` status next to a real score is not a failed [run] entry (SKY-221, SKY-751)."""
+    assert fill_unscored(["a", "a"], [0.4, 0.6], [{"status": RUN_FAILED_STATUS}, {}]) == pytest.approx([0.4, 0.6])
+
+
+def test_a_scorers_own_run_failed_status_with_a_finite_score_keeps_its_score() -> None:
+    """Only a failed [run] entry, which sends no score, drops a score; a real score with that status stays (SKY-751)."""
+    server = EvalServer(lambda c, e: (0.4, {"feedback": "ok", "status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score == pytest.approx(0.4)
+    assert info == {"feedback": "ok", "status": RUN_FAILED_STATUS}
+    assert server.mean_score("x") == pytest.approx(0.4)
+    assert server.run_failed("x") is False
+    assert server.metric_error("x") is None
+
+
+def test_nested_server_marks_an_unscored_failed_run_as_no_score() -> None:
+    """An Auto lane gets a failed [run] case as UNSCORED; it stays a run failure with no score (SKY-751)."""
+    server = EvalServer(lambda c, e: (UNSCORED, {"status": RUN_FAILED_STATUS}), max_evals=5)
+
+    score, info = server.evaluate("x")
+
+    assert score is None
+    assert info["status"] == RUN_FAILED_STATUS
+    assert server.metric_error("x") is not None
+    assert server.best_candidate is None
+
+
+def test_a_failed_run_after_a_clean_case_marks_the_version_as_run_failed() -> None:
+    """A version scored on a clean case, then a failed [run] case, keeps the run-failed mark (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Score the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 2:
+            return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+        return 0.7, {"feedback": "ok"}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    assert server.mean_score("c") is None
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
+def test_a_failed_run_after_a_metric_error_marks_the_version_as_run_failed() -> None:
+    """A metric error on one case, then a failed [run] case, still marks the version as run-failed (SKY-751)."""
+
+    def scorer(candidate: str, example: int) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; fail the [run] entry on the second.
+
+        Args:
+            candidate: The version.
+            example: The case number.
+
+        Returns:
+            The score and side info.
+        """
+        if example == 1:
+            return None, {"error": "metric boom"}
+        return None, {"feedback": "Run failed: boom", "status": RUN_FAILED_STATUS}
+
+    server = EvalServer(scorer, max_evals=5)
+    server.evaluate("c", 1)
+    server.evaluate("c", 2)
+
+    assert server.run_failed("c") is True
+    [record] = server.history
+    assert (record.run_failed, record.metric_error) == (True, "Run failed: boom")
+
+
 def test_score_batch_keeps_order_and_metric_error_status() -> None:
     """A batch scores each pair once, keeps the order, and still marks the filled case as a metric error."""
     server = EvalServer(lambda c, e: _crashing("boom" if e == 2 else c, e), max_evals=10)
@@ -375,3 +549,364 @@ def test_score_batch_keeps_order_and_metric_error_status() -> None:
         assert [score for score, _ in results] == [-2.0, -2.0, -4.0]
         assert results[1][1]["status"] == METRIC_ERROR
     assert server.used == 6
+
+
+# An assistant message as LiteLLM's ``response.choices[0].message.model_dump()`` gives it.
+_OPENAI_MESSAGE: dict[str, Any] = {
+    "role": "assistant",
+    "content": None,
+    "tool_calls": [
+        {
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "ls -la"}'},
+        },
+        {"id": "call_def", "type": "function", "function": {"name": "bash", "arguments": ""}},
+    ],
+}
+
+
+def test_openai_tools_converts_flat_definitions() -> None:
+    """A flat definition becomes an OpenAI function tool whose ``parameters`` is the input schema."""
+    schema = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+    tools = openai_tools([{"name": "bash", "description": "Run a command.", "input_schema": schema}])
+
+    assert tools == [
+        {"type": "function", "function": {"name": "bash", "description": "Run a command.", "parameters": schema}}
+    ]
+
+
+def test_tool_calls_from_openai_parses_arguments_and_keeps_ids() -> None:
+    """Each call keeps its id and name, and its JSON arguments become a dict; empty arguments are an empty dict."""
+    assert tool_calls_from_openai(_OPENAI_MESSAGE) == [
+        {"id": "call_abc", "name": "bash", "arguments": {"command": "ls -la"}},
+        {"id": "call_def", "name": "bash", "arguments": {}},
+    ]
+
+
+@pytest.mark.parametrize("message", [{"role": "assistant", "content": "done"}, {"tool_calls": None}])
+def test_tool_calls_from_openai_gives_no_calls_for_a_plain_reply(message: dict[str, Any]) -> None:
+    """A reply that asks for no tool gives no calls."""
+    assert tool_calls_from_openai(message) == []
+
+
+@pytest.mark.parametrize("arguments", ['{"command": ', "[1, 2]"])
+def test_tool_calls_from_openai_keeps_raw_text_that_is_no_json_object(arguments: str) -> None:
+    """Bad JSON, or JSON that is no object, stays raw text, so the engine can answer it with an error result."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": arguments}]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"command": "ls"}, {"command": "ls"}),
+        (["ls"], '["ls"]'),
+        (7, "7"),
+        (0, "0"),
+        (False, "false"),
+        ([], "[]"),
+        ({}, {}),
+        (None, {}),
+        ("", {}),
+    ],
+)
+def test_tool_calls_from_openai_keeps_parsed_or_odd_arguments(arguments: Any, expected: Any) -> None:
+    """A dict stays as it is, missing arguments are ``{}``, and any other value becomes its JSON text.
+
+    A value that is no text does not raise, so no reply is lost, and a falsy one keeps its value.
+    """
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    assert tool_calls_from_openai(message) == [{"id": "call_x", "name": "bash", "arguments": expected}]
+
+
+def _deep_list(levels: int) -> list[Any]:
+    """Build a list nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested lists.
+
+    Returns:
+        ``[[...[]...]]``, ``levels`` lists deep.
+    """
+    value: list[Any] = []
+    for _ in range(levels - 1):
+        value = [value]
+    return value
+
+
+def _deep_dict(levels: int) -> dict[str, Any]:
+    """Build an object nested to a depth, with no recursion.
+
+    Args:
+        levels: The number of nested objects, the outer one included.
+
+    Returns:
+        ``{"a": {"a": ... {}}}``, ``levels`` objects deep.
+    """
+    value: dict[str, Any] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+# 900 levels parses with no RecursionError at a shallow stack, but a later read at a deeper stack can raise. 5000
+# levels raises at any stack.
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "[" * 900 + "]" * 900,
+        '{"a": ' * 900 + "1" + "}" * 900,
+        "[" * 900,
+        _deep_list(900),
+        _deep_dict(900),
+        "[" * 5000 + "]" * 5000,
+        _deep_list(5000),
+    ],
+    ids=["array-text", "object-text", "bad-text", "list-value", "dict-value", "text-past-limit", "value-past-limit"],
+)
+def test_tool_calls_from_openai_gives_too_deep_arguments_for_deep_arguments(arguments: Any) -> None:
+    """Arguments past the fixed depth bound give ``TOO_DEEP_ARGUMENTS``, whatever the stack and the JSON shape.
+
+    Deep text must not reach the transcript, because a later call would read it again and raise.
+
+    Args:
+        arguments: The deep arguments, as text to read or as a value to write as JSON text.
+    """
+    message = {
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+        ]
+    }
+
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_y", "name": "bash", "arguments": {"command": "ls"}},
+    ]
+
+
+def test_tool_calls_from_openai_gives_too_deep_arguments_when_parsing_overflows_the_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text under the depth bound that still overflows the caller's stack fails only its own call.
+
+    Args:
+        monkeypatch: Replaces the JSON reader with one that overflows, as a deep caller stack does.
+    """
+
+    def overflow(value: Any, **_: Any) -> Any:
+        """Raise as ``json.loads`` and ``json.dumps`` do when the caller's stack is already deep.
+
+        Args:
+            value: The arguments text or value.
+
+        Raises:
+            RecursionError: Always.
+        """
+        raise RecursionError(str(value)[:10])
+
+    monkeypatch.setattr(protocol, "json", SimpleNamespace(loads=overflow, dumps=overflow))
+    message = {
+        "tool_calls": [
+            {"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+            {"id": "call_y", "type": "function", "function": {"name": "bash", "arguments": [["ls"]]}},
+            {"id": "call_z", "type": "function", "function": {"name": "bash", "arguments": {"command": "pwd"}}},
+        ]
+    }
+
+    assert tool_calls_from_openai(message) == [
+        {"id": "call_x", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_y", "name": "bash", "arguments": TOO_DEEP_ARGUMENTS},
+        {"id": "call_z", "name": "bash", "arguments": {"command": "pwd"}},
+    ]
+
+
+def test_tool_calls_from_openai_keeps_arguments_at_the_depth_bound() -> None:
+    """Arguments that nest exactly 97 levels stay; one level more gives ``TOO_DEEP_ARGUMENTS``."""
+    # A literal, not the constant, so a change to the bound fails this test.
+    bound = 97
+    at_bound = "[" * bound + "]" * bound
+    message = {
+        "tool_calls": [
+            {"id": "call_a", "type": "function", "function": {"name": "bash", "arguments": at_bound}},
+            {"id": "call_b", "type": "function", "function": {"name": "bash", "arguments": f"[{at_bound}]"}},
+            {"id": "call_c", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound)}},
+            {"id": "call_d", "type": "function", "function": {"name": "bash", "arguments": _deep_list(bound + 1)}},
+            {"id": "call_e", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound)}},
+            {"id": "call_f", "type": "function", "function": {"name": "bash", "arguments": _deep_dict(bound + 1)}},
+        ]
+    }
+
+    assert [call["arguments"] for call in tool_calls_from_openai(message)] == [
+        at_bound,
+        TOO_DEEP_ARGUMENTS,
+        json.dumps(_deep_list(bound)),
+        TOO_DEEP_ARGUMENTS,
+        _deep_dict(bound),
+        TOO_DEEP_ARGUMENTS,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "deeper"),
+    [
+        ('{"a": "' + "[" * 200 + '"}', False),
+        ('{"a": "\\\\", "b": [[1]]}', True),
+        ('{"a": "\\"[[["}', False),
+        ("[[1]]", False),
+        ("[[[1]]]", True),
+        ("[[1], [2]]", False),
+        ("]]][[[", True),
+        ('{"a":1}}}}[[[', True),
+    ],
+    ids=[
+        "brackets-in-string",
+        "escaped-backslash",
+        "escaped-quote",
+        "at-bound",
+        "past-bound",
+        "siblings",
+        "stray-closers-first",
+        "stray-closers-after-a-value",
+    ],
+)
+def test_text_nests_deeper_counts_only_brackets_outside_strings(text: str, deeper: bool) -> None:
+    """Brackets inside JSON strings, quotes that a backslash escapes, and stray closers do not lower the bound.
+
+    Args:
+        text: The JSON text.
+        deeper: Whether it opens more than two levels at one time.
+    """
+    assert protocol.text_nests_deeper(text, 2) is deeper
+
+
+# Compact JSON: json.dumps adds spaces, so the test fails if the code dumps the parsed object again.
+@pytest.mark.parametrize("arguments", ['{"text":"\\ud800"}', '{"k\\udfff":1}', '{"a":[{"b":"\\udc00"}]}', "\ud800"])
+def test_tool_calls_from_openai_keeps_raw_text_when_the_parsed_arguments_hold_a_lone_surrogate(arguments: str) -> None:
+    """A lone surrogate in a key or a value, at any depth, keeps the raw text, escaped, so the step log stores it."""
+    message = {
+        "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "bash", "arguments": arguments}}]
+    }
+
+    [call] = tool_calls_from_openai(message)
+
+    assert call["arguments"] == arguments.encode("utf-8", "backslashreplace").decode("utf-8")
+    json.dumps(call, ensure_ascii=False).encode("utf-8")  # The step log encodes so; a surrogate raises.
+
+
+def test_safe_tool_call_escapes_surrogates_and_keeps_a_safe_call() -> None:
+    """Parsed arguments with a surrogate become JSON text; the id and the name get escapes; a safe call stays."""
+    safe = {"id": "call_x", "name": "bash", "arguments": {"command": "ls \u00e9"}}
+
+    assert safe_tool_call(safe) == safe
+    assert safe_tool_call({"id": "c\ud800", "name": "b\udfff", "arguments": {"k": ["\ud83d"]}}) == {
+        "id": "c\\ud800",
+        "name": "b\\udfff",
+        "arguments": '{"k": ["\\ud83d"]}',
+    }
+    hebrew = safe_tool_call({"id": "c", "name": "b", "arguments": {"a": "\ud800 שלום"}})
+    assert hebrew["arguments"] == '{"a": "\\ud800 שלום"}'
+
+
+def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
+    """A flat definition sent in OpenAI form, and the OpenAI call it gets, convert back to the flat shapes."""
+    definition = {"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}
+    sent = openai_tools([definition])[0]["function"]
+    call = {"id": "call_1", "name": sent["name"], "arguments": {"command": "pytest -q"}}
+    message = {
+        "tool_calls": [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])},
+            }
+        ]
+    }
+
+    assert {"name": sent["name"], "description": sent["description"], "input_schema": sent["parameters"]} == definition
+    assert tool_calls_from_openai(message) == [call]
+
+
+_DIRECTION_SCORES = {"low": 0.2, "mid": 0.5, "high": 0.8}
+
+
+def _direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score each named version with a fixed raw score."""
+    return _DIRECTION_SCORES[candidate], {}
+
+
+def test_a_minimize_server_gives_the_engines_negated_scores_and_the_lowest_version_as_best() -> None:
+    """Every engine maximizes, so a minimize run negates each score; raw_score turns it back (SKY-750)."""
+    seen: list[float | None] = []
+    server = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+
+    scores = [server.evaluate(name)[0] for name in ("mid", "low", "high")]
+
+    assert server.minimizes
+    assert scores == [-0.5, -0.2, -0.8]
+    assert seen == [0.5, 0.2, 0.8]
+    assert server.best_candidate == "low"
+    assert server.raw_score(server.best_score) == 0.2
+    assert server.raw_score(server.raw_score(0.3)) == 0.3
+    assert server.raw_score(None) is None
+
+
+def test_a_minimize_lane_follows_its_root_and_record_external_takes_a_raw_score() -> None:
+    """A lane shares the root's direction, and an outside score is the metric's own score (SKY-750)."""
+    seen: list[float | None] = []
+    root = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+    lane = root.lane(5)
+
+    lane.charge("ext", 0.1, {})
+
+    assert lane.minimizes
+    assert root.mean_score("ext") == -0.1
+    assert lane.raw_score(lane.mean_score("ext")) == 0.1
+    assert seen == [0.1]
+
+
+def _named_direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score every version 0.5, with a raw ``cost_usd`` and ``recall`` named score."""
+    return 0.5, {"scores": {"cost_usd": _DIRECTION_SCORES[candidate], "recall": {"score": 0.9, "feedback": "ok"}}}
+
+
+def test_a_minimize_named_score_stays_raw_and_carries_its_direction() -> None:
+    """Only a [metric.scores] minimize name gets the marker; every named score keeps the metric's value (SKY-775)."""
+    root = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "minimize", "x": "maximize"})
+
+    score, side_info = root.lane(5).evaluate("low")
+
+    assert score == 0.5
+    assert side_info["scores"] == {
+        "cost_usd": {"score": 0.2, "feedback": "", "direction": "minimize"},
+        "recall": {"score": 0.9, "feedback": "ok"},
+    }
+
+
+def test_a_server_with_no_minimize_named_score_keeps_side_info_as_returned() -> None:
+    """Without a minimize name the scorer's side info passes through unchanged."""
+    server = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "maximize"})
+
+    assert server.evaluate("low")[1]["scores"] == {"cost_usd": 0.2, "recall": {"score": 0.9, "feedback": "ok"}}
+
+
+def test_a_maximize_server_keeps_raw_scores() -> None:
+    """The default direction leaves every score as the metric gave it."""
+    server = EvalServer(_direction_scorer, max_evals=10)
+
+    assert [server.evaluate(name)[0] for name in ("low", "high")] == [0.2, 0.8]
+    assert not server.minimizes
+    assert server.best_candidate == "high"
+    assert server.raw_score(0.8) == 0.8

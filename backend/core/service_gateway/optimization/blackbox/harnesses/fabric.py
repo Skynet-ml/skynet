@@ -158,7 +158,7 @@ def sweep(root):
 
 def main():
     config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    prompt = Path(os.environ["APP_PROMPT_FILE"]).read_text(encoding="utf-8")
+    prompt = Path(os.environ["ASCENT_TASK"]).read_text(encoding="utf-8")
     sweep(Path(tempfile.gettempdir()))
     state = Path(tempfile.mkdtemp(prefix="app-fabric-"))
     lock = os.open(state / "owner.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
