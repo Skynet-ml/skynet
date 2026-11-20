@@ -41,6 +41,14 @@ setup = ["npm", "ci"]
 # the output of this entry.
 entry = "bot/run.py:main"
 
+[metric]
+# Optional. The files of the metric. No version sees or changes them.
+files = ["eval"]
+# Optional. The metric itself. The default is "metric.py:score", the Python
+# metric code of the run. A command list runs a metric in any language. See
+# "The metric: [metric] entry" below.
+entry = ["bash", "eval/metric.sh"]
+
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
 # no cases.
@@ -294,14 +302,21 @@ content and no metric code. It has these keys:
   run has no such score. The run scores the final version one time.
 - `contract_sha256`: the SHA-256 of the `optimize.toml` bytes the run read,
   after the draft files apply.
-- `metric_sha256`: one SHA-256 over framed parts. The first part is the
-  entry code, with the path `metric.py`. Then comes one part for each file
-  under the `[metric] files` paths, in sorted path order. Each part is
+- `metric_sha256`: one SHA-256 over framed parts, one part for each file
+  that the metric box gets from `[metric] files`, in sorted path order. The
+  rule is the same for a Python and a command `[metric] entry`. For a Python
+  entry, the run's metric code counts as one file at the entry's path (for
+  `"metric.py:score"`, the path `metric.py`). It replaces a repository file
+  at that path. The entry value itself is not a part, because
+  `contract_sha256` covers it. Each part is
   `<path in UTF-8>\0<byte length in decimal>\0<SHA-256 of the bytes>`. The
   SHA-256 is 64 lowercase hex characters, as `sha256sum` prints it. When
   the staged tree lists a path twice, the later entry counts, as extraction
-  writes it last. For an entry code and one file, this gives the hash:
-  `{ printf 'metric.py\0%s\0%s' "$code_len" "$code_hex"; printf 'eval/scorer.py\0%s\0%s' "$len" "$hex"; } | sha256sum`.
+  writes it last. For the two files `eval/metric.sh` and `eval/words.txt`,
+  this gives the hash:
+  `for f in eval/metric.sh eval/words.txt; do printf '%s\0%s\0%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(sha256sum "$f" | cut -d' ' -f1)"; done | sha256sum`.
+  List the files in byte order (`LC_ALL=C sort`). With no part, the hash is
+  the SHA-256 of no bytes.
 - `metric_source`: `repository` or `request`. `repository` when the file
   sets `[metric] files` and every one comes from the pinned commit.
   `request` when the file sets no `[metric] files`, or a draft file in the
@@ -473,6 +488,91 @@ metric would give each version the same score.
 
 The box user can be root. The boxes depend on the microVM boundary between
 boxes, not on file permissions inside a box.
+
+## The metric: `[metric] entry`
+
+`[metric] entry` names the metric. It has two forms:
+
+- A Python function, `"path.py:function"`. The default is
+  `"metric.py:score"`, so a file without `entry` scores as before. The code
+  is the metric code of the run (the `metric_code` of the scorer), and the
+  function is the one that `entry` names. The calls are the same as above.
+- A command list in any language, for example `["bash", "eval/metric.sh"]`
+  or `["node", "eval/metric.mjs"]`. Each part is a non-empty string. One part
+  must name a file under `[metric] files`, because only those files reach the
+  metric box. The command needs a `[run]` section, because it scores the
+  `[run]` output. The run needs no metric code. When the run sends metric
+  code anyway, the command ignores it.
+
+Any other value fails the setup check, with one message that shows the two
+forms.
+
+A command runs in the metric box, in the folder that holds the `[metric]
+files`, through the `call_metric` function of the pinned
+[OpenAscent](https://pypi.org/project/openascent/) package. It gets two
+environment variables:
+
+- `ASCENT_INPUT`: the path of a JSON file to read. It holds one object:
+  - `input` (any JSON value): the case's `input`.
+  - `output` (any JSON value): what the `[run]` entry returned for the case.
+    It is `null` when nothing ran.
+  - `expected` (any JSON value, optional): the case's `expected`, when the
+    case has one.
+  - `elapsed_s` (number, optional): the run time of the `[run]` entry in
+    seconds, measured outside the version's code. The object has no
+    `elapsed_s` when the time is not known. See "Run time for the metric"
+    below.
+- `ASCENT_OUTPUT`: the path where the command writes its answer as JSON.
+
+The answer is one object, the same form as a Python metric's answer:
+
+- `score` (finite number, required): the score of the version.
+- `feedback` (string, optional): why the version got this score.
+- `scores` (object, optional): a named score for each name, each one
+  `{"score": <finite number>, "feedback": <string, optional>}`.
+
+Any other key is an error. The command must exit with code 0. Its stdout is
+not read. A failure gives the version no score, and the message names the
+cause: the command could not start (for example a missing file), a time
+limit, a nonzero exit code (the message shows the code), no answer file, an
+answer file that is not a plain file, an answer that is not valid JSON, or
+an answer with no `score` or another wrong form. The stderr of the command
+stays in the server log.
+
+The command has the same limits as a Python metric: the same box, network,
+services, vCPUs and time limit. The metric box holds no version code, so
+the command cannot start the candidate again. It reaches only the
+`[metric]` services and hosts. A command gets no `skynet` helpers, such as
+`call()` and the `[metric]` model, in this version.
+
+A bash metric that scores an exact match:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'EOF'
+import json, os
+with open(os.environ["ASCENT_INPUT"]) as f:
+    data = json.load(f)
+ok = data["output"] == data.get("expected")
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"score": 1.0 if ok else 0.0, "feedback": "exact match" if ok else "different"}, f)
+EOF
+```
+
+The same metric in Node:
+
+```js
+// eval/metric.mjs
+import { readFileSync, writeFileSync } from "node:fs";
+
+const data = JSON.parse(readFileSync(process.env.ASCENT_INPUT, "utf8"));
+const ok = JSON.stringify(data.output) === JSON.stringify(data.expected);
+writeFileSync(process.env.ASCENT_OUTPUT, JSON.stringify({ score: ok ? 1 : 0 }));
+```
+
+Metric hardening needs a Python metric. A hardening job for a command
+metric stops with the message "needs a Python metric".
 
 ## Run time for the metric
 
@@ -652,6 +752,10 @@ catch the failure in the program, as above, and let the metric score it.
 - A `services` list in a `[target.<name>]`, or a `network` host list in a
   `[target.<name>]`. Runs cannot use these settings yet. `network = []` in a
   stage passes, because a stage box is already offline except for the relay.
+- A `[metric] entry` that is not `"path.py:function"` and not a list of
+  non-empty strings. A command `entry` that runs no file from `[metric]
+  files`, or that comes without a `[run]` section. A Python `entry` when the
+  run has no metric code.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.

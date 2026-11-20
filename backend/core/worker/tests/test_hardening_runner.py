@@ -1151,6 +1151,7 @@ def test_the_sweep_closes_a_hold_that_an_earlier_close_left_open(
     [
         ({"kind": "remote", "url": "https://score.example", "metric_code": "x"}, True, "hardening.no_python_metric"),
         ({"kind": "python"}, True, "hardening.no_python_metric"),
+        ({"kind": "python", "metric_code": "x", "command_metric": True}, True, "hardening.no_python_metric"),
         (None, False, "hardening.no_managed_models"),
         (
             {**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
@@ -2108,3 +2109,71 @@ def test_a_reclaim_clears_the_live_sessions_of_a_lapsed_pass(engine: Engine) -> 
     assert second is not None
     assert second[2].live_sessions == []
     assert _row(engine, job.id).job["live_sessions"] == []
+
+
+def test_a_trusted_tree_with_a_command_metric_entry_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attackers and fixes edit Python metric code, so a command ``[metric] entry`` stops the pass (SKY-738)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.sh").write_text("exit 0\n")
+    (trusted / "optimize.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="needs a Python metric"), opened:
+        pass

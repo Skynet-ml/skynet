@@ -76,6 +76,11 @@ from urllib.parse import unquote, urlencode
 
 import httpx
 
+try:
+    import openascent
+except ImportError:  # the package needs Python 3.12; a 3.11 dev venv runs only Python metrics
+    openascent = None
+
 from ....billing.budgets import BudgetError, BudgetInsufficientError
 from ....billing.env_connectors import relay_request
 from ....billing.mcp_broker import _pinned_address, _PinnedTransport
@@ -91,7 +96,7 @@ from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import RUN_FAILED_STATUS, STATUS_KEY
-from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
+from .repo_constraints import DEFAULT_METRIC_ENTRY, RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import (
@@ -122,6 +127,12 @@ RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
 CALLS_DIR = f"{REPO_DIR}/calls"
 METRIC_RUNNER_PATH = f"{METRIC_DIR}/app_runner.py"
 METRIC_CALLS_DIR = f"{METRIC_DIR}/calls"
+# The parent copies its own pinned OpenAscent package here for a command
+# [metric] entry, so the box image needs no install of it (SKY-738).
+METRIC_ASCENT_DIR = f"{METRIC_DIR}/openascent"
+# The runner's own work around the command (reading the case, writing the
+# answer) runs inside the box's time limit, so the command gets a bit less.
+_COMMAND_TIME_SHARE = 0.9
 # The version's code can write next to the runner and into $HOME, so the
 # runner starts without its own folder, user site-packages or PYTHON* env on
 # its path: a planted json.py or .pth would run before any check (E38, E40).
@@ -223,6 +234,33 @@ class RepoScoreError(Exception):
 # Skynet's own text, never the metric's (SKY-353). It ends with the answer
 # form, so the run stops on it before any version has a score (SKY-769).
 _WRONG_FORM = f"The scorer answer does not have the valid form, so the version has no score. {runner.ANSWER_FORM}"
+# A command metric's failure, by the OpenAscent cause code (SKY-738). Skynet's
+# own text again: the command's stderr stays in the server log.
+_COMMAND_FAILED = {
+    "start_failed": "The metric command could not start, so the version has no score.",
+    "time_limit": "The metric command exceeded its time limit, so the version has no score.",
+    "nonzero_exit": "The metric command exited with a nonzero code{code}, so the version has no score.",
+    "no_output": "The metric command wrote no result file at ASCENT_OUTPUT, so the version has no score.",
+    "bad_output_file": "The metric command's result at ASCENT_OUTPUT is not a plain file, so the version has no score.",
+    "invalid_json": "The metric command's result file is not valid JSON, so the version has no score.",
+    "invalid_form": _WRONG_FORM,
+}
+
+
+@functools.cache
+def _ascent_files() -> dict[str, str]:
+    """Read the pinned OpenAscent package's modules, to copy into a metric box.
+
+    Returns:
+        Each module's text by its box path under the metric folder.
+
+    Raises:
+        RepoScoreError: When this server has no OpenAscent package.
+    """
+    if openascent is None:
+        raise RepoScoreError("This server has no OpenAscent package, so a metric command cannot run.")
+    folder = Path(openascent.__file__).parent
+    return {f"{METRIC_ASCENT_DIR}/{path.name}": path.read_text(encoding="utf-8") for path in folder.glob("*.py")}
 
 
 class _StageSnapshotError(RepoScoreError):
@@ -289,6 +327,7 @@ class RepoScorer:
         mcp_roles: Mapping[str, RoleEnvironment] | None = None,
         run_entry: str | tuple[str, ...] | None = None,
         run_timeout: float = 60.0,
+        metric_entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY,
         secret_bindings: Mapping[str, str] | None = None,
         secret_hosts: Mapping[str, str] | None = None,
         secret_allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
@@ -329,6 +368,9 @@ class RepoScorer:
             run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
                 command; ``None`` runs no version code before the metric.
             run_timeout: Longest one ``[run]`` call may run.
+            metric_entry: The ``[metric] entry``: ``"path.py:function"``, whose
+                function ``code`` defines, or a command list that the metric box
+                runs through OpenAscent; ``code`` is then unused (SKY-738).
             secret_bindings: ``user`` or ``managed`` for each secret name.
             secret_hosts: The one host each secret may go to, from the
                 repository's ``optimize.toml``.
@@ -359,6 +401,7 @@ class RepoScorer:
         self._recorder = recorder
         self._run_entry = run_entry
         self._run_timeout = run_timeout
+        self._metric_entry = metric_entry
         self._workspace = workspace
         self._gateway = gateway
         self._code = code
@@ -520,12 +563,19 @@ class RepoScorer:
         session.write_files({METRIC_RUNNER_PATH: RUNNER_SOURCE})
         folder = f"{METRIC_CALLS_DIR}/{call.rsplit('/', 1)[1]}"
         document: dict[str, Any] = {
-            "code": self._code,
             "candidate": metric.repo_path,
             "case": case,
             "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
             runner.METRIC_SITE_PARAM: metric.site_path,
         }
+        if isinstance(self._metric_entry, tuple):
+            session.write_files(_ascent_files())
+            document[runner.METRIC_ENTRY_PARAM] = list(self._metric_entry)
+            document[runner.METRIC_TIMEOUT_PARAM] = self._timeout_seconds * _COMMAND_TIME_SHARE
+            document[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{METRIC_ASCENT_DIR}"
+        else:
+            document["code"] = self._code
+            document[runner.METRIC_FUNCTION_PARAM] = self._metric_entry.rsplit(":", 1)[1]
         if ran is not None:
             document["output"] = ran.get("output")
             elapsed = ran.get(runner.ELAPSED_PARAM)
@@ -568,6 +618,10 @@ class RepoScorer:
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
+            if output.get("cause") in _COMMAND_FAILED:
+                code = output.get("exit_code")
+                shown = f" ({code})" if isinstance(code, int) and not isinstance(code, bool) else ""
+                raise RepoScoreError(_COMMAND_FAILED[output["cause"]].replace("{code}", shown))
             # The fixed form text lets the run stop before any score (protocol.py); the metric's text stays out.
             if runner.ANSWER_FORM in str(output["error"]):
                 raise RepoScoreError(_WRONG_FORM)

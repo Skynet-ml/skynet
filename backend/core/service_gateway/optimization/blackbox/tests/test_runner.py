@@ -21,6 +21,11 @@ from typing import Any
 
 import pytest
 
+try:
+    import openascent
+except ImportError:  # the package needs Python 3.12
+    openascent = None
+
 from core.sandbox.providers import vercel
 
 from .. import runner
@@ -1288,6 +1293,30 @@ def test_metric_cannot_import_the_old_skynet_helper_module() -> None:
     assert "skynet" not in sys.modules
 
 
+def test_helper_module_and_copied_openascent_package_coexist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The helper module and the OpenAscent files a metric box gets both keep the ``openascent`` name (SKY-768, SKY-738).
+
+    Args:
+        tmp_path: Stands for the metric folder that holds the copied package.
+        monkeypatch: Puts that folder on ``sys.path`` and restores ``sys.modules``.
+    """
+    package = tmp_path / "openascent"
+    package.mkdir()
+    (package / "__init__.py").write_text("COPIED = True\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setitem(sys.modules, "openascent", sys.modules.get("openascent"))
+    code = (
+        "import openascent\nfrom openascent import call\n"
+        "def score(c, x=None): return call(), hasattr(openascent, 'COPIED')\n"
+    )
+
+    assert load_scorer_from_code(code, helpers={"call": lambda: 1.0})("x") == (1.0, False)
+    copied = runner._load_openascent(package)
+    assert copied.COPIED is True
+    assert sys.modules["openascent"] is copied
+    assert load_scorer_from_code(code, helpers={"call": lambda: 2.0})("x") == (2.0, False)
+
+
 _CANDIDATE_CODE = """
 import json
 import subprocess
@@ -1811,3 +1840,158 @@ def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp
         pytest.skip("the test process already holds no_new_privs, so the call cannot show a change")
     assert "NoNewPrivs:\t0" in before
     assert "NoNewPrivs:\t1" in after
+
+
+_needs_openascent = pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
+
+
+def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]:
+    """Run the runner on a command ``[metric] entry`` whose bash script is ``script`` (SKY-738).
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+        script: The body of ``metric.sh``.
+        **extra: Input keys to add or replace; ``drop`` names keys to remove.
+
+    Returns:
+        The runner's ``output.json``.
+    """
+    drop = extra.pop("drop", ())
+    box = tmp_path / "box"
+    box.mkdir()
+    (box / "metric.sh").write_text(script)
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    payload = {
+        "candidate": str(box),
+        "case": {"input": "q", "expected": "a"},
+        "output": "a",
+        runner.ELAPSED_PARAM: 0.25,
+        "gateway": None,
+        runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
+        runner.METRIC_TIMEOUT_PARAM: 20,
+        runner.ASCENT_PACKAGE_PARAM: str(Path(openascent.__file__).parent),
+        **extra,
+    }
+    for key in drop:
+        payload.pop(key)
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    completed = subprocess.run(
+        [sys.executable, "-I", runner.__file__, str(call_dir)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=box,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+
+
+@_needs_openascent
+def test_a_command_metric_reads_ascent_input_and_writes_ascent_output(tmp_path: Path) -> None:
+    """The command gets the documented input fields and its answer becomes the score (SKY-738)."""
+    script = (
+        'cp "$ASCENT_INPUT" seen.json\n'
+        'printf \'{"score": 0.75, "feedback": "close", "scores": {"exact": {"score": 1}}}\' > "$ASCENT_OUTPUT"\n'
+    )
+    output = _command_metric(tmp_path, script)
+
+    assert output["error"] is None
+    assert output["score"] == 0.75
+    assert output["side_info"]["feedback"] == "close"
+    assert json.loads((tmp_path / "box" / "seen.json").read_text()) == {
+        "input": "q",
+        "output": "a",
+        "expected": "a",
+        "elapsed_s": 0.25,
+    }
+
+
+@_needs_openascent
+def test_a_command_metric_without_expected_or_elapsed_gets_only_input_and_output(tmp_path: Path) -> None:
+    """``expected`` and ``elapsed_s`` are optional: a case without them gives the command neither key."""
+    script = 'cp "$ASCENT_INPUT" seen.json\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    payload = {"candidate": "x", "case": {"input": "q"}, "output": None}
+    output = _command_metric(tmp_path, script, **payload, drop=(runner.ELAPSED_PARAM,))
+    seen = json.loads((tmp_path / "box" / "seen.json").read_text())
+
+    assert output["score"] == 1.0
+    assert seen == {"input": "q", "output": None}
+
+
+@_needs_openascent
+@pytest.mark.parametrize(
+    ("script", "entry", "cause"),
+    [
+        ("echo bad >&2\nexit 3\n", ["bash", "metric.sh"], "nonzero_exit"),
+        ("exit 0\n", ["bash", "metric.sh"], "no_output"),
+        ('echo "{not json" > "$ASCENT_OUTPUT"\n', ["bash", "metric.sh"], "invalid_json"),
+        ('echo \'{"feedback": "no score"}\' > "$ASCENT_OUTPUT"\n', ["bash", "metric.sh"], "invalid_form"),
+        ("exit 0\n", ["./missing.sh"], "start_failed"),
+        ("sleep 30\n", ["bash", "metric.sh"], "time_limit"),
+    ],
+)
+def test_a_failed_command_metric_names_its_cause(tmp_path: Path, script: str, entry: list[str], cause: str) -> None:
+    """Each failure has no score and the OpenAscent cause code, and an exit code when there is one."""
+    output = _command_metric(tmp_path, script, **{runner.METRIC_ENTRY_PARAM: entry, runner.METRIC_TIMEOUT_PARAM: 1})
+
+    assert output["score"] is None
+    assert output["cause"] == cause
+    assert output["error"]
+    if cause == "nonzero_exit":
+        assert output["exit_code"] == 3
+        assert "bad" in output["error"]
+
+
+def test_the_metric_command_is_the_one_process_the_runner_may_start(tmp_path: Path) -> None:
+    """The audit hook lets exactly one start of the command through; a second start or another command is refused."""
+    script = (
+        "import subprocess, sys\n"
+        f"sys.path.insert(0, {str(Path(runner.__file__).parent)!r})\n"
+        "import runner\n"
+        "refused = runner.refuse_processes(allow=['true', 'x'])\n"
+        "results = []\n"
+        "for argv in (['false'], ['true', 'x'], ['true', 'x']):\n"
+        "    try:\n"
+        "        subprocess.run(argv, check=False)\n"
+        "        results.append('ran')\n"
+        "    except runner.ScorerError:\n"
+        "        results.append('refused')\n"
+        "print(results, len(refused))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60, cwd=tmp_path, check=False
+    )
+
+    assert completed.stdout.strip() == "['refused', 'ran', 'refused'] 2", completed.stderr
+
+
+def test_without_an_allowed_command_every_process_start_is_refused(tmp_path: Path) -> None:
+    """A Python metric keeps the old rule: no process start at all (E40)."""
+    script = (
+        "import subprocess, sys\n"
+        f"sys.path.insert(0, {str(Path(runner.__file__).parent)!r})\n"
+        "import runner\n"
+        "refused = runner.refuse_processes()\n"
+        "try:\n"
+        "    subprocess.run(['true'], check=False)\n"
+        "except runner.ScorerError:\n"
+        "    print('refused', len(refused))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60, cwd=tmp_path, check=False
+    )
+
+    assert completed.stdout.strip() == "refused 1", completed.stderr
+
+
+def test_a_python_metric_entry_calls_the_function_it_names() -> None:
+    """``[metric] entry = "metric.py:grade"`` calls ``grade``, not the default ``score`` (SKY-738)."""
+    code = "def score(c, case=None):\n    return 0.0\ndef grade(c, case=None):\n    return 0.5\n"
+
+    assert load_scorer_from_code(code, entrypoint="grade")("x") == 0.5
+    assert load_scorer_from_code(code, entrypoint="score")("x") == 0.0
+    with pytest.raises(ScorerError, match="defines no function 'judge'"):
+        load_scorer_from_code(code, entrypoint="judge")

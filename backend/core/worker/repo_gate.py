@@ -68,6 +68,9 @@ _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.v
 _OUTCOME_TARGET = frozenset({"outcome.target"})
 # The run end judges each minimum on the final score (SKY-692).
 _OUTCOME_MINIMUMS = frozenset({"outcome.require"})
+# The metric box calls a Python entry's function, or runs a command entry
+# through OpenAscent under the same [metric] rules (SKY-738).
+_METRIC_ENTRY = frozenset({"metric.entry"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -81,6 +84,7 @@ _ENFORCED_EVERYWHERE = (
     | _ROLE_BOXES
     | _OUTCOME_TARGET
     | _OUTCOME_MINIMUMS
+    | _METRIC_ENTRY
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -491,7 +495,7 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [("services", f"[services.{name}]") for name in services]
     run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
-    metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
+    metric_keys = ("entry", "files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
     outcome = document.get("outcome", {})
     if "target" in outcome:

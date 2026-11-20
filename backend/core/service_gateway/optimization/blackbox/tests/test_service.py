@@ -983,7 +983,7 @@ def test_run_fails_when_the_scorer_rejects_the_starting_point(fake_lm: FakeRefle
 def test_validate_payload_checks_engine_and_scorer_code(monkeypatch: pytest.MonkeyPatch) -> None:
     """Validation rejects unavailable engines and unloadable scorer code, and passes clean payloads."""
     checked: list[str] = []
-    monkeypatch.setattr(service_mod, "validate_scorer_code", checked.append)
+    monkeypatch.setattr(service_mod, "validate_scorer_code", lambda code, entrypoint, entry_known: checked.append(code))
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: "missing runtime")
 
     validate_blackbox_payload(_payload(max_cost_cents=100))
@@ -998,6 +998,83 @@ def test_validate_payload_checks_engine_and_scorer_code(monkeypatch: pytest.Monk
     assert checked == []
 
 
+@pytest.mark.parametrize(
+    ("metric", "checked"),
+    [
+        ('entry = "metric.py:grade"', [("grade", "grade", True)]),
+        ('entry = "metric.py:score"', [("grade", "score", True)]),
+        ('files = ["eval"]\nentry = ["bash", "eval/metric.sh"]', []),
+        (None, [("grade", None, False)]),
+    ],
+)
+def test_validate_payload_checks_the_function_the_draft_metric_entry_names(
+    monkeypatch: pytest.MonkeyPatch, metric: str | None, checked: list[tuple[str, str | None, bool]]
+) -> None:
+    """Load the draft's ``[metric] entry`` function, and leave a command entry to the setup check (SKY-738).
+
+    Args:
+        monkeypatch: Pytest fixture that records the scorer check.
+        metric: The draft's ``[metric]`` table body, or ``None`` for no draft optimize.toml.
+        checked: The expected ``(code, entrypoint, entry_known)`` calls of the scorer check.
+    """
+    calls: list[tuple[str, str | None, bool]] = []
+    monkeypatch.setattr(
+        service_mod,
+        "validate_scorer_code",
+        lambda code, entrypoint, entry_known: calls.append((code, entrypoint, entry_known)),
+    )
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+    repo: dict[str, Any] = {"repository": "octo/hello", "branch": "main", "editable_paths": ["src/"]}
+    if metric is not None:
+        repo["draft_files"] = {"optimize.toml": f'version = 1\n\n[run]\nentry = ["pytest"]\n\n[metric]\n{metric}\n'}
+    payload = BlackboxRunRequest.model_validate(
+        _repo_request(
+            scorer={"kind": "python", "metric_code": "grade"},
+            target={"kind": "repo", "repo": repo},
+            strategy={"mode": "single", "engine": BLACKBOX_ENGINE_GEPA},
+            max_cost_cents=100,
+        )
+    )
+
+    validate_blackbox_payload(payload)
+
+    assert calls == checked
+
+
+def test_validate_payload_leaves_the_repository_metric_entry_to_the_setup_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a draft optimize.toml, a missing ``score`` does not block, but a syntax error does (SKY-738)."""
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+
+    def payload(code: str) -> BlackboxRunRequest:
+        """Build a repository request with no draft optimize.toml.
+
+        Args:
+            code: The metric code.
+
+        Returns:
+            The request.
+        """
+        return BlackboxRunRequest.model_validate(
+            _repo_request(
+                scorer={"kind": "python", "metric_code": code},
+                target={
+                    "kind": "repo",
+                    "repo": {"repository": "octo/hello", "branch": "main", "editable_paths": ["src/"]},
+                },
+                strategy={"mode": "single", "engine": BLACKBOX_ENGINE_GEPA},
+                max_cost_cents=100,
+            )
+        )
+
+    validate_blackbox_payload(
+        payload("def helper(x):\n    return x\n\ndef grade(candidate, case=None):\n    return 1.0\n")
+    )
+    with pytest.raises(ServiceError, match="syntax error"):
+        validate_blackbox_payload(payload("def !!!"))
+
+
 def test_validate_payload_surfaces_sandbox_errors() -> None:
     """Broken scorer code is caught by the real sandbox before the job is queued."""
     with pytest.raises(ServiceError, match="must define a function named 'score"):
@@ -1007,7 +1084,7 @@ def test_validate_payload_surfaces_sandbox_errors() -> None:
 def test_protected_contract_validation_never_loads_authored_scorer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep executable scorer verification inside the protected runtime's actual readiness check."""
 
-    def forbid(_code: str) -> None:
+    def forbid(_code: str, entrypoint: str | None, entry_known: bool) -> None:
         """Reject scorer execution in contract-only validation."""
         pytest.fail("The protected parent must not execute authored scorer code.")
 
@@ -1087,7 +1164,7 @@ def test_every_engine_accepts_zero_one_or_many_cases(
         cases: No cases, one case, or many.
     """
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
-    monkeypatch.setattr(service_mod, "validate_scorer_code", lambda _code: None)
+    monkeypatch.setattr(service_mod, "validate_scorer_code", lambda _code, entrypoint, entry_known: None)
 
     validate_blackbox_payload(_payload(strategy=strategy, max_cost_cents=100, cases=cases))
 

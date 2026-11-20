@@ -1556,3 +1556,90 @@ def test_a_call_that_finishes_in_time_keeps_its_answer(judge: Any, monkeypatch: 
     assert _payload(_judge(client, draft_id)) == {"status": "scored", "session_id": "session-1", "score": 0.5}
     record["answer"] = remote_mcp_repo.JudgeError("judge.candidate_refused", "It changes optimize.toml.")
     assert json.loads(_error_text(_judge(client, draft_id)))["code"] == "judge.candidate_refused"
+
+
+_COMMAND_CONTRACT = (
+    'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n'
+)
+
+
+def test_a_command_metric_entry_takes_an_empty_scorer(harness: Any) -> None:
+    """A draft whose contract names a command entry needs no metric code, and sends ``command_metric`` (SKY-738)."""
+    client, engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="Make the tests faster.")["draft_id"]
+    _step(client, "repo_draft_set_repository", draft_id=draft_id, repository="acme/app", editable_paths=["src"])
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml=_COMMAND_CONTRACT)
+    _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
+    _step(client, "repo_draft_set_engine", draft_id=draft_id, engine="gepa")
+
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="")
+
+    assert body["issues"] == []
+    assert _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))["issues"] == []
+    scorer = remote_mcp_repo.build_request(_spec(engine, draft_id)).scorer
+    assert (scorer.command_metric, scorer.metric_code) == (True, None)
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    assert body["issues"] == []
+    assert any("does not use the metric code" in note for note in body["notes"])
+    assert remote_mcp_repo.build_request(_spec(engine, draft_id)).scorer.command_metric is False
+
+
+def test_a_python_metric_entry_with_an_empty_scorer_is_an_issue(harness: Any) -> None:
+    """A Python ``[metric] entry`` calls a function, so an empty scorer names the fix (SKY-738)."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    _step(client, "repo_draft_set_contract", draft_id=draft_id, optimize_toml=CONTRACT)
+
+    body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="")
+
+    assert body["issues"] == [
+        "The [metric] entry metric.py:score names a Python function, so the scorer needs metric code."
+        " Set it with repo_draft_set_scorer, or make the entry a command."
+    ]
+
+
+_GRADE_CONTRACT = 'version = 1\n\n[run]\nentry = ["pytest", "-q"]\n\n[metric]\nentry = "metric.py:grade"\n'
+_GRADE_ANSWER = "  return {'score': 1.0, 'feedback': 'ok'}\n"
+
+
+@pytest.mark.parametrize(
+    ("code", "issue"),
+    [
+        (f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}", None),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}\nasync def grade(repo_path):\n{_GRADE_ANSWER}", "grade is async"),
+        (f"def score(repo_path):\n{_GRADE_ANSWER}", "must define grade(...)"),
+    ],
+)
+def test_the_draft_scorer_check_reads_the_function_the_metric_entry_names(code: str, issue: str | None) -> None:
+    """Check the function that ``[metric] entry`` names, not ``score`` or the single function (SKY-738).
+
+    Args:
+        code: The scorer source.
+        issue: A part of the one expected issue, or ``None`` for no issue.
+    """
+    issues, _notes = remote_mcp_repo.draft_scorer_issues(code, {"contract": {"optimize_toml": _GRADE_CONTRACT}})
+
+    if issue is None:
+        assert issues == []
+    else:
+        [found] = issues
+        assert issue in found
+
+
+def test_without_a_draft_contract_a_missing_score_function_is_a_note() -> None:
+    """The repository's own optimize.toml can name another function, so the run's setup checks it (SKY-738)."""
+    code = f"def helper(x):\n  return x\n\ndef grade(repo_path):\n{_GRADE_ANSWER}"
+
+    issues, notes = remote_mcp_repo.draft_scorer_issues(code, {})
+
+    assert issues == []
+    assert "[metric] entry names" in notes[0]
+    assert remote_mcp_repo.draft_scorer_issues("def grade(:\n", {})[0]
+
+
+def test_an_empty_scorer_without_a_draft_contract_leaves_the_entry_to_staging() -> None:
+    """Without the draft's own optimize.toml, the run's staging checks the repository's entry (SKY-738)."""
+    issues, notes = remote_mcp_repo.draft_scorer_issues("", {})
+
+    assert issues == []
+    assert "must give [metric] entry as a command" in notes[0]

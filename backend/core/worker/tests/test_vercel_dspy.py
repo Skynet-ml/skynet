@@ -256,6 +256,37 @@ def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
         assert all(event.get("error") != vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE for event in seen)
 
 
+@pytest.mark.parametrize(("image_protocol", "refused"), [(18, True), (SANDBOX_PROTOCOL, False)])
+def test_an_image_before_19_is_refused_for_a_run_of_a_command_metric(
+    image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image before 19 refuses a command metric request with an unclear error, so the worker names it (SKY-738).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        refused: Whether the worker refuses the image.
+        tmp_path: Checkpoint directory.
+        monkeypatch: Pytest monkeypatch.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    payload = _descriptor_payload(tmp_path, scorer={"kind": "python", "command_metric": True})
+
+    vercel_dspy.run_vercel_dspy(payload, "job-command-metric", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+
+    if refused:
+        assert session.steps == ["probe"]
+        assert seen[0]["error"] == vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE
+    else:
+        assert "optimizer" in session.steps
+        assert all(event.get("error") != vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE for event in seen)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 

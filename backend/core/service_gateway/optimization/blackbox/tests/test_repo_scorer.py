@@ -7,6 +7,7 @@ import http.server
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -5187,3 +5188,101 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
     assert "The supervisor file changed before it ran." in done.stderr
     path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
     assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1
+
+
+_BASH_METRIC = """#!/usr/bin/env bash
+set -euo pipefail
+if grep -q 'x = 7' "$ASCENT_INPUT"; then
+  echo '{"score": 0.7, "feedback": "seven", "scores": {"exact": {"score": 1}}}' > "$ASCENT_OUTPUT"
+else
+  echo '{"score": 0.1, "feedback": "not seven"}' > "$ASCENT_OUTPUT"
+fi
+"""
+
+
+def _command_scorer(tmp_path: Path, metric: str, monkeypatch: pytest.MonkeyPatch) -> tuple[RepoScorer, Path]:
+    """Build a scorer whose ``[metric] entry`` is a bash command in the hidden ``eval`` folder (SKY-738).
+
+    Args:
+        tmp_path: Scratch folder.
+        metric: The text of ``eval/metric.sh``.
+        monkeypatch: Puts this interpreter's folder first on ``PATH``, since the box's
+            ``python3`` must run the OpenAscent package.
+
+    Returns:
+        The scorer and its archive.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": metric})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", "cat src/app.py"),
+        metric_entry=("bash", "eval/metric.sh"),
+    )
+    return scorer, archive
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+def test_a_bash_metric_scores_each_version_through_the_local_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash ``[metric] entry`` reads the ``[run]`` output and scores the baseline and a version (SKY-738)."""
+    scorer, archive = _command_scorer(tmp_path, _BASH_METRIC, monkeypatch)
+    try:
+        baseline = scorer.score("")
+        improved = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+    finally:
+        scorer.close()
+
+    assert (baseline["score"], baseline["feedback"]) == (pytest.approx(0.1), "not seven")
+    assert (improved["score"], improved["feedback"]) == (pytest.approx(0.7), "seven")
+    assert improved["scores"] == {"exact": {"score": pytest.approx(1.0), "feedback": ""}}
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+@pytest.mark.parametrize(
+    ("metric", "message"),
+    [
+        ("echo secret-stderr >&2\nexit 4\n", "exited with a nonzero code (4)"),
+        ("exit 0\n", "wrote no result file at ASCENT_OUTPUT"),
+        ('echo nope > "$ASCENT_OUTPUT"\n', "result file is not valid JSON"),
+        ('echo \'{"feedback": "x"}\' > "$ASCENT_OUTPUT"\n', "does not have the valid form"),
+    ],
+)
+def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metric: str, message: str
+) -> None:
+    """Each failure raises Skynet's fixed message for its cause; the command's stderr stays out of it."""
+    scorer, _ = _command_scorer(tmp_path, metric, monkeypatch)
+    try:
+        with pytest.raises(RepoScoreError, match=re.escape(message)) as caught:
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert "secret-stderr" not in str(caught.value)
+
+
+def test_a_command_metric_is_refused_when_the_server_has_no_openascent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server without the package refuses the command metric with a clear message, before any score."""
+    monkeypatch.setattr(repo_scorer, "openascent", None)
+    monkeypatch.setattr(repo_scorer, "_ascent_files", repo_scorer._ascent_files.__wrapped__)
+    scorer, _ = _command_scorer(tmp_path, _BASH_METRIC, monkeypatch)
+    try:
+        with pytest.raises(RepoScoreError, match="no OpenAscent package"):
+            scorer.score("")
+    finally:
+        scorer.close()

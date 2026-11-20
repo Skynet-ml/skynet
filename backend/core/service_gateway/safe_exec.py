@@ -32,7 +32,15 @@ from queue import Empty as QueueEmpty
 from typing import Any
 
 from ..exceptions import ServiceError
-from .optimization.blackbox.runner import IMAGE_HELPER_NAME, LLM_HELPER_NAME, LOG_HELPER_NAME, Image, log, missing_llm
+from .optimization.blackbox.runner import (
+    IMAGE_HELPER_NAME,
+    LLM_HELPER_NAME,
+    LOG_HELPER_NAME,
+    Image,
+    MissingScorerError,
+    log,
+    missing_llm,
+)
 from .optimization.blackbox.scorer import load_scorer_from_code
 from .optimization.data import (
     extract_signature_fields,
@@ -344,41 +352,65 @@ def validate_transform_code(
         return introspection
 
 
-def _scorer_worker(scorer_code: str, queue: Any) -> None:
+def _scorer_worker(scorer_code: str, entrypoint: str | None, entry_known: bool, queue: Any) -> None:
     """Child-side entry point for ``validate_scorer_code``: load the code, report whether it defines a scorer.
 
     Args:
         scorer_code: User-authored scorer source.
+        entrypoint: The function that ``[metric] entry`` names, or ``None`` for the default lookup.
+        entry_known: Whether ``entrypoint`` is the run's entry. When it is not,
+            a missing default function is no error.
         queue: Multiprocessing queue used to return a result dict.
     """
     try:
         load_scorer_from_code(
-            scorer_code, helpers={LLM_HELPER_NAME: missing_llm, IMAGE_HELPER_NAME: Image, LOG_HELPER_NAME: log}
+            scorer_code,
+            helpers={LLM_HELPER_NAME: missing_llm, IMAGE_HELPER_NAME: Image, LOG_HELPER_NAME: log},
+            entrypoint=entrypoint,
         )
-        queue.put({"ok": True})
+    except ServiceError as exc:
+        # The repository's own [metric] entry can name another function; the run's setup checks it (SKY-738).
+        if entry_known or not isinstance(exc.__cause__, MissingScorerError):
+            queue.put(_error_payload(exc))
+            return
     except BaseException as exc:  # user code is arbitrary — any failure is reported, not raised
         queue.put(_error_payload(exc))
+        return
+    queue.put({"ok": True})
 
 
-def validate_scorer_code(code: str, *, timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS) -> None:
+def validate_scorer_code(
+    code: str,
+    *,
+    entrypoint: str | None = None,
+    entry_known: bool = True,
+    timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS,
+) -> None:
     """Load user-authored scorer code in a subprocess to prove it defines a scorer.
 
     Memoized per-process like the signature validator, for the same dogpile reason.
 
     Args:
         code: User-authored scorer source.
+        entrypoint: The function that ``[metric] entry`` names. ``None`` keeps
+            the default lookup: ``score``, then ``metric``, then the single function.
+        entry_known: ``False`` when the repository's own ``optimize.toml``
+            gives the entry and this check cannot read it. The code must still
+            load, but a missing default function is left to the run's setup.
         timeout_seconds: Maximum time to wait for the child to finish.
 
     Raises:
         ServiceError: When the code fails to load, defines no scorer, or the
             child errors out.
     """
-    if _scorer_cache.get(code):
+    # The same code can define the entry function and miss another one, so the key holds both.
+    key = f"{entrypoint or ''}:{entry_known}:{code}"
+    if _scorer_cache.get(key):
         return
-    with _dogpile_lock(f"scr:{code}"):
-        if _scorer_cache.get(code):
+    with _dogpile_lock(f"scr:{key}"):
+        if _scorer_cache.get(key):
             return
-        result = _run_in_subprocess(_scorer_worker, (code,), timeout_seconds=timeout_seconds)
+        result = _run_in_subprocess(_scorer_worker, (code, entrypoint, entry_known), timeout_seconds=timeout_seconds)
         if not result.get("ok"):
             _raise_child_error(result)
-        _bounded_cache_put(_scorer_cache, code, True)
+        _bounded_cache_put(_scorer_cache, key, True)
