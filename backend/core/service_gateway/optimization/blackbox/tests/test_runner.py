@@ -3019,9 +3019,9 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     and the session gives the stage the mailbox address. The runner blocks
     tracing in every mode, so the scan cannot read the stage's process. No
     process that the scan can read holds the relay address or the tool relay
-    token (SKY-880). ``open`` is the
-    control: the stage makes itself dumpable again, and the scan must find
-    the relay address in the stage's environment.
+    token (SKY-880). ``open`` is the control: the stage makes itself
+    dumpable again, and the scan must find the relay address in the stage's
+    environment.
 
     Args:
         tmp_path: The test's folder.

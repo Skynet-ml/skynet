@@ -787,11 +787,10 @@ continues. The guest keeps the tool relay token in its own memory, not in
 its environment. So no command of a contained session gets the token, and
 no child that copies the guest's environment gets it either (a proposer,
 `git apply`, a served program). Only the guest's own ReAct tools use the
-token. A command stage or a
-proposer still has the mailbox address in its environment, and so does the
-shell that starts a command stage's runner, because they reach models
-through it. Hiding the address is defense in depth: the command can also
-find the mailbox port in `/proc/net/tcp`.
+token. A command stage or a proposer still has the mailbox address in its
+environment, and so does the shell that starts a command stage's runner,
+because they reach models through it. Hiding the address is defense in
+depth: the command can also find the mailbox port in `/proc/net/tcp`.
 
 A Python metric gets none of these variables, because it imports the helpers.
 

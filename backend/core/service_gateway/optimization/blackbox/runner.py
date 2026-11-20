@@ -146,8 +146,9 @@ _LEGACY_ENV_PREFIX = "SKYNET_"
 # session, ``sandbox_runtime._contained_environment``) sets, so they stay out
 # of the command's environment, the ``APP_*`` names in both spellings. The
 # tool relay token goes too: no current runtime sets it, but an older pinned
-# sandbox image's guest wrote it into the environment (SKY-880). The box's own ``ASCENT_MODEL*`` values go too: the command
-# gets these names only from its helpers, and only with a judge model.
+# sandbox image's guest wrote it into the environment (SKY-880). The box's
+# own ``ASCENT_MODEL*`` values go too: the command gets these names only from
+# its helpers, and only with a judge model.
 _COMMAND_HIDDEN_ENV = (
     *(
         name
