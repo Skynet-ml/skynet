@@ -283,8 +283,8 @@ The metric returns each named score as it is. Do not negate a cost or a
 latency. For a minimize named score, the engines get the negated value, so
 each engine still climbs. The proposer text says "(lower is better)" for
 that score. Every named score that a person or an API client sees stays
-raw. A minimize named score in the run result has `"direction":
-"minimize"`.
+raw. Each entry in `failed_requirements` holds the `direction` of its
+score.
 
 A run that sets an `[outcome.require]` limit or uses a minimize named
 score needs a sandbox image at protocol 21 or later. With an older image,
