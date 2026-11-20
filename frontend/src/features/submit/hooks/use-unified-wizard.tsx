@@ -476,8 +476,9 @@ export function WizardV2Provider({
     return () => controller.abort();
   }, [mode, runSource, catalogLoads]);
 
-  // A contract whose [metric] entry is a command needs no metric.py. The
-  // server's parser names the command; the wizard parses no TOML (SKY-770).
+  // A contract whose [metric] entry is a command needs no metric.py, and one
+  // whose [proposer] entry names a command offers it in the agent picker. The
+  // server's parser names both; the wizard parses no TOML (SKY-770, SKY-771).
   const repoContract = useWizardStateOptional()?.repoBase?.get(OPTIMIZE_TOML);
   const contract = state.task.repo
     ? contractText(state.workspace.files[OPTIMIZE_TOML], repoContract)
@@ -485,6 +486,7 @@ export function WizardV2Provider({
   const [checkedContract, setCheckedContract] = useState<{
     text: string;
     command: readonly string[] | null;
+    proposer: readonly string[] | null;
   } | null>(null);
   useEffect(() => {
     if (!contract.trim()) return;
@@ -494,7 +496,12 @@ export function WizardV2Provider({
         .then((result) => {
           if (controller.signal.aborted) return;
           const command = result.ok ? (result.metric_command ?? null) : null;
-          setCheckedContract({ text: contract, command: command?.length ? command : null });
+          const proposer = result.ok ? (result.proposer_command ?? null) : null;
+          setCheckedContract({
+            text: contract,
+            command: command?.length ? command : null,
+            proposer: proposer?.length ? proposer : null,
+          });
         })
         // With no answer the wizard asks for metric.py, as for a contract with no command.
         .catch(() => {});
@@ -507,6 +514,8 @@ export function WizardV2Provider({
   // An answer counts only for the text it checked, so an edit never keeps a stale command.
   const metricCommand =
     contract.trim() && checkedContract?.text === contract ? checkedContract.command : null;
+  const proposerCommand =
+    contract.trim() && checkedContract?.text === contract ? checkedContract.proposer : null;
   const stepIssue = useCallback(
     (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog, { metricCommand }),
     [state, optimizerCatalog, metricCommand],
@@ -1206,6 +1215,7 @@ export function WizardV2Provider({
     optimizerCatalogLoading,
     runBlockedReason,
     metricCommand,
+    proposerCommand,
     ensureBudget,
     submit,
     submitting: submitPhase !== "idle",

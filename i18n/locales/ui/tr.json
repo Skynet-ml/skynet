@@ -153,6 +153,7 @@
   "submit.v2.optimizer.proposer.candidates": "Yineleme başına aday",
   "submit.v2.optimizer.proposer.harness": "Kodlama ajanı",
   "submit.v2.optimizer.proposer.harness_default": "Deponun öneren ajanı veya sunucu varsayılanı",
+  "submit.v2.optimizer.proposer.from_file": "Sözleşme dosyasından",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
   "submit.v2.optimizer.sandbox.hint": "Çalıştırmanın kodunun çalıştığı yer.",
   "submit.v2.optimizer.sandbox.load_failed": "Sandbox'lar yüklenemedi. Çalıştırma sunucunun varsayılanını kullanır.",

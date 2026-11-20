@@ -4043,6 +4043,7 @@
   "submit.v2.optimizer.proposer.title.guided": "הגדרות הסוכן (אופציונלי)",
   "submit.v2.optimizer.proposer.harness": "סוכן קוד",
   "submit.v2.optimizer.proposer.harness_default": "הסוכן המציע מהמאגר או ברירת המחדל של השרת",
+  "submit.v2.optimizer.proposer.from_file": "מקובץ החוזה",
   "submit.v2.optimizer.sandbox.label": "ארגז חול",
   "submit.v2.optimizer.sandbox.hint": "איפה הקוד של ההרצה רץ.",
   "submit.v2.optimizer.sandbox.load_failed": "לא הצלחנו לטעון את ארגזי החול. ההרצה תשתמש בברירת המחדל של השרת.",

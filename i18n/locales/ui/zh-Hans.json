@@ -153,6 +153,7 @@
   "submit.v2.optimizer.proposer.candidates": "每次迭代的候选数",
   "submit.v2.optimizer.proposer.harness": "编程智能体",
   "submit.v2.optimizer.proposer.harness_default": "仓库的提议智能体或服务器默认值",
+  "submit.v2.optimizer.proposer.from_file": "来自合约文件",
   "submit.v2.optimizer.sandbox.label": "沙箱",
   "submit.v2.optimizer.sandbox.hint": "运行代码的执行位置。",
   "submit.v2.optimizer.sandbox.load_failed": "无法加载沙盒列表。本次运行使用服务器默认值。",

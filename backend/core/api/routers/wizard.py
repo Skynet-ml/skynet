@@ -11,7 +11,8 @@ inputs, optimizer (with models and budget), and the metric/code workspace.
 of an ``optimize.toml`` from the setup draft and returns each error with the
 section and key that caused it, so the editor can show it there. It also
 returns the command that ``[metric] entry`` names, so the wizard asks for no
-``metric.py`` without a TOML parser of its own (SKY-770).
+``metric.py`` without a TOML parser of its own (SKY-770), and the command that
+``[proposer] entry`` names, so the agent picker offers it first (SKY-771).
 
 Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 """
@@ -158,6 +159,10 @@ class OptimizeTomlCheckResponse(BaseModel):
     metric_command: list[str] | None = Field(
         default=None,
         description="The command that [metric] entry names. Null for a Python entry, no entry, or a file with an error.",
+    )
+    proposer_command: list[str] | None = Field(
+        default=None,
+        description="The command that [proposer] entry names. Null for no entry or a file with an error.",
     )
 
 
@@ -444,8 +449,9 @@ def create_wizard_router() -> APIRouter:
             req: The file text.
 
         Returns:
-            ``ok`` true with no errors and the ``[metric] entry`` command, if any,
-            or ``ok`` false with the error and its section and key.
+            ``ok`` true with no errors and the ``[metric] entry`` and
+            ``[proposer] entry`` commands, if any, or ``ok`` false with the
+            error and its section and key.
         """
         try:
             # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
@@ -457,8 +463,12 @@ def create_wizard_router() -> APIRouter:
             )
         # A command entry needs no metric.py; a Python entry still runs the wizard's metric code (SKY-770).
         entry = constraints.metric.entry
+        proposer = constraints.proposer_entry
         return OptimizeTomlCheckResponse(
-            ok=True, errors=[], metric_command=list(entry) if isinstance(entry, tuple) else None
+            ok=True,
+            errors=[],
+            metric_command=list(entry) if isinstance(entry, tuple) else None,
+            proposer_command=list(proposer) if proposer is not None else None,
         )
 
     return router
