@@ -1195,6 +1195,31 @@ def store_live_sessions(engine: Engine, job_id: str, sessions: list[HardeningSes
         return True
 
 
+def store_job_direction(engine: Engine, job_id: str, *, minimize: bool, claim: str) -> bool:
+    """Write the metric direction to the job row as soon as the pass has staged its tree.
+
+    The page reads the row while the round runs, so it picks the best live
+    score by the direction before the pass result is written (SKY-867).
+
+    Args:
+        engine: SQLAlchemy engine of the job store.
+        job_id: The job.
+        minimize: Whether the metric treats a lower score as better.
+        claim: The pass's claim token.
+
+    Returns:
+        Whether the direction was written; False when the claim is lost.
+    """
+    with Session(engine) as session:
+        row = session.scalars(select(HardeningJobModel).where(HardeningJobModel.id == job_id).with_for_update()).first()
+        if row is None or row.claimed_by != claim:
+            return False
+        # A new dict, so SQLAlchemy sees the JSON column change.
+        row.job = {**row.job, "minimize": minimize}
+        session.commit()
+        return True
+
+
 def process_next_hardening_job(
     engine: Engine,
     *,
@@ -1295,6 +1320,9 @@ def process_next_hardening_job(
                 local_mode=local_mode,
                 runner_factory=runner_factory,
                 reserve=reserve,
+                on_staged=lambda staged_job: store_job_direction(
+                    engine, job_id, minimize=staged_job.minimize, claim=claim
+                ),
             )
         except Exception as exc:
             # One bad job must not stop the worker loop.

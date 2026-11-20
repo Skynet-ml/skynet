@@ -56,6 +56,7 @@ _JOB_FIELDS = {
     "parallel_sessions",
     "live_sessions",
     "noise",
+    "minimize",
 }
 _EXPLOIT_FIELDS = {
     "id",
