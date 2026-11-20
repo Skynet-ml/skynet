@@ -40,10 +40,11 @@ from typing import IO, Any
 Usage = dict[str, int]
 
 CONFIG_ENV = "APP_PROPOSER_CONFIG"
-KEY_ENV = "APP_API_KEY"
+KEY_ENV = "ASCENT_MODEL_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
-KEY_TOKEN = "__APP_API_KEY__"
+# ``repo_constraints`` refuses it in the contract file's own commands (SKY-776).
+KEY_TOKEN = "__ASCENT_MODEL_KEY__"
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
@@ -74,7 +75,6 @@ _DEFERRED_STOP: list[int] = []
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
-_LEGACY_KEY_TOKEN = "__SKYNET_API_KEY__"
 SHIM_DIR = ".local/app-bin"
 SESSIONS_DIR = ".app-bridge"
 # Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
@@ -97,20 +97,23 @@ _RESUME_NOTE = (
 
 
 def _env(name: str, default: str = "") -> str:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
-        default: Value returned when neither name is set.
+        name: Variable name.
+        default: Value returned when no name is set.
 
     Returns:
         The first non-empty value found, else ``default``.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) or default
+    legacy = os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or default
 
 
 def _with_key(text: str, api_key: str) -> str:
-    """Restore the gateway key in place of either key token.
+    """Restore the gateway key in place of the key token.
 
     Args:
         text: A launch command, file or environment value.
@@ -119,7 +122,7 @@ def _with_key(text: str, api_key: str) -> str:
     Returns:
         ``text`` with every key token replaced.
     """
-    return text.replace(KEY_TOKEN, api_key).replace(_LEGACY_KEY_TOKEN, api_key)
+    return text.replace(KEY_TOKEN, api_key)
 
 
 def _json_lines(stdout: str) -> Iterator[dict[str, Any]]:
@@ -2244,7 +2247,7 @@ def run_session(
         timeout_seconds: Kill the harness after this many seconds.
         extra_env: Environment overrides layered on top of the launch env.
         api_key: Route key substituted for the launch's key token; defaults
-            to the proposer key in ``APP_API_KEY``.
+            to the proposer key in ``ASCENT_MODEL_KEY``.
 
     Returns:
         The parsed answer, raw transcript, usage and exit status.
@@ -2313,9 +2316,8 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
+    env["ASCENT_MODEL"] = model
     for name, value in (
-        ("MODEL", model),
-        ("PROMPT_FILE", str(prompt_file)),
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
         # A harness with native resume keeps its own session state here, so the committed tree carries it.
         ("SESSION_DIR", str(session_dir)),
@@ -2655,7 +2657,7 @@ def main(argv: list[str]) -> int:
     proposer = json.loads(Path(config_path).read_text(encoding="utf-8"))
     resumed = args.resume or args.r
     session_id = args.session_id or resumed or uuid.uuid4().hex
-    model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
+    model = args.model or str(proposer.get("model") or _env("ASCENT_MODEL"))
     workspace = Path.cwd()
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)

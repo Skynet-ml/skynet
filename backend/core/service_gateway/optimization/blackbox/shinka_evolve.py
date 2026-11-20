@@ -634,7 +634,7 @@ class _Proposer:
         # model route on the user's own key needs a metered relay; the engine refuses the command until SKY-828.
         self.grants = tuple(Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host)
         # The same name the managed proposer box sets (docs/repository-constraints.md).
-        self.exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        self.exports = [f"export ASCENT_MODEL={shlex.quote(str(options.model or ''))}"]
         self.seed = ctx.repo_seed.tree_id
         self.base: str | None = None
         self.seed_ids: dict[str, str] = {}
@@ -671,7 +671,7 @@ class _Proposer:
                 "\n".join(
                     [
                         *self.exports,
-                        f'export ASCENT_TASK="$PWD/{_TASK_PATH}" APP_PROMPT_FILE="$PWD/{_TASK_PATH}"',
+                        f'export ASCENT_TASK="$PWD/{_TASK_PATH}"',
                         self.entry,
                     ]
                 ),

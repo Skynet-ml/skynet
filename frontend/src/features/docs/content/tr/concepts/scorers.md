@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.
+Puanlayıcı, `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` ve `ASCENT_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.
 
 ## Model çağrıları ve gizli anahtarlar
 

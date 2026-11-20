@@ -44,7 +44,7 @@ def _run_turn(
         "refusals": refusals,
     }
     monkeypatch.chdir(workspace)
-    monkeypatch.delenv("APP_PROMPT_FILE", raising=False)
+    monkeypatch.delenv("ASCENT_TASK", raising=False)
     monkeypatch.setattr(host_agent_shim, "endpoint_url", lambda: "http://parent.invalid/v1/_host_agent")
     monkeypatch.setattr(host_agent_shim, "_post", lambda *_args: (200, reply))
     assert host_agent_shim.main() == 0

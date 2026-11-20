@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | 변수                 | 담는 값                                                  |
 | -------------------- | -------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | 게이트웨이 URL입니다. `APP_GATEWAY_URL`도 같은 값입니다. |
-| `APP_API_KEY`        | 이 실행 전용 토큰입니다. 제공업체 키가 아닙니다.         |
-| `APP_MODEL`          | 보낼 모델 이름입니다. 실행의 채점기 모델입니다.          |
+| `OPENAI_BASE_URL`    | 게이트웨이 URL입니다. `ASCENT_MODEL_URL`도 같은 값입니다. |
+| `ASCENT_MODEL_KEY`   | 이 실행 전용 토큰입니다. 제공업체 키가 아닙니다.         |
+| `ASCENT_MODEL`       | 보낼 모델 이름입니다. 실행의 채점기 모델입니다.          |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK용 게이트웨이 URL입니다.                    |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | वेरिएबल              | इसमें क्या होता है                                              |
 | -------------------- | --------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | गेटवे URL। `APP_GATEWAY_URL` में भी यही मान होता है।              |
-| `APP_API_KEY`        | सिर्फ़ इस रन के लिए एक टोकन। यह प्रदाता की कुंजी नहीं है।           |
-| `APP_MODEL`          | भेजने के लिए मॉडल का नाम। यह रन का स्कोरर मॉडल है।                |
+| `OPENAI_BASE_URL`    | गेटवे URL। `ASCENT_MODEL_URL` में भी यही मान होता है।             |
+| `ASCENT_MODEL_KEY`   | सिर्फ़ इस रन के लिए एक टोकन। यह प्रदाता की कुंजी नहीं है।           |
+| `ASCENT_MODEL`       | भेजने के लिए मॉडल का नाम। यह रन का स्कोरर मॉडल है।                |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK के लिए गेटवे URL।                                  |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

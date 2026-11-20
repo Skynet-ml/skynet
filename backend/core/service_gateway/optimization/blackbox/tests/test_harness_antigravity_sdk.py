@@ -208,9 +208,9 @@ def test_launch_routes_through_the_gateway_without_a_direct_key() -> None:
     """The env carries the gateway token and blanks every direct Gemini or Google credential."""
     launch = SPEC.launch("gemini-3-pro", _GATEWAY)
 
-    assert launch.env["APP_MODEL"] == "gemini-3-pro"
-    assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "gemini-3-pro"
+    assert launch.env["ASCENT_MODEL_URL"] == _GATEWAY.url
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert "GOOGLE_GEMINI_BASE_URL" not in launch.env
@@ -317,7 +317,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         launch.files,
         **{
             **launch.env,
-            "APP_PROMPT_FILE": str(prompt),
+            "ASCENT_TASK": str(prompt),
             "GEMINI_API_KEY": "leaked-direct-key",
             "GOOGLE_API_KEY": "leaked-direct-key",
             "FAKE_SDK_RECORD": str(record),
@@ -353,7 +353,9 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 
-    result = _run_runner(tmp_path, launch.files, **{**launch.env, "APP_API_KEY": "", "FAKE_SDK_RECORD": str(record)})
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_SDK_RECORD": str(record)}
+    )
 
     assert result.returncode != 0
     assert "gateway" in result.stderr

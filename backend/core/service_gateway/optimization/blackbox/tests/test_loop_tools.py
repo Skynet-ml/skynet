@@ -140,7 +140,8 @@ def test_the_setup_and_the_entry_get_the_proposer_hosts_without_the_model_gatewa
 
 
 @pytest.mark.parametrize(
-    ("budget_route", "env"), [({"token": "route-key"}, {"APP_API_KEY": "route-key"}), (None, None)]
+    ("budget_route", "env"),
+    [({"token": "route-key"}, {"ASCENT_MODEL_KEY": "route-key", "ASCENT_MODEL": "m"}), (None, None)],
 )
 def test_only_a_protected_run_gives_the_setup_and_the_entry_its_route_key_and_never_in_the_script(
     budget_route: dict[str, str] | None, env: dict[str, str] | None
@@ -166,7 +167,7 @@ def test_only_a_protected_run_gives_the_setup_and_the_entry_its_route_key_and_ne
 
 def test_an_entry_that_runs_out_of_time_gives_no_version() -> None:
     """A timed-out command keeps ``start`` and names the timeout, also when its exit code is 0."""
-    proposer = _proposer(_Commands({"export APP_MODEL": CommandResult(0, timed_out=True)}))
+    proposer = _proposer(_Commands({"export ASCENT_MODEL": CommandResult(0, timed_out=True)}))
 
     tree, failure = proposer.run("start")
 
@@ -179,11 +180,11 @@ def test_an_entry_that_runs_out_of_time_gives_no_version() -> None:
     ("outcomes", "message"),
     [
         (
-            {"export APP_MODEL": BoxFailureError("s", "box died")},
+            {"export ASCENT_MODEL": BoxFailureError("s", "box died")},
             r"setup command .* could not run in a box\. Start a new run",
         ),
         (
-            {"export APP_MODEL": TreeRejectedError("s", "hidden path")},
+            {"export ASCENT_MODEL": TreeRejectedError("s", "hidden path")},
             r"setup command .* left files that the run refuses",
         ),
         ({"rm -rf --": BoxFailureError("s", "box died")}, r"check of the \[proposer\] setup .* could not run"),

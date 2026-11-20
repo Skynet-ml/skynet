@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-채점기는 `OPENAI_BASE_URL`, `APP_API_KEY`, `APP_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.
+채점기는 `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY`, `ASCENT_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.
 
 ## 모델 호출과 시크릿
 

@@ -125,31 +125,27 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert not (tmp_path.parent / "escaped.bin").exists()
 
 
-@pytest.mark.parametrize("image_protocol", [12, 13, 14])
-def test_an_older_readable_image_gets_its_own_protocol(
+@pytest.mark.parametrize("image_protocol", [12, 16, 21])
+def test_an_image_before_the_current_protocol_is_refused_at_the_probe(
     image_protocol: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pinned older image still runs, so a deploy need not wait for its rebuild."""
+    """An image before protocol 22 reads the old model names, so the worker refuses it before it sends work (SKY-776)."""
     session = FakeSession()
     session.image_protocol = image_protocol
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
-    vercel_dspy.run_vercel_dspy(
-        {
-            "_gepa_log_dir": str(tmp_path),
-            "_budget_gateway_descriptor": {
-                "url": "http://127.0.0.1:9876",
-                "control_token": "control",
-                "image": "backend@sha256:" + "a" * 64,
-                "lifetime_seconds": 600,
-            },
-        },
-        "job-old-image",
-        events,
-        "spawn",
+    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path), "job-old-image", events, "spawn")
+
+    assert session.steps == ["probe"]
+    assert session.files == {}
+    assert session.closed
+    event = events.get_nowait()
+    assert event["type"] == "error"
+    assert event["error"] == (
+        f"The sandbox image speaks protocol {image_protocol}, but this worker speaks {SANDBOX_PROTOCOL};"
+        " rebuild and re-pin the sandbox image."
     )
-    assert session.steps[:2] == ["probe", "write_files"]
-    assert events.get_nowait() == {"type": "result", "result": {"program": "done"}}
+    assert event["failure_kind"] == DETERMINISTIC_FAILURE
     assert events.empty()
 
 
@@ -183,21 +179,19 @@ def _run_with_outcome(
     return session, seen
 
 
+# The probe now refuses every image before SANDBOX_PROTOCOL (SKY-776), so a run
+# cannot reach the per-feature gates with an older image. The gate tests below
+# call each gate directly with the older protocols, and run the current
+# protocol through the full run.
+
+
 @pytest.mark.parametrize("image_protocol", [12, 13, 14, 15])
 @pytest.mark.parametrize("outcome", [{"target": 0.9, "require": {}}, {"target": None, "require": {"latency": 0.5}}])
-def test_an_older_image_is_refused_for_a_run_with_outcome_values(
-    image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_older_image_is_refused_for_a_run_with_outcome_values(image_protocol: int, outcome: dict[str, Any]) -> None:
     """An image before 16 drops the file's target or minimums, or gives no run end verdict (SKY-691, SKY-692)."""
-    session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
-
-    assert session.steps == ["probe"]
-    assert session.files == {}
-    assert session.closed
-    [event] = events
-    assert event["type"] == "error"
-    assert event["error"] == vercel_dspy.OUTCOME_IMAGE_MESSAGE
-    assert event["failure_kind"] == DETERMINISTIC_FAILURE
+    with pytest.raises(RuntimeError) as refusal:
+        vercel_dspy._require_outcome_support(image_protocol, {"outcome": outcome})
+    assert str(refusal.value) == vercel_dspy.OUTCOME_IMAGE_MESSAGE
 
 
 @pytest.mark.parametrize(
@@ -206,36 +200,42 @@ def test_an_older_image_is_refused_for_a_run_with_outcome_values(
         (12, {"target": None, "require": {}}),
         (14, {}),
         (15, {"target": None, "require": {}}),
-        # SKY-775: a limit needs an image at 21, so an image at 16 runs only a target.
         (16, {"target": 0.9, "require": {}}),
-        (SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}}),
     ],
 )
-def test_an_image_runs_when_it_can_read_the_runs_outcome(
-    image_protocol: int, outcome: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_older_image_passes_the_outcome_gate_when_it_can_read_the_runs_outcome(
+    image_protocol: int, outcome: dict[str, Any]
 ) -> None:
-    """An older image runs a run with no outcome values; an image at 16 or later runs one with a target."""
-    session, events = _run_with_outcome(tmp_path, monkeypatch, image_protocol, outcome)
+    """An older image passes the gate for a run with no outcome values; an image at 16 passes one with a target."""
+    vercel_dspy._require_outcome_support(image_protocol, {"outcome": outcome})
+
+
+def test_the_current_image_runs_a_run_with_a_target_and_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image at the current protocol runs a run whose outcome sets a target and a limit."""
+    session, events = _run_with_outcome(
+        tmp_path, monkeypatch, SANDBOX_PROTOCOL, {"target": 0.9, "require": {"latency": 0.5}}
+    )
 
     assert session.steps[0] == "probe"
     assert "optimizer" in session.steps
     assert all(event.get("error") != vercel_dspy.OUTCOME_IMAGE_MESSAGE for event in events)
 
 
-@pytest.mark.parametrize(("image_protocol", "refused"), [(17, True), (SANDBOX_PROTOCOL, False)])
-def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
-    image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An image before 18 runs the entry as a plain custom command, without setup or ``ASCENT_TASK`` (SKY-753).
+def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer() -> None:
+    """An image before 18 runs the entry as a plain custom command, without setup or ``ASCENT_TASK`` (SKY-753)."""
+    with pytest.raises(RuntimeError) as refusal:
+        vercel_dspy._require_file_proposer_support(17, {"file_proposer": True})
+    assert str(refusal.value) == vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE
+
+
+def test_the_current_image_runs_a_run_of_the_files_proposer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image at the current protocol runs the contract file's proposer.
 
     Args:
-        image_protocol: The protocol the image answers to the probe.
-        refused: Whether the worker refuses the image.
         tmp_path: Checkpoint directory and the packed tree's folder.
         monkeypatch: Pytest monkeypatch.
     """
     session = FakeSession()
-    session.image_protocol = image_protocol
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     archive = tmp_path / "tree.tgz"
     archive.write_bytes(b"tree")
@@ -249,28 +249,25 @@ def test_an_image_before_18_is_refused_for_a_run_of_the_files_proposer(
     while not events.empty():
         seen.append(events.get_nowait())
 
-    if refused:
-        assert session.steps == ["probe"]
-        assert seen[0]["error"] == vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE
-    else:
-        assert "optimizer" in session.steps
-        assert all(event.get("error") != vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE for event in seen)
+    assert "optimizer" in session.steps
+    assert all(event.get("error") != vercel_dspy.FILE_PROPOSER_IMAGE_MESSAGE for event in seen)
 
 
-@pytest.mark.parametrize(("image_protocol", "refused"), [(18, True), (SANDBOX_PROTOCOL, False)])
-def test_an_image_before_19_is_refused_for_a_run_of_a_command_metric(
-    image_protocol: int, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An image before 19 refuses a command metric request with an unclear error, so the worker names it (SKY-738).
+def test_an_image_before_19_is_refused_for_a_run_of_a_command_metric() -> None:
+    """An image before 19 refuses a command metric request with an unclear error, so the worker names it (SKY-738)."""
+    with pytest.raises(RuntimeError) as refusal:
+        vercel_dspy._require_command_metric_support(18, {"scorer": {"kind": "python", "command_metric": True}})
+    assert str(refusal.value) == vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE
+
+
+def test_the_current_image_runs_a_run_of_a_command_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image at the current protocol runs a command metric.
 
     Args:
-        image_protocol: The protocol the image answers to the probe.
-        refused: Whether the worker refuses the image.
         tmp_path: Checkpoint directory.
         monkeypatch: Pytest monkeypatch.
     """
     session = FakeSession()
-    session.image_protocol = image_protocol
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
     payload = _descriptor_payload(tmp_path, scorer={"kind": "python", "command_metric": True})
@@ -280,112 +277,88 @@ def test_an_image_before_19_is_refused_for_a_run_of_a_command_metric(
     while not events.empty():
         seen.append(events.get_nowait())
 
-    if refused:
-        assert session.steps == ["probe"]
-        assert seen[0]["error"] == vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE
-    else:
-        assert "optimizer" in session.steps
-        assert all(event.get("error") != vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE for event in seen)
+    assert "optimizer" in session.steps
+    assert all(event.get("error") != vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE for event in seen)
 
 
-@pytest.mark.parametrize(
-    ("image_protocol", "direction", "refused"),
-    [(19, "minimize", True), (19, "maximize", False), (SANDBOX_PROTOCOL, "minimize", False)],
-)
-def test_an_image_before_20_is_refused_for_a_minimize_run(
-    image_protocol: int, direction: str, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.parametrize(("direction", "refused"), [("minimize", True), ("maximize", False)])
+def test_an_image_before_20_is_refused_for_a_minimize_run(direction: str, refused: bool) -> None:
     """An image before 20 ignores the outcome's direction and would maximize a minimize run (SKY-750).
 
     Args:
-        image_protocol: The protocol the image answers to the probe.
         direction: The staged snapshot's ``outcome.direction``.
-        refused: Whether the worker refuses the image.
-        tmp_path: Checkpoint directory and the packed tree's folder.
-        monkeypatch: Pytest monkeypatch.
+        refused: Whether the gate refuses the image.
     """
-    session = FakeSession()
-    session.image_protocol = image_protocol
-    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
-    archive = tmp_path / "tree.tgz"
-    archive.write_bytes(b"tree")
-    events: queue.Queue = queue.Queue()
-    outcome = {"target": None, "require": {}, "direction": direction}
-    payload = _descriptor_payload(
-        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "outcome": outcome}
+    snapshot = {"outcome": {"target": None, "require": {}, "direction": direction}}
+    if refused:
+        with pytest.raises(RuntimeError) as refusal:
+            vercel_dspy._require_direction_support(19, snapshot)
+        assert str(refusal.value) == vercel_dspy.DIRECTION_IMAGE_MESSAGE
+    else:
+        vercel_dspy._require_direction_support(19, snapshot)
+
+
+def test_the_current_image_runs_a_minimize_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image at the current protocol runs a minimize run."""
+    session, seen = _run_with_outcome(
+        tmp_path, monkeypatch, SANDBOX_PROTOCOL, {"target": None, "require": {}, "direction": "minimize"}
     )
 
-    vercel_dspy.run_vercel_dspy(payload, "job-direction", events, "spawn")
-    seen = []
-    while not events.empty():
-        seen.append(events.get_nowait())
-
-    if refused:
-        assert session.steps == ["probe"]
-        assert seen[0]["error"] == vercel_dspy.DIRECTION_IMAGE_MESSAGE
-    else:
-        assert "optimizer" in session.steps
-        assert all(event.get("error") != vercel_dspy.DIRECTION_IMAGE_MESSAGE for event in seen)
+    assert "optimizer" in session.steps
+    assert all(event.get("error") != vercel_dspy.DIRECTION_IMAGE_MESSAGE for event in seen)
 
 
 @pytest.mark.parametrize(
-    ("image_protocol", "scores", "require", "refused"),
+    ("scores", "require", "refused"),
     [
-        (20, {"cost_usd": "minimize", "recall": "maximize"}, {"cost_usd": 0.05}, True),
-        (20, {"cost_usd": "minimize"}, {}, True),
+        ({"cost_usd": "minimize", "recall": "maximize"}, {"cost_usd": 0.05}, True),
+        ({"cost_usd": "minimize"}, {}, True),
         # The old image writes the old verdict keys, so any limit would lose the run record.
-        (20, {"recall": "maximize"}, {"recall": 0.8}, True),
-        (20, None, {"recall": 0.8}, True),
-        (20, None, {}, False),
-        (SANDBOX_PROTOCOL, {"cost_usd": "minimize"}, {"cost_usd": 0.05}, False),
+        ({"recall": "maximize"}, {"recall": 0.8}, True),
+        (None, {"recall": 0.8}, True),
+        (None, {}, False),
     ],
 )
 def test_an_image_before_21_is_refused_for_limits_or_a_minimize_named_score(
-    image_protocol: int,
-    scores: dict[str, str] | None,
-    require: dict[str, float],
-    refused: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    scores: dict[str, str] | None, require: dict[str, float], refused: bool
 ) -> None:
     """An image before 21 misjudges a minimize limit and writes the old verdict keys (SKY-775).
 
     Args:
-        image_protocol: The protocol the image answers to the probe.
         scores: The staged snapshot's ``outcome.scores``, or ``None`` when it has no key.
         require: The staged snapshot's ``outcome.require``.
-        refused: Whether the worker refuses the image.
-        tmp_path: Checkpoint directory and the packed tree's folder.
-        monkeypatch: Pytest monkeypatch.
+        refused: Whether the gate refuses the image.
     """
-    session = FakeSession()
-    session.image_protocol = image_protocol
-    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
-    archive = tmp_path / "tree.tgz"
-    archive.write_bytes(b"tree")
-    events: queue.Queue = queue.Queue()
-    outcome = {"target": None, "require": require, "direction": "maximize"}
+    outcome: dict[str, Any] = {"target": None, "require": require, "direction": "maximize"}
     if scores is not None:
         outcome["scores"] = scores
-    payload = _descriptor_payload(
-        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "outcome": outcome}
-    )
+    if not refused:
+        vercel_dspy._require_score_direction_support(20, {"outcome": outcome})
+        return
+    with pytest.raises(RuntimeError) as refusal:
+        vercel_dspy._require_score_direction_support(20, {"outcome": outcome})
+    message = str(refusal.value)
+    assert message == vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE
+    assert "rebuild and re-pin the sandbox image" in message
+    # The message names both rules, so it is right for a contract with only [outcome.require] limits too.
+    assert "[outcome.require] limits" in message
+    assert "[metric.scores]" in message
 
-    vercel_dspy.run_vercel_dspy(payload, "job-score-direction", events, "spawn")
-    seen = []
-    while not events.empty():
-        seen.append(events.get_nowait())
 
-    if refused:
-        assert session.steps == ["probe"]
-        assert seen[0]["error"] == vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE
-        assert "rebuild and re-pin the sandbox image" in seen[0]["error"]
-        # The message names both rules, so it is right for a contract with only [outcome.require] limits too.
-        assert "[outcome.require] limits" in seen[0]["error"]
-        assert "[metric.scores]" in seen[0]["error"]
-    else:
-        assert "optimizer" in session.steps
-        assert all(event.get("error") != vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE for event in seen)
+def test_the_current_image_runs_limits_and_a_minimize_named_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image at the current protocol runs a minimize score with a limit."""
+    outcome = {
+        "target": None,
+        "require": {"cost_usd": 0.05},
+        "direction": "maximize",
+        "scores": {"cost_usd": "minimize"},
+    }
+    session, seen = _run_with_outcome(tmp_path, monkeypatch, SANDBOX_PROTOCOL, outcome)
+
+    assert "optimizer" in session.steps
+    assert all(event.get("error") != vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE for event in seen)
 
 
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:

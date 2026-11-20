@@ -197,9 +197,8 @@ U+2066 to U+2069), because they can hide what a command does.
   not UTF-8 stops the run there, because the run cannot store it.
 - The command runs in the proposer's box, under the `[proposer]` rules. Its
   working directory is the repository checkout. It gets the absolute task file path in
-  `ASCENT_TASK` (and in `APP_PROMPT_FILE`, which stays for now), the model in
-  `APP_MODEL`, the model relay in `APP_GATEWAY_URL` and the relay key in
-  `APP_API_KEY`. The arguments run exactly as written: `{model}` and the
+  `ASCENT_TASK`, the model in `ASCENT_MODEL`, the model relay in
+  `ASCENT_MODEL_URL` and the relay key in `ASCENT_MODEL_KEY`. The arguments run exactly as written: `{model}` and the
   other custom-harness placeholders stay plain text. In GEPA, Best-of-N and
   AutoSaddler, the files it changes are the new version.
 - ShinkaEvolve refuses `entry` today. The command may reach a model only on
@@ -234,10 +233,10 @@ U+2066 to U+2069), because they can hide what a command does.
   out of time gives no version. A command that fails gives no version: it is
   a failed attempt, not a failed run. AutoResearch then ends the run,
   because a round with no version ends it. Meta-Harness goes on to its next
-  iteration. In these two engines, the command gets `ASCENT_TASK`,
-  `APP_PROMPT_FILE` and `APP_MODEL`. In a protected run, `setup` and the
-  command also get the model relay in `APP_GATEWAY_URL` and the run's scoped
-  key in `APP_API_KEY`. Their output shows `[redacted]` in place of the key.
+  iteration. In these two engines, the command gets `ASCENT_TASK` and
+  `ASCENT_MODEL`. In a protected run, `setup` and the command also get the
+  model relay in `ASCENT_MODEL_URL` and the run's scoped key in
+  `ASCENT_MODEL_KEY`. Their output shows `[redacted]` in place of the key.
   Skynet redacts only values of 8 or more characters, so a short value
   cannot change other output. A run that is not protected gets no model
   relay and no key. The engine loop does not give the command `[proposer]
@@ -264,8 +263,8 @@ U+2066 to U+2069), because they can hide what a command does.
   the setup check. Protection matches paths, so a version could change the
   file that the link points at. Name the real path, and keep links out of a
   named folder.
-- `entry` and `setup` cannot contain `__APP_API_KEY__` or
-  `__SKYNET_API_KEY__`. The command reads the relay key from `APP_API_KEY`.
+- `entry` and `setup` cannot contain `__ASCENT_MODEL_KEY__` or an older key
+  token. The command reads the relay key from `ASCENT_MODEL_KEY`.
 - Limits in this version: `[proposer] mcp` with `entry` fails the setup
   check, and the run's tool-call limit does not apply to your command.
 
@@ -768,7 +767,7 @@ that is not 2xx and the body `{"error": "<text>"}`.
 
 The command reaches the model and the stages only through these URLs. Its
 environment holds no model key, no model mailbox address
-(`APP_BUDGET_RELAY_URL`, `APP_GATEWAY_URL`, `OPENAI_BASE_URL`,
+(`APP_BUDGET_RELAY_URL`, the box's own `ASCENT_MODEL_URL`, `OPENAI_BASE_URL`,
 `ANTHROPIC_BASE_URL`) and no tool relay token (`APP_TOOL_RELAY_TOKEN`), also
 not in the old `SKYNET_` spelling. The box command that starts the runner has
 no model key in its environment either. The scorer writes the key to a file
@@ -1082,8 +1081,8 @@ catch the failure in the program, as above, and let the metric score it.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
 - A `[proposer] entry` or `setup` that is not a list of non-empty strings,
-  or a part with a control character, or that contains `__APP_API_KEY__` or
-  `__SKYNET_API_KEY__`. A `setup` without `entry`. An `entry` together with
+  or a part with a control character, or that contains `__ASCENT_MODEL_KEY__`
+  or an older key token. A `setup` without `entry`. An `entry` together with
   `[proposer] mcp`. An `entry` in any run that is not a single AutoResearch
   or Meta-Harness run.
 - A proposer setting that the run's engine does not apply (SKY-728). Every

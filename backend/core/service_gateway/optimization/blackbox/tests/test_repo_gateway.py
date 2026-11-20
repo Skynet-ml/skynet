@@ -64,14 +64,14 @@ import json, os, urllib.request
 
 def ask(text):
     body = json.dumps({
-        "model": os.environ["APP_MODEL"],
+        "model": os.environ["ASCENT_MODEL"],
         "max_tokens": 16,
         "messages": [{"role": "user", "content": text}],
     }).encode()
     request = urllib.request.Request(
         os.environ["OPENAI_BASE_URL"] + "/chat/completions",
         data=body,
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["APP_API_KEY"]},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["ASCENT_MODEL_KEY"]},
     )
     with urllib.request.urlopen(request) as response:
         return json.load(response)["choices"][0]["message"]["content"]
@@ -80,7 +80,7 @@ def ask(text):
 
 def run(value):
     leaked = any(key in item for item in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
-    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("APP_API_KEY"))}}
+    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("ASCENT_MODEL_KEY"))}}
 """
 )
 # The metric box holds no repository file, so the version's own call runs
@@ -97,7 +97,7 @@ def score(repo_path, case, output):
     probe = {{
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
-        "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
+        "has_key": output["has_key"] and bool(os.environ.get("ASCENT_MODEL_KEY")),
     }}
     # The answer allows no other keys (SKY-769), so the probe travels in the feedback.
     return {{"score": 1.0 if direct == "OK" and judged == "OK" else 0.0, "feedback": json.dumps(probe)}}
@@ -356,7 +356,7 @@ import json, os, urllib.error, urllib.request
 def _status(path, token):
     request = urllib.request.Request(
         os.environ["OPENAI_BASE_URL"] + path,
-        data=json.dumps({{"model": os.environ["APP_MODEL"], "messages": []}}).encode(),
+        data=json.dumps({{"model": os.environ["ASCENT_MODEL"], "messages": []}}).encode(),
         headers={{"Content-Type": "application/json", "Authorization": "Bearer " + token}},
     )
     try:
@@ -366,7 +366,7 @@ def _status(path, token):
         return error.code
 
 def score(repo_path, case, output):
-    route = os.environ["APP_API_KEY"]
+    route = os.environ["ASCENT_MODEL_KEY"]
     statuses = [
         _status("/_evaluator", route),
         _status("/_evaluator", {evaluator_token!r}),

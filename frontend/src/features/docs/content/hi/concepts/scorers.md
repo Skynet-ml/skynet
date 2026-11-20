@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-स्कोरर `OPENAI_BASE_URL`, `APP_API_KEY` और `APP_MODEL` एनवायरनमेंट वेरिएबल के साथ कोई भी OpenAI-संगत क्लाइंट भी इस्तेमाल कर सकता है। गेटवे सिर्फ़ रन का स्कोरर मॉडल स्वीकार करता है।
+स्कोरर `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` और `ASCENT_MODEL` एनवायरनमेंट वेरिएबल के साथ कोई भी OpenAI-संगत क्लाइंट भी इस्तेमाल कर सकता है। गेटवे सिर्फ़ रन का स्कोरर मॉडल स्वीकार करता है।
 
 ## मॉडल कॉल और सीक्रेट
 

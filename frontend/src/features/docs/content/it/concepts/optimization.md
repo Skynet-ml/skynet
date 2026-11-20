@@ -37,9 +37,9 @@ Il codice del tuo repository e il tuo scorer possono chiamare un modello tramite
 
 | Variabile            | Che cosa contiene                                                          |
 | -------------------- | -------------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | L'URL del gateway. `APP_GATEWAY_URL` contiene lo stesso valore.            |
-| `APP_API_KEY`        | Un token solo per questa esecuzione. Non è una chiave del provider.        |
-| `APP_MODEL`          | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
+| `OPENAI_BASE_URL`    | L'URL del gateway. `ASCENT_MODEL_URL` contiene lo stesso valore.           |
+| `ASCENT_MODEL_KEY`   | Un token solo per questa esecuzione. Non è una chiave del provider.        |
+| `ASCENT_MODEL`       | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
 | `ANTHROPIC_BASE_URL` | L'URL del gateway per gli SDK di Anthropic.                                |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

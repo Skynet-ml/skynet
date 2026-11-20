@@ -287,13 +287,13 @@ def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
     """Launch files, logs, copies, tool output and exec records never put the key into the step log or tree store."""
     workspace, session_dir, bin_dir = tmp_path / "work", tmp_path / "session", tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "probe").write_text('#!/bin/sh\necho "probe $APP_API_KEY"\n')
+    (bin_dir / "probe").write_text('#!/bin/sh\necho "probe $ASCENT_MODEL_KEY"\n')
     (bin_dir / "probe").chmod(0o755)
     proposer = {
-        "run_command": 'env > env.txt; cp .codex/config.toml copy.toml; touch "name-$APP_API_KEY"; probe; echo "$APP_API_KEY"',
+        "run_command": 'env > env.txt; cp .codex/config.toml copy.toml; touch "name-$ASCENT_MODEL_KEY"; probe; echo "$ASCENT_MODEL_KEY"',
         "files": {".codex/config.toml": f'key = "{harness_bridge.KEY_TOKEN}"'},
         "instructions_file": "AGENTS.md",
-        "env": {"APP_API_KEY": harness_bridge.KEY_TOKEN, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        "env": {"ASCENT_MODEL_KEY": harness_bridge.KEY_TOKEN, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
         "exec_commands": ["probe"],
         "output_format": "plain",
     }
@@ -306,10 +306,10 @@ def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
     assert KEY in (workspace / "copy.toml").read_text()
 
     [shim_step] = capture.observe({"model": "m1", "messages": [{"role": "user", "content": "go"}]})
-    [tool_step] = capture.observe(_tool_round("t1", f"curl -H 'x-api-key: {KEY}'", f"APP_API_KEY={KEY}"))
+    [tool_step] = capture.observe(_tool_round("t1", f"curl -H 'x-api-key: {KEY}'", f"ASCENT_MODEL_KEY={KEY}"))
 
     assert step_log.get_step(shim_step)["body"]["stdout"] == f"probe {harness_bridge.KEY_TOKEN}\n"
-    assert step_log.get_step(tool_step)["body"]["output"] == f"APP_API_KEY={harness_bridge.KEY_TOKEN}"
+    assert step_log.get_step(tool_step)["body"]["output"] == f"ASCENT_MODEL_KEY={harness_bridge.KEY_TOKEN}"
     files = _tree_files(TreeStore(step_log), step_log.get_step(tool_step)["tree_id"])
     assert files["copy.toml"] == f'key = "{harness_bridge.KEY_TOKEN}"'.encode()
     assert ".codex/config.toml" not in files
@@ -1407,13 +1407,13 @@ def _claude(env: dict[str, str], workspace: Path, *args: str) -> str:
 
 # Keeps its own state in the session folder and continues it on resume, as a harness with native resume does.
 _NATIVE = {
-    "run_command": 'echo started > "$APP_SESSION_DIR/native.txt"; cat "$APP_PROMPT_FILE"',
-    "resume_command": 'echo "resumed $(cat "$APP_SESSION_DIR/native.txt")"; cat "$APP_PROMPT_FILE"',
+    "run_command": 'echo started > "$APP_SESSION_DIR/native.txt"; cat "$ASCENT_TASK"',
+    "resume_command": 'echo "resumed $(cat "$APP_SESSION_DIR/native.txt")"; cat "$ASCENT_TASK"',
     "output_format": "plain",
     "files": {},
     "env": {},
 }
-_FALLBACK = {"run_command": 'cat "$APP_PROMPT_FILE"', "output_format": "plain", "files": {}, "env": {}}
+_FALLBACK = {"run_command": 'cat "$ASCENT_TASK"', "output_format": "plain", "files": {}, "env": {}}
 
 
 @pytest.mark.parametrize(("proposer", "native"), [(_NATIVE, True), (_FALLBACK, False)])

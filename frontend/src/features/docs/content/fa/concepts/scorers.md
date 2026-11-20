@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-امتیازدهنده می‌تواند از هر کلاینت سازگار با OpenAI هم با متغیرهای محیطی `OPENAI_BASE_URL`، `APP_API_KEY` و `APP_MODEL` استفاده کند. دروازه فقط مدل امتیازدهندهٔ اجرا را می‌پذیرد.
+امتیازدهنده می‌تواند از هر کلاینت سازگار با OpenAI هم با متغیرهای محیطی `OPENAI_BASE_URL`، `ASCENT_MODEL_KEY` و `ASCENT_MODEL` استفاده کند. دروازه فقط مدل امتیازدهندهٔ اجرا را می‌پذیرد.
 
 ## فراخوانی‌های مدل و رازها
 

@@ -1829,7 +1829,7 @@ def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Pat
         "route-token",
         True,
     )
-    assert gateway.evaluator._model_env() == {"APP_API_KEY": "route-token", "APP_MODEL": "vendor/judge"}
+    assert gateway.evaluator._model_env() == {"ASCENT_MODEL_KEY": "route-token", "ASCENT_MODEL": "vendor/judge"}
     box = gateway.boxes[0]
     assert box.spec.network_disabled is True
     assert box.spec.allowed_hosts == ()

@@ -33,7 +33,7 @@ from ..harness_bridge import (
     run_session,
 )
 
-_PLAIN = {"run_command": 'cat "$APP_PROMPT_FILE"', "output_format": "plain", "files": {}, "env": {}}
+_PLAIN = {"run_command": 'cat "$ASCENT_TASK"', "output_format": "plain", "files": {}, "env": {}}
 
 
 def test_cli_parser_accepts_the_meta_harness_and_autoresearch_shapes() -> None:
@@ -72,7 +72,7 @@ def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_pat
     """Materialize the launch in the workspace, swap in the real key and capture the harness answer."""
     proposer = {
         **_PLAIN,
-        "run_command": 'cat "$APP_PROMPT_FILE"; cat config.json; echo "$TOKEN"',
+        "run_command": 'cat "$ASCENT_TASK"; cat config.json; echo "$TOKEN"',
         "files": {"config.json": json.dumps({"key": harness_bridge.KEY_TOKEN})},
         "env": {"TOKEN": harness_bridge.KEY_TOKEN},
         "instructions_file": "AGENTS.md",
@@ -91,24 +91,6 @@ def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_pat
     assert json.loads((workspace / "config.json").read_text()) == {"key": "real-key"}
     assert (tmp_path / "session" / "prompt-1.md").read_text() == "hello"
     assert (tmp_path / "session" / "run-1.stdout").exists()
-
-
-def test_run_session_accepts_the_legacy_key_token_and_variables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Restore a saved launch's pre-rename key token and expose both variable spellings."""
-    proposer = {
-        **_PLAIN,
-        "run_command": 'echo "$APP_MODEL $SKYNET_MODEL"; cat config.json',
-        "files": {"config.json": "__SKYNET_API_KEY__"},
-    }
-    monkeypatch.delenv(harness_bridge.KEY_ENV, raising=False)
-    monkeypatch.setenv("SKYNET_API_KEY", "legacy-key")
-    outcome = run_session(
-        proposer, workspace=tmp_path / "work", prompt="hi", model="m1", session_dir=tmp_path / "session"
-    )
-    assert outcome.returncode == 0
-    assert outcome.text == "m1 m1\nlegacy-key"
 
 
 def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> None:

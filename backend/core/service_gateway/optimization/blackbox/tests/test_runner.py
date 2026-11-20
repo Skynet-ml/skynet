@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import openai
 import pytest
 
 try:
@@ -556,7 +557,7 @@ def test_run_call_binds_llm_to_the_gateway_with_the_key_from_the_environment(
 
 
 def test_run_call_prefers_a_key_in_the_payload_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit ``api_key`` in the gateway section wins over ``APP_API_KEY``."""
+    """An explicit ``api_key`` in the gateway section wins over ``ASCENT_MODEL_KEY``."""
     monkeypatch.setenv(runner.ENV_API_KEY, "env-key")
     with FakeGateway() as gateway:
         run_call(
@@ -696,15 +697,16 @@ def test_scorer_code_imports_log_from_openascent() -> None:
     assert fn("x") == {"score": 1.0}
 
 
-def test_env_value_prefers_the_new_name_and_falls_back_to_the_legacy_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Read ``APP_*`` first, then the pre-rename ``SKYNET_*`` spelling an older caller sets."""
-    monkeypatch.delenv("APP_API_KEY", raising=False)
-    monkeypatch.delenv("SKYNET_API_KEY", raising=False)
-    assert runner.env_value("APP_API_KEY") is None
-    monkeypatch.setenv("SKYNET_API_KEY", "old")
-    assert runner.env_value("APP_API_KEY") == "old"
-    monkeypatch.setenv("APP_API_KEY", "new")
-    assert runner.env_value("APP_API_KEY") == "new"
+def test_env_value_falls_back_to_the_legacy_name_only_for_app_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read ``APP_*`` first, then its pre-rename ``SKYNET_*`` spelling; ``ASCENT_*`` names get no fallback."""
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.setenv("SKYNET_BUDGET_RELAY_URL", "old")
+    assert runner.env_value("APP_BUDGET_RELAY_URL") == "old"
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "new")
+    assert runner.env_value("APP_BUDGET_RELAY_URL") == "new"
+    monkeypatch.delenv("ASCENT_MODEL_KEY", raising=False)
+    monkeypatch.setenv("SKYNET_MODEL_KEY", "old")
+    assert runner.env_value("ASCENT_MODEL_KEY") is None
 
 
 def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sent: list[dict[str, Any]]) -> Any:
@@ -2342,7 +2344,7 @@ def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_k
     """With a gateway the command reaches the model through the runner; the key stays out of its environment."""
     script = (
         _CURL_POST
-        + 'env | grep -c "^APP_API_KEY=" > keys || true\n'
+        + 'env | grep -c "sk-test" > keys || true\n'
         + 'printf "%s|%s\\n" "$ASCENT_MODEL" "${ASCENT_MODEL_KEY-unset}" > model\n'
         + 'url="$ASCENT_MODEL_URL/chat/completions"\n'
         + 'post "$url" "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\",'
@@ -2354,12 +2356,13 @@ def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_k
     )
     with FakeGateway(reply="judged", usage=(7, 2)) as gateway:
         gateway_payload = {"url": gateway.url, "model": "judge-model", "declared_model": "openai/judge-model"}
-        output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"}, gateway=gateway_payload)
+        output = _command_metric(tmp_path, script, environ={"ASCENT_MODEL_KEY": "sk-test"}, gateway=gateway_payload)
     box = tmp_path / "box"
     answers = (box / "answers").read_text().splitlines()
 
     assert output["score"] == 1.0
     assert output["usage"] == [{"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}]
+    # The box and the helper both use ASCENT_MODEL_KEY (SKY-776), so the check counts the key's value.
     assert (box / "keys").read_text().strip() == "0"
     assert (box / "model").read_text().strip() == "openai/judge-model|"
     status, body = answers[0].split(" ", 1)
@@ -2371,6 +2374,35 @@ def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_k
     assert gateway.requests[0]["body"]["max_tokens"] == 5
     assert [answer.split(" ", 1)[0] for answer in answers[1:]] == ["400", "400", "400"]
     assert runner.MODEL_ENV in json.loads(answers[1].split(" ", 1)[1])["error"]
+
+
+def test_a_stock_openai_client_reaches_the_judge_model_through_the_metric_model_url() -> None:
+    """In the metric box a stock OpenAI client on ``ASCENT_MODEL_URL`` gets the judge's answer.
+
+    A request for another model gets an error that names ``ASCENT_MODEL`` and never reaches the gateway.
+    """
+    with FakeGateway(reply="judged") as gateway:
+        client_of_gateway = GatewayClient(
+            gateway.url, "judge-model", api_key="sk-test", declared_model="openai/judge-model"
+        )
+        helpers = runner.MetricHelpers(None, [], client_of_gateway, "openai/judge-model")
+        try:
+            env = helpers.env
+            client = openai.OpenAI(base_url=env["ASCENT_MODEL_URL"], api_key=env["ASCENT_MODEL_KEY"], max_retries=0)
+            ask = [{"role": "user", "content": "hi"}]
+            answer = client.chat.completions.create(
+                model=env["ASCENT_MODEL"], messages=ask, max_tokens=5, temperature=0
+            )
+            with pytest.raises(openai.BadRequestError) as refused:
+                client.chat.completions.create(model="other/model", messages=ask)
+        finally:
+            helpers.close()
+
+    assert answer.choices[0].message.content == "judged"
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0]["authorization"] == "Bearer sk-test"
+    assert gateway.requests[0]["body"]["max_tokens"] == 5
+    assert "ASCENT_MODEL" in str(refused.value)
 
 
 @_needs_openascent
@@ -2417,8 +2449,8 @@ def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Pat
     seen = (tmp_path / "box" / "seen").read_text()
 
     assert output["score"] == 1.0
-    assert {"APP_API_KEY", "SKYNET_API_KEY", "APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"} <= set(hidden)
-    assert {"APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} <= set(hidden)
+    assert {"ASCENT_MODEL_KEY", "ASCENT_MODEL", "APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"} <= set(hidden)
+    assert {"ASCENT_MODEL_URL", "APP_TOOL_RELAY_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} <= set(hidden)
     assert "secret-value" not in seen
     assert "KEEP_ME=1" in seen.splitlines()
 
@@ -2429,11 +2461,11 @@ def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> 
     """The runner holds the model key in its start environment; its child command cannot read it from /proc."""
     script = (
         'tr "\\0" " " < "/proc/$PPID/cmdline" > parent\n'
-        'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^APP_API_KEY="; then\n'
+        'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^ASCENT_MODEL_KEY="; then\n'
         "  echo read > seen\nelse\n  echo refused > seen\nfi\n"
         'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
     )
-    output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"})
+    output = _command_metric(tmp_path, script, environ={"ASCENT_MODEL_KEY": "sk-test"})
     box = tmp_path / "box"
 
     assert output["score"] == 1.0
@@ -2516,7 +2548,7 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     start += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
     if chain == "vercel_key_in_env":
-        env["APP_API_KEY"] = "sk-scan"
+        env["ASCENT_MODEL_KEY"] = "sk-scan"
     if chain.startswith("vercel"):
         inner = f"/usr/bin/timeout --signal=KILL 60s /bin/bash {' '.join(vercel.SHELL_FLAGS)} {shlex.quote(start)}"
         script = vercel._wrapper(inner, uuid.uuid4().hex, sudo=False)[0]

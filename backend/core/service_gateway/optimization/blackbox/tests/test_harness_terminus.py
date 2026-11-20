@@ -126,7 +126,7 @@ class Terminus2:
             **self.seen,
             "instruction": instruction,
             "exit": result.return_code,
-            "shell_keys": sorted(k for k in ("APP_API_KEY", "SKYNET_API_KEY") if k in shell_env),
+            "shell_keys": sorted(k for k in ("ASCENT_MODEL_KEY",) if k in shell_env),
             "tmux_tmpdir_set": "TMUX_TMPDIR" in shell_env,
             "pane_log_in_logs_parent": str(tmux["logging_path"]).startswith(str(os.path.dirname(self.seen["logs_dir"]))),
             "asciinema": [tmux["local_asciinema_recording_path"], tmux["remote_asciinema_recording_path"]],
@@ -231,14 +231,13 @@ def test_spec_is_registered_with_a_pinned_version_and_the_pi_parser() -> None:
 
 
 def test_launch_routes_through_the_gateway_with_blank_provider_keys_and_no_telemetry() -> None:
-    """The env carries the gateway under both names, blanks every direct key and turns telemetry off."""
+    """The env carries the gateway under the one model name set, blanks every direct key and turns telemetry off."""
     launch = SPEC.launch("gpt-x", _GATEWAY)
 
     assert launch.run_command == 'PATH="$HOME/.local/bin:$PATH" uv run --quiet --script .app/terminus/run_agent.py'
     assert launch.instructions_file == "AGENTS.md"
-    for prefix in ("APP_", "SKYNET_"):
-        assert launch.env[f"{prefix}API_KEY"] == _GATEWAY.api_key
-        assert launch.env[f"{prefix}MODEL"] == "gpt-x"
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "gpt-x"
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert launch.env["HARBOR_TELEMETRY"] == "0"
@@ -312,7 +311,7 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
     prompt.write_text("Write out.txt.\n")
     record = tmp_path / "record.json"
     env = {k: v for k, v in launch.env.items() if not k.startswith("APP_")}
-    env.update(SKYNET_PROMPT_FILE=str(prompt), FAKE_HARBOR_RECORD=str(record), TMPDIR=str(tmp_path / "tmp"))
+    env.update(ASCENT_TASK=str(prompt), FAKE_HARBOR_RECORD=str(record), TMPDIR=str(tmp_path / "tmp"))
     (tmp_path / "tmp").mkdir()
 
     result = _run_runner(tmp_path, launch.files, **env)
@@ -350,7 +349,7 @@ def test_runner_without_an_effort_sends_no_effort(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_TASK": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, **env)
 
@@ -394,7 +393,7 @@ def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
     (tmp_path / "tmp").mkdir()
     env = {
         **launch.env,
-        "APP_PROMPT_FILE": str(prompt),
+        "ASCENT_TASK": str(prompt),
         "FAKE_HARBOR_HANG": str(ready),
         "FAKE_TMUX_LOG": str(tmux_log),
         "TMPDIR": str(tmp_path / "tmp"),
@@ -423,7 +422,7 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
     """The runner exits before any agent call when the gateway token is missing."""
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_API_KEY": "", "SKYNET_API_KEY": "", "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, **env)
 
@@ -438,7 +437,7 @@ def test_runner_stops_when_tmux_is_missing(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_TASK": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, tmux=False, **env)
 

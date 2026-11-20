@@ -1648,7 +1648,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
         """
         assert ctx.run_command is not None
         assert ctx.repo_seed is not None
-        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"APP_API_KEY": "route-key"})
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"ASCENT_MODEL_KEY": "route-key"})
         return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
 
     payload = _host_payload(owner, tmp_path, monkeypatch)
@@ -1660,7 +1660,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
 
     assert [event["type"] for event in events][-1] == "result"
-    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"APP_API_KEY": "route-key"})
+    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"ASCENT_MODEL_KEY": "route-key"})
 
 
 def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:

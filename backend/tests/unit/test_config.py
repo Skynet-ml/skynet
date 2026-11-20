@@ -259,23 +259,25 @@ def test_app_env_reads_process_environment(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_legacy_env_name_rejects_other_prefixes() -> None:
     """Only ``APP_*`` names have a legacy spelling."""
-    assert legacy_env_name("APP_MODEL") == "SKYNET_MODEL"
+    assert legacy_env_name("APP_ANSWER_FILE") == "SKYNET_ANSWER_FILE"
     with pytest.raises(ValueError):
         legacy_env_name("OPENAI_BASE_URL")
 
 
 def test_with_legacy_env_copies_new_names_only() -> None:
     """Child environments carry both spellings of every ``APP_*`` entry."""
-    assert with_legacy_env({"APP_MODEL": "m", "PATH": "/bin"}) == {
-        "APP_MODEL": "m",
-        "SKYNET_MODEL": "m",
+    assert with_legacy_env({"APP_ANSWER_FILE": "a", "ASCENT_MODEL": "m", "PATH": "/bin"}) == {
+        "APP_ANSWER_FILE": "a",
+        "SKYNET_ANSWER_FILE": "a",
+        "ASCENT_MODEL": "m",
         "PATH": "/bin",
     }
 
 
 def test_with_legacy_env_overwrites_a_stale_legacy_value() -> None:
     """The new value wins, so code reading either spelling sees the same thing."""
-    assert with_legacy_env({"SKYNET_GATEWAY_URL": "stale", "APP_GATEWAY_URL": "relay"})["SKYNET_GATEWAY_URL"] == "relay"
+    stale = {"SKYNET_BUDGET_RELAY_URL": "stale", "APP_BUDGET_RELAY_URL": "relay"}
+    assert with_legacy_env(stale)["SKYNET_BUDGET_RELAY_URL"] == "relay"
 
 
 def test_settings_env_override_port(monkeypatch: pytest.MonkeyPatch) -> None:

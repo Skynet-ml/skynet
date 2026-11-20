@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | 変数                 | 内容                                                                   |
 | -------------------- | ---------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | ゲートウェイの URL。`APP_GATEWAY_URL` も同じ値を持ちます。             |
-| `APP_API_KEY`        | この実行専用のトークン。プロバイダーキーではありません。               |
-| `APP_MODEL`          | 送信するモデル名。実行のスコアラーモデルです。                         |
+| `OPENAI_BASE_URL`    | ゲートウェイの URL。`ASCENT_MODEL_URL` も同じ値を持ちます。            |
+| `ASCENT_MODEL_KEY`   | この実行専用のトークン。プロバイダーキーではありません。               |
+| `ASCENT_MODEL`       | 送信するモデル名。実行のスコアラーモデルです。                         |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK 用のゲートウェイの URL。                                 |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

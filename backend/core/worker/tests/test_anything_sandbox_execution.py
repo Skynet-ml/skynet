@@ -218,7 +218,7 @@ def test_contained_commands_cannot_restore_provider_endpoints(monkeypatch: pytes
             {
                 "inspect_env.py": (
                     "import json, os\n"
-                    "names = ('SKYNET_BUDGET_RELAY_URL', 'SKYNET_GATEWAY_URL', "
+                    "names = ('SKYNET_BUDGET_RELAY_URL', 'ASCENT_MODEL_URL', "
                     "'OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL')\n"
                     "print(json.dumps({name: os.environ[name] for name in names}))\n"
                 )
@@ -238,7 +238,7 @@ def test_contained_commands_cannot_restore_provider_endpoints(monkeypatch: pytes
     environment = json.loads(result.stdout)
     assert environment == {
         "SKYNET_BUDGET_RELAY_URL": relay,
-        "SKYNET_GATEWAY_URL": relay,
+        "ASCENT_MODEL_URL": relay,
         "OPENAI_BASE_URL": relay,
         "ANTHROPIC_BASE_URL": relay.removesuffix("/v1"),
     }

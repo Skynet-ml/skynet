@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-Оцінювач також може використовувати будь-який клієнт, сумісний з OpenAI, зі змінними середовища `OPENAI_BASE_URL`, `APP_API_KEY` і `APP_MODEL`. Шлюз приймає лише модель оцінювача запуску.
+Оцінювач також може використовувати будь-який клієнт, сумісний з OpenAI, зі змінними середовища `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` і `ASCENT_MODEL`. Шлюз приймає лише модель оцінювача запуску.
 
 ## Виклики моделей і секрети
 

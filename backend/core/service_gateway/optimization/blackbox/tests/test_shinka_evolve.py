@@ -2321,7 +2321,7 @@ def test_each_proposal_runs_the_file_command_on_the_parents_tree_and_files_the_t
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
     options = _proposer_options(
-        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$APP_MODEL" > model.txt'
+        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$ASCENT_MODEL" > model.txt'
         " && printf 'child\\n' > main.py",
         setup=["sh", "-c", "printf built > .cache.txt"],
     )
@@ -2765,7 +2765,7 @@ def test_the_proposer_box_gets_each_host_once_and_never_the_gateway(
     proposer = shinka_evolve._Proposer(_box_context(options, tmp_path), options)
 
     assert proposer.grants == (Grant("docs.test"), Grant("pypi.org"))
-    assert proposer.exports == ["export APP_MODEL=test-model"]
+    assert proposer.exports == ["export ASCENT_MODEL=test-model"]
 
 
 def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(

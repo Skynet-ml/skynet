@@ -291,6 +291,28 @@ def test_a_command_path_through_a_tracked_link_is_refused(
     assert (caught.value.section, caught.value.key) == ("proposer", key)
 
 
+@pytest.mark.parametrize("key", ["entry", "setup"])
+def test_a_proposer_command_with_the_launch_key_token_is_refused(tmp_path: Path, key: str) -> None:
+    """The bridge puts the relay key in place of the token, so a command cannot name it (SKY-776).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that holds the token.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = (
+        f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = ["node", "--key=__ASCENT_MODEL_KEY__"]\n'
+    ).encode()
+
+    with pytest.raises(ConstraintsError, match=r"cannot contain __ASCENT_MODEL_KEY__.*ASCENT_MODEL_KEY") as parsed:
+        parse_constraints(raw)
+    with pytest.raises(ConstraintsError, match="cannot contain __ASCENT_MODEL_KEY__") as read:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+
+    assert (parsed.value.section, parsed.value.key) == ("proposer", key)
+    assert (read.value.section, read.value.key) == ("proposer", key)
+
+
 @pytest.mark.parametrize(
     ("key", "link_name"), [("entry", "agent/lib.js"), ("setup", "agent/lib/deep/util.js")], ids=["top", "nested"]
 )

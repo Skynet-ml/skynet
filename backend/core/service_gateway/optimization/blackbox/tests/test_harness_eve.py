@@ -109,7 +109,7 @@ def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> No
     assert "process.env.EVE_WORKSPACE" in EVE_SANDBOX
     assert "export const environment = " in EVE_SANDBOX
     assert "export default defineSandbox(" in EVE_SANDBOX
-    for name in ("APP_API_KEY", "EVE_RUNNER_TOKEN"):
+    for name in ("ASCENT_MODEL_KEY", "EVE_RUNNER_TOKEN"):
         assert f'"{name}"' in EVE_SANDBOX
     assert "process.env.APP_GUARD_EVE" in EVE_SANDBOX
     assert "eveChannel({ auth: [runnerToken] })" in EVE_CHANNEL
@@ -253,7 +253,7 @@ def _monitor_runner(tmp_path: Path, scenario: str, env: dict[str, str] | None = 
             env={
                 "PATH": os.environ.get("PATH", os.defpath),
                 "EVE_PROJECT_DIR": str(project),
-                "APP_PROMPT_FILE": str(tmp_path / "prompt.txt"),
+                "ASCENT_TASK": str(tmp_path / "prompt.txt"),
                 "FAKE_EVE_SCENARIO": scenario,
                 **(env or {}),
             },
@@ -427,8 +427,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
         cwd=project,
         env={
             "PATH": f"{tools_bin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
-            "APP_API_KEY": "secret-key",
-            "SKYNET_API_KEY": "secret-key",
+            "ASCENT_MODEL_KEY": "secret-key",
             "EVE_RUNNER_TOKEN": "runner-token",
             "ANTHROPIC_AUTH_TOKEN": "secret-key",
             "EVE_PROJECT_DIR": str(project),
@@ -444,8 +443,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     result = json.loads(completed.stdout)
     names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
     assert not names & {
-        "APP_API_KEY",
-        "SKYNET_API_KEY",
+        "ASCENT_MODEL_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "EVE_RUNNER_TOKEN",
         "EVE_PROJECT_DIR",

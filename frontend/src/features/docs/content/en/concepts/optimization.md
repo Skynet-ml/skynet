@@ -37,9 +37,9 @@ Your repository code and your scorer can call a model through Skynet's model gat
 
 | Variable             | What it holds                                              |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | The gateway URL. `APP_GATEWAY_URL` holds the same value.   |
-| `APP_API_KEY`        | A token for this run only. It is not a provider key.       |
-| `APP_MODEL`          | The model name to send. It is the scorer model of the run. |
+| `OPENAI_BASE_URL`    | The gateway URL. `ASCENT_MODEL_URL` holds the same value.  |
+| `ASCENT_MODEL_KEY`   | A token for this run only. It is not a provider key.       |
+| `ASCENT_MODEL`       | The model name to send. It is the scorer model of the run. |
 | `ANTHROPIC_BASE_URL` | The gateway URL for Anthropic SDKs.                        |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content
