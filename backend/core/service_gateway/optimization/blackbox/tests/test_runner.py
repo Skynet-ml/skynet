@@ -2953,8 +2953,140 @@ def test_no_process_a_contained_session_command_can_read_holds_relay_secrets(tmp
         assert str(process.pid) not in (box / "readable").read_text().split()
 
 
+# Runs the shipped guest entry point, as ``_CONTAINED_GUEST`` does, with a job that opens a stage box and a metric
+# box in one contained session and runs a Python stage call while the metric command runs, as the scorer does when a
+# metric calls a stage. Argument 1 is the stage box command, argument 2 the metric box command, argument 3 the
+# request file.
+_CONTAINED_STAGE_GUEST = """
+import runpy, sys, threading
+from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox_runtime import current_sandbox_runtime
+from core.worker import subprocess_runner
+
+stage_command, metric_command, request = sys.argv[1:4]
+
+def run(payload, artifact_id, events):
+    runtime = current_sandbox_runtime()
+    stage_box = runtime.open(SandboxSpec(lifetime_seconds=60))
+    metric_box = runtime.open(SandboxSpec(lifetime_seconds=60))
+    results = {}
+    thread = threading.Thread(target=lambda: results.update(stage=stage_box.run(stage_command, timeout_seconds=60)))
+    try:
+        thread.start()
+        results["metric"] = metric_box.run(metric_command, timeout_seconds=60)
+        thread.join()
+    finally:
+        stage_box.close()
+        metric_box.close()
+    events.put({
+        "type": "scored",
+        "exit_codes": [results["stage"].exit_code, results["metric"].exit_code],
+        "stderr": results["stage"].stderr[-2000:] + results["metric"].stderr[-2000:],
+    })
+
+subprocess_runner.run_service_in_subprocess = run
+sys.argv = ["isolated_runner", request]
+runpy.run_module("core.worker.isolated_runner", run_name="__main__", alter_sys=True)
+"""
+
+# A Python stage that writes its process id, then waits until the metric's scan is over. ``open`` makes the stage's
+# process dumpable again, so the scan's control can see the stage's environment without the flag.
+_WAITING_STAGE = """
+import ctypes, os, sys, time
+from pathlib import Path
+
+def run(payload):
+    if payload["mode"] == "open":
+        ctypes.CDLL(None).prctl(4, 1, 0, 0, 0)
+    Path(payload["ready"]).write_text(str(os.getpid()))
+    deadline = time.monotonic() + 30
+    while not Path(payload["done"]).exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return "staged"
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
+@pytest.mark.parametrize("mode", ["blocked", "open"])
+def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_session(
+    tmp_path: Path, mode: str
+) -> None:
+    """A command metric scans ``/proc/*/environ`` while a Python stage call runs in its contained session.
+
+    The stage box command starts the runner's stage mode as the scorer does,
+    and the session gives the stage the mailbox address. The runner blocks
+    tracing in every mode, so the scan cannot read the stage's process, and no
+    process holds the guest's tool relay token (SKY-880). ``open`` is the
+    control: the stage makes itself dumpable again, and the scan must find
+    the relay address in the stage's environment.
+
+    Args:
+        tmp_path: The test's folder.
+        mode: ``blocked`` runs the stage as shipped; ``open`` makes it dumpable again.
+    """
+    box = tmp_path / "box"
+    box.mkdir()
+    ready, done = tmp_path / "stage-ready", tmp_path / "scan-done"
+    wait = f"for _ in $(seq 300); do [ -s {shlex.quote(str(ready))} ] && break; sleep 0.1; done\n"
+    (box / "metric.sh").write_text(wait + _PROC_SCAN + f"touch {shlex.quote(str(done))}\n")
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    payload = {
+        "candidate": str(box),
+        "case": {"input": "q"},
+        "output": "a",
+        "gateway": {"url": "http://127.0.0.1:9/v1", "model": "judge-model"},
+        runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
+        runner.METRIC_TIMEOUT_PARAM: 40,
+        runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
+    }
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "stage.py").write_text(_WAITING_STAGE)
+    stage_call = tmp_path / "stage-calls" / "one"
+    stage_call.mkdir(parents=True)
+    (stage_call / runner.INPUT_FILE).write_text(json.dumps({"mode": mode, "ready": str(ready), "done": str(done)}))
+    request = tmp_path / "request.json"
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    request.write_text(
+        json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
+    )
+    python = shlex.quote(sys.executable)
+    stage = f"cd {shlex.quote(str(tree))} && {python} {shlex.quote(runner.__file__)} {runner.STAGE_FLAG}"
+    stage += f" {shlex.quote(str(stage_call))} stage.py:run"
+    metric = f"cd {shlex.quote(str(box))} && exec {python} -I -B -u"
+    metric += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
+    backend = Path(__file__).resolve().parents[5]
+    start = f"PYTHONPATH={shlex.quote(str(backend))} {python} -c {shlex.quote(_CONTAINED_STAGE_GUEST)}"
+    start += f" {shlex.quote(stage)} {shlex.quote(metric)} {shlex.quote(str(request))}"
+    relay = "http://relay.invalid/v1"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
+    env.update({"APP_BUDGET_RELAY_URL": relay, "OPENAI_BASE_URL": relay, "ASCENT_MODEL_URL": relay})
+    process = subprocess.Popen(
+        ["bash", *vercel.SHELL_FLAGS, start], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    stdout, stderr = process.communicate(timeout=120)
+    events = [json.loads(line.split(" ", 2)[2]) for line in stdout.splitlines() if line.startswith("SKYNET_JOB_EVENT ")]
+
+    assert process.returncode == 0, stderr
+    assert [event["exit_codes"] for event in events if event["type"] == "scored"] == [[0, 0]], events
+    assert json.loads((stage_call / runner.OUTPUT_FILE).read_text()) == {"output": "staged"}
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
+    stage_pid = ready.read_text()
+    found = (box / "found").read_text().splitlines()
+    assert not [line for line in found if line.endswith("relay-token-scan")]
+    if mode == "open":
+        assert f"{stage_pid} {relay}" in found
+    else:
+        assert stage_pid not in (box / "readable").read_text().split()
+
+
 def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``run_metric_command`` makes the runner non-dumpable before it starts anything; ``run_call`` does not.
+    """``run_metric_command`` makes the runner non-dumpable before it starts anything, and so does every runner mode.
+
+    The ``__main__`` block blocks tracing before ``main``, so a stage, a
+    ``[run]`` call and a Python metric are not readable either (SKY-880).
 
     Args:
         monkeypatch: Pytest monkeypatch.
@@ -2970,7 +3102,8 @@ def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.Monkey
     monkeypatch.setattr(runner, "_block_tracing", blocked)
     with pytest.raises(BlockedError):
         runner.run_metric_command({})
-    assert "_block_tracing" not in runner.run_call.__code__.co_names
+    entry = Path(runner.__file__).read_text(encoding="utf-8").split('if __name__ == "__main__":', 1)[1]
+    assert entry.index("_block_tracing()") < entry.index("main()")
 
 
 def test_stage_names_that_share_a_variable_get_no_variable() -> None:

@@ -1943,8 +1943,9 @@ def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) ->
     # The command runs as this process's user, and this process holds the
     # model key in memory and the relay values in its environment. So this
     # process's /proc/<pid>/mem and environ must not be readable. The flag
-    # does not reach the command (execve resets it), and it does not cover a
-    # parent process that a contained session keeps alive.
+    # does not reach the command (execve resets it). In a contained session
+    # the box shell execs this process, and the guest above it sets the flag
+    # for itself (``isolated_runner``, SKY-880).
     _block_tracing()
     key = _take_model_key(call_dir)
     relay = StageClient(stages) if isinstance(stages, dict) else None
@@ -2727,4 +2728,9 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
 
 
 if __name__ == "__main__":
+    # Every mode, before any code runs: in a contained session the metric
+    # command runs as the same user as a stage or [run] call, whose environment
+    # holds the model route. Not inside main: tests call it in the pytest
+    # process (SKY-880).
+    _block_tracing()
     sys.exit(main())

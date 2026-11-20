@@ -204,6 +204,26 @@ def test_the_local_runtimes_refuse_a_gpu(monkeypatch: pytest.MonkeyPatch) -> Non
         sandbox_runtime.ContainedSubprocessRuntime().open(_GPU_SPEC)
 
 
+def test_a_contained_command_gets_the_mailbox_but_no_tool_relay_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contained command reaches models through the mailbox and never sees the guest's tool token (SKY-880).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    relay = "http://127.0.0.1:9/v1"
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", relay)
+    monkeypatch.setenv("APP_TOOL_RELAY_TOKEN", "tool-token")
+    monkeypatch.setenv("SKYNET_TOOL_RELAY_TOKEN", "tool-token")
+    session = sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60))
+    try:
+        result = session.run("env")
+    finally:
+        session.close()
+    assert result.ok
+    assert f"OPENAI_BASE_URL={relay}" in result.stdout.splitlines()
+    assert "tool-token" not in result.stdout
+
+
 class _NoClient:
     """Fail the test when the guest sends a request to its parent."""
 
