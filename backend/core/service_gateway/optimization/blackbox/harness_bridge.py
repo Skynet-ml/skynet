@@ -538,6 +538,7 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
         if process.returncode is None or root_start is not None:
             _stop_group(process, signal.SIGKILL, root_start)
     for binding in list(_LIVE_BINDINGS):
+        # A file in the set may not exist yet, or may already be renamed.
         with contextlib.suppress(OSError):
             binding.unlink()
     os._exit(128 + signum)
@@ -2270,15 +2271,33 @@ def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
     target = folder / hashlib.sha256(api_key.encode()).hexdigest()
     # One file for each session: concurrent sessions of one key with different models must all pass.
     name = uuid.uuid4().hex
-    # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
-    with contextlib.suppress(OSError):
+    binding = target / name
+    # The proxy must never read a partial name, so the name is renamed into place.
+    partial = target / f".{name}"
+    # A stop signal can land at any point below, so both files are live before either exists.
+    _LIVE_BINDINGS.update((binding, partial))
+    try:
         target.mkdir(parents=True, exist_ok=True)
-        # The proxy must never read a partial name, so the name is renamed into place.
-        partial = target / f".{name}"
         partial.write_text(model, encoding="utf-8")
-        partial.replace(target / name)
-        return target / name
-    return None
+        partial.replace(binding)
+    except OSError:
+        # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
+        _unbind(binding, partial)
+        return None
+    _LIVE_BINDINGS.discard(partial)
+    return binding
+
+
+def _unbind(*paths: Path) -> None:
+    """Remove binding files that may or may not exist, and stop tracking them.
+
+    Args:
+        paths: The binding files.
+    """
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        _LIVE_BINDINGS.discard(path)
 
 
 @contextlib.contextmanager
@@ -2295,16 +2314,12 @@ def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> It
     """
     folder = env.get(MODEL_BINDINGS_ENV)
     binding = bind_model(Path(folder), api_key, model) if folder and api_key and model else None
-    if binding is not None:
-        _LIVE_BINDINGS.add(binding)
     try:
         yield
     finally:
         # A finished session's model must not pass the box check or stay in its error.
         if binding is not None:
-            with contextlib.suppress(OSError):
-                binding.unlink()
-            _LIVE_BINDINGS.discard(binding)
+            _unbind(binding)
 
 
 def run_session(

@@ -4584,3 +4584,55 @@ def test_a_stopped_bridge_removes_its_session_binding(bindings: Path, tmp_path: 
 
     assert guest_model_proxy._bound_models("route-key") == []
     assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_bind_model_tracks_its_files_before_they_exist(
+    bindings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop at any point of a bind leaves no binding and no partial file (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds a file in place of a bindings folder.
+        monkeypatch: Gives the test its own live set and stops the exit.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    monkeypatch.setattr(harness_bridge, "_OWNED_GROUPS", {})
+    seen: list[set[Path]] = []
+    write_text = Path.write_text
+
+    def record(path: Path, *args: Any, **kwargs: Any) -> int:
+        """Record the live set when the partial file is written.
+
+        Args:
+            path: The file to write.
+            args: The text and its options.
+            kwargs: The text options.
+
+        Returns:
+            The number of characters written.
+        """
+        seen.append(set(live))
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", record)
+    binding = harness_bridge.bind_model(bindings, "route-key", "run-model")
+    monkeypatch.setattr(Path, "write_text", write_text)
+
+    assert binding is not None
+    assert seen == [{binding, binding.with_name("." + binding.name)}]
+    assert live == {binding}
+    # A partial file that a stop left behind is in the set too, and the stop removes it.
+    partial = binding.with_name(".left")
+    partial.write_text("run-model")
+    live.update((partial, binding.with_name("missing")))
+    monkeypatch.setattr(harness_bridge.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    with pytest.raises(SystemExit):
+        harness_bridge._stop_owned_groups(signal.SIGTERM, None)
+    assert list(binding.parent.iterdir()) == []
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("")
+    assert harness_bridge.bind_model(blocked, "route-key", "run-model") is None
+    assert live == {binding, partial, binding.with_name("missing")}
