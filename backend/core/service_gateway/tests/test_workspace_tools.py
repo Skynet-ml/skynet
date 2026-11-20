@@ -887,6 +887,25 @@ async def test_write_refuses_an_optimize_toml_when_the_repository_cannot_open() 
 
 
 @pytest.mark.asyncio
+async def test_write_refuses_an_optimize_toml_when_the_repository_file_is_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repository optimize.toml over the size cap cannot be checked, and a retry would read the same file."""
+    _fake_repo_with_toml(monkeypatch, [])
+    monkeypatch.setattr(repo_browser.github, "read_text_file", lambda *args: ("x" * 10, True))
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_VALID_TOML
+    )
+
+    assert f"larger than {DRAFT_FILE_BYTES} bytes" in result["error"]
+    assert result["error"].endswith(" Ask the user.")
+    assert "Try again" not in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
 async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> None:
     """A current text that is not TOML keeps the paths of its instructions and illegal lines."""
     current = 'instructions = "docs/intent.md"\n[proposer\nillegal = "docs/rules.md"\n'
@@ -929,10 +948,12 @@ def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line
     assert "'rules.md'" in refusal
 
 
-@pytest.mark.parametrize("value", ['"""\nrules.md"""', '"rules\\\n.md"'])
-def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(value: str) -> None:
-    """A non-TOML current text whose rules path spans lines refuses any new text (fail closed)."""
-    refusal = workspace_tools.dropped_rule_files(f"version = 1\nillegal = {value}\n[broken\n", OPTIMIZE_TOML_EXAMPLE)
+@pytest.mark.parametrize(
+    "line", ['illegal = """\nrules.md"""', 'illegal = "rules\\\n.md"', '"\\u0069llegal" = "rules.md"']
+)
+def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(line: str) -> None:
+    """A non-TOML current text whose rules path spans lines, or whose key is escaped, refuses any new text."""
+    refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", OPTIMIZE_TOML_EXAMPLE)
 
     assert refusal is not None
     assert "cannot be read" in refusal

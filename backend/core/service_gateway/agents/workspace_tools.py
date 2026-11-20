@@ -292,6 +292,8 @@ _RULE_STRING = re.compile(
 )
 # The same key with any string value, to find a value that _RULE_STRING cannot read (one over many lines).
 _RULE_KEY = re.compile(r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*[\"']")
+# A quoted key with an escape, which could spell instructions or illegal so that neither search sees it.
+_ESCAPED_KEY = re.compile(r"[\"'][^\"'\n]*\\[^\"'\n]*[\"']\s*=")
 
 
 def _clean_rule_path(path: str) -> str:
@@ -388,7 +390,10 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         named = [f"{path!r}" for path in raw_paths]
     else:
         named = [f"{setting} = {path!r}" for setting, path in before.items()]
-    if before is None and any(not _RULE_STRING.match(current, key.start()) for key in _RULE_KEY.finditer(current)):
+    if before is None and (
+        _ESCAPED_KEY.search(current)
+        or any(not _RULE_STRING.match(current, key.start()) for key in _RULE_KEY.finditer(current))
+    ):
         # A rules path the raw search cannot read could be dropped unseen, so refuse (fail closed).
         return (
             "The current optimize.toml is not valid TOML and names an instructions or illegal rules file "
@@ -615,7 +620,8 @@ def workspace_tools(
             return ""
         text, truncated = read
         if truncated:
-            return {"error": f"the file is larger than {DRAFT_FILE_BYTES} bytes."}
+            # A retry reads the same file, so only the user can fix it.
+            return {"error": f"the file is larger than {DRAFT_FILE_BYTES} bytes.", "advice": "Ask the user."}
         return text
 
     async def current_toml() -> str | dict[str, str]:
@@ -635,10 +641,8 @@ def workspace_tools(
             read = await browse(read_repo_toml)
             if isinstance(read, dict):
                 reason = read.get("error", "")
-                return {
-                    "error": f"optimize.toml cannot be checked against the repository's file: {reason} "
-                    "Try again, or ask the user."
-                }
+                advice = read.get("advice", "Try again, or ask the user.")
+                return {"error": f"optimize.toml cannot be checked against the repository's file: {reason} {advice}"}
             # A refusal leaves the draft empty, so a retry must not read (and count) again.
             repo_toml.append(read)
         return repo_toml[0]
