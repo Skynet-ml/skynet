@@ -316,8 +316,10 @@ class SkynetCi:
         # seccomp filter and an unmasked /proc, so unshare can mount a fresh
         # /proc. That exec also gives the ci user every capability as an
         # ambient capability, and CAP_SYS_PTRACE lets the /proc isolation tests
-        # read other processes. setpriv clears the ambient and inheritable
-        # sets, so pytest runs as a plain unprivileged user, as in a sandbox.
+        # read other processes. setpriv clears the ambient, inheritable and
+        # bounding sets and sets no_new_privs, so a setuid binary cannot get
+        # root back and pytest runs as a plain unprivileged user, as in a
+        # sandbox.
         # SKY_REQUIRE_USERNS=1 turns a refused namespace into a failure
         # instead of a skip (SKY-885, SKY-886). No -n: the /proc scan tests
         # read every process, so they must not run beside each other.
@@ -335,6 +337,8 @@ class SkynetCi:
                     "setpriv",
                     "--inh-caps=-all",
                     "--ambient-caps=-all",
+                    "--bounding-set=-all",
+                    "--no-new-privs",
                     "--",
                     "uv",
                     "run",
