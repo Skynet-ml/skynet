@@ -2488,8 +2488,9 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
 
     ``vercel`` uses the provider's own wrapper: a wrapper shell and ``timeout``
     stay alive above the runner with the command env, which holds no secret
-    now. ``contained`` copies a contained session: the shell ``exec``s the
-    runner, whose environment holds the relay address and token.
+    now. ``contained`` copies only the metric box command of a contained
+    session: the shell ``exec``s the runner, whose environment holds the relay
+    address and token. It does not copy the session's own parent process.
     ``vercel_key_in_env`` is the old scorer, which put the key in the command
     env: the scan must find it in the wrapper shell, so the scan works.
     """
@@ -2599,6 +2600,59 @@ def test_metric_helpers_refuse_a_stage_outside_the_run_and_relay_one_inside(
         helpers.close()
     assert [frame["stage"] for frame in sent] == ["good", "bad"]
     assert runner.MODEL_URL_ENV not in helpers.env
+
+
+def _post_raw(url: str, data: bytes) -> tuple[int, Any]:
+    """POST raw bytes and return the status and the decoded JSON answer.
+
+    Args:
+        url: The helper URL.
+        data: The request body.
+
+    Returns:
+        The HTTP status and the decoded answer.
+    """
+    request = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def test_metric_helpers_refuse_deep_nesting_and_non_finite_numbers_with_400(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A deeply nested body and ``NaN`` or ``Infinity`` get a 400 JSON answer and print no traceback."""
+    helpers = runner.MetricHelpers(None, [], None, None)
+    try:
+        log_url = helpers.env[runner.LOG_URL_ENV]
+        answers = [_post_raw(log_url, body) for body in (b"[" * 100_000, b"NaN", b'{"x": Infinity}', b"-Infinity")]
+    finally:
+        helpers.close()
+
+    assert answers == [(400, {"error": "The request body is not JSON."})] * 4
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_metric_helpers_answer_an_unexpected_failure_with_500_and_no_traceback(
+    capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper failure outside ``_HelperError`` gets a 500 JSON answer, and stderr, where log() events go, stays clean."""
+    helpers = runner.MetricHelpers(None, [], None, None)
+
+    def fail(path: str, body: Any) -> dict[str, Any]:
+        """Fail as an unexpected bug would."""
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(helpers, "answer", fail)
+    try:
+        answer = _post_raw(helpers.env[runner.LOG_URL_ENV], b"{}")
+    finally:
+        helpers.close()
+
+    assert answer == (500, {"error": "The helper failed: RuntimeError."})
+    assert "Traceback" not in capfd.readouterr().err
 
 
 def test_the_metric_command_is_the_one_process_the_runner_may_start(tmp_path: Path) -> None:

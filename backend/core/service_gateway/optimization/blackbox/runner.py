@@ -1644,6 +1644,18 @@ class _HelperError(Exception):
         self.status = status
 
 
+def _refuse_constant(name: str) -> Any:
+    """Refuse ``NaN``, ``Infinity`` and ``-Infinity``, which strict JSON does not allow.
+
+    Args:
+        name: The constant that ``json.loads`` found.
+
+    Raises:
+        ValueError: Always.
+    """
+    raise ValueError(f"{name} is not JSON.")
+
+
 class MetricHelpers:
     """Serve a command metric's stages, judge model and log on one loopback port (SKY-767).
 
@@ -1683,6 +1695,10 @@ class MetricHelpers:
                     status, document = 200, helpers.answer(self.path, self.read_json())
                 except _HelperError as exc:
                     status, document = exc.status, {"error": str(exc)}
+                except Exception as exc:
+                    # socketserver would print a traceback to stderr, where
+                    # log() events travel, and the client would get no answer.
+                    status, document = 500, {"error": f"The helper failed: {type(exc).__name__}."}
                 data = json.dumps(document).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -1691,13 +1707,14 @@ class MetricHelpers:
                 self.wfile.write(data)
 
             def read_json(self) -> Any:
-                """Read the request body as strict JSON.
+                """Read the request body as JSON, without ``NaN`` or ``Infinity``.
 
                 Returns:
                     The decoded body.
 
                 Raises:
-                    _HelperError: When the body is too large or not JSON.
+                    _HelperError: When the body is too large, not JSON, too
+                        deeply nested or holds a non-finite number.
                 """
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -1708,8 +1725,8 @@ class MetricHelpers:
                     self.close_connection = True
                     raise _HelperError(413, f"The request body is larger than {_HELPER_BODY_BYTES} bytes.")
                 try:
-                    return json.loads(self.rfile.read(length) if length > 0 else b"")
-                except ValueError:
+                    return json.loads(self.rfile.read(length) if length > 0 else b"", parse_constant=_refuse_constant)
+                except (ValueError, RecursionError):
                     raise _HelperError(400, "The request body is not JSON.") from None
 
             def log_message(self, format: str, *args: Any) -> None:
@@ -1871,9 +1888,10 @@ def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) ->
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     stages = payload.get("stages")
     # The command runs as this process's user, and this process holds the
-    # model key in memory, and on a contained session the relay addresses and
-    # token in its environment. So /proc/<pid>/mem and environ must not be
-    # readable. The flag does not reach the command: execve resets it.
+    # model key in memory and the relay values in its environment. So this
+    # process's /proc/<pid>/mem and environ must not be readable. The flag
+    # does not reach the command (execve resets it), and it does not cover a
+    # parent process that a contained session keeps alive.
     _block_tracing()
     key = _take_model_key(call_dir)
     relay = StageClient(stages) if isinstance(stages, dict) else None
@@ -1886,7 +1904,7 @@ def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) ->
     names = [str(name) for name in stages.get("names") or ()] if isinstance(stages, dict) else []
     model = (gateway.get("declared_model") or gateway.get("model")) if isinstance(gateway, dict) else None
     helpers = MetricHelpers(relay, names, llm, str(model) if model else None)
-    env = {key: value for key, value in os.environ.items() if key not in _COMMAND_HIDDEN_ENV}
+    env = {name: value for name, value in os.environ.items() if name not in _COMMAND_HIDDEN_ENV}
     env.update(helpers.env)
     case = payload.get("case")
     case = case if isinstance(case, dict) else {"input": case}

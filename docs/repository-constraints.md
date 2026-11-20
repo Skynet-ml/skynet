@@ -742,9 +742,12 @@ environment holds no model key, no model mailbox address
 not in the old `SKYNET_` spelling. The box command that starts the runner has
 no model key in its environment either. The scorer writes the key to a file
 in the call folder, and the runner reads and deletes the file before the
-command starts. The runner also blocks same-user reads of its memory and
-environment, so the command cannot read the key or the relay values from
-`/proc`.
+command starts. The runner also blocks same-user reads of its own memory
+and environment, so the command cannot read them from `/proc`. No process
+that starts the metric has the model key in its environment. On a Vercel
+box, the processes above the runner also have no relay values. A contained
+session can keep a parent process alive that has the relay address in its
+environment.
 
 A Python metric gets none of these variables, because it imports the helpers.
 
