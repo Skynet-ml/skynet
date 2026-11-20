@@ -70,11 +70,17 @@ const SETUP_WARNINGS_TOAST_ID = "submit-setup-warnings";
 const ASCENT_TOML = "ascent.toml";
 
 // A second press shows its own text in place of the first one's, not a second toast.
-function setupToast(text: string, id = SETUP_CHECK_TOAST_ID, show = toast.error) {
+// An undefined autoClose takes the container's default, also on an update.
+function setupToast(
+  text: string,
+  id = SETUP_CHECK_TOAST_ID,
+  show = toast.error,
+  autoClose?: false,
+) {
   // A check can give many diagnostics, one on each line of the text (SKY-763).
   const render = <span className="whitespace-pre-line">{text}</span>;
-  if (toast.isActive(id)) toast.update(id, { render });
-  else show(render, { toastId: id });
+  if (toast.isActive(id)) toast.update(id, { render, autoClose });
+  else show(render, { toastId: id, autoClose });
 }
 
 function shortfallMessage(shortfall: BudgetShortfall): string {
@@ -243,7 +249,8 @@ function UnifiedWizardFrame() {
           if (result.ok) {
             toast.dismiss(SETUP_CHECK_TOAST_ID);
             // A warning blocks nothing, so the wizard says it and moves on.
-            if (lines) {
+            if (!lines) toast.dismiss(SETUP_WARNINGS_TOAST_ID);
+            else {
               setupToast(
                 formatMsg("submit.setup_check.warnings", { p1: lines }),
                 SETUP_WARNINGS_TOAST_ID,
@@ -253,7 +260,14 @@ function UnifiedWizardFrame() {
             then();
             return;
           }
-          setupToast(formatMsg("submit.setup_check.invalid", { p1: lines }));
+          toast.dismiss(SETUP_WARNINGS_TOAST_ID);
+          // Up to ten lines take longer to read than the default delay (SKY-763).
+          setupToast(
+            formatMsg("submit.setup_check.invalid", { p1: lines }),
+            SETUP_CHECK_TOAST_ID,
+            toast.error,
+            false,
+          );
         });
       };
       run(setupText)

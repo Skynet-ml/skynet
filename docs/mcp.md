@@ -78,9 +78,9 @@ repository. `repo_draft_contract_guide` gives the format guide and an example
 file. The setup screen's agent uses the same guide. `repo_draft_set_contract`
 saves the text into the draft, and the run writes it over the repository's
 own file. Each parser error is one issue: the parser's message, then its
-line, such as `(line 4)`. `contract_issues` returns at most 20 diagnostics,
-errors first. Then it adds one line with the count of the diagnostics it does
-not show. A parser warning is a note, and it does not stop the run. When the
+line, such as `(line 4)`. `repo_draft_set_contract` and `repo_draft_review`
+list at most 20 diagnostics, errors first, then one line with the count of
+the rest. A parser warning is a note, and it does not stop the run. When the
 repository has an `ascent.toml`, the step is optional. When the draft and
 the repository both have none, `repo_draft_review` reports an issue and the
 run does not start.
