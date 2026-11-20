@@ -4190,10 +4190,17 @@ def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_mo
         stdout=subprocess.PIPE,
         text=True,
         env=env,
+        start_new_session=True,
     )
+
+    def stop() -> None:
+        """Kill the proxy and the bridge under it, which also holds the output pipe."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proxy.pid, signal.SIGKILL)
+
     relayed = []
-    # A hung proxy closes its output when killed, so the loop ends and the test fails instead of blocking.
-    watchdog = threading.Timer(60, proxy.kill)
+    # Killing the whole group closes the output pipe, so the loop ends and a hang fails the test.
+    watchdog = threading.Timer(60, stop)
     watchdog.start()
     try:
         assert proxy.stdout is not None
@@ -4208,7 +4215,7 @@ def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_mo
         assert proxy.wait(timeout=60) == 0
     finally:
         watchdog.cancel()
-        proxy.kill()
+        stop()
 
     statuses = json.loads(record.read_text())
     status, message = statuses.pop("other/model")
@@ -4378,3 +4385,60 @@ def test_root_box_proxy_reads_no_bindings(bindings: Path, monkeypatch: pytest.Mo
 
     assert guest_model_proxy._bound_models("route-key") == []
     assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/messages", "/responses", "/messages"])
+def test_box_proxy_with_its_own_ascent_model_checks_the_responses_and_messages_routes(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A box with its own ``ASCENT_MODEL`` and no bindings checks Responses and messages requests (SKY-776).
+
+    Args:
+        monkeypatch: Sets the box's ``ASCENT_MODEL`` and removes the bindings folder.
+        path: A model route, with or without the ``/v1`` prefix.
+    """
+    monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "openai/run-model")
+    monkeypatch.delenv(guest_model_proxy.MODEL_BINDINGS_ENV, raising=False)
+
+    refusal = guest_model_proxy._other_model_refusal(path, json.dumps({"model": "other/model"}).encode())
+
+    assert refusal is not None
+    assert "ASCENT_MODEL" in json.loads(refusal)["error"]["message"]
+    accepted = json.dumps({"model": "litellm_proxy/openai/run-model"}).encode()
+    assert guest_model_proxy._other_model_refusal(path, accepted) is None
+
+
+@pytest.mark.parametrize("own_model", [True, False])
+def test_box_proxy_lets_other_routes_and_methods_go_on(
+    bindings: Path, monkeypatch: pytest.MonkeyPatch, own_model: bool
+) -> None:
+    """A thread's messages route and a GET are not model calls, so the box does not check them.
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Sets the box's own ``ASCENT_MODEL`` for one case.
+        own_model: Whether the box has its own ``ASCENT_MODEL``.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    if own_model:
+        monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "run-model")
+    body = json.dumps({"model": "other/model"}).encode()
+
+    for path in ("/v1/threads/x/messages", "/v1/chat/completions/extra", "/v1/openai/responses"):
+        assert guest_model_proxy._other_model_refusal(path, body, "route-key") is None
+    assert guest_model_proxy._other_model_refusal("/v1/messages", body, "route-key", "GET") is None
+    assert guest_model_proxy._other_model_refusal("/v1/messages?beta=true", body, "route-key") is not None
+
+
+def test_a_second_session_with_the_same_key_replaces_the_bound_model(bindings: Path) -> None:
+    """A key names only its latest session's model, so the error lists no stale model.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "old-model")
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+
+    assert guest_model_proxy._bound_models("route-key") == ["run-model"]
+    assert len(list((bindings / guest_model_proxy.key_digest("route-key")).iterdir())) == 1
+    assert "old-model" not in _refusal_message()

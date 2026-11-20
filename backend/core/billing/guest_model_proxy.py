@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -31,8 +32,8 @@ _AGENT_PREFIXES = ("openai/", "app/")
 _BINDING_MAX_BYTES = 256
 _MODEL_NAME_MAX = 200
 # The model routes whose body names its model at the top level: OpenAI chat, OpenAI Responses (Codex) and
-# Anthropic messages.
-_MODEL_PATHS = ("/chat/completions", "/responses", "/messages")
+# Anthropic messages. Only these exact paths: /v1/threads/<id>/messages is not a model call.
+_MODEL_PATHS = frozenset({"/chat/completions", "/responses", "/messages"})
 # The pinned sandbox image predates the APP_* names and reads only this one.
 _LEGACY_RELAY_URL_ENV = "SKYNET_BUDGET_RELAY_URL"
 _PRINT_LOCK = threading.Lock()
@@ -132,7 +133,7 @@ def main() -> int:
                 self.send_error(413)
                 return
             body = self.rfile.read(length) if length else b"" if raw else b"{}"
-            refusal = None if raw else _other_model_refusal(self.path, body, _request_key(self.headers))
+            refusal = None if raw else _other_model_refusal(self.path, body, _request_key(self.headers), self.command)
             if refusal is not None:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
@@ -202,9 +203,12 @@ def main() -> int:
     endpoint = f"http://127.0.0.1:{server.server_port}"
     if not _runs_as_root():
         bindings = (response_dir.parent / "models").resolve()
-        bindings.mkdir(exist_ok=True)
-        # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
-        os.environ[MODEL_BINDINGS_ENV] = str(bindings)
+        # Without the folder the box only loses the clearer error: the gateway still refuses another model.
+        with contextlib.suppress(OSError):
+            bindings.mkdir(exist_ok=True)
+        if not bindings.is_symlink() and bindings.is_dir():
+            # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
+            os.environ[MODEL_BINDINGS_ENV] = str(bindings)
     environment = {
         **os.environ,
         RELAY_URL_ENV: f"{endpoint}/v1",
@@ -366,7 +370,7 @@ def _read_binding(path: Path) -> str | None:
     return model
 
 
-def _other_model_refusal(path: str, body: bytes, key: str = "") -> bytes | None:
+def _other_model_refusal(path: str, body: bytes, key: str = "", method: str = "POST") -> bytes | None:
     """Return the error body for a model request that names another model than ``ASCENT_MODEL``.
 
     The gateway refuses such a request too, but its error does not say which
@@ -378,12 +382,13 @@ def _other_model_refusal(path: str, body: bytes, key: str = "") -> bytes | None:
         path: The request path on this proxy.
         body: The raw request body.
         key: The request's route key.
+        method: The request's HTTP method; only a POST calls a model.
 
     Returns:
         An OpenAI-shaped error body, or ``None`` when the request may go on.
     """
     box_model = os.environ.get(MODEL_ENV)
-    if not path.split("?", 1)[0].endswith(_MODEL_PATHS):
+    if method != "POST" or path.split("?", 1)[0].removeprefix("/v1") not in _MODEL_PATHS:
         return None
     allowed = [box_model] if box_model else _bound_models(key)
     if not allowed:

@@ -2248,6 +2248,8 @@ def _reap_children() -> None:
 def bind_model(folder: Path, api_key: str, model: str) -> None:
     """Name a session's model for its route key in the box proxy's model bindings folder.
 
+    The key's binding then names only this model.
+
     The layout mirrors ``guest_model_proxy._bound_models``: this file runs in
     the box without the backend's code. The proxy then refuses a request for
     another model with an error that names ``ASCENT_MODEL`` (SKY-884).
@@ -2258,15 +2260,15 @@ def bind_model(folder: Path, api_key: str, model: str) -> None:
         model: The session's model.
     """
     target = folder / hashlib.sha256(api_key.encode()).hexdigest()
-    name = hashlib.sha256(model.encode()).hexdigest()
     # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
     with contextlib.suppress(OSError):
         target.mkdir(parents=True, exist_ok=True)
-        if not (target / name).exists():
-            # A concurrent session or the proxy must never read a partial name, so the name is renamed into place.
-            partial = target / f".{name}.{uuid.uuid4().hex}"
-            partial.write_text(model, encoding="utf-8")
-            partial.replace(target / name)
+        # One file for each key: a later session with the same key replaces the earlier model, so the error
+        # never lists a model of a finished session. The proxy must never read a partial name, so the name
+        # is renamed into place.
+        partial = target / f".model.{uuid.uuid4().hex}"
+        partial.write_text(model, encoding="utf-8")
+        partial.replace(target / "model")
 
 
 def run_session(
