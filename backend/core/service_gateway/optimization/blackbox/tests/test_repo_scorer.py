@@ -1442,6 +1442,47 @@ def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_maske
     assert secret not in feedback
 
 
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"printf '{secret}%0791d\\n' 0 >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: " in feedback
+    assert "9876" not in feedback
+
+
+def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
+    marker = tmp_path / "base-python-ran"
+    base = tmp_path / "base" / "python3"
+    base.parent.mkdir()
+    base.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    base.chmod(0o755)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"shout": STAGES["shout"]})
+    try:
+        assert scorer.score("")["feedback"] == "HI"
+    finally:
+        scorer.close()
+    assert marker.exists()
+
+
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
 
@@ -4862,12 +4903,13 @@ def test_run_failed_scrub_drops_metric_runner_and_library_frames() -> None:
     assert _scrub(text.removeprefix("Run failed: "), root, ("eval",)) == "RuntimeError: broke"
 
 
-def _shell_run_scorer(tmp_path: Path, script: str) -> RepoScorer:
+def _shell_run_scorer(tmp_path: Path, script: str, secrets: Mapping[str, str] | None = None) -> RepoScorer:
     """Build a local scorer whose ``[run] entry`` is ``sh src/run.sh`` and whose metric echoes the output (SKY-757).
 
     Args:
         tmp_path: Scratch folder.
         script: The body of ``src/run.sh``.
+        secrets: The run's secrets.
 
     Returns:
         The scorer; the caller closes it.
@@ -4882,7 +4924,7 @@ def _shell_run_scorer(tmp_path: Path, script: str) -> RepoScorer:
             editable_paths=["src"],
             readonly_paths=[],
             setup_command=None,
-            secrets={},
+            secrets=dict(secrets or {}),
         ),
         metric,
         timeout_seconds=60,
@@ -4947,7 +4989,22 @@ def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: 
     assert result["score"] is None
     assert result["feedback"].startswith("Run failed: The command exited with code 1.")
     assert result["feedback"].endswith("out line 300")
-    assert "err line 300\n\nstdout: " in result["feedback"]
+    assert "err line 300\nstdout: " in result["feedback"]
+
+
+@_needs_openascent
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut, and the cause stays (SKY-757)."""
+    secret = "run-secret-value-9876"
+    scorer = _shell_run_scorer(tmp_path, f"printf '{secret}%0791d\\n' 0 >&2\nexit 1\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: " in result["feedback"]
+    assert "9876" not in result["feedback"]
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:

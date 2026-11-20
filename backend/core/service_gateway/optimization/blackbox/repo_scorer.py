@@ -485,8 +485,12 @@ class RepoScorer:
                     finally:
                         self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
-                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
-                    error = error[len(RUN_FAILED) :]
+                    error = runner.command_error(
+                        ran,
+                        lambda text: _scrub(RUN_FAILED + redact(text, secrets), opened.root, self._hidden)[
+                            len(RUN_FAILED) :
+                        ],
+                    )
                     # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
                         "score": None,
@@ -2114,13 +2118,19 @@ class _StageRelay:
             files[f"{folder}/{runner.STAGE_RELAY_FILE}"] = json.dumps(relay.config(_FROM_STAGE_TREE))
         box.write_files(files)
         relative = f"../calls/{identity}"
-        stage_runner = f"python3 ../{RUNNER_PATH.rsplit('/', 1)[1]}"
+        runner_file = f"../{RUNNER_PATH.rsplit('/', 1)[1]}"
+        stage_runner = f"python3 {runner_file}"
         if isinstance(stage.entry, str):
             command = f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_FLAG} {relative} {shlex.quote(stage.entry)}"
         else:
-            # The runner serves the stage's relay when it has one, then runs the command.
+            # The runner serves the stage's relay when it has one, then runs the
+            # command. It needs only the standard library and the copied
+            # OpenAscent package, which the python3 that [setup] put first on
+            # PATH may be too old to load, so it runs on the base interpreter,
+            # as a [run] command does. The command still finds python3 on PATH.
             command = (
-                f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_COMMAND_FLAG} {relative} ../openascent"
+                f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                f'; cd {_STAGE_TREE} && "$p" {runner_file} {runner.STAGE_COMMAND_FLAG} {relative} ../openascent'
                 f" {stage.timeout * _COMMAND_TIME_SHARE:g} {shlex.join(stage.entry)}"
             )
         sink = functools.partial(relay.output, source=identity) if relay is not None else sandbox_log.ignore_output
@@ -2146,8 +2156,8 @@ class _StageRelay:
         if isinstance(output, dict) and output.get("error"):
             if isinstance(stage.entry, str):
                 return {"error": f"Stage {name!r} raised {output['error']}"}
-            # A command's error leads with its cause, then a stderr tail that may echo a secret.
-            tail = redact(str(output["error"]), self._stage_secrets)[:_STAGE_ERROR_CHARS]
+            # A command's error leads with its cause, then log tails that may echo a secret.
+            tail = runner.command_error(output, lambda text: redact(text, self._stage_secrets))[:_STAGE_ERROR_CHARS]
             return {"error": f"Stage {name!r} failed: {tail}"}
         return {"error": f"Stage {name!r} returned no valid output."}
 

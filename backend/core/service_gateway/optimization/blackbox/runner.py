@@ -46,7 +46,8 @@ the call's folder: the call then gets its own loopback relay on a free port,
 checked against the stage's own role. A command stage runs as
 ``--stage-command <call_dir> <package> <timeout> <command> [<arg> ...]``,
 behind that relay when it has one, and writes the same ``{"output": ...}``
-or ``{"error": ...}`` as a Python stage (SKY-757). Parallel
+or ``{"error": ...}`` as a Python stage, with the failed command's
+``stderr`` and ``stdout`` tails next to the error (SKY-757). Parallel
 calls share the stage box, so the tree's MCP file, which names
 ``RELAY_PORT``, reaches no call; each call gets ``mcp.json`` in its folder
 with its own port, and ``ASCENT_MCP_CONFIG`` names that copy (SKY-624).
@@ -177,6 +178,15 @@ _COMMAND_STOP_SECONDS = 10.0
 # six-character escape). The cap stops a process that left the entry's
 # session from making the supervisor read a huge file in its place (SKY-757).
 _COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
+# The characters of a failed command's stderr and of its stdout that its error
+# shows. Two tails leave room for the cause in the [run] feedback, which keeps
+# only its last 1,988 characters (SKY-757).
+COMMAND_LOG_CHARS = 800
+# The characters of each log that the box sends to the parent, which cuts them
+# to COMMAND_LOG_CHARS after it masks the secrets. The extra characters hold
+# the whole of a secret that the box's cut splits, so the parent's cut drops
+# all of it.
+_COMMAND_LOG_BOUND = 4_000
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
 # The metric input key that names the folder the metric setup step installed
@@ -1865,7 +1875,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     Returns:
         ``{"output", "error", "elapsed_s"}``: the entry's output, why the run
         failed, and the entry's run time in seconds, measured here, outside
-        its processes.
+        its processes. A failed command also gives ``stderr`` and ``stdout``.
     """
     entry = payload["entry"]
     timeout = float(payload["timeout"])
@@ -1911,7 +1921,8 @@ def _run_entry(
         package: The OpenAscent package folder for a command entry.
 
     Returns:
-        ``{"output", "error", "elapsed_s"}``.
+        ``{"output", "error", "elapsed_s"}``, and ``stderr`` and ``stdout``
+        when a command failed.
     """
     user = switch.get("user")
     wait = timeout
@@ -1967,7 +1978,29 @@ def _run_entry(
             result["output"] = answer["output"]
         else:
             result["error"] = str(answer.get("error") or "returned nothing")
+            result.update((stream, str(answer[stream])) for stream in ("stderr", "stdout") if answer.get(stream))
     return result
+
+
+def command_error(document: dict[str, Any], mask: Callable[[str], str]) -> str:
+    """Join a failed call's cause and the tails of its stderr and its stdout.
+
+    stderr comes first: a stage error keeps only its head, and a command's
+    stdout is often progress output (SKY-757).
+
+    Args:
+        document: ``{"error"}``, and ``stderr`` and ``stdout`` from a failed command.
+        mask: Removes the secrets from a text. It runs before each cut, so a
+            secret across a cut leaves no part of itself.
+
+    Returns:
+        The masked cause, then the last ``COMMAND_LOG_CHARS`` of each masked log.
+    """
+    error = mask(str(document["error"]))
+    for stream in ("stderr", "stdout"):
+        if document.get(stream):
+            error += f"\n{stream}: {mask(str(document[stream]))[-COMMAND_LOG_CHARS:]}"
+    return error
 
 
 class _quiet:  # noqa: N801
@@ -2090,20 +2123,19 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
         text = json.dumps({"output": call.output}, allow_nan=False, separators=(",", ":"))
     except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
         if ascent is not None and isinstance(exc, ascent.AscentError):
-            error = str(exc)
             # The same logs as a passed call: stdout, then stderr (SKY-757).
             sys.stderr.write(exc.stdout + exc.stderr)
-            # stderr comes first in the error: a stage error keeps only its
-            # head, and a command's stdout is often progress output. Two
-            # 800-character tails leave room for the cause in the [run]
-            # feedback, which keeps only the last 1,988 characters.
-            if exc.stderr:
-                error += f"\nstderr: {exc.stderr[-800:]}"
-            if exc.stdout:
-                error += f"\nstdout: {exc.stdout[-800:]}"
+            # The parent masks the secrets and only then cuts each log to
+            # COMMAND_LOG_CHARS, so no secret here is cut in two (SKY-757).
+            document = {"error": str(exc)}
+            document.update(
+                (stream, text[-_COMMAND_LOG_BOUND:])
+                for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout))
+                if text
+            )
         else:
-            error = f"{type(exc).__name__}: {exc}"
-        text = json.dumps({"error": error})
+            document = {"error": f"{type(exc).__name__}: {exc}"}
+        text = json.dumps(document)
     _write_output(call_dir, text)
     return 0
 

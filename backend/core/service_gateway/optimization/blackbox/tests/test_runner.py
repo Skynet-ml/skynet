@@ -1081,9 +1081,21 @@ def test_a_failed_stage_command_writes_the_package_error(tmp_path: Path) -> None
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    error = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["error"]
-    assert error.startswith("The command exited with code 4.")
-    assert error.endswith("stderr: broken\n")
+    document = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert document["error"].startswith("The command exited with code 4.")
+    assert document["stderr"] == "broken\n"
+
+
+def test_a_command_error_masks_each_log_before_it_cuts_it() -> None:
+    """The cause comes first, then each masked log's last ``COMMAND_LOG_CHARS``, stderr first (SKY-757)."""
+    secret = "secret-value-9876"
+    document = {"error": "The command exited with code 1.", "stdout": "out", "stderr": secret + "x" * 795}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"))
+    cause, stderr, stdout = error.split("\n")
+    assert cause == "The command exited with code 1."
+    assert stderr == "stderr: " + ("[secret]" + "x" * 795)[-runner.COMMAND_LOG_CHARS :]
+    assert stdout == "stdout: out"
+    assert "9876" not in error
 
 
 def test_a_stage_command_without_the_package_writes_an_error(tmp_path: Path) -> None:
@@ -1488,10 +1500,8 @@ def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
     """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout."""
     ran = _candidate(tmp_path, ["sh", "-c", "echo '{\"output\": 1}'"])
     assert ran["output"] is None
-    assert ran["error"] == (
-        "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
-        '\nstdout: {"output": 1}\n'
-    )
+    assert ran["error"] == "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+    assert ran["stdout"] == '{"output": 1}\n'
 
 
 @_needs_openascent
@@ -1578,7 +1588,7 @@ def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: 
     assert ran["output"] is None
     assert error in ran["error"]
     if "code 3" in error:
-        assert ran["error"].endswith("stderr: why\n")
+        assert ran["stderr"] == "why\n"
 
 
 @_needs_openascent
@@ -1589,7 +1599,7 @@ def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path)
     assert ran["output"] is None
     assert "said-on-stdout\nsaid-on-stderr\n" in logs[0]
     assert ran["error"].startswith("The command exited with code 1.")
-    assert ran["error"].endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
+    assert runner.command_error(ran, str).endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
 
 
 def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:
