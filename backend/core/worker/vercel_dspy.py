@@ -55,7 +55,8 @@ DIRECTION_IMAGE_MESSAGE = (
     "The sandbox image is older than [metric] direction support in optimize.toml; rebuild and re-pin the sandbox image."
 )
 SCORE_DIRECTION_IMAGE_MESSAGE = (
-    "The sandbox image is older than [metric.scores] support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [outcome.require] limits and [metric.scores] support in optimize.toml; rebuild"
+    " and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'

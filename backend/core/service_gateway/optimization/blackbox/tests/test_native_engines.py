@@ -331,3 +331,12 @@ def test_the_state_table_marks_a_minimize_named_column_as_negated(tmp_path: Path
     assert "| `score:cost_usd` (lower is better, negated) | -0.06" in state
     assert "| `score:recall` | 0.8" in state
     assert "`score:recall` (lower" not in state
+
+
+def test_the_meta_harness_skill_says_val_json_named_scores_are_raw() -> None:
+    """The skill says val.json named scores are raw while the frontier columns are engine scale (SKY-775)."""
+    skill = native_engines.MetaHarnessEngine(_config("meta_harness")).skill()
+
+    assert "each `named_scores` value in val.json is the metric's raw value and follows its `direction`" in skill
+    assert '`"direction": "minimize"` is better when lower' in skill
+    assert "`frontier_val.json` columns are on the engine scale (higher is better)" in skill

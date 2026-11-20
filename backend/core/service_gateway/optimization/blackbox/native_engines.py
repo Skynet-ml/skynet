@@ -127,6 +127,12 @@ def _shown(score: float) -> str:
 
 # The engines see every score on one scale where higher is better (SKY-750).
 _SCALE_NOTE = "Scores are on the engine scale: higher is always better, and a score may be negative."
+# SKY-775: val.json shows named scores raw, but the frontier columns stay negated for minimize scores.
+_RAW_NAMED_NOTE = (
+    "Exception: each `named_scores` value in val.json is the metric's raw value and follows its `direction`; one"
+    ' with `"direction": "minimize"` is better when lower. `avg_val`, the per-example `scores` and the'
+    " `frontier_val.json` columns are on the engine scale (higher is better)."
+)
 # Mirror protocol.SCORE_DIRECTION_KEY and feedback.LOWER_IS_BETTER_KEY: this module runs in the sandbox
 # without Skynet's code. A ``[metric.scores]`` minimize named score carries the marker raw (SKY-775).
 _DIRECTION_KEY = "direction"
@@ -1544,7 +1550,7 @@ class MetaHarnessEngine:
                 "- `agents/seed.txt` is the starting candidate the run began from.\n\n"
                 "## Directory Structure\n\n"
                 "- Val results: `results/<candidate>/val.json` (`avg_val` plus per-example `scores` and evaluator "
-                "`infos`). " + _SCALE_NOTE + "\n"
+                "`infos`). " + _SCALE_NOTE + " " + _RAW_NAMED_NOTE + "\n"
                 "- Frontier: `frontier_val.json` (`_pareto` ranks candidates by average score; every other key "
                 "is an example or a named score `score:<name>` with the candidate that leads it)\n"
                 "- Named scores: `results/<candidate>/val.json` `named_scores` maps each to its score and "

@@ -380,6 +380,9 @@ def test_an_image_before_21_is_refused_for_limits_or_a_minimize_named_score(
         assert session.steps == ["probe"]
         assert seen[0]["error"] == vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE
         assert "rebuild and re-pin the sandbox image" in seen[0]["error"]
+        # The message names both rules, so it is right for a contract with only [outcome.require] limits too.
+        assert "[outcome.require] limits" in seen[0]["error"]
+        assert "[metric.scores]" in seen[0]["error"]
     else:
         assert "optimizer" in session.steps
         assert all(event.get("error") != vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE for event in seen)
