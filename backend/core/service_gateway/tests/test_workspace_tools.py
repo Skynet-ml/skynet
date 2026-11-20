@@ -1319,13 +1319,17 @@ def test_guide_example_is_a_valid_optimize_toml() -> None:
     assert OPTIMIZE_TOML_EXAMPLE in METRIC_GUIDE
     assert constraints.run_entry == ("pytest", "-q")
     assert constraints.editable_paths == ("src",)
-    assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
+    assert (constraints.outcome_target, constraints.outcome_limits) == (0.9, {"pass_rate": 0.8})
 
 
-def test_guide_says_the_target_stops_the_search_and_the_run_end_checks_the_minimums() -> None:
-    """The guide tells the agent the run stops at the target and judges the minimums at its end (SKY-692)."""
+def test_guide_says_the_target_stops_the_search_and_the_run_end_checks_the_limits() -> None:
+    """The guide tells the agent the run stops at the target and judges the limits at its end (SKY-692)."""
     assert "A run stops its search when the score reaches ``target``." in METRIC_GUIDE
-    assert "each ``[outcome.require]`` minimum" in METRIC_GUIDE
+    assert "each ``[outcome.require]`` limit" in METRIC_GUIDE
+    # SKY-775: a limit follows its score's [metric.scores] direction, so it is not always a minimum.
+    assert "``[metric.scores]``" in METRIC_GUIDE
+    assert "a maximum for a minimize score" in METRIC_GUIDE
+    assert "its minimum score" not in METRIC_GUIDE
     assert "cannot check ``[outcome.require]``" not in METRIC_GUIDE
     assert "cannot use ``[outcome]``" not in METRIC_GUIDE
 

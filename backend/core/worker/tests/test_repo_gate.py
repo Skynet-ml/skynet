@@ -159,8 +159,8 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, raw: bytes, place: str) -> None:
-    """The run end checks each [outcome.require] minimum on the final score, so the gate lets it through (SKY-692)."""
+def test_outcome_limits_pass_because_the_run_end_judges_them(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The run end checks each [outcome.require] limit on the final score, so the gate lets it through (SKY-692)."""
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
@@ -171,6 +171,23 @@ def test_a_metric_direction_passes_because_the_run_obeys_it(tmp_path: Path, plac
 
     assert "metric.direction" in repo_gate.ENFORCED[place]  # type: ignore[index]
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_metric_scores_passes_because_the_run_obeys_it(
+    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engines and the run end read each [metric.scores] direction, so the gate lets it through (SKY-775)."""
+    raw = (
+        b'version = 1\n[metric.scores]\ncost_usd = "minimize"\n[run]\nentry = "run.py:main"\n'
+        b"[outcome.require]\ncost_usd = 0.05\n"
+    )
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    assert "metric.scores" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - {"metric.scores"})  # type: ignore[index]
+    assert [failure.key for failure in check_repository(archive, (), place=place)] == ["[metric.scores]"]  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -198,7 +215,7 @@ def test_a_metric_setup_passes_because_the_metric_setup_box_runs_it(
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_a_file_without_outcome_minimums_passes(tmp_path: Path, raw: bytes, place: str) -> None:
+def test_a_file_without_outcome_limits_passes(tmp_path: Path, raw: bytes, place: str) -> None:
     """The run stops at [outcome] target (SKY-691); an empty [outcome] or a [tool.<name>] table asks for nothing."""
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 

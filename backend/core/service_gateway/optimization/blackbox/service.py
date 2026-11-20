@@ -785,7 +785,7 @@ def _reaches(value: float, bound: float) -> bool:
 
     Args:
         value: The measured score; finite.
-        bound: The target or minimum from ``optimize.toml``.
+        bound: The target or limit from ``optimize.toml``.
 
     Returns:
         True when ``value`` is above ``bound`` or equal to it within float rounding.
@@ -809,21 +809,24 @@ def _improvement(baseline: float, optimized: float, direction: str) -> float:
 
 
 def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
-    """Judge the ``[outcome]`` target and minimums of ``optimize.toml`` on the reported final run.
+    """Judge the ``[outcome]`` target and limits of ``optimize.toml`` on the reported final run.
 
     The engine may stop on its search-time score; this verdict uses the final
     run of the reported version, so the search can stop and the target still
     fail. The verdict only reports: it never changes what the run publishes.
 
     Args:
-        outcome: The snapshot's ``{"target": float | None, "require": {name: minimum}, "direction": str}``.
+        outcome: The snapshot's ``{"target": float | None, "require": {name: limit}, "direction": str}``,
+            with ``"scores": {name: direction}`` when ``[metric.scores]`` names directions.
         best: The reported version's final run, if it had one.
 
     Returns:
         ``target`` and ``target_reached`` when the file sets a target (for a
         minimize run, a score equal to or below it reaches it), and
-        ``minimums_passed`` and ``failed_minimums`` when it sets minimums.
-        A version with no final score reaches no target and passes no minimum.
+        ``requirements_passed`` and ``failed_requirements`` when it sets limits.
+        A limit is a minimum for a maximize named score and a maximum for a
+        minimize one; a name with no direction maximizes (SKY-775).
+        A version with no final score reaches no target and passes no limit.
         A score that is not a finite number reaches nothing and is stored as
         ``None``, because this dict is stored without ``finite_json``.
     """
@@ -831,14 +834,17 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
     verdict: dict[str, Any] = {}
     if outcome.get("target") is not None:
         target = float(outcome["target"])
-        # Named minimums stay minimums; only the total score follows ``[metric] direction`` (SKY-750).
+        # Only the total score follows ``[metric] direction`` (SKY-750); named scores follow [metric.scores].
         sign = -1.0 if outcome.get("direction") == MINIMIZE else 1.0
         reached = score is not None and math.isfinite(score) and _reaches(sign * score, sign * target)
         verdict.update(target=target, target_reached=reached)
-    minimums = outcome.get("require") or {}
-    if minimums:
+    limits = outcome.get("require") or {}
+    if limits:
+        directions = outcome.get("scores") or {}
         failed = []
-        for name, minimum in minimums.items():
+        for name, limit in limits.items():
+            direction = MINIMIZE if directions.get(name) == MINIMIZE else MAXIMIZE
+            sign = -1.0 if direction == MINIMIZE else 1.0
             entry = best.named.get(name) if best and score is not None else None
             if score is None:
                 reason = f"The final run has no score, so {name!r} has no value."
@@ -848,14 +854,17 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
                 reason = f"The metric returned {name!r} on only {returned} of {best.runs} cases."
             elif not math.isfinite(entry.score):
                 reason = f"The metric returned a value for {name!r} that is not a finite number."
-            elif not _reaches(entry.score, float(minimum)):
+            elif not _reaches(sign * entry.score, sign * float(limit)):
                 # Twelve digits always show the gap: ``_reaches`` passes anything closer than that.
-                reason = f"{name!r} scored {entry.score:.12g}, below its minimum {float(minimum):.12g}."
+                side = "above its maximum" if direction == MINIMIZE else "below its minimum"
+                reason = f"{name!r} scored {entry.score:.12g}, {side} {float(limit):.12g}."
             else:
                 continue
             value = entry.score if entry and math.isfinite(entry.score) else None
-            failed.append({"name": name, "minimum": float(minimum), "value": value, "reason": reason})
-        verdict.update(minimums_passed=not failed, failed_minimums=failed)
+            failed.append(
+                {"name": name, "direction": direction, "limit": float(limit), "value": value, "reason": reason}
+            )
+        verdict.update(requirements_passed=not failed, failed_requirements=failed)
     return verdict
 
 
@@ -1366,6 +1375,7 @@ def _run_job(
         max_evals=job.budget.max_scorer_runs,
         on_eval=_progress_listener(progress_callback),
         direction=direction,
+        score_directions=outcome_rules.get("scores") or {},
     )
     engine_progress = _without_unscored(progress_callback, server)
     seed_candidate = job.seed_candidate
@@ -1703,7 +1713,7 @@ def _run_job(
             # It stays None unless both final runs finished, so a budget stop
             # in the winner's held-out run never passes for a finished final run.
             "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
-            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no minimum.
+            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no limit.
             **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,

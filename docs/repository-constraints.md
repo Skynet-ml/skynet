@@ -55,6 +55,11 @@ direction = "maximize"
 # first metric call. See "Build the metric: [metric] setup" below.
 # setup = "cd eval && cargo build --release"
 
+[metric.scores]
+# Optional. The direction of each named score that the metric returns:
+# "maximize" (the default) or "minimize". See "Named score directions" below.
+cost_usd = "minimize"
+
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
 # no cases.
@@ -65,8 +70,10 @@ cases = "data/cases.jsonl"
 target = 0.9
 
 [outcome.require]
-# Optional. A minimum for each named score that the metric returns.
-latency = 0.5
+# Optional. A limit for each named score that the metric returns: a minimum
+# for a maximize score, a maximum for a minimize score.
+recall = 0.8
+cost_usd = 0.05
 
 [tool.my-team]
 # Optional. Skynet defines no key here and does not read this table.
@@ -245,8 +252,44 @@ result, the versions, the progress events, the record and the pull request.
 The best version is the one with the lowest score, and the improvement is
 positive when the score went down. The run result has a `direction` field.
 
-`[outcome.require]` does not follow `direction`. Each value there is
-always a minimum.
+`[outcome.require]` does not follow `direction`. Each named score has its
+own direction in `[metric.scores]`.
+
+## Named score directions: `[metric.scores]`
+
+`[metric.scores]` gives a direction to each named score in the `scores`
+that the metric returns. Each key is a score name, and each value is
+`"maximize"` or `"minimize"`. Another value fails the setup check, and the
+message names both values. A score name must not be empty. The table holds
+at most 50 names.
+
+A named score that the table does not name is `"maximize"`. This is also
+true when `[metric] direction = "minimize"`: the main direction does not
+change the named scores.
+
+```toml
+[metric]
+direction = "maximize"
+
+[metric.scores]
+cost_usd = "minimize"
+
+[outcome.require]
+recall = 0.8     # a minimum: recall must be 0.8 or more
+cost_usd = 0.05  # a maximum: cost_usd must be 0.05 or less
+```
+
+The metric returns each named score as it is. Do not negate a cost or a
+latency. For a minimize named score, the engines get the negated value, so
+each engine still climbs. The proposer text says "(lower is better)" for
+that score. Every named score that a person or an API client sees stays
+raw. Each entry in `failed_requirements` holds the `direction` of its
+score.
+
+A run that sets an `[outcome.require]` limit or uses a minimize named
+score needs a sandbox image at protocol 21 or later. With an older image,
+the run fails before it starts, and the message tells you to rebuild and
+re-pin the sandbox image.
 
 ## Outcome: `[outcome]`
 
@@ -255,7 +298,8 @@ always a minimum.
 - `target`: the score that is good enough, for example `0.9`.
 - `require`: written as an `[outcome.require]` table. Each key is a score
   name from the `scores` that the metric returns, and each value is the
-  minimum for that score.
+  limit for that score. The limit is a minimum for a maximize score and a
+  maximum for a minimize score (see `[metric.scores]`).
 
 Each value must be a finite number. `true`, `false`, `nan` and `inf` fail.
 An integer is read as a number, so `1` means `1.0`. Skynet sets no range,
@@ -271,13 +315,33 @@ cases there is no held-out part, so the run uses its validation cases, or
 its train cases when there are none. A
 run with no cases has no split, so the verdict uses the one `score()` of
 the version. "Target reached" is true when that score is equal to or above
-`target`, or equal to or below it with `direction = "minimize"`. "Minimums passed" is true when each named score is equal to or
-above its minimum. A named score is its mean over the same cases. The
-metric must return the name on each of those cases, or the minimum fails.
-The reason gives the count, or names the score when no case returns it.
-The run stores the verdict as `details.outcome` in its result, with
-the list of the failed minimums. The verdict does not change what the run
+`target`, or equal to or below it with `direction = "minimize"`.
+"Requirements passed" is true when each named score obeys its limit: equal
+to or above its minimum for a maximize score, or equal to or below its
+maximum for a minimize score. A named score is its mean over the same
+cases. The metric must return the name on each of those cases, or the limit
+fails. The reason gives the count, or names the score when no case returns
+it. The run stores the verdict as `details.outcome` in its result, with
+the list of the failed requirements. Each failed entry has the score
+`name`, its `direction`, its `limit`, the raw `value` (null when the metric
+did not return it) and a `reason`. The verdict does not change what the run
 publishes.
+
+```json
+{
+  "target_reached": true,
+  "requirements_passed": false,
+  "failed_requirements": [
+    {
+      "name": "cost_usd",
+      "direction": "minimize",
+      "limit": 0.05,
+      "value": 0.06,
+      "reason": "'cost_usd' scored 0.06, above its maximum 0.05."
+    }
+  ]
+}
+```
 
 `[outcome]` has no `accept` key, and an `accept` key fails as an unknown
 setting. A run that improves the score opens a pull request, as before.
@@ -295,7 +359,7 @@ check its score. The record is `details.record` in the run result, and
 `get_run` returns it. A pull request from the run shows the same record in
 a short block. The first line of the block says if the run met the
 contract, which rule failed with its numbers, or that the file sets no
-target and no minimum. Then comes one line for each fact. Last comes a
+target and no limit. Then comes one line for each fact. Last comes a
 collapsed section, "Record as JSON". It holds the full record as one JSON
 block, which parses to the same object as `details.record`. GitHub limits
 the length of a pull request text. When the JSON is longer than 20,000
@@ -365,10 +429,10 @@ content and no metric code. It has these keys:
   puts the one case in every part.
 - `image`: the sandbox image pinned for the run (`name@sha256:<hex>` on
   hosted runs, the Docker image id on local runs), or null.
-- `target_reached`, `minimums_passed` and `failed_minimums`: copied from
+- `target_reached`, `requirements_passed` and `failed_requirements`: copied from
   `details.outcome`. Each key is there only when `details.outcome` has it.
 - `contract_met`: true when no rule failed. It is also true when the file
-  sets no target and no minimum.
+  sets no target and no limit.
 
 A run from before the record, or a run whose sandbox image writes no split
 positions, has no `record` key.
@@ -813,7 +877,7 @@ feedback. A version with a case that has no score has no score itself:
 - A metric error in the final run also gives the version no score.
 - A version with a metric error stays in the version tree with no score,
   so its child versions keep their parent.
-- It reaches no `[outcome] target`, passes no minimum and opens no pull
+- It reaches no `[outcome] target`, passes no limit and opens no pull
   request.
 - The starting version can fail a case. Then a version that passes every
   case counts as better and opens a pull request. The result shows no

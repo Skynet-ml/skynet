@@ -2065,7 +2065,8 @@ def _feedback_text(info: Mapping[str, Any]) -> str:
         info: Side info the parent scorer returned.
 
     Returns:
-        The feedback text and any named scores, one per line.
+        The feedback text and any named scores, one per line; a ``[metric.scores]``
+        minimize score says lower is better (SKY-775).
     """
     lines = []
     feedback = info.get("feedback")
@@ -2074,7 +2075,11 @@ def _feedback_text(info: Mapping[str, Any]) -> str:
     elif feedback is not None:
         lines.append(json.dumps(_json_finite(feedback), default=str))
     for name, entry in _named_scores(info).items():
-        lines.append(f"{name}: {entry['score']:.4g}" + (f" ({entry['feedback']})" if entry["feedback"] else ""))
+        lines.append(
+            f"{name}: {entry['score']:.4g}"
+            + (" (lower is better)" if entry["minimize"] else "")
+            + (f" ({entry['feedback']})" if entry["feedback"] else "")
+        )
     return "\n".join(lines)
 
 
@@ -2085,7 +2090,7 @@ def _named_scores(info: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         info: Side info the parent scorer returned.
 
     Returns:
-        ``{name: {"score", "feedback"}}`` for every finite named score.
+        ``{name: {"score", "feedback", "minimize"}}`` for every finite named score; the score stays raw.
     """
     named: dict[str, dict[str, Any]] = {}
     scores = info.get("scores")
@@ -2095,7 +2100,12 @@ def _named_scores(info: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         value = entry.get("score") if isinstance(entry, dict) else entry
         if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
             feedback = entry.get("feedback") if isinstance(entry, dict) else None
-            named[str(name)] = {"score": float(value), "feedback": str(feedback or "")}
+            named[str(name)] = {
+                "score": float(value),
+                "feedback": str(feedback or ""),
+                # The scorer's entry carries ``direction`` only for a minimize score.
+                "minimize": isinstance(entry, dict) and entry.get("direction") == "minimize",
+            }
     return named
 
 

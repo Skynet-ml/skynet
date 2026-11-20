@@ -1638,8 +1638,9 @@ def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
     skip the record instead of failing a finished run. The rule follows the
     shapes Skynet's own guest writes: the split has a ``str`` rule, an ``int``
     seed and ``int`` positions; a verdict with ``target_reached`` has a finite
-    ``target``; each failed minimum has a ``str`` name and reason, a finite
-    minimum, and a finite or ``None`` value. A number never means a ``bool``.
+    ``target``; each failed requirement has a ``str`` name and reason, a
+    ``direction`` of ``"maximize"`` or ``"minimize"``, a finite limit, and a
+    finite or ``None`` value. A number never means a ``bool``.
 
     Args:
         split: ``details["case_split"]``, or ``None`` for a run with no cases.
@@ -1662,16 +1663,17 @@ def _guest_record_parts_ok(split: Any, outcome: Any) -> bool:
         return False
     if not isinstance(outcome, dict):
         return False
-    if any(key in outcome and not isinstance(outcome[key], bool) for key in ("target_reached", "minimums_passed")):
+    if any(key in outcome and not isinstance(outcome[key], bool) for key in ("target_reached", "requirements_passed")):
         return False
     if "target_reached" in outcome and not _finite_number(outcome.get("target")):
         return False
-    failed = outcome.get("failed_minimums", [])
+    failed = outcome.get("failed_requirements", [])
     return isinstance(failed, list) and all(
         isinstance(entry, dict)
         and isinstance(entry.get("name"), str)
         and isinstance(entry.get("reason"), str)
-        and _finite_number(entry.get("minimum"))
+        and entry.get("direction") in ("maximize", "minimize")
+        and _finite_number(entry.get("limit"))
         and (entry.get("value") is None or _finite_number(entry.get("value")))
         for entry in failed
     )
@@ -1690,13 +1692,13 @@ def add_run_record(
     sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
     is true when no rule failed, also when the file sets no target and no
-    minimum. A run with no ``optimize.toml``, a result with no ``details``, a
+    limit. A run with no ``optimize.toml``, a result with no ``details``, a
     run with cases whose guest wrote no split positions (an older image), or a
     guest split or verdict of another shape gets no record. A verdict whose
     keys do not match the file's own rules in the staged snapshot also gets
     no record: ``target_reached`` exactly when the file sets a target, and
-    ``minimums_passed`` exactly when it sets minimums, with
-    ``failed_minimums`` only then. A snapshot with no ``outcome`` (an older
+    ``requirements_passed`` exactly when it sets limits, with
+    ``failed_requirements`` only then. A snapshot with no ``outcome`` (an older
     payload) sets no rule. A ``record`` the guest wrote is removed on every
     path. The record holds no secret, no case content and no metric code.
 
@@ -1721,14 +1723,16 @@ def add_run_record(
         return
     # The verdict crosses the guest's result file, so its keys must match the file's own rules.
     rules = (payload.get(REPO_SNAPSHOT_KEY) or {}).get("outcome") or {}
-    has_target, has_minimums = rules.get("target") is not None, bool(rules.get("require"))
+    has_target, has_limits = rules.get("target") is not None, bool(rules.get("require"))
     if (
         ("target_reached" in outcome) != has_target
-        or ("minimums_passed" in outcome) != has_minimums
-        or ("failed_minimums" in outcome and not has_minimums)
+        or ("requirements_passed" in outcome) != has_limits
+        or ("failed_requirements" in outcome and not has_limits)
     ):
         return
-    verdict = {key: outcome[key] for key in ("target_reached", "minimums_passed", "failed_minimums") if key in outcome}
+    verdict = {
+        key: outcome[key] for key in ("target_reached", "requirements_passed", "failed_requirements") if key in outcome
+    }
     best = result.get("best_candidate")
     # Hash the change the run serves and publishes, which never holds a hidden-path edit (SKY-764).
     change = drop_paths(best, staged.hidden_paths) if isinstance(best, str) else ""
@@ -1744,7 +1748,8 @@ def add_run_record(
         "split": split,
         "image": image,
         **verdict,
-        "contract_met": verdict.get("target_reached", True) is True and verdict.get("minimums_passed", True) is True,
+        "contract_met": verdict.get("target_reached", True) is True
+        and verdict.get("requirements_passed", True) is True,
     }
 
 
@@ -1768,8 +1773,8 @@ def _record_block(result: dict[str, Any]) -> str:
     record = (result.get("details") or {}).get("record")
     if not isinstance(record, dict):
         return ""
-    if "target_reached" not in record and "minimums_passed" not in record:
-        verdict = f"The {CONSTRAINTS_FILE} file sets no target and no minimum."
+    if "target_reached" not in record and "requirements_passed" not in record:
+        verdict = f"The {CONSTRAINTS_FILE} file sets no target and no limit."
     elif record.get("contract_met"):
         verdict = "This run met the contract."
     else:
@@ -1782,7 +1787,7 @@ def _record_block(result: dict[str, Any]) -> str:
                 failed.append(f"The final score {reached} is not at or below the target {target:.12g}.")
             else:
                 failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
-        failed.extend(str(entry.get("reason")) for entry in record.get("failed_minimums") or [])
+        failed.extend(str(entry.get("reason")) for entry in record.get("failed_requirements") or [])
         verdict = "This run did not meet the contract. " + " ".join(failed)
     split = record.get("split")
     if split is None:

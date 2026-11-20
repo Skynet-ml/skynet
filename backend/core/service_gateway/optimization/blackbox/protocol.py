@@ -37,6 +37,9 @@ Candidate = str | dict[str, str]
 SideInfo = dict[str, Any]
 ScorerFn = Callable[[Candidate, Any], tuple[float | None, SideInfo]]
 EvalListener = Callable[["EvalServer", float | None], None]
+# SKY-775: a named score of a ``[metric.scores]`` minimize name carries this key with ``"minimize"``.
+# The value stays the metric's own, so people and API clients see it raw; only engine shaping flips it.
+SCORE_DIRECTION_KEY = "direction"
 
 # Side info ``status`` of a case the metric or scorer crashed on. That case has
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
@@ -778,6 +781,7 @@ class EvalServer:
         parent: EvalServer | None = None,
         on_eval: EvalListener | None = None,
         direction: str = "maximize",
+        score_directions: Mapping[str, str] | None = None,
     ) -> None:
         """Create a server over ``scorer`` with a cap of ``max_evals`` calls.
 
@@ -787,9 +791,12 @@ class EvalServer:
             parent: Server whose budget this one is a slice of, if any.
             on_eval: Listener called with ``(server, raw score)`` after each root eval.
             direction: ``"maximize"`` or ``"minimize"``; a lane follows its root's direction.
+            score_directions: ``[metric.scores]``: the direction of each named score it names.
+                A lane follows its root's directions.
         """
         self._scorer = scorer
         self._sign = -1.0 if direction == "minimize" else 1.0
+        self._minimized = frozenset(name for name, way in (score_directions or {}).items() if way == "minimize")
         self.max_evals = max_evals
         self._parent = parent
         self._on_eval = on_eval
@@ -964,7 +971,28 @@ class EvalServer:
         failed_run = is_run_failed(side_info) and (score is None or not math.isfinite(score))
         if score is None or is_metric_error(side_info) or failed_run:
             return None, {**side_info, STATUS_KEY: RUN_FAILED_STATUS if failed_run else METRIC_ERROR}
-        return self._sign * score, side_info
+        return self._sign * score, self._mark_directions(side_info)
+
+    def _mark_directions(self, side_info: SideInfo) -> SideInfo:
+        """Mark each minimize named score of ``side_info`` with :data:`SCORE_DIRECTION_KEY`.
+
+        Args:
+            side_info: What the scorer returned next to the score.
+
+        Returns:
+            ``side_info`` itself when no named score minimizes, else a copy whose minimize
+            named scores are ``{"score", "feedback", "direction": "minimize"}`` with the raw score.
+        """
+        named = side_info.get("scores")
+        if not self._minimized or not isinstance(named, dict) or not self._minimized.intersection(named):
+            return side_info
+        marked = {}
+        for name, entry in named.items():
+            if name in self._minimized:
+                entry = dict(entry) if isinstance(entry, dict) else {"score": entry, "feedback": ""}
+                entry[SCORE_DIRECTION_KEY] = "minimize"
+            marked[name] = entry
+        return {**side_info, "scores": marked}
 
     def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
         """Fold ``score`` into the candidate's running mean and keep its latest side info.

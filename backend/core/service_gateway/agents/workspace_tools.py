@@ -171,17 +171,22 @@ How to write the run's files:
     ``"minimize"`` when a lower score is better), ``setup`` (one shell command, such as ``"cd eval && cargo
     build --release"``, that builds the metric one time, before the first metric call; like a command
     ``entry``, it runs in the folder that holds the ``[metric] files`` paths, with the repository root layout;
-    write the build output next to the metric files), ``mcp``, ``network``, ``services``, ``illegal`` and
-    ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
-    besides the relay, default none) and ``vcpus`` (SKY-398).
+    write the build output next to the metric files), ``mcp``, ``network``, ``services``, ``illegal``,
+    ``vcpus`` and ``scores`` (the ``[metric.scores]`` table, see ``[outcome]``). ``[run]`` and ``[metric]``
+    run in separate boxes, so each sets its own ``network`` (hosts besides the relay, default none) and
+    ``vcpus`` (SKY-398).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
   - ``[sandbox]``: ``compose``, the path of a compose file whose services run beside the metric.
   - ``[services.<name>]``: ``url`` (https, required) and ``headers``, nothing else. One secret may go to one
     host only.
   - ``[outcome]``: ``target`` (the score that is good enough, such as ``0.9``) and ``require``, an
-    ``[outcome.require]`` table that sets a name from the ``scores`` the metric returns to its minimum score.
-    A run stops its search when the score reaches ``target``. At the end of a run, Skynet checks the final
-    score against ``target`` and against each ``[outcome.require]`` minimum, and stores the verdict.
+    ``[outcome.require]`` table that sets a name from the ``scores`` the metric returns to its limit. A
+    ``[metric.scores]`` table sets a named score to ``"maximize"`` (the default, also when ``[metric]
+    direction`` is ``"minimize"``) or ``"minimize"``, such as ``cost_usd = "minimize"``. A limit is a
+    minimum for a maximize score and a maximum for a minimize score. Return a cost or a latency as it is,
+    never negated. A run stops its search when the score reaches ``target``. At the end of a run, Skynet
+    checks the final score against ``target`` and against each ``[outcome.require]`` limit, and stores the
+    verdict.
   The errors you must avoid most: "[run] entry is missing", "network entry ... must be a host name such as
   api.example.com, not a URL", "... is not a supported setting" and "url must be an https:// address". This
   file is valid. The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders:

@@ -633,10 +633,20 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
             b'version = 1\n[metric]\ndirection = "minimize"\n[run]\nentry = "run.py:main"\n[outcome]\ntarget = 0.2\n',
             {"target": 0.2, "require": {}, "direction": "minimize"},
         ),
+        (
+            b'version = 1\n[metric.scores]\ncost_usd = "minimize"\n[run]\nentry = "run.py:main"\n'
+            b"[outcome.require]\ncost_usd = 0.05\n",
+            {
+                "target": None,
+                "require": {"cost_usd": 0.05},
+                "direction": "maximize",
+                "scores": {"cost_usd": "minimize"},
+            },
+        ),
     ],
 )
 def test_the_record_holds_the_outcome(raw: bytes | None, outcome: dict[str, object]) -> None:
-    """Every new run records the file's target and minimums, with null and empty when the file sets none (SKY-691)."""
+    """Every new run records the file's target, limits and score directions; a file without them records none."""
     constraints = None if raw is None else parse_constraints(raw)
     environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
 
@@ -2163,16 +2173,16 @@ def test_a_constraints_error_keeps_its_section_and_key_through_pickle() -> None:
     assert (str(copy), copy.section, copy.key) == ("[run] entry is missing", "run", "entry")
 
 
-def test_the_outcome_block_gives_the_target_and_the_minimums() -> None:
-    """``[outcome]`` holds the run's target score and the minimum of each named score (SKY-690)."""
+def test_the_outcome_block_gives_the_target_and_the_limits() -> None:
+    """``[outcome]`` holds the run's target score and the limit of each named score (SKY-690)."""
     constraints = parse_constraints(
         b'version = 1\n\n[run]\nentry = "run.py:main"\n'
         b"[outcome]\ntarget = 0.9\n\n[outcome.require]\nlatency = 0.9\nno_regressions = 1\n"
     )
 
     assert constraints.outcome_target == 0.9
-    assert constraints.outcome_minimums == {"latency": 0.9, "no_regressions": 1.0}
-    assert isinstance(constraints.outcome_minimums["no_regressions"], float)
+    assert constraints.outcome_limits == {"latency": 0.9, "no_regressions": 1.0}
+    assert isinstance(constraints.outcome_limits["no_regressions"], float)
 
 
 @pytest.mark.parametrize(
@@ -2192,7 +2202,7 @@ def test_the_outcome_block_and_each_of_its_keys_are_optional(
     """No ``[outcome]``, an empty one, or only ``[outcome.require]`` are valid; scores have no fixed range."""
     constraints = parse_constraints(raw)
 
-    assert (constraints.outcome_target, constraints.outcome_minimums) == (target, minimums)
+    assert (constraints.outcome_target, constraints.outcome_limits) == (target, minimums)
 
 
 @pytest.mark.parametrize(
@@ -2428,6 +2438,60 @@ def test_a_bad_metric_direction_names_both_values(value: bytes) -> None:
     with pytest.raises(ConstraintsError, match=r'\[metric\] direction must be "maximize" or "minimize"') as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("metric", "direction")
+
+
+def test_metric_scores_gives_each_named_score_its_direction() -> None:
+    """``[metric.scores]`` names a direction for each score; the table is optional and empty by default (SKY-775)."""
+    run = b'[run]\nentry = "run.py:main"\n'
+    constraints = parse_constraints(
+        b'version = 1\n[metric]\ndirection = "maximize"\n[metric.scores]\ncost_usd = "minimize"\n'
+        b'latency_ms = "minimize"\n"rouge.l" = "maximize"\n' + run
+    )
+
+    assert constraints.metric.scores == {"cost_usd": "minimize", "latency_ms": "minimize", "rouge.l": "maximize"}
+    assert parse_constraints(b"version = 1\n" + run).metric.scores == {}
+
+
+@pytest.mark.parametrize(
+    ("raw", "message", "section", "key"),
+    [
+        (
+            b'[metric.scores]\ncost = "lower"\n',
+            r'\[metric.scores\] cost must be "maximize" or "minimize"\.',
+            "metric.scores",
+            "cost",
+        ),
+        (
+            b"[metric.scores]\ncost = 1\n",
+            r'\[metric.scores\] cost must be "maximize" or "minimize"',
+            "metric.scores",
+            "cost",
+        ),
+        (b'[metric.scores]\n"" = "minimize"\n', "empty score name", "metric.scores", None),
+        (
+            b'[metric.scores]\nrouge.l = "minimize"\n',
+            r'\[metric.scores\] rouge is a table\. Quote a score name that has a dot, such as "rouge\.l" = "minimize"\.',
+            "metric.scores",
+            "rouge",
+        ),
+        (b'[metric]\nscores = "minimize"\n', r"\[metric.scores\] must be a table of at most 50", "metric", "scores"),
+    ],
+)
+def test_a_bad_metric_scores_entry_fails_with_its_section_and_key(
+    raw: bytes, message: str, section: str, key: str | None
+) -> None:
+    """A wrong direction, an empty name, an unquoted dotted name or a non-table fails at the setting (SKY-775)."""
+    with pytest.raises(ConstraintsError, match=message) as caught:
+        parse_constraints(b"version = 1\n" + raw + b'[run]\nentry = "run.py:main"\n')
+    assert (caught.value.section, caught.value.key) == (section, key)
+
+
+def test_metric_scores_holds_at_most_the_name_cap() -> None:
+    """``[metric.scores]`` is capped at 50 names, like ``[outcome.require]`` (SKY-775)."""
+    names = "".join(f's{index} = "minimize"\n' for index in range(51)).encode()
+
+    with pytest.raises(ConstraintsError, match="at most 50 score names"):
+        parse_constraints(b"version = 1\n[metric.scores]\n" + names + b'[run]\nentry = "run.py:main"\n')
 
 
 @pytest.mark.parametrize(

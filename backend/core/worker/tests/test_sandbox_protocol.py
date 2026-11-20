@@ -43,6 +43,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     19: {"blackbox": "3e02206ab3dc54ab"},
     # The same request; the image obeys the snapshot outcome's direction (SKY-750).
     20: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's named-score directions (SKY-775).
+    21: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

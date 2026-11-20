@@ -127,6 +127,18 @@ def _shown(score: float) -> str:
 
 # The engines see every score on one scale where higher is better (SKY-750).
 _SCALE_NOTE = "Scores are on the engine scale: higher is always better, and a score may be negative."
+# SKY-775: val.json shows named scores raw, but the frontier columns stay negated for minimize scores.
+_RAW_NAMED_NOTE = (
+    "Exception: each `named_scores` value in val.json is the metric's raw value and follows its `direction`; one"
+    ' with `"direction": "minimize"` is better when lower. `avg_val`, the per-example `scores` and the'
+    " `frontier_val.json` columns are on the engine scale (higher is better)."
+)
+# Mirror protocol.SCORE_DIRECTION_KEY and feedback.LOWER_IS_BETTER_KEY: this module runs in the sandbox
+# without Skynet's code. A ``[metric.scores]`` minimize named score carries the marker raw (SKY-775).
+_DIRECTION_KEY = "direction"
+_MINIMIZE = "minimize"
+_LOWER_IS_BETTER_KEY = "Lower is better"
+_NEGATED_NOTE = "Lower is better; this column holds the negated value."
 # The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
 # is refused before it is read. A pending list of a few candidates is far smaller than its cap.
 MAX_PENDING_BYTES = 1024 * 1024
@@ -491,7 +503,8 @@ def task_brief(task: Task, example_ids: list[str]) -> str:
         "The evaluator may also report named scores, each with its own feedback when the metric gives it. "
         "Each named score is a column "
         f"(`{NAMED_PREFIX}<name>`) of the per-example scores and an axis of the Pareto front, so a candidate that "
-        "wins on one of them is worth keeping even when its average is lower.",
+        "wins on one of them is worth keeping even when its average is lower. A named score where lower is "
+        "better holds its negated value in its column, so higher is better in every column.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -536,8 +549,11 @@ def named_score_columns(infos: list[Any]) -> tuple[dict[str, float], dict[str, s
 
     Returns:
         ``(scores, feedback)`` keyed ``score:<name>``: each name's mean score,
-        and its feedback from every example joined into one note.
+        and its feedback from every example joined into one note. A minimize
+        score's column holds the negated mean, so the Pareto front and each
+        column's leader keep its lowest raw value.
     """
+    lower = minimized_columns(infos)
     collected: dict[str, list[tuple[float, str]]] = {}
     for info in infos:
         raw = info.get("scores") if isinstance(info, dict) else None
@@ -549,12 +565,39 @@ def named_score_columns(infos: list[Any]) -> tuple[dict[str, float], dict[str, s
                 continue
             note = str(entry.get("feedback") or "") if isinstance(entry, dict) else ""
             collected.setdefault(f"{NAMED_PREFIX}{name}", []).append((float(value), note))
-    scores = {column: sum(value for value, _ in entries) / len(entries) for column, entries in collected.items()}
+    scores = {
+        column: (-1.0 if column in lower else 1.0) * sum(value for value, _ in entries) / len(entries)
+        for column, entries in collected.items()
+    }
     feedback = {
-        column: _feedback_text({"feedback": " | ".join(note for _, note in entries if note)})
+        column: _feedback_text(
+            {
+                "feedback": " | ".join(
+                    ([_NEGATED_NOTE] if column in lower else []) + [note for _, note in entries if note]
+                )
+            }
+        )
         for column, entries in collected.items()
     }
     return scores, feedback
+
+
+def minimized_columns(infos: list[Any]) -> set[str]:
+    """Find the named-score columns whose scorer entries say lower is better.
+
+    Args:
+        infos: The scorer's side info for each example scored.
+
+    Returns:
+        The ``score:<name>`` columns of the ``[metric.scores]`` minimize scores.
+    """
+    return {
+        f"{NAMED_PREFIX}{name}"
+        for info in infos
+        if isinstance(info, dict) and isinstance(info.get("scores"), dict)
+        for name, entry in info["scores"].items()
+        if isinstance(entry, dict) and entry.get(_DIRECTION_KEY) == _MINIMIZE
+    }
 
 
 def gepa_named_scores(side_info: Any) -> Any:
@@ -588,12 +631,21 @@ def record_text(record: Any) -> str:
         return _feedback_text(record)
     numbers = record.get("Scores (Higher is Better)")
     notes = record.get("Feedback per score")
+    lower = record.get(_LOWER_IS_BETTER_KEY)
+    lower = set(lower) if isinstance(lower, list) else set()
     lines = [_feedback_text({"feedback": record["feedback"]}) if isinstance(record.get("feedback"), str) else ""]
     if isinstance(numbers, dict):
         notes = notes if isinstance(notes, dict) else {}
         for name, value in numbers.items():
             note = notes.get(name)
-            lines.append(f"   - {name}: {value}" + (f" — {_feedback_text({'feedback': note})}" if note else ""))
+            # GEPA's frontier holds a minimize score negated; the proposer reads the metric's own value.
+            if name in lower and isinstance(value, int | float):
+                value = -value
+            lines.append(
+                f"   - {name}: {value}"
+                + (" (lower is better)" if name in lower else "")
+                + (f" — {_feedback_text({'feedback': note})}" if note else "")
+            )
     text = "\n".join(line for line in lines if line)
     return text or _feedback_text(record)
 
@@ -1084,12 +1136,21 @@ class AutoResearchEngine:
             lines.append("Nothing has been fully evaluated yet.")
         columns = self._columns(table)
         if table and columns:
+            # named_score_columns marks a negated column's feedback, so the agent learns which columns flipped.
+            with self._lock:
+                lower = {
+                    column
+                    for o in self.observations
+                    for column, note in o.feedback.items()
+                    if note.startswith(_NEGATED_NOTE)
+                }
             lines += ["", "## Per-example and named scores on the frontier", ""]
             lines += ["| column | " + " | ".join(self._ids[c] for c in front) + " |"]
             lines += ["| --- " * (len(front) + 1) + "|"]
             for column in columns:
                 cells = " | ".join(_shown(table[c].get(column, _MISSING_SCORE)) for c in front)
-                lines.append(f"| `{column}` | {cells} |")
+                label = f"`{column}` (lower is better, negated)" if column in lower else f"`{column}`"
+                lines.append(f"| {label} | {cells} |")
         lines += ["", "## Failure dossier", ""]
         lines += self._dossier(table, front)
         (self.work_dir / "STATE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1489,7 +1550,7 @@ class MetaHarnessEngine:
                 "- `agents/seed.txt` is the starting candidate the run began from.\n\n"
                 "## Directory Structure\n\n"
                 "- Val results: `results/<candidate>/val.json` (`avg_val` plus per-example `scores` and evaluator "
-                "`infos`). " + _SCALE_NOTE + "\n"
+                "`infos`). " + _SCALE_NOTE + " " + _RAW_NAMED_NOTE + "\n"
                 "- Frontier: `frontier_val.json` (`_pareto` ranks candidates by average score; every other key "
                 "is an example or a named score `score:<name>` with the candidate that leads it)\n"
                 "- Named scores: `results/<candidate>/val.json` `named_scores` maps each to its score and "
@@ -1701,7 +1762,9 @@ class MetaHarnessEngine:
         avg = float(avg)
         server.log_progress(avg, candidate=candidate)
         infos = info.get("infos", {})
-        named, named_feedback = named_score_columns(list(infos.values()) if isinstance(infos, dict) else [info])
+        scored = list(infos.values()) if isinstance(infos, dict) else [info]
+        named, named_feedback = named_score_columns(scored)
+        lower = minimized_columns(scored)
         # SKY-751: the agent reads these files, so a case or version with no score shows null, never -Infinity.
         record = {
             "system": name,
@@ -1711,8 +1774,13 @@ class MetaHarnessEngine:
                 for case, score in (info.get("scores") or {}).items()
             },
             "infos": infos,
+            # SKY-775: the agent reads the metric's own value here; the frontier columns stay engine scale.
             "named_scores": {
-                column.removeprefix(NAMED_PREFIX): {"score": value, "feedback": named_feedback[column]}
+                column.removeprefix(NAMED_PREFIX): {
+                    "score": -value if column in lower else value,
+                    "feedback": named_feedback[column].removeprefix(_NEGATED_NOTE).removeprefix(" | "),
+                    **({_DIRECTION_KEY: _MINIMIZE} if column in lower else {}),
+                }
                 for column, value in named.items()
             },
         }

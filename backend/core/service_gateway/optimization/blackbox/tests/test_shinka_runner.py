@@ -302,6 +302,17 @@ def test_scores_become_upstream_metrics() -> None:
     assert "tone: 0.5 (flat)" in metrics["text_feedback"]
 
 
+def test_a_minimize_named_score_shows_raw_and_says_lower_is_better() -> None:
+    """The public metric keeps the raw cost, and the feedback says lower is better (SKY-775)."""
+    cost = {"score": 0.06, "feedback": "pricey", "direction": "minimize"}
+    metrics = shinka_runner.summarize_scores([(0.5, {"scores": {"cost_usd": cost, "recall": 0.8}})])
+
+    assert metrics["public"] == {"cost_usd": 0.06, "recall": 0.8}
+    assert "cost_usd: 0.06 (lower is better) (pricey)" in metrics["text_feedback"]
+    assert "recall: 0.8\n" in metrics["text_feedback"] + "\n"
+    assert "recall: 0.8 (" not in metrics["text_feedback"]
+
+
 def test_generation_is_read_from_the_program_path() -> None:
     """Read upstream's generation from its ``gen_<n>`` directory."""
     assert shinka_runner.generation_of("/run/results/gen_12/main.py") == 12
