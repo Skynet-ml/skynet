@@ -1656,6 +1656,22 @@ def _refuse_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON.")
 
 
+class _QuietHTTPServer(http.server.ThreadingHTTPServer):
+    """A loopback HTTP server that prints nothing when a request fails."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Drop the error report of a failed request.
+
+        The default prints a traceback to stderr, where log() events travel. A
+        metric command that leaves early (``curl --max-time``) breaks the
+        answer write, and ``do_POST`` already answers every other failure.
+
+        Args:
+            request: The failed request's socket.
+            client_address: The client's address.
+        """
+
+
 class MetricHelpers:
     """Serve a command metric's stages, judge model and log on one loopback port (SKY-767).
 
@@ -1732,7 +1748,7 @@ class MetricHelpers:
             def log_message(self, format: str, *args: Any) -> None:
                 """Keep the access log out of the scorer's stderr, where log() events travel."""
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()
         base = f"http://127.0.0.1:{self._server.server_address[1]}"
         variables = [stage_env_name(name) for name in names]

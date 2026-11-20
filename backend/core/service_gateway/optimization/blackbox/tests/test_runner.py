@@ -9,7 +9,9 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -2652,6 +2654,43 @@ def test_metric_helpers_answer_an_unexpected_failure_with_500_and_no_traceback(
         helpers.close()
 
     assert answer == (500, {"error": "The helper failed: RuntimeError."})
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_metric_helpers_print_no_traceback_when_the_client_leaves_before_the_answer(
+    capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metric command that closes its socket before the answer (``curl --max-time``) leaves stderr clean."""
+    helpers = runner.MetricHelpers(None, [], None, None)
+    left, done = threading.Event(), threading.Event()
+
+    def slow(path: str, body: Any) -> dict[str, Any]:
+        """Answer only after the client left, with a body larger than a socket buffer."""
+        left.wait(10)
+        time.sleep(0.2)
+        return {"output": "x" * 4_000_000}
+
+    finish = helpers._server.shutdown_request
+
+    def shutdown_request(request: Any) -> None:
+        """Mark the end of the request, which comes after any error report."""
+        finish(request)
+        done.set()
+
+    monkeypatch.setattr(helpers, "answer", slow)
+    monkeypatch.setattr(helpers._server, "shutdown_request", shutdown_request)
+    port = urllib.parse.urlsplit(helpers.env[runner.LOG_URL_ENV]).port
+    try:
+        client = socket.create_connection(("127.0.0.1", port), timeout=10)
+        client.sendall(b"POST /log HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+        # Linger 0 makes close send a reset, as a killed curl does.
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()
+        left.set()
+        assert done.wait(10)
+    finally:
+        helpers.close()
+
     assert "Traceback" not in capfd.readouterr().err
 
 
