@@ -562,7 +562,7 @@ stays in the server log.
 The command has the same limits as a Python metric: the same box, network,
 services, vCPUs and time limit. The metric box holds no version code, so
 the command cannot start the candidate again. It reaches only the
-`[metric]` services and hosts. A command gets no `skynet` helpers, such as
+`[metric]` services and hosts. A command gets no `openascent` helpers, such as
 `call()` and the `[metric]` model, in this version.
 
 A bash metric that scores an exact match:
