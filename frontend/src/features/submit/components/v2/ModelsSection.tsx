@@ -120,7 +120,9 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   // file's [proposer] entry runs if it names one, else the server default
   // (SKY-753). The effort limit assumes the default harness, but a file's
   // command is no built-in agent, so no limit applies to it (SKY-771).
-  const fileCommand = fileProposerCommand(proposer, proposerCommand);
+  const fileCommand = fileProposerCommand(proposer, proposerCommand, choice);
+  // The first picker item shows the file's command whenever the engine runs it.
+  const offeredCommand = fileProposerCommand({}, proposerCommand, choice);
   const limitingHarness = fileCommand
     ? null
     : effortHarness(
@@ -332,19 +334,22 @@ export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
-                  <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")} />
+                  {/* The h-9 trigger shows one line; the command line stays in the open list. */}
+                  <SelectValue placeholder={t("submit.v2.optimizer.proposer.harness_default")}>
+                    {fileCommand ? t("submit.v2.optimizer.proposer.from_file") : undefined}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {/* With a [proposer] entry, the first item is the file's command (SKY-771). */}
                   <SelectItem value={HARNESS_DEFAULT_PICK}>
-                    {proposerCommand?.length ? (
+                    {offeredCommand ? (
                       <span className="flex min-w-0 flex-col items-start">
                         <span>{t("submit.v2.optimizer.proposer.from_file")}</span>
                         <bdi
                           dir="ltr"
                           className="max-w-full truncate font-mono text-xs text-muted-foreground"
                         >
-                          {metricCommandText(proposerCommand)}
+                          {metricCommandText(offeredCommand)}
                         </bdi>
                       </span>
                     ) : (

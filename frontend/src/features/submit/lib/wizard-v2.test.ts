@@ -415,11 +415,20 @@ test("the contract file's proposer runs until the user picks a built-in agent (S
   const command = ["python", "agent/propose.py"];
   const { proposer } = initialWizardV2State().optimizer;
   // A fresh setup picks no agent, so the file's command is selected by default.
-  assert.deepEqual(fileProposerCommand(proposer, command), command);
+  assert.deepEqual(fileProposerCommand(proposer, command, "autoresearch"), command);
+  assert.deepEqual(fileProposerCommand(proposer, command, "meta_harness"), command);
   // A picked agent or host CLI replaces the file's command (SKY-753).
-  assert.equal(fileProposerCommand({ ...proposer, harness: "codex" }, command), null);
-  assert.equal(fileProposerCommand({ ...proposer, host_cli: "claude" }, command), null);
+  assert.equal(fileProposerCommand({ ...proposer, harness: "codex" }, command, "autoresearch"), null);
+  assert.equal(fileProposerCommand({ ...proposer, host_cli: "claude" }, command, "autoresearch"), null);
   // A contract with no command, or no answer yet, keeps today's picker.
-  assert.equal(fileProposerCommand(proposer, null), null);
-  assert.equal(fileProposerCommand(proposer, []), null);
+  assert.equal(fileProposerCommand(proposer, null, "autoresearch"), null);
+  assert.equal(fileProposerCommand(proposer, [], "autoresearch"), null);
+});
+
+test("only AutoResearch and Meta-Harness offer the contract file's proposer (SKY-816)", () => {
+  const proposer = initialWizardV2State().optimizer.proposer;
+  const command = ["bash", "propose.sh"];
+  // The server refuses [proposer] entry for every other engine, so the picker keeps its old item.
+  assert.equal(fileProposerCommand(proposer, command, "auto"), null);
+  assert.equal(fileProposerCommand(proposer, command, "autosaddler"), null);
 });

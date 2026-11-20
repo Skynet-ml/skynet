@@ -108,14 +108,14 @@ test("a repository run sends no harness until the user picks one (SKY-753)", () 
 
 test("the contract file's proposer sends no agent; a picked agent is sent (SKY-771)", () => {
   const state = repoState();
-  assert.notEqual(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"]), null);
+  assert.notEqual(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
   const fromFile = repoRunRequest(state, options)!.proposer!;
   assert.equal("harness" in fromFile, false);
   assert.equal("run_command" in fromFile, false);
   assert.equal("install_command" in fromFile, false);
 
   state.optimizer.proposer = pickHarness(state.optimizer.proposer, "pi");
-  assert.equal(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"]), null);
+  assert.equal(fileProposerCommand(state.optimizer.proposer, ["bash", "propose.sh"], "autoresearch"), null);
   assert.equal(repoRunRequest(state, options)?.proposer?.harness, "pi");
 });
 
