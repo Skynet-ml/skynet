@@ -996,6 +996,7 @@ def open_hardening_runner(
                     run_vcpus=constraints.run_vcpus if constraints is not None else None,
                     metric_hosts=_role_hosts(constraints.metric_role if constraints is not None else None),
                     metric_vcpus=constraints.metric_vcpus if constraints is not None else None,
+                    metric_setup=constraints.metric.setup if constraints is not None else None,
                 ),
                 str(scorer_spec["metric_code"]),
                 timeout_seconds=float(scorer_spec.get("timeout_seconds") or SCORE_TIMEOUT_SECONDS),

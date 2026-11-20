@@ -173,6 +173,21 @@ def test_a_metric_direction_passes_because_the_run_obeys_it(tmp_path: Path, plac
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_setup_passes_because_the_metric_setup_box_runs_it(
+    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric setup box runs [metric] setup once, so the gate lets it through (SKY-740)."""
+    raw = b'version = 1\n[metric]\nfiles = ["eval"]\nsetup = "make -C eval"\n[run]\nentry = "run.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    assert "metric.setup" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    # The gate reads the key: without it in ENFORCED, the same file is refused.
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - {"metric.setup"})  # type: ignore[index]
+    assert check_repository(archive, (), place=place) != []  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "raw",
     [

@@ -11,8 +11,11 @@ versions. Each box holds only the code it needs (SKY-398):
   ``--read-only``, so there is no ``docker commit``). The parent keeps the
   prepared tree's digest.
 - The metric setup step runs once in its own box. It installs only the
-  packages of ``METRIC_REQUIREMENTS`` and saves a second state that holds no
-  repository code. Its network is open only for that install.
+  packages of ``METRIC_REQUIREMENTS``, then runs the ``[metric] setup``
+  command in ``METRIC_REPO_DIR`` with the metric files there (SKY-740). It
+  saves a second state that holds no repository code; the files the build
+  writes in the box working directory stay in that state. Its network is
+  open only to the package registries, and it gets no secret.
 - A candidate box C opens for each evaluation from the prepared state,
   checks the digest and lays out the version. The parent ends it after the
   ``[run]`` entry; closing the box is the only cleanup. No candidate box
@@ -445,6 +448,31 @@ def box_root(session: SandboxSession) -> str:
     return root
 
 
+def _install_metric_files(session: SandboxSession, files: str | None) -> None:
+    """Put the packed metric files into ``METRIC_REPO_DIR`` at their repository paths.
+
+    Args:
+        session: The metric box or the metric setup box.
+        files: The base64 tar.gz from :func:`pack_metric_files`; ``None`` only makes the folder.
+
+    Raises:
+        RepoSetupError: When the files cannot be installed.
+    """
+    made = session.run(f"mkdir -p {METRIC_REPO_DIR}", timeout_seconds=60)
+    if not made.ok:
+        raise RepoSetupError(f"The metric folder could not be made: {_tail(made)}")
+    if files is None:
+        return
+    source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
+    session.write_files({source: files})
+    result = session.run(
+        f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
+        timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+    )
+    if not result.ok:
+        raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
+
+
 def _close_quietly(session: SandboxSession, what: str) -> None:
     """Close a box and log only a failure's type.
 
@@ -699,20 +727,9 @@ class MetricBox:
         Raises:
             RepoSetupError: When the files cannot be installed.
         """
-        files = self._workspace.metric_files
-        made = self.session.run(f"mkdir -p {METRIC_REPO_DIR}", timeout_seconds=60)
-        if not made.ok:
-            raise RepoSetupError(f"The metric folder could not be made: {_tail(made)}")
-        if files is None:
-            return
-        source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
-        self.session.write_files({source: files})
-        result = self.session.run(
-            f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
-            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-        )
-        if not result.ok:
-            raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
+        # The extract overwrites the metric files and keeps the files a
+        # [metric] setup build wrote next to them (SKY-740).
+        _install_metric_files(self.session, self._workspace.metric_files)
 
     def close(self) -> None:
         """Give the box back to its source once."""
@@ -786,6 +803,7 @@ class RepoWorkspace:
         run_vcpus: int | None = None,
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
+        metric_setup: str | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -807,6 +825,8 @@ class RepoWorkspace:
             run_vcpus: The ``[run] vcpus`` of the candidate box; ``None`` keeps ``spec.vcpus``.
             metric_hosts: The ``[metric] network`` hosts of the metric box; empty keeps it offline.
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
+            metric_setup: The ``[metric] setup`` command, run once in the metric
+                setup box with the metric files; ``None`` builds nothing.
         """
         self._runtime = runtime
         self._spec = spec
@@ -820,6 +840,7 @@ class RepoWorkspace:
         self._metric_grants = tuple(Grant(host) for host in metric_hosts)
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
+        self._metric_setup = (metric_setup or "").strip() or None
         self._secrets = dict(secrets)
         self._failure: BaseException | None = None
         self._setup_log = ""
@@ -900,7 +921,7 @@ class RepoWorkspace:
             self._requirements = read_metric_requirements(self._archive)
             self.metric_files = pack_metric_files(self._archive, self._hidden) if self._hidden else None
         self._repo_state = self._setup_repository(on_output)
-        self._metric_state = self._setup_metric() if self._requirements else None
+        self._metric_state = self._setup_metric() if self._requirements or self._metric_setup else None
 
     def _next_key(self, kind: str) -> str | None:
         """Return a new operation key for one box, so each box reserves its own hold (E31).
@@ -990,13 +1011,15 @@ class RepoWorkspace:
             raise RepoSetupError("The prepared repository could not be fingerprinted.")
 
     def _setup_metric(self) -> _State:
-        """Install only the declared metric packages in a box without repository code, and save its state.
+        """Install the declared metric packages and run ``[metric] setup`` in a box without repository code.
+
+        The box holds only the metric files, and saves its state for every metric box.
 
         Returns:
             The saved state.
 
         Raises:
-            RepoSetupError: When the install fails or the state cannot be saved.
+            RepoSetupError: When the install or the build fails, or the state cannot be saved.
         """
         # The registries, also when the repository has no [setup] command: the
         # spec's own hosts are then empty, and the install would run offline.
@@ -1012,20 +1035,44 @@ class RepoWorkspace:
         )
         session = self._runtime.open(spec)
         try:
-            session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
-            result = session.run(
-                f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
-                f" -r {METRIC_DIR}/requirements.txt"
-                f" && rm -f {METRIC_DIR}/requirements.txt && touch {_METRIC_READY}",
-                env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
-                timeout_seconds=_SETUP_TIMEOUT_SECONDS,
-            )
-            if not result.ok:
-                log = redact(_tail(result), self._secrets.values())
-                raise RepoSetupError(f"The metric packages ({METRIC_REQUIREMENTS}) could not be installed.\n{log}")
+            if self._requirements:
+                session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
+                result = session.run(
+                    f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
+                    f" -r {METRIC_DIR}/requirements.txt && rm -f {METRIC_DIR}/requirements.txt",
+                    env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+                if not result.ok:
+                    log = redact(_tail(result), self._secrets.values())
+                    raise RepoSetupError(f"The metric packages ({METRIC_REQUIREMENTS}) could not be installed.\n{log}")
+            if self._metric_setup is not None:
+                self._build_metric(session)
+            ready = session.run(f"touch {_METRIC_READY}", timeout_seconds=60)
+            if not ready.ok:
+                raise RepoSetupError(f"The metric setup could not be marked ready: {_tail(ready)}")
             return self._save(session, self._metric_snapshot_key, "metric-state")
         finally:
             _close_quietly(session, "The metric setup box")
+
+    def _build_metric(self, session: SandboxSession) -> None:
+        """Run the ``[metric] setup`` command once in the metric files' folder (SKY-740).
+
+        Args:
+            session: The metric setup box, after the package install.
+
+        Raises:
+            RepoSetupError: When the files cannot be installed, or the command
+                fails or runs out of time; the error holds the output's last lines.
+        """
+        assert self._metric_setup is not None
+        _install_metric_files(session, self.metric_files)
+        build = session.run(f"cd {METRIC_REPO_DIR} && {self._metric_setup}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+        log = redact(_tail(build), self._secrets.values())
+        if build.timed_out:
+            raise RepoSetupError(f"The metric setup command ([metric] setup) ran out of time.\n{log}")
+        if not build.ok:
+            raise RepoSetupError(f"The metric setup command ([metric] setup) failed (exit {build.exit_code}).\n{log}")
 
     def _save(self, session: SandboxSession, key: str, name: str) -> _State:
         """Save a box's state as a snapshot, or as a tar.gz in the parent when the runtime has none.

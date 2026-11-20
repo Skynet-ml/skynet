@@ -73,6 +73,8 @@ _OUTCOME_MINIMUMS = frozenset({"outcome.require"})
 _METRIC_ENTRY = frozenset({"metric.entry"})
 # The eval server, the run end and the pull request read the score's direction (SKY-750).
 _METRIC_DIRECTION = frozenset({"metric.direction"})
+# The metric setup box runs the build once before the first metric call (SKY-740).
+_METRIC_SETUP = frozenset({"metric.setup"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -88,6 +90,7 @@ _ENFORCED_EVERYWHERE = (
     | _OUTCOME_MINIMUMS
     | _METRIC_ENTRY
     | _METRIC_DIRECTION
+    | _METRIC_SETUP
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -504,6 +507,7 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         "exploits",
         "reference",
         "direction",
+        "setup",
         "mcp",
         "network",
         "services",

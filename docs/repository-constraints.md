@@ -51,6 +51,9 @@ entry = ["bash", "eval/metric.sh"]
 # Optional. "maximize" (the default) or "minimize". With "minimize", a lower
 # score is better.
 direction = "maximize"
+# Optional. One shell command that builds the metric one time, before the
+# first metric call. See "Build the metric: [metric] setup" below.
+# setup = "cargo build --release"
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
@@ -336,7 +339,14 @@ content and no metric code. It has these keys:
   this gives the hash:
   `for f in eval/metric.sh eval/words.txt; do printf '%s\0%s\0%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(sha256sum "$f" | cut -d' ' -f1)"; done | sha256sum`.
   List the files in byte order (`LC_ALL=C sort`). With no part, the hash is
-  the SHA-256 of no bytes.
+  the SHA-256 of no bytes. With `[metric] setup`, the command is one more
+  part. Its path is `/[metric] setup`, and its bytes are the command text in
+  UTF-8, with the spaces at the start and end removed. No file path starts
+  with `/`, so the part cannot clash with a file. In `sort` byte order it
+  comes before every file path.
+- `metric_setup`: the `[metric] setup` command. The record has this key only
+  when the file sets `[metric] setup`. The pull request block shows it as
+  "Metric setup".
 - `metric_source`: `repository` or `request`. `repository` when the file
   sets `[metric] files` and every one comes from the pinned commit.
   `request` when the file sets no `[metric] files`, or a draft file in the
@@ -463,9 +473,12 @@ Each box holds only the code that it needs. The run uses these boxes:
   network only, and closes. The parent saves the prepared state and its
   digest.
 - **Metric setup.** It runs once, in a separate box, only when the
-  repository has `.optimize/metric-requirements.txt`. It installs only the
-  packages in that file, with package-registry network for the install only.
-  The parent saves this second state. It holds no repository code.
+  repository has `.optimize/metric-requirements.txt` or the file sets
+  `[metric] setup`. It installs only the packages in that file. Then it puts
+  the `[metric] files` in the box and runs `[metric] setup` in their folder.
+  The box reaches only the package registries. It gets no secret, no service
+  and no version file. The parent saves this second state. It holds no
+  repository code.
 - **Candidate box.** Each evaluation opens a new one from the prepared
   state. The parent checks the digest and lays out the version. The box
   runs the `[run]` entry on the case's `input` and reaches only the `[run]`
@@ -590,6 +603,50 @@ const data = JSON.parse(readFileSync(process.env.ASCENT_INPUT, "utf8"));
 const ok = JSON.stringify(data.output) === JSON.stringify(data.expected);
 writeFileSync(process.env.ASCENT_OUTPUT, JSON.stringify({ score: ok ? 1 : 0 }));
 ```
+
+## Build the metric: `[metric] setup`
+
+`[metric] setup` is one shell command that builds the metric, for example
+for a metric in a compiled language. It is text of 1 to 300 characters, the
+same limit as `[setup] command`. Another type fails the setup check.
+
+The command runs one time for each run, in the metric setup box, before the
+first metric call. It runs in the folder that holds the `[metric] files`,
+the same folder where the `[metric] entry` command runs. The box reaches
+only the package registries. It gets no secret, no service and no version
+file. The time limit is 30 minutes, and the box time counts in the run's
+cost. A command that fails or runs out of time stops the run before the
+first version. The error shows the last lines of the build output.
+
+Each metric box opens from the state that the metric setup box saved. Only
+the box's working folder is saved. Build into the folder of the metric
+files, for example a `target/` or `bin/` folder next to the source. A file
+that the build writes outside the working folder, such as `~/.cargo` or the
+Go build cache, is not kept. The metric box then puts the `[metric] files`
+in the folder again, and the built files stay next to them.
+
+A Rust metric:
+
+```toml
+[metric]
+files = ["eval"]
+setup = "cd eval && cargo build --release"
+entry = ["eval/target/release/metric"]
+```
+
+A Go metric:
+
+```toml
+[metric]
+files = ["eval"]
+setup = "cd eval && go build -o metric ./cmd/metric"
+entry = ["eval/metric"]
+```
+
+The compilers must be in the sandbox image. The package registry hosts
+include `crates.io` and `proxy.golang.org`, so the build can fetch its
+crates and modules. Those downloads go to caches outside the working
+folder, which the metric box does not need after the build.
 
 Metric hardening needs a Python metric. A hardening job for a command
 metric stops with the message "needs a Python metric".
@@ -759,6 +816,7 @@ catch the failure in the program, as above, and let the metric score it.
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
 | `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. Only a single AutoResearch or Meta-Harness run can use it today; every other run refuses it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
+| `[metric] setup` | Runs once in the metric setup box, in the folder of the metric files, with package-registry network and no secrets. No version file is in that box. A failure stops the run before the first version. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |

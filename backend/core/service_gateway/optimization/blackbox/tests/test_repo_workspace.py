@@ -1811,6 +1811,85 @@ def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_r
     assert not metric_box.online
 
 
+def _build_space(tmp_path: Path, runtime: _Runtime, build: str) -> RepoWorkspace:
+    """Build a workspace whose ``[metric] setup`` command is ``build`` and whose metric files are ``eval``.
+
+    Args:
+        tmp_path: Scratch folder.
+        runtime: Where its boxes open.
+        build: The ``[metric] setup`` command.
+
+    Returns:
+        The workspace.
+    """
+    archive = _archive(
+        tmp_path, {"src/app.py": "SOURCE = 1\n", "eval/metric.sh": "cat bin/metric.txt\n", "eval/source.txt": "v1\n"}
+    )
+    return _space(archive, runtime, setup=None, hidden_paths=["eval"], metric_setup=build)
+
+
+def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(tmp_path: Path) -> None:
+    """``[metric] setup`` runs once with the metric files, offline but for the registries and with no secret (SKY-740)."""
+    runtime = _Runtime()
+    build = 'mkdir -p eval/bin && cp eval/source.txt eval/bin/metric.txt && echo "${API_KEY:-unset}" > eval/bin/key.txt'
+    space = _build_space(tmp_path, runtime, build)
+    try:
+        space.prepare()
+        boxes = [space.open_metric() for _ in range(2)]
+        for metric in boxes:
+            metric.install_metric_files()
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/key.txt") == "unset\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") == "cat bin/metric.txt\n"
+            metric.close()
+    finally:
+        space.close()
+    _, metric_setup, *metric_boxes = runtime.boxes
+    assert len(metric_boxes) == 2
+    builds = [command for each in runtime.boxes for command, _ in each.commands if build in command]
+    assert builds == [f"cd {METRIC_REPO_DIR} && {build}"]
+    [(_, env)] = [(command, env) for command, env in metric_setup.commands if build in command]
+    assert env is None
+    assert metric_setup.spec.operation_key == "op:metric-setup-1"
+    assert metric_setup.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
+    assert metric_setup.spec.services == ()
+    assert metric_setup.spec.private
+    assert metric_setup.online
+    # The box has no requirements file, so no pip install runs.
+    assert not [command for command, _ in metric_setup.commands if "pip install" in command]
+    texts = [*metric_setup.writes.values(), *(command for command, _ in metric_setup.commands)]
+    assert not [text for text in texts if "SOURCE" in text or "very-secret-value" in text]
+
+
+def test_a_failed_metric_setup_command_stops_the_run_before_any_candidate_box(tmp_path: Path) -> None:
+    """A broken build fails ``prepare`` with its last lines, and no candidate box opens (SKY-740)."""
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "echo the-build-broke; exit 3")
+    archive = _archive(tmp_path / "other", {"src/app.py": "SOURCE = 1\n"})
+    try:
+        with pytest.raises(RepoSetupError, match=r"\[metric\] setup\) failed \(exit 3\)") as raised:
+            space.prepare()
+        assert "the-build-broke" in str(raised.value)
+        with pytest.raises(RepoSetupError, match="exit 3"):
+            space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
+    finally:
+        space.close()
+    assert [box.spec.operation_key for box in runtime.boxes] == ["op:setup-0", "op:metric-setup-1"]
+
+
+def test_a_metric_setup_command_that_runs_out_of_time_fails_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build has the setup time limit (SKY-740)."""
+    monkeypatch.setattr(repo_workspace, "_SETUP_TIMEOUT_SECONDS", 1.0)
+    space = _build_space(tmp_path, _Runtime(), "sleep 5")
+    try:
+        with pytest.raises(RepoSetupError, match="ran out of time"):
+            space.prepare()
+    finally:
+        space.close()
+
+
 @pytest.mark.parametrize("line", ["-r other.txt", "--index-url https://x.example.com", "./local", "git+https://x/y"])
 def test_a_metric_requirement_that_is_not_a_package_fails_setup(tmp_path: Path, line: str) -> None:
     """Options, paths and URLs could install repository code or reach other hosts, so they fail."""
