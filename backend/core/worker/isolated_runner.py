@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ from core.worker.subprocess_runner import run_service_in_subprocess
 EVENT_PREFIX = "SKYNET_JOB_EVENT "
 INCOMPATIBLE_IMAGE_MESSAGE = "The sandbox image speaks an older protocol than this worker; rebuild the sandbox image."
 _CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
+_PR_SET_DUMPABLE = 4
 
 
 class EventQueue:
@@ -76,6 +78,25 @@ def _export_checkpoints(directory: Path, events: EventQueue, seen: dict[str, str
         if seen.get(relative) != digest:
             events.put({"type": "checkpoint_file", "path": relative, "data": base64.b64encode(data).decode()})
             seen[relative] = digest
+
+
+def _block_tracing() -> None:
+    """Stop same-user reads of this process's ``/proc/<pid>/environ`` and memory on Linux (SKY-880).
+
+    The model mailbox proxy starts this process with its address
+    (``APP_BUDGET_RELAY_URL``) in its start environment. A contained session
+    runs the metric command and the candidate's commands as this process's
+    user, and ``/proc/<pid>/environ`` shows the start environment even after
+    ``os.environ`` changes. A non-dumpable process refuses those reads to the
+    same user. The flag does not reach a command, because ``execve`` resets it.
+
+    Raises:
+        RuntimeError: When the kernel refuses the flag, so no command runs.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    if ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise RuntimeError(f"The guest could not become non-dumpable (errno {ctypes.get_errno()}).")
 
 
 def _forget_request(path: Path) -> None:
@@ -197,4 +218,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Not inside main: tests call it in the pytest process, which must stay dumpable.
+    _block_tracing()
     main()

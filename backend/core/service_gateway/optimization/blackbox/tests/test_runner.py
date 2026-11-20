@@ -29,6 +29,7 @@ import openascent
 import pytest
 
 from core.sandbox.providers import vercel
+from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
 
 from .. import runner
 from ..repo_constraints import McpServer, RoleEnvironment
@@ -2805,7 +2806,7 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     stay alive above the runner with the command env, which holds no secret
     now. ``contained`` copies only the metric box command of a contained
     session: the shell ``exec``s the runner, whose environment holds the relay
-    address and token. It does not copy the session's own parent process.
+    address and token. It does not copy the session's own guest process; the next test does.
     ``vercel_key_in_env`` is the old scorer, which put the key in the command
     env: the scan must find it in the wrapper shell, so the scan works.
 
@@ -2852,6 +2853,104 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
         assert found == []
     if chain.startswith("vercel"):
         assert str(process.pid) in (box / "readable").read_text().split()
+
+
+# Runs the shipped guest entry point (``python3 -m core.worker.isolated_runner``, so its ``__main__`` block) with a
+# job that opens one contained session and runs a metric command there, as the scorer does. Argument 1 is the box
+# command, argument 2 the request file. Argument 3 "open" replaces prctl with a no-op, so the scan's control can
+# see that the guest's start environment is readable without the flag.
+_CONTAINED_GUEST = """
+import ctypes, runpy, sys, types
+from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox_runtime import current_sandbox_runtime
+from core.worker import subprocess_runner
+
+command, request, mode = sys.argv[1:4]
+
+def run(payload, artifact_id, events):
+    session = current_sandbox_runtime().open(SandboxSpec(lifetime_seconds=60))
+    try:
+        result = session.run(command, timeout_seconds=60)
+    finally:
+        session.close()
+    events.put({"type": "scored", "exit_code": result.exit_code, "stderr": result.stderr[-2000:]})
+
+subprocess_runner.run_service_in_subprocess = run
+if mode == "open":
+    ctypes.CDLL = lambda *args, **kwargs: types.SimpleNamespace(prctl=lambda *values: 0)
+sys.argv = ["isolated_runner", request]
+runpy.run_module("core.worker.isolated_runner", run_name="__main__", alter_sys=True)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
+@pytest.mark.parametrize("mode", ["blocked", "open"])
+def test_no_process_a_contained_session_command_can_read_holds_relay_secrets(tmp_path: Path, mode: str) -> None:
+    """A command metric in a real contained session scans every readable ``/proc/*/environ`` and finds no secret.
+
+    The guest starts the way the model proxy starts it: ``bash -c`` with the
+    relay address in the environment, and bash ``exec``s the guest. The guest
+    sets the tool relay token at run time and opens a contained session,
+    whose metric box command ``exec``s the runner (SKY-880). ``open`` is the
+    control: without the flag the scan must find the relay address in the
+    guest's start environment, so the scan works.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+        mode: ``blocked`` runs the guest as shipped; ``open`` skips its prctl call.
+    """
+    box = tmp_path / "box"
+    box.mkdir()
+    (box / "metric.sh").write_text(_PROC_SCAN)
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    payload = {
+        "candidate": str(box),
+        "case": {"input": "q"},
+        "output": "a",
+        "gateway": {"url": "http://127.0.0.1:9/v1", "model": "judge-model"},
+        runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
+        runner.METRIC_TIMEOUT_PARAM: 20,
+        runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
+    }
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    (call_dir / runner.MODEL_KEY_FILE).write_text("sk-scan")
+    request = tmp_path / "request.json"
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    request.write_text(
+        json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
+    )
+    command = f"cd {shlex.quote(str(box))} && exec {shlex.quote(sys.executable)} -I -B -u"
+    command += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
+    backend = Path(__file__).resolve().parents[5]
+    start = f"PYTHONPATH={shlex.quote(str(backend))} {shlex.quote(sys.executable)} -c {shlex.quote(_CONTAINED_GUEST)}"
+    start += f" {shlex.quote(command)} {shlex.quote(str(request))} {mode}"
+    relay = "http://relay.invalid/v1"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "APP_BUDGET_RELAY_URL": relay,
+        "SKYNET_BUDGET_RELAY_URL": relay,
+        "OPENAI_BASE_URL": relay,
+        "ASCENT_MODEL_URL": relay,
+        "ANTHROPIC_BASE_URL": relay.removesuffix("/v1"),
+    }
+    process = subprocess.Popen(
+        ["bash", *vercel.SHELL_FLAGS, start], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    stdout, stderr = process.communicate(timeout=120)
+    events = [json.loads(line.split(" ", 2)[2]) for line in stdout.splitlines() if line.startswith("SKYNET_JOB_EVENT ")]
+
+    assert process.returncode == 0, stderr
+    assert [event["exit_code"] for event in events if event["type"] == "scored"] == [0], events
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
+    found = (box / "found").read_text().splitlines()
+    if mode == "open":
+        assert f"{process.pid} {relay}" in found
+    else:
+        assert found == []
+        assert str(process.pid) not in (box / "readable").read_text().split()
 
 
 def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:
