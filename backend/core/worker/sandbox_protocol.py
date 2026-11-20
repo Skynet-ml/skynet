@@ -54,7 +54,7 @@ SANDBOX_PROTOCOL = 22
 # ``ASCENT_MODEL_KEY``, and the task file variable to ``ASCENT_TASK``, with no
 # transition period. A worker and an image with different names must never run
 # together, so the worker reads no image before 22 (until 22, it read 12-21).
-# The worker sends an older image the image's own protocol number.
+# The probe refuses every image before 22, so the worker sends no older protocol number.
 READABLE_PROTOCOLS = frozenset({SANDBOX_PROTOCOL})
 
 # The first protocol whose image writes the run end verdict of ``[outcome]``.
