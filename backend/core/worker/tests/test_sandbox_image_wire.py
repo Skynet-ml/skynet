@@ -245,6 +245,18 @@ def test_the_proxy_refuses_another_model_and_names_the_model_variable(
     assert "ASCENT_MODEL" in error["message"]
 
 
+def test_the_proxy_lets_a_deeply_nested_body_go_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body too deep to parse goes on like any body that does not parse, with no traceback.
+
+    Args:
+        monkeypatch: Sets ``ASCENT_MODEL`` for the proxy.
+    """
+    monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "openai/run-model")
+    body = ("[" * 100000 + "]" * 100000).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body) is None
+
+
 @pytest.mark.parametrize(
     ("model", "bound"),
     [

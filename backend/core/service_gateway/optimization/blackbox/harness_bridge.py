@@ -2354,6 +2354,8 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
+    # The harness proposer box's proxy env has no ASCENT_MODEL, so the proxy model check does not run there
+    # and the gateway refuses other models. SKY-884 tracks that refusal text.
     env["ASCENT_MODEL"] = model
     for name, value in (
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),

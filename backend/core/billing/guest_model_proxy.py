@@ -253,7 +253,7 @@ def _other_model_refusal(path: str, body: bytes) -> bytes | None:
         return None
     try:
         model = json.loads(body).get("model")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):
         return None
     if model_matches(model, expected):
         return None

@@ -248,20 +248,19 @@ async function stopServer(child) {
 # check first, so a call that names a hidden path fails. The eve server must
 # keep ASCENT_MODEL_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel
 # reads it), so the provider removes them, with the project paths, only from
-# the env of the commands it starts. The box
-# process can also hold the tool relay, package relay, candidate and host
-# agent tokens, the task and metric keys and the ShinkaEvolve route keys, so
-# the provider removes them and their SKYNET_ twins. The native runtime also
-# puts the gateway key in ANTHROPIC_AUTH_TOKEN, so the provider removes it too. eve's
-# contract says ``bash -lc``, but a login shell reads /etc/profile, which
-# resets PATH and drops the Node 24 directory that the launch adds. The
-# image's ENV PATH already holds the venv, so ``bash -c`` keeps the server
-# PATH and every image tool. Each command starts detached, in its own session
-# and process group, so an abort or ``kill()`` stops the whole group. The
-# bridge's stop sweep finds these groups through the process tree; on Linux
-# the bridge starts the harness shell under a reaper process that is a child
-# subreaper, so a background job that a finished command left behind stays in
-# that tree.
+# the env of the commands it starts. The box process can also hold the tool
+# relay, package relay, candidate and host agent tokens, the task and metric
+# keys and the ShinkaEvolve route keys, so the provider removes them and their
+# SKYNET_ twins. The native runtime also puts the gateway key in
+# ANTHROPIC_AUTH_TOKEN, so the provider removes it too. eve's contract says
+# ``bash -lc``, but a login shell reads /etc/profile, which resets PATH and
+# drops the Node 24 directory that the launch adds. The image's ENV PATH
+# already holds the venv, so ``bash -c`` keeps the server PATH and every image
+# tool. Each command starts detached, in its own session and process group, so
+# an abort or ``kill()`` stops the whole group. The bridge's stop sweep finds
+# these groups through the process tree; on Linux the bridge starts the harness
+# shell under a reaper process that is a child subreaper, so a background job
+# that a finished command left behind stays in that tree.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
