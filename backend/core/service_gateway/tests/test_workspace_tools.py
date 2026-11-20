@@ -920,6 +920,16 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
     assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
 
 
+def test_a_new_rules_value_that_is_not_a_string_is_not_called_invalid_toml_alone() -> None:
+    """A valid TOML new text with a list rules value gets a refusal that names the value form too."""
+    refusal = workspace_tools.dropped_rule_files(
+        '[proposer]\nillegal = "rules.md"\n', '[proposer]\nillegal = ["do not cheat"]\n'
+    )
+
+    assert refusal is not None
+    assert "or a rules path in it is not a string" in refusal
+
+
 def test_a_commented_rules_path_in_a_broken_current_text_is_not_called_a_named_file() -> None:
     """A raw-search match in a comment gives a refusal that does not claim the file names the path."""
     refusal = workspace_tools.dropped_rule_files('# illegal = "docs/old.md"\n[broken\n', _VALID_TOML)
@@ -937,7 +947,7 @@ def test_a_new_text_that_is_not_toml_is_refused_when_the_current_text_is_not_tom
     )
 
     assert refusal is not None
-    assert "not valid TOML, so it cannot keep 'docs/rules.md'" in refusal
+    assert "not valid TOML, or a rules path in it is not a string, so it cannot keep 'docs/rules.md'" in refusal
 
 
 @pytest.mark.parametrize(

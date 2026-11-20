@@ -407,8 +407,8 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         return None
     if after is None:
         return (
-            f"The new optimize.toml is not valid TOML, so it cannot keep {', '.join(named)}. "
-            "Send a valid file that keeps these settings."
+            f"The new optimize.toml is not valid TOML, or a rules path in it is not a string, so it cannot keep "
+            f"{', '.join(named)}. Send a valid file that keeps each setting as a path string."
         )
     if before is None:
         dropped = [f"{path!r}" for path in raw_paths if path not in after.values()]
