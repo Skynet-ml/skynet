@@ -2280,8 +2280,9 @@ def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
         target.mkdir(parents=True, exist_ok=True)
         partial.write_text(model, encoding="utf-8")
         partial.replace(binding)
-    except OSError:
-        # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
+    except (OSError, ValueError):
+        # The gateway refuses another model anyway, so a folder the session cannot write, or a model name
+        # that UTF-8 cannot hold, skips only the clearer error.
         _unbind(binding, partial)
         return None
     _LIVE_BINDINGS.discard(partial)

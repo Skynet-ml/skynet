@@ -4636,3 +4636,23 @@ def test_bind_model_tracks_its_files_before_they_exist(
     blocked.write_text("")
     assert harness_bridge.bind_model(blocked, "route-key", "run-model") is None
     assert live == {binding, partial, binding.with_name("missing")}
+
+
+def test_a_model_name_utf8_cannot_hold_leaves_no_binding(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model with a lone surrogate binds nothing, and its session still runs (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Gives the test its own live set.
+    """
+    live: set[Path] = set()
+    monkeypatch.setattr(harness_bridge, "_LIVE_BINDINGS", live)
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    ran = False
+
+    with harness_bridge.model_binding(env, "route-key", "bad\udcff"):
+        ran = True
+
+    assert ran
+    assert live == set()
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
