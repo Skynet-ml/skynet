@@ -3254,11 +3254,11 @@ wheels = [
 
 [[package]]
 name = "openascent"
-version = "0.2.1"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f8/89/ad10625521136638f0ac0916cbbda0b9ebe27855820c20a93fa52779a585/openascent-0.2.1.tar.gz", hash = "sha256:f106bd550549aad57c8e9273068ed27de3c3f8e397249bcdda5f1bed62950d2e", size = 33023, upload-time = "2026-11-20T05:43:29.27Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/c5/de38959bb263c82520778bb29dd38de205a73df19f7969cbbcffd4b1c2f8/openascent-0.4.2.tar.gz", hash = "sha256:e9d1a50156a3e46f427a8a34a934995df591f37dc000556f0ff7f70940406ae2", size = 85041, upload-time = "2026-11-20T13:19:25.8Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/bd/f32c814dbcefd1beab242c477e50bea2bc0e77b48137c7f426b3eb3523d0/openascent-0.2.1-py3-none-any.whl", hash = "sha256:a344694d604fba6ec626885c9a1d89a7f4335fd5cb6011c76d32afb1f0d82be7", size = 37677, upload-time = "2026-11-20T05:43:27.936Z" },
+    { url = "https://files.pythonhosted.org/packages/01/73/67ac192ddbae878d1696990e7e8d79e833bc9a6408a32afa96b058274a8f/openascent-0.4.2-py3-none-any.whl", hash = "sha256:3d4aa70636ef911ebca9ce73095fa68ee13ce1da3a2b715e1f717d7fb33b09dd", size = 81575, upload-time = "2026-11-20T13:19:24.404Z" },
 ]
 
 [[package]]
@@ -5373,7 +5373,7 @@ dependencies = [
     { name = "ldap3" },
     { name = "litellm" },
     { name = "numpy" },
-    { name = "openascent", marker = "python_full_version >= '3.12' or (extra == 'extra-6-skynet-e2b' and extra == 'extra-6-skynet-prime')" },
+    { name = "openascent" },
     { name = "pgvector" },
     { name = "pip" },
     { name = "prometheus-client" },
@@ -5492,7 +5492,7 @@ requires-dist = [
     { name = "mosaic-sandbox", marker = "extra == 'mosaic'", specifier = ">=0.15.1,<0.16" },
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "openascent", marker = "python_full_version >= '3.12'", specifier = "==0.2.1" },
+    { name = "openascent", specifier = "==0.4.2" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "pillow", marker = "extra == 'render'", specifier = ">=13.0.0" },
     { name = "pip", specifier = "==26.2.1" },

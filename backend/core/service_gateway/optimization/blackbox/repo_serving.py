@@ -187,7 +187,8 @@ def staged_snapshot(
             except DraftFileError as error:
                 raise ConstraintsError(str(error)) from None
         # Only a run that started can be served, maybe from before version was required (SKY-690).
-        hidden = hidden_repo_paths(read_constraints(snapshot.archive, require_version=False))
+        # Its contract passed Skynet's older reader, so the forms that reader accepted still read (SKY-760).
+        hidden = hidden_repo_paths(read_constraints(snapshot.archive, require_version=False, legacy_forms=True))
         # Run start refuses these links since SKY-387; a run started before that can still reach serving.
         if linked := linked_hidden_paths(snapshot.archive, hidden):
             raise ConstraintsError(

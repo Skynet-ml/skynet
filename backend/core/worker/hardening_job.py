@@ -236,7 +236,9 @@ def _workspace(staged: StagedRepository, staged_payload: dict[str, Any], job: Ha
     # the tree; the caller ends the job as failed when it refuses.
     with tarfile.open(archive) as tree:
         tree.extractall(trusted_root, filter="data")
-    constraints = read_constraints(archive, require_version=staged.require_version)
+    constraints = read_constraints(
+        archive, require_version=staged.require_version, legacy_forms=not staged.require_version
+    )
     metric = constraints.metric if constraints is not None else MetricSpec()
     exploits_path = trusted_root / metric.exploits
     fixed = [r for r in job.rounds_detail if r.status == "fixed"]

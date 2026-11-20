@@ -131,7 +131,7 @@ CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
 MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
 UPLOADED_CASES_REFUSED = "This repo defines its cases in ascent.toml. Remove the uploaded cases."
-# Rules the run is held to; a resumed run must arrive at exactly these again.
+# Rules the run is held to; a resumed run must arrive at exactly these again (only the compose file may join or move).
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
 _ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}, "direction": "maximize"}}
@@ -435,7 +435,10 @@ def stage_repository(
             apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
         except DraftFileError as error:
             raise ConstraintsError(str(error)) from None
-        constraints = read_constraints(snapshot.archive, require_version=require_version)
+        # A started run passed its first staging under Skynet's older reader, so it re-reads in its forms (SKY-760).
+        constraints = read_constraints(
+            snapshot.archive, require_version=require_version, legacy_forms=not require_version
+        )
         # A started run (resume, recovery) already recorded the rules it runs under, so only a new run stops here.
         if require_constraints and constraints is None and not isinstance(repo.get(ENVIRONMENT_KEY), dict):
             raise ConstraintsError(CONSTRAINTS_REQUIRED)
@@ -465,7 +468,11 @@ def stage_repository(
         )
         if environment.constraints is not None:
             record["roles"] = plan_roles(environment.constraints, proposer_hosts=hosts)
-        _ensure_unchanged(repo.get(ENVIRONMENT_KEY), record)
+        _ensure_unchanged(
+            repo.get(ENVIRONMENT_KEY),
+            record,
+            compose_file=environment.constraints.compose_file if environment.constraints is not None else None,
+        )
         # The guest's workspace (Vercel or local Docker) unpacks this copy; the
         # parent's scorer box keeps the full tree, so it scores with the base
         # commit's metric (SKY-353).
@@ -836,12 +843,13 @@ def relay_mcp_archive(archive: Path, roles: tuple[RoleEnvironment, ...], destina
     return destination
 
 
-def _ensure_unchanged(previous: Any, current: dict[str, Any]) -> None:
+def _ensure_unchanged(previous: Any, current: dict[str, Any], *, compose_file: str | None = None) -> None:
     """Refuse to resume a run under rules other than the ones first recorded for it.
 
     Args:
         previous: The environment saved on the run by an earlier attempt, if any.
         current: The environment this attempt worked out.
+        compose_file: The contract's ``[sandbox] compose`` file, which the current protected paths may add.
 
     Raises:
         ConstraintsError: When an enforced rule differs from the saved one.
@@ -864,7 +872,29 @@ def _ensure_unchanged(previous: Any, current: dict[str, Any]) -> None:
             return {**_ENFORCED_DEFAULTS["outcome"], **value}
         return value
 
-    changed = [name for name in _ENFORCED_FIELDS if enforced(previous, name) != enforced(current, name)]
+    def differs(name: str) -> bool:
+        """Tell whether one enforced field changed since it was recorded.
+
+        Args:
+            name: One of :data:`_ENFORCED_FIELDS`.
+
+        Returns:
+            Whether the run would resume under another rule.
+        """
+        before, after = enforced(previous, name), enforced(current, name)
+        # The package reader also protects the [sandbox] compose file, which Skynet's older reader did not, so a run
+        # recorded before SKY-760 resumes with that one path added. More protection keeps the run safe. The package
+        # also moves the file ahead of [paths] protected, so it is left out of both lists before the compare.
+        if (
+            name == "protected_paths"
+            and compose_file is not None
+            and isinstance(before, list)
+            and isinstance(after, list)
+        ):
+            return [path for path in before if path != compose_file] != [path for path in after if path != compose_file]
+        return before != after
+
+    changed = [name for name in _ENFORCED_FIELDS if differs(name)]
     if changed:
         raise ConstraintsError(
             f"The run's environment changed since it was recorded ({', '.join(changed)}); clone the run to review it."

@@ -6,10 +6,12 @@ import io
 import tarfile
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from core.billing import env_connectors
+from core.connectors.github_repo import RepoSnapshot
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -17,7 +19,7 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     parse_constraints,
 )
-from core.worker import repo_gate
+from core.worker import repo_gate, repo_staging
 from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, check_repository, sandbox_place
 from core.worker.repo_staging import hidden_path_labels, hidden_repo_paths
 
@@ -79,6 +81,105 @@ def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> 
     with pytest.raises(ConstraintsError, match="version is missing"):
         check_repository(archive, (), place="local")
     assert check_repository(archive, (), place="local", require_version=False) == []
+
+
+def test_a_started_run_reads_an_older_form_and_a_new_run_refuses_it(tmp_path: Path) -> None:
+    """The gate reads the tree as its staging did: a started run accepts ``" bot/ "`` (SKY-760)."""
+    raw = b'version = 1\n[paths]\neditable = [" bot/ "]\n[run]\nentry = "run.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
+
+    with pytest.raises(ConstraintsError, match="must be written 'bot'"):
+        check_repository(archive, (), place="local")
+    assert check_repository(archive, (), place="local", require_version=False) == []
+
+
+def _stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, bytes], environment: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Stage a run over a tree holding ``files``, with the fetch and the secrets faked.
+
+    Args:
+        tmp_path: Scratch folder for the fetched tree.
+        monkeypatch: Pytest monkeypatch.
+        files: Root-relative path to bytes.
+        environment: The environment an earlier attempt recorded; ``None`` stages a new run.
+
+    Returns:
+        The environment that staging recorded.
+    """
+    fetch = tmp_path / f"fetch-{len(list(tmp_path.glob('fetch-*')))}"
+    fetch.mkdir()
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
+    monkeypatch.setattr(
+        repo_staging,
+        "fetch_snapshot",
+        lambda repository, pinned, token, workdir: RepoSnapshot(
+            commit=pinned, archive=_archive(fetch, files), readonly_paths=(), size_bytes=1
+        ),
+    )
+    repo: dict[str, Any] = {"repository": "acme/app", "branch": "main", "commit": "c" * 40, "editable_paths": ["."]}
+    if environment is not None:
+        repo["environment"] = environment
+    staged_payload, staged = repo_staging.stage_repository(
+        {"target": {"kind": "repo", "repo": repo}}, username="alice", binding_id="b", engine=None
+    )
+    staged.cleanup()
+    return staged_payload["target"]["repo"]["environment"]
+
+
+_STAGED = b'version = 1\n[paths]\neditable = ["bot"]\n[run]\nentry = "run.py:main"\n'
+
+
+def test_staging_reads_an_older_form_only_for_a_started_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded environment means the run started under the older reader, so staging accepts ``" bot/ "`` (SKY-760)."""
+    recorded = _stage(tmp_path, monkeypatch, {CONSTRAINTS_FILE: _STAGED})
+    older = {CONSTRAINTS_FILE: _STAGED.replace(b'"bot"', b'" bot/ "')}
+
+    with pytest.raises(ConstraintsError, match="must be written 'bot'"):
+        _stage(tmp_path, monkeypatch, older)
+    assert _stage(tmp_path, monkeypatch, older, recorded)["editable_paths"] == ["bot"]
+
+
+def test_a_resumed_run_may_newly_protect_only_its_compose_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package also protects the compose file, so a run recorded without it resumes; other changes are refused."""
+    raw = _STAGED + b'[sandbox]\ncompose = "compose.yaml"\n'
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "compose.yaml": b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n",
+    }
+    recorded = _stage(tmp_path, monkeypatch, files)
+    assert recorded["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml"]
+    # Skynet's older reader recorded only the contract file as protected.
+    older = {**recorded, "protected_paths": [CONSTRAINTS_FILE]}
+
+    assert _stage(tmp_path, monkeypatch, files, older)["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml"]
+    wider = {**recorded, "protected_paths": [CONSTRAINTS_FILE, "compose.yaml", "bot/eval"]}
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths\)"):
+        _stage(tmp_path, monkeypatch, files, wider)
+    with pytest.raises(ConstraintsError, match=r"\(editable_paths\)"):
+        _stage(tmp_path, monkeypatch, files, {**older, "editable_paths": ["lib"]})
+
+
+def test_a_resumed_run_resumes_when_the_package_moves_its_compose_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The older reader kept a protected compose file in the user's order; the package moves it ahead."""
+    raw = _STAGED.replace(b"[run]", b'protected = ["data", "compose.yaml"]\n[run]') + (
+        b'[sandbox]\ncompose = "compose.yaml"\n'
+    )
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "compose.yaml": b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n",
+    }
+    recorded = _stage(tmp_path, monkeypatch, files)
+    assert recorded["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml", "data"]
+    older = {**recorded, "protected_paths": [CONSTRAINTS_FILE, "data", "compose.yaml"]}
+
+    assert _stage(tmp_path, monkeypatch, files, older)["protected_paths"] == recorded["protected_paths"]
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths\)"):
+        _stage(tmp_path, monkeypatch, files, {**recorded, "protected_paths": [CONSTRAINTS_FILE, "compose.yaml"]})
 
 
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:

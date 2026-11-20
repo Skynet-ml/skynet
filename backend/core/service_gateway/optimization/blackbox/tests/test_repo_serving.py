@@ -691,7 +691,7 @@ def _stage_tree(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], links: d
 
 
 def test_a_hidden_path_with_a_trailing_slash_is_still_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``scoring/`` names the same folder as ``scoring``."""
+    """``scoring/`` names the same folder as ``scoring``: a served run re-reads in the older forms (SKY-760)."""
     files = {
         "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/"]\n',
         "scoring/score.py": f"# {_LEAK}\n",

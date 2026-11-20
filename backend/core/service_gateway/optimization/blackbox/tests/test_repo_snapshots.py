@@ -818,7 +818,9 @@ def test_stage_boxes_start_from_their_own_snapshot_without_scorer_files(tmp_path
     assert "stages.py" in names
     assert "metric.py" not in names
     assert "labels.csv" not in names
-    assert "hidden\n" not in _texts(saved)
+    # The metric file is the one line "hidden" (_stage_scorer). The copied openascent source holds the
+    # text "error.hidden", so the check looks for that whole line, not the substring (SKY-760).
+    assert "hidden" not in _texts(saved).splitlines()
     assert runtime.keys[0] not in scorer_runtime.keys
     assert all(spec.snapshot_id != "stage-0" for spec in scorer_runtime.specs)
 

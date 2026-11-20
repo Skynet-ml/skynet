@@ -853,6 +853,7 @@ def _trusted_constraints(trusted_root: Path, *, require_version: bool) -> RepoCo
     Args:
         trusted_root: The base-commit tree.
         require_version: Passed to :func:`read_constraints`, as the pass's staging used it.
+            ``False`` marks a started pass, which also reads the older forms, as its staging did.
 
     Returns:
         The validated constraints, or None when the tree has no constraints file.
@@ -860,7 +861,7 @@ def _trusted_constraints(trusted_root: Path, *, require_version: bool) -> RepoCo
     with tempfile.TemporaryDirectory(prefix="hardening-constraints-") as folder:
         archive = Path(folder) / "tree.tgz"
         _pack_tree(trusted_root, archive)
-        return read_constraints(archive, require_version=require_version)
+        return read_constraints(archive, require_version=require_version, legacy_forms=not require_version)
 
 
 @contextmanager
