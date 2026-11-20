@@ -147,7 +147,7 @@ def _improvement_points(value: float) -> float:
     be aggregated alongside metrics already expressed in points.
 
     Args:
-        value: Raw ``optimized - baseline`` delta.
+        value: The raw metric improvement, positive when the run got better.
 
     Returns:
         The delta in percentage points.
