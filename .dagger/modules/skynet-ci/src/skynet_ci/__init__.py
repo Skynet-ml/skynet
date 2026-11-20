@@ -257,7 +257,9 @@ class SkynetCi:
     @function
     @check
     async def backend_gates(self) -> None:
-        """Run ruff, the terraform script tests, requirements sync, Postgres, SLO and user namespace gates."""
+        """Run ruff, the terraform script tests, requirements sync, Postgres and SLO gates."""
+        # The docstring stays as is: sdk/entrypoint/types.dang copies it. This
+        # check also runs the user namespace tests (SKY-886), see below.
         postgres = (
             core()
             .container()
@@ -321,7 +323,8 @@ class SkynetCi:
         # SKY_REQUIRE_USERNS=1 turns a refused namespace into a failure
         # instead of a skip (SKY-885, SKY-886). No -n: the /proc scan tests
         # read every process, so they must not run beside each other.
-        await (
+        # ReturnType.ANY keeps the output of a failed run, so the error shows it.
+        userns_run = (
             self._backend()
             .with_exec(["useradd", "--create-home", "--uid", "1001", "ci"])
             .with_exec(["chown", "-R", "ci:ci", "/src"])
@@ -344,9 +347,17 @@ class SkynetCi:
                     "-rs",
                 ],
                 insecure_root_capabilities=True,
+                expect=ReturnType.ANY,
             )
-            .sync()
         )
+        exit_code = await userns_run.exit_code()
+        if exit_code != 0:
+            stdout = await userns_run.stdout()
+            stderr = await userns_run.stderr()
+            raise RuntimeError(
+                f"user namespace tests failed: pytest exit code {exit_code}.\n"
+                f"{stdout[-8000:]}\n--- stderr ---\n{stderr[-4000:]}"
+            )
 
     def _collected(self) -> Container:
         """Collect the full core suite without a shard filter."""

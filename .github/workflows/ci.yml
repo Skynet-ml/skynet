@@ -62,10 +62,19 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
+      # Ubuntu runners block unprivileged user namespaces through AppArmor.
+      # The user namespace tests need them (SKY-886). Kernels without this
+      # key do not block them, so the step does nothing there.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       # Ruff, the terraform script tests, the requirements.txt/uv.lock sync
       # check, the PostgreSQL gates (Dagger runs postgres:16-alpine as a
-      # service) and the load-test SLO gate. See .dagger/modules/skynet-ci.
-      - name: Ruff, script tests, requirements sync, PostgreSQL and SLO gates
+      # service), the load-test SLO gate and the user namespace tests of the
+      # contained metric. See .dagger/modules/skynet-ci.
+      - name: Ruff, script tests, requirements sync, PostgreSQL, SLO and user namespace gates
         run: dagger check skynet-ci/backend-gates
 
   backend-shard-coverage:
