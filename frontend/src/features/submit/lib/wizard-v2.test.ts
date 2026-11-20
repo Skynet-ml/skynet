@@ -17,6 +17,7 @@ const {
   WIZARD_V2_STEPS,
   deleteWorkspaceFile,
   emptyRepoDraft,
+  fileProposerCommand,
   initialWizardV2State,
   optimizerModelsReady,
   defaultModels,
@@ -408,4 +409,17 @@ test("withRepository clears the created-by-Skynet flag for another repository", 
   const created = { ...emptyRepoDraft(), repository: "acme/new", createdBySkynet: true };
   assert.equal(withRepository(created, "acme/other").createdBySkynet, false);
   assert.equal(withRepository(created, "acme/new").createdBySkynet, true);
+});
+
+test("the contract file's proposer runs until the user picks a built-in agent (SKY-771)", () => {
+  const command = ["python", "agent/propose.py"];
+  const { proposer } = initialWizardV2State().optimizer;
+  // A fresh setup picks no agent, so the file's command is selected by default.
+  assert.deepEqual(fileProposerCommand(proposer, command), command);
+  // A picked agent or host CLI replaces the file's command (SKY-753).
+  assert.equal(fileProposerCommand({ ...proposer, harness: "codex" }, command), null);
+  assert.equal(fileProposerCommand({ ...proposer, host_cli: "claude" }, command), null);
+  // A contract with no command, or no answer yet, keeps today's picker.
+  assert.equal(fileProposerCommand(proposer, null), null);
+  assert.equal(fileProposerCommand(proposer, []), null);
 });

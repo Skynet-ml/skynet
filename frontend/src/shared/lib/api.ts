@@ -1033,12 +1033,14 @@ export interface AccountDeletionResult {
 /**
  * Check an optimize.toml text with the repository parser; it stops at the first error.
  * `metric_command` is the command that `[metric] entry` names, else null (SKY-770).
+ * `proposer_command` is the command that `[proposer] entry` names, else null (SKY-771).
  */
 export function checkOptimizeToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
     errors: Array<{ section: string | null; key: string | null; message: string }>;
     metric_command: string[] | null;
+    proposer_command: string[] | null;
   }>("/wizard/optimize-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 

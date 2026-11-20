@@ -545,6 +545,25 @@ export function deleteWorkspaceFile(
   return Object.keys(files).length === 0 ? { files, filesBase: undefined } : { files };
 }
 
+/**
+ * The contract file's proposer command when it is the run's proposer (SKY-771).
+ *
+ * Args:
+ *   proposer: The wizard's proposer settings.
+ *   proposerCommand: The `[proposer] entry` command from the contract check.
+ *
+ * Returns:
+ *   The command while the user picked no built-in agent and no host CLI, else
+ *   null: a picked agent replaces the file's command (SKY-753).
+ */
+export function fileProposerCommand(
+  proposer: BlackboxProposer,
+  proposerCommand: readonly string[] | null,
+): readonly string[] | null {
+  if (proposer.harness || proposer.host_cli || !proposerCommand?.length) return null;
+  return proposerCommand;
+}
+
 export interface WizardV2Context {
   state: WizardV2State;
   goTo(step: WizardStepId): void;
@@ -573,6 +592,11 @@ export interface WizardV2Context {
    * answer yet. A command needs no metric.py (SKY-770).
    */
   metricCommand: readonly string[] | null;
+  /**
+   * The command that the run's optimize.toml names in `[proposer] entry`, from
+   * the same contract check; null for no entry or no answer yet (SKY-771).
+   */
+  proposerCommand: readonly string[] | null;
   /** The wizard's execution budget, created on first use. */
   ensureBudget(): Promise<ExecutionBudget>;
   submit(): Promise<void>;

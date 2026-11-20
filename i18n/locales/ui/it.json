@@ -153,6 +153,7 @@
   "submit.v2.optimizer.proposer.candidates": "Candidati per iterazione",
   "submit.v2.optimizer.proposer.harness": "Agente di programmazione",
   "submit.v2.optimizer.proposer.harness_default": "Agente proponente del repository o predefinito del server",
+  "submit.v2.optimizer.proposer.from_file": "Dal file del contratto",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
   "submit.v2.optimizer.sandbox.hint": "Dove viene eseguito il codice dell’esecuzione.",
   "submit.v2.optimizer.sandbox.load_failed": "Impossibile caricare le sandbox. L’esecuzione usa il valore predefinito del server.",

@@ -269,7 +269,7 @@ def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
     resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": [], "metric_command": None}
+    assert resp.json() == {"ok": True, "errors": [], "metric_command": None, "proposer_command": None}
 
 
 @pytest.mark.parametrize(
@@ -290,7 +290,7 @@ def test_the_check_names_the_metric_command_only_for_a_command_entry(
     resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML + metric})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "errors": [], "metric_command": command}
+    assert resp.json() == {"ok": True, "errors": [], "metric_command": command, "proposer_command": None}
 
 
 def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
@@ -301,6 +301,30 @@ def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
     assert resp.status_code == 200
     assert resp.json()["ok"] is False
     assert resp.json()["metric_command"] is None
+
+
+def test_the_check_names_the_proposer_command_of_the_file(wizard_client: TestClient) -> None:
+    """A ``[proposer] entry`` comes back as its argv, so the picker offers it first (SKY-771)."""
+    text = _VALID_TOML + '[proposer]\nentry = ["python", "agent/propose.py"]\n'
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "errors": [],
+        "metric_command": None,
+        "proposer_command": ["python", "agent/propose.py"],
+    }
+
+
+def test_a_bad_file_names_no_proposer_command(wizard_client: TestClient) -> None:
+    """A file the parser refuses names no proposer, so the picker stays as it is (SKY-771)."""
+    text = 'version = 1\n[proposer]\nentry = ["python", "agent/propose.py"]\n'
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert resp.json()["proposer_command"] is None
 
 
 @pytest.mark.parametrize(
