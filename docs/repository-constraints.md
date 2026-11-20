@@ -739,8 +739,63 @@ answer file.
 The command has the same limits as a Python metric: the same box, network,
 services, vCPUs and time limit. The metric box holds no version code, so
 the command cannot start the candidate again. It reaches only the
-`[metric]` services and hosts. A command gets no `openascent` helpers, such as
-`call()` and the `[metric]` model, in this version.
+`[metric]` services and hosts.
+
+A command reaches the stages, the judge model and the run log at local URLs
+that the metric box serves on `127.0.0.1` only. These URLs use the
+OpenAscent wire form, so the `openascent` helpers `call`, `llm` and `log`
+work in a command too. Each answer is JSON. An error answer has a status
+that is not 2xx and the body `{"error": "<text>"}`.
+
+- `ASCENT_STAGE_<NAME>_URL`: one variable for each `[target.<name>]` stage.
+  In `<NAME>`, each ASCII letter is upper case, each ASCII digit stays, and
+  each other character is `_`. Two stages with the same `<NAME>` (such as
+  `a-b` and `a_b`) get no variable, so a call to either fails as an
+  unknown stage. POST `{"input": <any JSON>}`. The answer is
+  `{"output": <the stage's output>}`. An unknown stage, a failed stage, a
+  stage with no valid output, a stage time-out and a body with another key
+  each give an error answer.
+- `ASCENT_MODEL_URL`, `ASCENT_MODEL` and `ASCENT_MODEL_KEY`: only when the
+  run has a judge model. POST an OpenAI chat request to
+  `$ASCENT_MODEL_URL/chat/completions`, with `model` set to `$ASCENT_MODEL`.
+  The request takes `messages` and, optionally, `max_tokens`, `temperature`
+  and `reasoning_effort`. A request that names another model, asks for a
+  stream or has another key gets an error answer. `ASCENT_MODEL_KEY` is
+  empty, because the box adds the key itself. Each call is metered like a
+  call from a Python metric.
+- `ASCENT_LOG_URL`: POST `{"event": "<name>", "fields": {...}}`. The run log
+  gets the same event as `log()` in a Python metric. The answer is `{}`.
+
+The command reaches the model and the stages only through these URLs. Its
+environment holds no model key, no model mailbox address
+(`APP_BUDGET_RELAY_URL`, `APP_GATEWAY_URL`, `OPENAI_BASE_URL`,
+`ANTHROPIC_BASE_URL`) and no tool relay token (`APP_TOOL_RELAY_TOKEN`), also
+not in the old `SKYNET_` spelling. The box command that starts the runner has
+no model key in its environment either. The scorer writes the key to a file
+in the call folder, and the runner reads and deletes the file before the
+command starts. The runner also blocks same-user reads of its own memory
+and environment, so the command cannot read them from `/proc`. No process
+that starts the metric has the model key in its environment. On a Vercel
+box, the processes above the runner also have no relay values. A contained
+session can keep a parent process alive that has the relay address in its
+environment.
+
+A Python metric gets none of these variables, because it imports the helpers.
+
+A bash metric that calls a stage and asks the judge model:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+input=$(jq -c '{input: .output}' "$ASCENT_INPUT")
+checked=$(curl -sf --noproxy '*' -X POST -d "$input" "$ASCENT_STAGE_CHECK_URL" | jq -c .output)
+verdict=$(jq -nc --arg model "$ASCENT_MODEL" --argjson checked "$checked" \
+  '{model: $model, messages: [{role: "user", content: "Rate 0 to 1: \($checked)"}]}' |
+  curl -sf --noproxy '*' -X POST -d @- "$ASCENT_MODEL_URL/chat/completions" |
+  jq -r '.choices[0].message.content')
+curl -sf --noproxy '*' -X POST -d '{"event": "metric.judged", "fields": {}}' "$ASCENT_LOG_URL" >/dev/null
+jq -nc --argjson score "$verdict" '{score: $score}' > "$ASCENT_OUTPUT"
+```
 
 A bash metric that scores an exact match:
 

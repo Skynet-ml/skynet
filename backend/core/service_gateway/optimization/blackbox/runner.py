@@ -75,6 +75,15 @@ the entry's run time in seconds as ``elapsed_s=...`` (SKY-642). The
 supervisor measures it in its own process, from just before the entry
 starts until the entry exits and its process group is killed, so the
 candidate's code cannot patch the clock it reads.
+
+A command ``[metric] entry`` cannot import ``call``, ``llm`` or ``log``, so
+the runner serves them to it on a loopback port of its own, in the
+OpenAscent wire form (SKY-767): ``ASCENT_STAGE_<NAME>_URL`` for each stage,
+through the same relay as ``call()``; ``ASCENT_MODEL_URL`` with
+``ASCENT_MODEL`` and an empty ``ASCENT_MODEL_KEY`` only with a judge model,
+through the same client as ``llm()``; and ``ASCENT_LOG_URL``, which writes
+the same event as ``log()``. The command's environment holds no model key.
+A Python metric gets none of these variables.
 """
 
 from __future__ import annotations
@@ -113,10 +122,14 @@ from typing import Any
 INPUT_FILE = "input.json"
 CODE_FILE = "app_scorer_code.txt"
 OUTPUT_FILE = "output.json"
+# A command metric's model key: the scorer writes it, and the runner reads and
+# deletes it before the command starts (SKY-767).
+MODEL_KEY_FILE = "model_key"
 SCORER_FILENAME = "<scorer_code>"
 # Names the scorer namespace binds the model helper and the image wrapper to.
 LLM_HELPER_NAME = "llm"
-# The gateway key rides in the environment so it never touches the box filesystem.
+# The gateway key rides in the environment so it never touches the box
+# filesystem, except for a command metric (``MODEL_KEY_FILE``).
 ENV_API_KEY = "APP_API_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
 # The image's box PATH, with /app/.venv/bin first after the sudo guard folder.
@@ -126,6 +139,20 @@ ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 # This file runs alone in the box, without ``core.config``; boxes started by an
 # older control plane still carry only the pre-rename spellings.
 _LEGACY_ENV_PREFIX = "SKYNET_"
+# A command metric reaches the model and the stages only through its helper
+# URLs (SKY-767), which meter each call and check each stage. These names hold
+# the model key, the protected model mailbox and the tool relay token that the
+# box (or a contained session, ``sandbox_runtime._contained_environment``)
+# sets, so they stay out of the command's environment, in both spellings.
+_COMMAND_HIDDEN_ENV = (
+    *(
+        name
+        for base in (ENV_API_KEY, ENV_BUDGET_RELAY_URL, "APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN")
+        for name in (base, _LEGACY_ENV_PREFIX + base.removeprefix("APP_"))
+    ),
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+)
 IMAGE_HELPER_NAME = "Image"
 LOG_HELPER_NAME = "log"
 # ``from openascent import call, StageError`` reaches the run's ``[target.<name>]`` stages.
@@ -151,6 +178,20 @@ SERVICE_ENV_PREFIX = "ASCENT_SERVICE_"
 MCP_ENV_PREFIX = "ASCENT_MCP_"
 # Names the role's own ``.mcp.json``, for MCP clients that read a config file.
 MCP_CONFIG_ENV = "ASCENT_MCP_CONFIG"
+# A command metric reaches its helpers at these loopback addresses (SKY-767),
+# in the form the OpenAscent helpers use: ``ASCENT_STAGE_<NAME>_URL`` for each
+# stage, the judge model's chat endpoint, and the log.
+STAGE_ENV_PREFIX = "ASCENT_STAGE_"
+MODEL_URL_ENV = "ASCENT_MODEL_URL"
+MODEL_ENV = "ASCENT_MODEL"
+# Always empty: the runner adds the gateway's key itself, so the command never holds it.
+MODEL_KEY_ENV = "ASCENT_MODEL_KEY"
+LOG_URL_ENV = "ASCENT_LOG_URL"
+# The largest helper request body; a stage input or a chat request is far smaller.
+_HELPER_BODY_BYTES = 16 * 1024 * 1024
+# The chat request fields the model helper passes on. Each other field is refused,
+# so the command cannot reach a field that changes the route or its cost bound.
+_MODEL_REQUEST_KEYS = frozenset({"model", "messages", "max_tokens", "temperature", "reasoning_effort", "stream"})
 # The box's loopback relay port. It is fixed because the parent writes each
 # role's .mcp.json with loopback urls before the box opens (E49, E53).
 RELAY_PORT = 47_311
@@ -443,6 +484,24 @@ def mcp_env_name(name: str) -> str:
         ``ASCENT_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
     return MCP_ENV_PREFIX + _env_part(name) + "_URL"
+
+
+def stage_env_name(name: str) -> str:
+    """Return the variable that holds one stage's loopback address for a command metric.
+
+    The OpenAscent ``call`` helper reads the same name, so the rule is its
+    rule: each ASCII letter in upper case, each ASCII digit unchanged, and
+    each other character as ``_``. ``str.upper()`` alone can turn one
+    character into ASCII letters (``ß`` into ``SS``).
+
+    Args:
+        name: The ``[target.<name>]`` name.
+
+    Returns:
+        ``ASCENT_STAGE_<NAME>_URL``.
+    """
+    part = "".join(char.upper() if char.isascii() and char.isalnum() else "_" for char in name)
+    return STAGE_ENV_PREFIX + part + "_URL"
 
 
 def _env_part(name: str) -> str:
@@ -838,10 +897,25 @@ def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) 
     name = str(level).upper()
     if name not in _EVENT_LEVELS:
         raise ValueError(f"log() level must be one of {', '.join(_EVENT_LEVELS)}, not {level!r}.")
+    _emit_event(event, event if message is None else str(message), name, fields)
+
+
+def _emit_event(event: str, message: str, level: str, fields: dict[str, Any]) -> None:
+    """Write one checked event line to the real stderr, where the host reads ``log()`` events.
+
+    A command metric's log helper writes through here too, so its events
+    are the same lines, and a field named ``level`` or ``message`` stays a field.
+
+    Args:
+        event: The event name.
+        message: The line shown in the log.
+        level: One of the four levels.
+        fields: Details shown with the event; values that are not JSON become text.
+    """
     line = {
-        "level": name,
+        "level": level,
         "logger": "scorer",
-        "message": event if message is None else str(message),
+        "message": message,
         "event": event,
         "fields": _json_plain(json.loads(json.dumps(fields, default=side_info_json_default))) if fields else None,
     }
@@ -1310,6 +1384,49 @@ class GatewayClient:
             messages = scorer_messages(prompt, input, images)
         elif not isinstance(messages, list):
             raise ScorerError("llm(messages=...) takes a list of chat messages.")
+        return _completion_text(
+            self.complete(messages, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+        )
+
+    def serves(self, model: str) -> bool:
+        """Return whether a model name names the model bound to this client.
+
+        Args:
+            model: The model a request names.
+
+        Returns:
+            Whether it matches the bound or the declared model.
+        """
+        return model_matches_bound(model, self._model, self._declared_model)
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> Any:
+        """Send one chat completion with the bound model and record its usage.
+
+        ``llm()`` and a command metric's model helper both send through here,
+        so both get the same model, limits, metering and budget stop.
+
+        Args:
+            messages: The chat messages, in OpenAI form.
+            temperature: Per-call sampling override.
+            max_tokens: Per-call output limit.
+            reasoning_effort: Per-call reasoning level.
+
+        Returns:
+            The gateway's decoded answer.
+
+        Raises:
+            ScorerError: When the gateway refuses the call.
+            GatewayControl: When the run's budget stopped this or an earlier call.
+        """
+        if self.control is not None:
+            raise GatewayControl(**self.control)
         body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -1335,7 +1452,7 @@ class GatewayClient:
                     "total_tokens": usage.get("total_tokens"),
                 }
             )
-        return _completion_text(payload)
+        return payload
 
     def _post(self, data: bytes) -> Any:
         """Send one protected attempt or retry transient legacy gateway failures.
@@ -1400,6 +1517,32 @@ class GatewayClient:
         raise ScorerError(last_error)
 
 
+def _gateway_client(gateway: Any) -> GatewayClient | None:
+    """Build the model client from a call's ``gateway`` section.
+
+    Args:
+        gateway: The ``gateway`` value of the call's input.
+
+    Returns:
+        The client, or ``None`` when the run has no model route.
+    """
+    if not isinstance(gateway, dict):
+        return None
+    return GatewayClient(
+        str(gateway["url"]),
+        str(gateway["model"]),
+        api_key=gateway.get("api_key") or env_value(ENV_API_KEY),
+        temperature=gateway.get("temperature"),
+        max_tokens=gateway.get("max_tokens"),
+        reasoning_effort=gateway.get("reasoning_effort"),
+        timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
+        protected=bool(gateway.get("protected")),
+        declared_model=gateway.get("declared_model"),
+        subscription=bool(gateway.get("subscription")),
+        gateway_reasoning=bool(gateway.get("gateway_reasoning")),
+    )
+
+
 def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     """Load the scorer and either verify readiness or score its real candidate.
 
@@ -1415,21 +1558,7 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     if relay is not None:
         # Set before the scorer loads, so its imports and child processes see the addresses.
         os.environ.update(_relay_env(relay, stages))
-    llm: GatewayClient | None = None
-    if isinstance(gateway, dict):
-        llm = GatewayClient(
-            str(gateway["url"]),
-            str(gateway["model"]),
-            api_key=gateway.get("api_key") or env_value(ENV_API_KEY),
-            temperature=gateway.get("temperature"),
-            max_tokens=gateway.get("max_tokens"),
-            reasoning_effort=gateway.get("reasoning_effort"),
-            timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
-            protected=bool(gateway.get("protected")),
-            declared_model=gateway.get("declared_model"),
-            subscription=bool(gateway.get("subscription")),
-            gateway_reasoning=bool(gateway.get("gateway_reasoning")),
-        )
+    llm = _gateway_client(gateway)
     helpers = {
         LLM_HELPER_NAME: llm if llm is not None else missing_llm,
         IMAGE_HELPER_NAME: Image,
@@ -1501,15 +1630,272 @@ def _load_openascent(folder: Any) -> types.ModuleType:
     return module
 
 
-def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
+class _HelperError(Exception):
+    """A helper request that gets an error answer with this status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        """Bind the answer's status and error text.
+
+        Args:
+            status: The HTTP status, not 2xx.
+            message: The ``error`` text of the answer.
+        """
+        super().__init__(message)
+        self.status = status
+
+
+def _refuse_constant(name: str) -> Any:
+    """Refuse ``NaN``, ``Infinity`` and ``-Infinity``, which strict JSON does not allow.
+
+    Args:
+        name: The constant that ``json.loads`` found.
+
+    Raises:
+        ValueError: Always.
+    """
+    raise ValueError(f"{name} is not JSON.")
+
+
+class _QuietHTTPServer(http.server.ThreadingHTTPServer):
+    """A loopback HTTP server that prints nothing when a request fails."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Drop the error report of a failed request.
+
+        The default prints a traceback to stderr, where log() events travel. A
+        metric command that leaves early (``curl --max-time``) breaks the
+        answer write, and ``do_POST`` already answers every other failure.
+
+        Args:
+            request: The failed request's socket.
+            client_address: The client's address.
+        """
+
+
+class MetricHelpers:
+    """Serve a command metric's stages, judge model and log on one loopback port (SKY-767).
+
+    A command metric cannot import ``call``, ``llm`` or ``log``, so the runner
+    serves them in the OpenAscent wire form. The server is a thread of this
+    process and starts no process, so the one-process rule of the metric box
+    stays as it is. Each stage request goes through the same relay as a
+    Python metric's ``call()``, and each model request through the same
+    client as ``llm()``, which adds the key, meters the call and keeps a
+    budget stop.
+    """
+
+    def __init__(
+        self, relay: StageClient | None, names: Sequence[str], gateway: GatewayClient | None, model: str | None
+    ) -> None:
+        """Start the server on a free loopback port.
+
+        Args:
+            relay: The call's stage relay, or ``None`` without stages.
+            names: The stages the metric may call.
+            gateway: The model client, or ``None`` when the run has no judge model.
+            model: The model name that ``ASCENT_MODEL`` gives the metric.
+        """
+        self._relay = relay
+        self._names = tuple(names)
+        self._gateway = gateway
+        self._model = model
+        self.stops: list[dict[str, str]] = []
+        helpers = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer each helper request with a JSON body."""
+
+            def do_POST(self) -> None:
+                """Read one JSON request, run its helper and write the answer."""
+                try:
+                    status, document = 200, helpers.answer(self.path, self.read_json())
+                except _HelperError as exc:
+                    status, document = exc.status, {"error": str(exc)}
+                except Exception as exc:
+                    # socketserver would print a traceback to stderr, where
+                    # log() events travel, and the client would get no answer.
+                    status, document = 500, {"error": f"The helper failed: {type(exc).__name__}."}
+                data = json.dumps(document).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def read_json(self) -> Any:
+                """Read the request body as JSON, without ``NaN`` or ``Infinity``.
+
+                Returns:
+                    The decoded body.
+
+                Raises:
+                    _HelperError: When the body is too large, not JSON, too
+                        deeply nested or holds a non-finite number.
+                """
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    raise _HelperError(400, "The request has no valid Content-Length.") from None
+                if length > _HELPER_BODY_BYTES:
+                    # The unread body would be taken as the next request.
+                    self.close_connection = True
+                    raise _HelperError(413, f"The request body is larger than {_HELPER_BODY_BYTES} bytes.")
+                try:
+                    return json.loads(self.rfile.read(length) if length > 0 else b"", parse_constant=_refuse_constant)
+                except (ValueError, RecursionError):
+                    raise _HelperError(400, "The request body is not JSON.") from None
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the access log out of the scorer's stderr, where log() events travel."""
+
+        self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()
+        base = f"http://127.0.0.1:{self._server.server_address[1]}"
+        variables = [stage_env_name(name) for name in names]
+        # Two names with one variable (``a-b`` and ``a_b``) get none, so a call
+        # fails as an absent stage and never reaches the other stage.
+        self.env: dict[str, str] = {}
+        for name in names:
+            variable = stage_env_name(name)
+            if variables.count(variable) == 1:
+                self.env[variable] = f"{base}/stage/{urllib.parse.quote(name, safe='')}"
+        self.env[LOG_URL_ENV] = f"{base}/log"
+        if gateway is not None and model:
+            self.env.update({MODEL_URL_ENV: f"{base}/model", MODEL_ENV: model, MODEL_KEY_ENV: ""})
+
+    def close(self) -> None:
+        """Stop the server and free its port."""
+        self._server.shutdown()
+        self._server.server_close()
+
+    def answer(self, path: str, body: Any) -> dict[str, Any]:
+        """Run the helper that a request path names.
+
+        Args:
+            path: The request path.
+            body: The decoded request body.
+
+        Returns:
+            The answer body of a success.
+
+        Raises:
+            _HelperError: When the path names no helper, or the helper refused or failed.
+        """
+        route = urllib.parse.urlsplit(path).path
+        if route.startswith("/stage/"):
+            return self._stage(urllib.parse.unquote(route[len("/stage/") :]), body)
+        if route == "/model/chat/completions" and self._gateway is not None:
+            return self._chat(self._gateway, body)
+        if route == "/log":
+            return self._log(body)
+        raise _HelperError(404, f"No helper is at {route}.")
+
+    def _stage(self, name: str, body: Any) -> dict[str, Any]:
+        """Call one stage through the relay.
+
+        Args:
+            name: The stage name from the path.
+            body: ``{"input": <any JSON>}``.
+
+        Returns:
+            ``{"output": <the stage's output>}``.
+
+        Raises:
+            _HelperError: When the stage is not in the run, the body is not
+                the stage form, the stage failed, or the budget stopped the call.
+        """
+        if self._relay is None or name not in self._names:
+            known = ", ".join(self._names) or "none"
+            raise _HelperError(404, f"Unknown stage {name!r}; the stages of this run are: {known}.")
+        if not isinstance(body, dict) or set(body) != {"input"}:
+            raise _HelperError(400, 'A stage request is one object with only the key "input".')
+        try:
+            return {"output": self._relay(name, body["input"])}
+        except StageError as exc:
+            raise _HelperError(502, str(exc)) from None
+        except GatewayControl as exc:
+            self.stops.append({"code": exc.code, "message": str(exc)})
+            raise _HelperError(503, str(exc)) from None
+
+    def _chat(self, gateway: GatewayClient, body: Any) -> dict[str, Any]:
+        """Send one chat completion through the run's model client.
+
+        Args:
+            gateway: The run's model client.
+            body: An OpenAI chat request for the ``ASCENT_MODEL`` model.
+
+        Returns:
+            The gateway's answer.
+
+        Raises:
+            _HelperError: When the request names another model, has a field
+                the helper does not pass on, asks for a stream, the gateway
+                refused it, or the budget stopped the call.
+        """
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise _HelperError(400, 'A model request is one object with a "messages" list.')
+        extra = sorted(set(body) - _MODEL_REQUEST_KEYS)
+        if extra:
+            allowed = ", ".join(sorted(_MODEL_REQUEST_KEYS))
+            raise _HelperError(400, f"The model helper does not take {', '.join(extra)}; it takes {allowed}.")
+        if body.get("stream"):
+            raise _HelperError(400, "The model helper does not stream; send the request without stream.")
+        requested = body.get("model")
+        if requested is not None and not (isinstance(requested, str) and gateway.serves(requested)):
+            raise _HelperError(
+                400, f"The model {requested!r} is not the judge model; send the model that {MODEL_ENV} names."
+            )
+        try:
+            answer = gateway.complete(
+                body["messages"],
+                temperature=body.get("temperature"),
+                max_tokens=body.get("max_tokens"),
+                reasoning_effort=body.get("reasoning_effort"),
+            )
+        except GatewayControl as exc:
+            self.stops.append({"code": exc.code, "message": str(exc)})
+            raise _HelperError(503, str(exc)) from None
+        except ScorerError as exc:
+            raise _HelperError(502, str(exc)) from None
+        if not isinstance(answer, dict):
+            raise _HelperError(502, "The model gave an answer that is not a JSON object.")
+        return answer
+
+    def _log(self, body: Any) -> dict[str, Any]:
+        """Write one event to the run log, the same line as ``log(event, **fields)``.
+
+        Args:
+            body: ``{"event": <name>, "fields": {...}}``.
+
+        Returns:
+            An empty object.
+
+        Raises:
+            _HelperError: When the body is not the log form.
+        """
+        if not isinstance(body, dict) or not set(body) <= {"event", "fields"}:
+            raise _HelperError(400, 'A log request is one object with the keys "event" and "fields".')
+        event, fields = body.get("event"), body.get("fields", {})
+        if not isinstance(event, str) or not event.strip():
+            raise _HelperError(400, 'A log request needs a non-empty "event" name.')
+        if not isinstance(fields, dict):
+            raise _HelperError(400, 'The "fields" of a log request must be an object.')
+        _emit_event(event, event, "INFO", fields)
+        return {}
+
+
+def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) -> dict[str, Any]:
     """Call a command ``[metric] entry`` once, through OpenAscent's ``call_metric`` (SKY-738).
 
     The command gets ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and runs in this
     process's box, folder and environment, so it has the same network,
-    services, vCPUs and time limit as a Python metric.
+    services, vCPUs and time limit as a Python metric. It also gets the
+    :class:`MetricHelpers` addresses (SKY-767), and its environment has no
+    model key.
 
     Args:
         payload: The decoded ``input.json``, with ``metric_entry``.
+        call_dir: The call's folder, which can hold ``MODEL_KEY_FILE``.
 
     Returns:
         The ``output.json`` contents: score, side info and error, and
@@ -1517,9 +1903,25 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     stages = payload.get("stages")
+    # The command runs as this process's user, and this process holds the
+    # model key in memory and the relay values in its environment. So this
+    # process's /proc/<pid>/mem and environ must not be readable. The flag
+    # does not reach the command (execve resets it), and it does not cover a
+    # parent process that a contained session keeps alive.
+    _block_tracing()
+    key = _take_model_key(call_dir)
     relay = StageClient(stages) if isinstance(stages, dict) else None
     if relay is not None:
         os.environ.update(_relay_env(relay, stages))
+    gateway = payload.get("gateway")
+    if key and isinstance(gateway, dict):
+        gateway = {**gateway, "api_key": key}
+    llm = _gateway_client(gateway)
+    names = [str(name) for name in stages.get("names") or ()] if isinstance(stages, dict) else []
+    model = (gateway.get("declared_model") or gateway.get("model")) if isinstance(gateway, dict) else None
+    helpers = MetricHelpers(relay, names, llm, str(model) if model else None)
+    env = {name: value for name, value in os.environ.items() if name not in _COMMAND_HIDDEN_ENV}
+    env.update(helpers.env)
     case = payload.get("case")
     case = case if isinstance(case, dict) else {"input": case}
     metric_input: dict[str, Any] = {"input": case.get("input"), "output": payload.get("output")}
@@ -1535,6 +1937,7 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
             metric_input,
             timeout_s=float(payload[METRIC_TIMEOUT_PARAM]),
             cwd=str(Path.cwd()),
+            env=env,
         )
         score, side_info = normalize_score(call.result.to_dict())
         result.update(score=score, side_info=side_info)
@@ -1547,7 +1950,43 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
                 result["exit_code"] = exc.exit_code
             if exc.stderr:
                 result["error"] += f"\nstderr: {exc.stderr[-2_000:]}"
+    finally:
+        helpers.close()
+    if llm is not None:
+        result["usage"] = llm.usage
+    # A budget stop wins over the command's answer, as it does for a Python metric.
+    control = (llm.control if llm is not None else None) or (helpers.stops[0] if helpers.stops else None)
+    if control is not None:
+        result = {"score": None, "side_info": {}, "error": None, "usage": result["usage"], "control": control}
     return result
+
+
+def _take_model_key(call_dir: Path | None) -> str | None:
+    """Read a command metric's model key file and delete it.
+
+    The command runs as this process's user, so the delete, not the file
+    mode, keeps the key from the command. The scorer starts no other process
+    in the metric box between its write and this delete.
+
+    Args:
+        call_dir: The call's folder, or ``None``.
+
+    Returns:
+        The key, or ``None`` when the call has no key file.
+
+    Raises:
+        OSError: When the file cannot be deleted, so the command never starts
+            while the key is on disk.
+    """
+    if call_dir is None:
+        return None
+    path = call_dir / MODEL_KEY_FILE
+    try:
+        key = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    path.unlink()
+    return key or None
 
 
 def _keep_user_site() -> None:
@@ -1623,7 +2062,7 @@ def main(argv: list[str] | None = None) -> int:
     command = payload.get(METRIC_ENTRY_PARAM)
     allowed = [str(part) for part in command] if isinstance(command, list) else None
     refused = refuse_processes(allow=allowed) if "output" in payload else None
-    result = run_metric_command(payload) if allowed is not None else run_call(payload)
+    result = run_metric_command(payload, call_dir) if allowed is not None else run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)

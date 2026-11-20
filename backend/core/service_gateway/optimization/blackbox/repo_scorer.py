@@ -35,7 +35,8 @@ box for each stage for each candidate evaluation, all before the scorer runs
 (E29). The scorer reaches them with ``call(name, input)``: the call is a
 framed line on the scorer's stdout, the parent runs the stage in its box, and
 writes the answer back into the metric box. That relay is the stages' only
-way out (E27).
+way out (E27). A command metric reaches the same stages, the judge model and
+the run log at loopback URLs that the metric box's runner serves (SKY-767).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
@@ -592,6 +593,13 @@ class RepoScorer:
             document[runner.METRIC_ENTRY_PARAM] = list(self._metric_entry)
             document[runner.METRIC_TIMEOUT_PARAM] = self._timeout_seconds * _COMMAND_TIME_SHARE
             document[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{METRIC_ASCENT_DIR}"
+            # A Vercel box runs the command under a wrapper shell and ``timeout``,
+            # which stay alive with the command env, and the metric command can
+            # read their /proc/<pid>/environ. So the key goes in a file that the
+            # runner deletes before the metric command starts (SKY-767).
+            if env.get(ENV_API_KEY):
+                session.write_files({f"{folder}/{runner.MODEL_KEY_FILE}": env[ENV_API_KEY]})
+            env = {name: value for name, value in env.items() if name != ENV_API_KEY}
         else:
             document["code"] = self._code
             document[runner.METRIC_FUNCTION_PARAM] = self._metric_entry.rsplit(":", 1)[1]
@@ -606,8 +614,10 @@ class RepoScorer:
             session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
+                # ``exec`` replaces this shell with the runner. A Python metric
+                # runs in the runner and reads the key there anyway.
                 result = metric.box.run(
-                    f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
+                    f"cd {shlex.quote(metric.repo_path)} && exec python3 {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
                     timeout_seconds=self._timeout_seconds,
