@@ -159,7 +159,7 @@ def staged_snapshot(
             or a hidden path is, holds or lies inside a link, so the strip cannot remove it,
             or a draft file of the run cannot be written over the tree.
     """
-    # Every run start protects the contract file, so a run without ascent.toml started under optimize.toml
+    # Every run start protects the contract file, so a run without ascent.toml started under the old file name
     # (SKY-746). Its tree has no ascent.toml, so the hidden list would miss its scoring files.
     if CONSTRAINTS_FILE not in protected_paths:
         raise ConstraintsError(

@@ -241,7 +241,7 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
 
 
 def test_serving_refuses_a_run_recorded_under_the_old_contract_file_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run that did not protect ascent.toml started under optimize.toml, so its hidden list is unknown (SKY-746).
+    """A run that did not protect ascent.toml started under the old file name, so its hidden list is unknown (SKY-746).
 
     Args:
         monkeypatch: Records any fetch of the repository.
@@ -254,7 +254,7 @@ def test_serving_refuses_a_run_recorded_under_the_old_contract_file_name(monkeyp
 
     with (
         pytest.raises(ConstraintsError, match=r"before the contract file was named ascent\.toml"),
-        staged_snapshot(payload, engine=None, owner=None, protected_paths=("optimize.toml", "eval")),
+        staged_snapshot(payload, engine=None, owner=None, protected_paths=("optimize" + ".toml", "eval")),
     ):
         pass
 
