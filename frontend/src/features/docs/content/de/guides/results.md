@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` ist das Dict der Eingabefelder aus der Anfrage.
 - Der Rückgabewert muss in JSON serialisierbar sein. Ein Dict wird zu `outputs`. Jeder andere Wert wird zu `{"output": value}`.
-- `serve.py` kann mit `llm` aus dem Hilfsmodul `skynet` ein Modell aufrufen. Es bekommt die Secrets des Laufs nicht.
+- `serve.py` kann mit `llm` aus dem Hilfsmodul `openascent` ein Modell aufrufen. Es bekommt die Secrets des Laufs nicht.
 
 Skynet führt die beste Version in derselben geschützten Sandbox aus wie den Durchlauf. Der Tab **Nutzung** hat zwei Teile:
 

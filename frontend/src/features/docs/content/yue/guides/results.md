@@ -64,7 +64,7 @@ def serve(input):
 
 - `input` 係請求入面輸入欄位嘅 dict。
 - 回傳值一定要可以序列化成 JSON。dict 會變成 `outputs`。其他任何值會變成 `{"output": value}`。
-- `serve.py` 可以用 `skynet` 輔助模組嘅 `llm` 呼叫模型。佢唔會攞到運行嘅密鑰。
+- `serve.py` 可以用 `openascent` 輔助模組嘅 `llm` 呼叫模型。佢唔會攞到運行嘅密鑰。
 
 Skynet 喺同運行一樣嘅受保護沙盒入面運行最佳版本。**用量** 分頁有兩部分：
 

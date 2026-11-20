@@ -19,7 +19,7 @@ Il file `optimize.toml` del repository deve avere una sezione `[run]` o una fase
 - Una voce di funzione, per esempio `entry = "serve.py:serve"`, riceve `case["input"]` come argomento. `output` è il suo valore restituito.
 - Una voce di comando, per esempio `entry = ["python", "-m", "pytest", "-q"]`, riceve l'input come JSON su stdin. `output` è `{"exit_code": ..., "stdout": "..."}`.
 
-Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica. Lo scorer non può importare né eseguire il codice della versione. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from skynet import call`. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica. Lo scorer non può importare né eseguire il codice della versione. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from openascent import call`. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
 
 ## Il valore restituito
 
@@ -109,7 +109,7 @@ Quando la entry `[run]` fallisce su un caso, quel caso non ha punteggio. Se l'en
 
 ### Modello come giudice
 
-Lo scorer può chiamare un modello. Importa `llm` dal modulo di supporto `skynet`. La chiamata passa per il gateway dei modelli di Skynet e va al modello dello scorer dell'esecuzione.
+Lo scorer può chiamare un modello. Importa `llm` dal modulo di supporto `openascent`. La chiamata passa per il gateway dei modelli di Skynet e va al modello dello scorer dell'esecuzione.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ Lo scorer può anche usare qualsiasi client compatibile con OpenAI con le variab
 ## Chiamate ai modelli e segreti
 
 - Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione. Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider, senza costi Skynet per il modello. Leggi [Fatturazione](/docs/concepts/billing).
-- Lo scorer non riceve i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva allo scorer solo tramite una tabella `[services.<name>]` che `[metric] services` elenca, o tramite un server del file `[metric] mcp`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Lo scorer invia le sue richieste all'URL in `SKYNET_SERVICE_<NAME>_URL`. Skynet aggiunge il segreto fuori dalla sandbox.
+- Lo scorer non riceve i segreti dell'esecuzione come variabili d'ambiente. Un segreto arriva allo scorer solo tramite una tabella `[services.<name>]` che `[metric] services` elenca, o tramite un server del file `[metric] mcp`. Scrivi il segreto negli `headers` della tabella come `${NAME}`. Lo scorer invia le sue richieste all'URL in `ASCENT_SERVICE_<NAME>_URL`. Skynet aggiunge il segreto fuori dalla sandbox.
 - Skynet nasconde i valori dei segreti nell'output dello scorer e nei log.
 
 ## Limiti

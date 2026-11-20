@@ -33,7 +33,7 @@ MCP_TOKEN_ENV = "APP_MCP_RELAY_TOKEN"
 _MCP_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"})
 # Each [proposer] service is at <relay url>/service/<name>/ on this proxy, behind the same relay token (SKY-612).
 SERVICE_PATH = "/v1/service/"
-# A JSON list of the role's service names; the proxy gives the command one SKYNET_SERVICE_<NAME>_URL for each.
+# A JSON list of the role's service names; the proxy gives the command one ASCENT_SERVICE_<NAME>_URL for each.
 SERVICES_ENV = "APP_RELAY_SERVICES"
 # A service takes any header but these: they belong to this connection or carry the box's own credential.
 _SERVICE_DROPPED_HEADERS = frozenset(
@@ -201,9 +201,9 @@ def service_env_name(name: str) -> str:
         name: The ``[services.<name>]`` name.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+        ``ASCENT_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
-    return "SKYNET_SERVICE_" + "".join(char if char.isalnum() else "_" for char in name.upper()) + "_URL"
+    return "ASCENT_SERVICE_" + "".join(char if char.isalnum() else "_" for char in name.upper()) + "_URL"
 
 
 def _wait(path: Path, timeout: float) -> dict | None:

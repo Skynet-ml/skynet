@@ -103,7 +103,7 @@ How to write the run's files:
   ``score(repo_path, case, output=None)`` and scores ``output``; a metric with fewer arguments never gets the
   output. Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define
   ``score(repo_path)`` or ``score(repo_path, case)``, and that metric calls its stages with
-  ``from skynet import call``. ``[metric] entry`` names the metric; without it, it is ``"metric.py:score"``,
+  ``from openascent import call``. ``[metric] entry`` names the metric; without it, it is ``"metric.py:score"``,
   the ``metric.py`` you write. A command list, for example ``entry = ["./metric.sh"]``, runs a metric in any
   language: it reads the JSON file at ``ASCENT_INPUT`` and writes its answer as JSON to ``ASCENT_OUTPUT``, and
   ``[metric] files`` lists its file. The setup screen sends only ``metric.py``, so leave ``entry`` out there.
@@ -161,7 +161,7 @@ How to write the run's files:
     ``["node", "agent.js"]``. ``setup`` needs ``entry``, ``entry`` cannot go with ``mcp``, and a run that
     names its own proposer replaces them.
   - ``[target.<name>]``, one table for each stage: ``entry`` (required), ``vcpus`` (1 or an even number from
-    2 to 32, default 2), ``timeout`` (seconds for each ``skynet.call``, default 60) and the role keys.
+    2 to 32, default 2), ``timeout`` (seconds for each ``openascent.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
     60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``. A contract needs a ``[run]`` section
     or at least one ``[target.<name>]`` stage.

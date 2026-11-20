@@ -72,9 +72,9 @@ MATH_ROWS = [
     },
 ]
 
-# Submitted as user code and run in the sandbox, where ``skynet.llm`` calls the
+# Submitted as user code and run in the sandbox, where ``openascent.llm`` calls the
 # task model.
-RUN_CODE = """from skynet import llm
+RUN_CODE = """from openascent import llm
 
 def run(artifact, input):
     return llm(artifact + "\\n\\nProblem: " + input["question"] + "\\nFinal numeric answer only:")

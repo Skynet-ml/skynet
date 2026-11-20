@@ -30,7 +30,7 @@ except ModuleNotFoundError as error:
     from pip._vendor.packaging.utils import canonicalize_name
 
 # Mirrors ``runner.HELPER_MODULE_NAME``, the scorer helper module the runner provides itself.
-_HELPER_MODULE = "skynet"
+_HELPER_MODULE = "openascent"
 _ALIASES = {
     "PIL": "Pillow",
     "sklearn": "scikit-learn",

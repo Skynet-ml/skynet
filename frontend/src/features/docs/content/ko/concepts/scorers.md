@@ -19,7 +19,7 @@ def score(repo_path, case, output=None):
 - 함수 엔트리(예: `entry = "serve.py:serve"`)는 `case["input"]`를 인수로 받습니다. `output`은 그 반환값입니다.
 - 명령 엔트리(예: `entry = ["python", "-m", "pytest", "-q"]`)는 입력을 stdin의 JSON으로 받습니다. `output`은 `{"exit_code": ..., "stdout": "..."}`입니다.
 
-채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from skynet import call`로 가져옵니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있습니다. 채점기는 버전의 코드를 가져오거나 실행할 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from openascent import call`로 가져옵니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
 
 ## 반환값
 
@@ -109,7 +109,7 @@ def score(repo_path, case, output=None):
 
 ### 모델을 심사자로 사용
 
-채점기는 모델을 호출할 수 있습니다. `skynet` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
+채점기는 모델을 호출할 수 있습니다. `openascent` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ def score(repo_path, case, output=None):
 ## 모델 호출과 시크릿
 
 - Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다. 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 가며, Skynet 모델 요금은 없습니다. [예산과 결제](/docs/concepts/billing)를 읽어 보세요.
-- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블이나 `[metric] mcp` 파일에 있는 서버를 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `SKYNET_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
+- 채점기는 실행 시크릿을 환경 변수로 받지 않습니다. 시크릿은 `[metric] services`에 나열된 `[services.<name>]` 테이블이나 `[metric] mcp` 파일에 있는 서버를 통해서만 채점기에 전달됩니다. 시크릿을 테이블의 `headers`에 `${NAME}`으로 쓰세요. 채점기는 `ASCENT_SERVICE_<NAME>_URL`의 URL로 요청을 보냅니다. Skynet은 샌드박스 밖에서 시크릿을 추가합니다.
 - Skynet은 채점기 출력과 로그에서 시크릿 값을 숨깁니다.
 
 ## 제한

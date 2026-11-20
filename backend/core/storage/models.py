@@ -1503,7 +1503,7 @@ class RunCallModel(Base):
     """One relay call made by a candidate of a run (SKY-364).
 
     The relay writes one row for each call out of a box: a model call, an MCP
-    tool call, a ``skynet.call`` to a stage, an evaluator call or an
+    tool call, an ``openascent.call`` to a stage, an evaluator call or an
     allowed-host request. ``seq`` counts the candidate's calls from 1 and is
     the ``since`` cursor of the live read route. The store assigns it under a
     lock on the candidate row, so a call with a lower ``seq`` always commits

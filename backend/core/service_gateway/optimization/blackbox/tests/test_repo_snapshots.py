@@ -35,7 +35,7 @@ from .test_sandbox_broker import IMAGE, FakeRuntime
 
 _SETUP = 'echo "key=${API_KEY:-unset}"; cat src/app.py > built.txt'
 _TWO_STAGES = (
-    "from skynet import call\n"
+    "from openascent import call\n"
     "def score(repo_path, case=None):\n"
     "    doubled = call('double', {'v': 3})\n"
     "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"

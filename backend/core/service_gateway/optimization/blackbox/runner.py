@@ -31,11 +31,11 @@ An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services"
 lets the scorer reach the run's ``[target.<name>]`` stages through the
 parent's relay with ``call(name, input)``. Its optional ``services`` list
 names the ``[services.<name>]`` with a url that the metric may reach: each
-gets ``SKYNET_SERVICE_<NAME>_URL``, a loopback address in the box whose
+gets ``ASCENT_SERVICE_<NAME>_URL``, a loopback address in the box whose
 requests go through the same relay, so the service's key stays with the
 parent. Its optional ``mcp`` list names the http servers of the role's own
-MCP file: each gets ``SKYNET_MCP_<NAME>_URL`` on the same loopback port, and
-``SKYNET_MCP_CONFIG`` names the role's own ``.mcp.json`` in the checkout. The
+MCP file: each gets ``ASCENT_MCP_<NAME>_URL`` on the same loopback port, and
+``ASCENT_MCP_CONFIG`` names the role's own ``.mcp.json`` in the checkout. The
 parent replaced that file before the box opened: each entry is a loopback url
 on ``RELAY_PORT``, never the real url, a header or a secret. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
@@ -47,7 +47,7 @@ checked against the stage's own role, and a command stage runs as
 ``--stage-command <call_dir> <command> [<arg> ...]`` behind it. Parallel
 calls share the stage box, so the tree's MCP file, which names
 ``RELAY_PORT``, reaches no call; each call gets ``mcp.json`` in its folder
-with its own port, and ``SKYNET_MCP_CONFIG`` names that copy (SKY-624).
+with its own port, and ``ASCENT_MCP_CONFIG`` names that copy (SKY-624).
 
 A repository with a ``[run]`` entry runs the candidate first, in its own
 candidate box (SKY-398). ``python3 app_runner.py --candidate <call_dir>``
@@ -121,7 +121,7 @@ ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 _LEGACY_ENV_PREFIX = "SKYNET_"
 IMAGE_HELPER_NAME = "Image"
 LOG_HELPER_NAME = "log"
-# ``from skynet import call, StageError`` reaches the run's ``[target.<name>]`` stages.
+# ``from openascent import call, StageError`` reaches the run's ``[target.<name>]`` stages.
 STAGE_HELPER_NAME = "call"
 STAGE_ERROR_NAME = "StageError"
 # ``app_runner.py --stage <call_dir> <path/file.py:function>`` runs one stage call.
@@ -134,11 +134,11 @@ STAGE_RELAY_FILE = "relay.json"
 # The stage call's own MCP file, next to its input, with the call's own relay port (SKY-624).
 _STAGE_MCP_FILE = "mcp.json"
 # The metric reaches each listed service at this variable's loopback address (E45).
-SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
+SERVICE_ENV_PREFIX = "ASCENT_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
-MCP_ENV_PREFIX = "SKYNET_MCP_"
+MCP_ENV_PREFIX = "ASCENT_MCP_"
 # Names the role's own ``.mcp.json``, for MCP clients that read a config file.
-MCP_CONFIG_ENV = "SKYNET_MCP_CONFIG"
+MCP_CONFIG_ENV = "ASCENT_MCP_CONFIG"
 # The box's loopback relay port. It is fixed because the parent writes each
 # role's .mcp.json with loopback urls before the box opens (E49, E53).
 RELAY_PORT = 47_311
@@ -188,9 +188,9 @@ EVENT_PREFIX = "APP_SCORER_EVENT "
 # unlike a file it can write (SKY-398).
 RESULT_PREFIX = "APP_RUN_RESULT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
-# The module scorer code imports those helpers from: ``from skynet import llm, Image``.
-# Saved user scorers import it by this name, so it stays as it is.
-HELPER_MODULE_NAME = "skynet"
+# The module scorer code imports those helpers from: ``from openascent import llm, Image``.
+# A neutral name, so a contract holds no product name (SKY-768). No other name works.
+HELPER_MODULE_NAME = "openascent"
 # Where Vercel's egress proxy leaves its CA when a network policy rewrites headers.
 PROXY_CA_PATH = "/usr/local/share/ca-certificates/vercel-proxy-ca.crt"
 _ENTRYPOINT_NAMES = ("score", "metric")
@@ -384,7 +384,7 @@ def service_env_name(name: str) -> str:
         name: The ``[services.<name>]`` name.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+        ``ASCENT_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
     return SERVICE_ENV_PREFIX + _env_part(name) + "_URL"
 
@@ -396,7 +396,7 @@ def mcp_env_name(name: str) -> str:
         name: The server's name in the role's MCP file.
 
     Returns:
-        ``SKYNET_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+        ``ASCENT_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
     return MCP_ENV_PREFIX + _env_part(name) + "_URL"
 
@@ -428,11 +428,11 @@ def start_service_proxy(
         port: The loopback port; ``0`` picks a free one.
         mcp_file: The role's ``.mcp.json``, relative to the working directory.
         own_mcp_file: A file to write with this proxy's servers and name in
-            ``SKYNET_MCP_CONFIG`` instead of ``mcp_file``.
+            ``ASCENT_MCP_CONFIG`` instead of ``mcp_file``.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL`` for each service, ``SKYNET_MCP_<NAME>_URL``
-        for each server, and ``SKYNET_MCP_CONFIG`` when there is a server and a file.
+        ``ASCENT_SERVICE_<NAME>_URL`` for each service, ``ASCENT_MCP_<NAME>_URL``
+        for each server, and ``ASCENT_MCP_CONFIG`` when there is a server and a file.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -776,7 +776,7 @@ def _json_plain(value: Any) -> Any:
 def log(event: str, message: Any = None, *, level: str = "INFO", **fields: Any) -> None:
     """Send one named event to the run's log the moment it happens.
 
-    Scorer code calls it as ``from skynet import log`` then
+    Scorer code calls it as ``from openascent import log`` then
     ``log("judge.retry", attempt=2, reason="rate limited")``. The host shows
     it live, tagged with the candidate and case being scored.
 
@@ -980,7 +980,7 @@ def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float, SideInf
 
 
 def helper_module(helpers: dict[str, Any]) -> types.ModuleType:
-    """Build the ``skynet`` module scorer code imports its helpers from.
+    """Build the ``openascent`` module scorer code imports its helpers from.
 
     Args:
         helpers: Helper names and the objects behind them.
@@ -1007,7 +1007,7 @@ def load_scorer_from_code(
 
     Args:
         code: User-authored python source.
-        helpers: Names the scorer may import from the ``skynet`` module. They
+        helpers: Names the scorer may import from the ``openascent`` module. They
             are also bound in its namespace, for scorers written before the
             import existed.
         entrypoint: The function that ``[metric] entry`` names. ``None`` and
@@ -2085,7 +2085,7 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
 
     Returns:
         The proxy's variables, or nothing when the call has no relay config.
-        ``SKYNET_MCP_CONFIG`` names the call's own MCP file.
+        ``ASCENT_MCP_CONFIG`` names the call's own MCP file.
     """
     path = call_dir / STAGE_RELAY_FILE
     if not path.is_file():

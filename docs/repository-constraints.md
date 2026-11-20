@@ -562,7 +562,7 @@ stays in the server log.
 The command has the same limits as a Python metric: the same box, network,
 services, vCPUs and time limit. The metric box holds no version code, so
 the command cannot start the candidate again. It reaches only the
-`[metric]` services and hosts. A command gets no `skynet` helpers, such as
+`[metric]` services and hosts. A command gets no `openascent` helpers, such as
 `call()` and the `[metric]` model, in this version.
 
 A bash metric that scores an exact match:
@@ -882,14 +882,14 @@ mcp = "eval/.mcp.json"
 - A `[target.<name>]` stage reaches the servers of its own `mcp` file
   through its box's relay (SKY-611). The stage box's copy of the file lists
   only that stage's servers, each with a loopback url, and holds no secret.
-  The stage also gets `SKYNET_MCP_<NAME>_URL` and `SKYNET_MCP_CONFIG`.
+  The stage also gets `ASCENT_MCP_<NAME>_URL` and `ASCENT_MCP_CONFIG`.
   Skynet checks each call against that stage's own file, so a stage cannot
   reach the proposer's, the scorer's or another stage's servers.
 - A stage with an `mcp` file runs calls in parallel, up to the run's
   concurrency, like any other stage (SKY-624). Each call serves its own
   relay on its own loopback port. Each call gets its own copy of the MCP
-  file with that port, and `SKYNET_MCP_CONFIG` names that copy. Read the
-  servers from `SKYNET_MCP_CONFIG` or `SKYNET_MCP_<NAME>_URL`. The copy of
+  file with that port, and `ASCENT_MCP_CONFIG` names that copy. Read the
+  servers from `ASCENT_MCP_CONFIG` or `ASCENT_MCP_<NAME>_URL`. The copy of
   the file in the stage's tree names a fixed port that no call serves.
 - Only http servers are supported now. Each server has a `url` and goes
   through Skynet's relay. A stdio server (`command`, `args`, `env`) fails

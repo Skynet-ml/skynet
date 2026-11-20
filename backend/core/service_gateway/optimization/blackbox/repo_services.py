@@ -121,7 +121,7 @@ def stage_spec(
     and its hold is keyed to the evaluation and the stage (E29, E31). A reused
     key returns the earlier reservation, so the id must be new for every
     evaluation, also when one candidate is evaluated again. The
-    stage's ``timeout`` is not used here: it limits each ``skynet.call`` on
+    stage's ``timeout`` is not used here: it limits each ``openascent.call`` on
     the relay, not the box's lifetime (E30).
 
     Args:
@@ -138,7 +138,7 @@ def stage_spec(
     Returns:
         The stage box's spec.
     """
-    # ``stage.timeout`` limits each ``skynet.call`` (repo_constraints.py), not
+    # ``stage.timeout`` limits each ``openascent.call`` (repo_constraints.py), not
     # the box, so the box lives for the whole candidate evaluation instead.
     return SandboxSpec(
         lifetime_seconds=lifetime_seconds,

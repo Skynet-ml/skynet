@@ -493,7 +493,7 @@ const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
   ".cfg",
 ];
 const PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
-const RESERVED_TOP_LEVEL = new Set([RUN_FILE, METRIC_FILE, "skynet", "skynet.py"]);
+const RESERVED_TOP_LEVEL = new Set([RUN_FILE, METRIC_FILE, "openascent", "openascent.py"]);
 
 /**
  * Why a path cannot name a new extra file, as an i18n key, or null when it

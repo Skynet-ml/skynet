@@ -1206,7 +1206,7 @@ def test_guide_has_the_run_entry_write_the_metric_reads_output() -> None:
         " ``output``; a metric with fewer arguments never gets the output." in prompt
     )
     assert "Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define" in prompt
-    assert "``from skynet import call``" in prompt
+    assert "``from openascent import call``" in prompt
     assert "``score(repo_path)``, or ``score(repo_path, case)`` when the run has data" not in prompt
 
 

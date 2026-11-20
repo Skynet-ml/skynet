@@ -212,7 +212,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       if (
         statement?.name !== "ImportStatement" ||
         tryBody.length !== 1 ||
-        !/^from\s+skynet\s+import\s+llm\s*$/.test(
+        !/^from\s+openascent\s+import\s+llm\s*$/.test(
           code
             .slice(statement.from, statement.to)
             .replace(/\\\r?\n/g, " ")
@@ -325,10 +325,10 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           const match = part.trim().match(/^(\w+|\*)(?:\s+as\s+(\w+))?$/);
           if (!match) continue;
           const binding = match[2] ?? match[1];
-          if (from[1] === "skynet" && match[1] === "llm") {
+          if (from[1] === "openascent" && match[1] === "llm") {
             aliases.add(binding!);
             imported = true;
-          } else if (from[1] === "skynet" && match[1] === "*") {
+          } else if (from[1] === "openascent" && match[1] === "*") {
             aliases.add("llm");
           } else if (binding && binding !== "*") bindings.add(binding);
         }
@@ -338,7 +338,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           const match = part.trim().match(/^([\w.]+)(?:\s+as\s+(\w+))?$/);
           if (!match) continue;
           const binding = match[2] ?? match[1]!.split(".")[0];
-          if (match[1] === "skynet") modules.add(binding!);
+          if (match[1] === "openascent") modules.add(binding!);
           else if (binding) bindings.add(binding);
         }
       }
@@ -440,7 +440,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         current.getChild("[") &&
         indirectBase?.name === "MemberExpression" &&
         code.slice(indirectBase.from, indirectBase.to) === "sys.modules" &&
-        literal(current.getChild("[")?.nextSibling ?? current) === "skynet"
+        literal(current.getChild("[")?.nextSibling ?? current) === "openascent"
       ) {
         uses = true;
         unsafe = true;
@@ -512,7 +512,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       const functionName = code.slice(called.from, called.to);
       if (
         first &&
-        literal(first) === "skynet" &&
+        literal(first) === "openascent" &&
         (["__import__", "import_module"].includes(functionName) ||
           (called.name === "MemberExpression" &&
             called.firstChild?.name === "VariableName" &&

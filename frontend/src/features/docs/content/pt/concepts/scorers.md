@@ -19,7 +19,7 @@ O arquivo `optimize.toml` do repositório precisa ter uma seção `[run]` ou uma
 - Uma entrada de função, por exemplo `entry = "serve.py:serve"`, recebe `case["input"]` como argumento. `output` é o valor que ela retorna.
 - Uma entrada de comando, por exemplo `entry = ["python", "-m", "pytest", "-q"]`, recebe a entrada do caso como JSON no stdin. `output` é `{"exit_code": ..., "stdout": "..."}`.
 
-O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica. O avaliador não pode importar nem executar o código da versão. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from skynet import call`. Leia [Como a otimização funciona](/docs/concepts/optimization).
+O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica. O avaliador não pode importar nem executar o código da versão. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from openascent import call`. Leia [Como a otimização funciona](/docs/concepts/optimization).
 
 ## O valor de retorno
 
@@ -109,7 +109,7 @@ Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada
 
 ### Modelo como juiz
 
-O avaliador pode chamar um modelo. Importe `llm` do módulo auxiliar `skynet`. A chamada passa pelo gateway de modelos do Skynet e vai para o modelo do avaliador da execução.
+O avaliador pode chamar um modelo. Importe `llm` do módulo auxiliar `openascent`. A chamada passa pelo gateway de modelos do Skynet e vai para o modelo do avaliador da execução.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ O avaliador também pode usar qualquer cliente compatível com OpenAI com as var
 ## Chamadas de modelo e segredos
 
 - As chamadas com as chaves do Skynet são medidas no orçamento da execução. Com a sua própria chave (BYOK), a chamada vai para a chave do seu provedor, sem taxa de modelo do Skynet. Leia [Cobrança](/docs/concepts/billing).
-- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista, ou por um servidor do arquivo `[metric] mcp`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `SKYNET_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
+- O avaliador não recebe os segredos da execução como variáveis de ambiente. Um segredo chega ao avaliador só por uma tabela `[services.<name>]` que `[metric] services` lista, ou por um servidor do arquivo `[metric] mcp`. Escreva o segredo nos `headers` da tabela como `${NAME}`. O avaliador envia as requisições para a URL em `ASCENT_SERVICE_<NAME>_URL`. O Skynet adiciona o segredo fora da sandbox.
 - O Skynet oculta os valores dos segredos na saída do avaliador e nos logs.
 
 ## Limites

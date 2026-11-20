@@ -245,7 +245,7 @@ class TargetStage(RoleEnvironment):
 
     ``entry`` is ``"path/to/file.py:function"`` for a Python function, or a
     command such as ``("node", "planner.js")``. ``timeout`` is in seconds for
-    each ``skynet.call``.
+    each ``openascent.call``.
     """
 
     entry: str | tuple[str, ...]
@@ -850,7 +850,7 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
         vcpus=_vcpus(section.get("vcpus", _DEFAULT_VCPUS), label, f"target.{name}"),
-        timeout=_timeout(section, label, "skynet.call"),
+        timeout=_timeout(section, label, "openascent.call"),
     )
 
 
@@ -860,7 +860,7 @@ def _timeout(section: Mapping[str, Any], label: str, unit: str) -> float:
     Args:
         section: The parsed table.
         label: The table as the file names it, used in errors.
-        unit: What one timeout covers, such as ``skynet.call``, named in errors.
+        unit: What one timeout covers, such as ``openascent.call``, named in errors.
 
     Returns:
         The timeout, or the 60-second default when the key is absent.

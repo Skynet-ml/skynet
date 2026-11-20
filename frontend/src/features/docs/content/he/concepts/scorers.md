@@ -19,7 +19,7 @@ def score(repo_path, case, output=None):
 - ‏`entry` של פונקציה, למשל `entry = "serve.py:serve"`, מקבל את `case["input"]` כארגומנט.‏ `output` הוא ערך ההחזרה שלו.
 - ‏`entry` של פקודה, למשל `entry = ["python", "-m", "pytest", "-q"]`, מקבל את הקלט כ-JSON ב-stdin.‏ `output` הוא `{"exit_code": ..., "stdout": "..."}`.
 
-פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך. פונקציית הניקוד לא יכולה לייבא או להריץ את הקוד של הגרסה. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from skynet import call`. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization).
+פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך. פונקציית הניקוד לא יכולה לייבא או להריץ את הקוד של הגרסה. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization).
 
 ## ערך ההחזרה
 
@@ -109,7 +109,7 @@ def score(repo_path, case, output=None):
 
 ### מודל כשופט
 
-פונקציית הניקוד יכולה לקרוא למודל. ייבא/י את `llm` ממודול העזר `skynet`. הקריאה עוברת דרך שער המודלים של Skynet אל מודל הניקוד של הריצה.
+פונקציית הניקוד יכולה לקרוא למודל. ייבא/י את `llm` ממודול העזר `openascent`. הקריאה עוברת דרך שער המודלים של Skynet אל מודל הניקוד של הריצה.
 
 ```toml tab="optimize.toml"
 version = 1
@@ -119,7 +119,7 @@ entry = "serve.py:serve"
 ```
 
 ```python tab="scorer.py"
-from skynet import llm
+from openascent import llm
 
 
 def score(repo_path, case, output=None):
@@ -138,7 +138,7 @@ def score(repo_path, case, output=None):
 ## קריאות למודל וסודות
 
 - קריאות על המפתחות של Skynet נמדדות מול תקציב הריצה. עם מפתח משלך (BYOK), הקריאה הולכת למפתח של הספק שלך, בלי עמלת מודל של Skynet. קרא/י את [חיוב](/docs/concepts/billing).
-- פונקציית הניקוד לא מקבלת את הסודות של הריצה כמשתני סביבה. סוד מגיע לפונקציית הניקוד רק דרך טבלת `[services.<name>]` ש-`[metric] services` מפרט, או דרך שרת בקובץ `[metric] mcp`. כתוב/י את הסוד ב-`headers` של הטבלה בצורה `${NAME}`. פונקציית הניקוד שולחת את הבקשות שלה לכתובת ה-URL שב-`SKYNET_SERVICE_<NAME>_URL`. ‏Skynet מוסיף את הסוד מחוץ ל-sandbox.
+- פונקציית הניקוד לא מקבלת את הסודות של הריצה כמשתני סביבה. סוד מגיע לפונקציית הניקוד רק דרך טבלת `[services.<name>]` ש-`[metric] services` מפרט, או דרך שרת בקובץ `[metric] mcp`. כתוב/י את הסוד ב-`headers` של הטבלה בצורה `${NAME}`. פונקציית הניקוד שולחת את הבקשות שלה לכתובת ה-URL שב-`ASCENT_SERVICE_<NAME>_URL`. ‏Skynet מוסיף את הסוד מחוץ ל-sandbox.
 - Skynet מסתיר את ערכי הסודות בפלט של פונקציית הניקוד וביומנים.
 
 ## מגבלות

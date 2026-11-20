@@ -18,7 +18,7 @@ export function scorerCallsModel(code: string): boolean {
 /** Make the runtime's legacy injected helpers explicit without moving future imports. */
 export function withScorerImports(code: string): string {
   const executable = executablePython(code);
-  const imports = [...executable.matchAll(/from\s+skynet\s+import\s+(\([^)]*\)|[^\n;]+)/g)]
+  const imports = [...executable.matchAll(/from\s+openascent\s+import\s+(\([^)]*\)|[^\n;]+)/g)]
     .map((match) => match[1])
     .join(",");
   const missing = ["llm", "Image"].filter(
@@ -32,5 +32,5 @@ export function withScorerImports(code: string): string {
     code.match(
       /^(?:(?:[ \t]*#[^\n]*|[ \t]*)\n)*(?:(?:"""[\s\S]*?"""|'''[\s\S]*?''')[ \t]*\n)?(?:(?:[ \t]*#[^\n]*|[ \t]*|from __future__ import (?:\([^)]*\)|[^\n]+))\n)*/,
     )?.[0] ?? "";
-  return `${header}from skynet import ${missing.join(", ")}\n\n${code.slice(header.length)}`;
+  return `${header}from openascent import ${missing.join(", ")}\n\n${code.slice(header.length)}`;
 }

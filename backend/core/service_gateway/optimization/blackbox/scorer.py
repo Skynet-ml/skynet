@@ -88,7 +88,7 @@ def load_scorer_from_code(
 
     Args:
         code: User-authored python source.
-        helpers: Names the scorer may import from ``skynet``; also bound in its namespace.
+        helpers: Names the scorer may import from ``openascent``; also bound in its namespace.
         entrypoint: The function that ``[metric] entry`` names. ``None`` and
             ``score`` keep the lookup above.
 

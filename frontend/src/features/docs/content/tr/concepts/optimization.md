@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Deponun kökünde `def serve(input)` içeren bir `serve.py` dosyası vardır. `[run]` giriş noktası onu kendi sandbox'ında çağırır. Skynet, çalıştırmadan sonra en iyi sürümü sunmak için onu kullanır.
 
-Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from skynet import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
+Puanlayıcı ayrı bir sandbox içinde çalışır. Bu sandbox yalnızca metrik dosyalarınızı tutar, sürüm kodunu tutmaz, bu yüzden puanlayıcı `serve.py` dosyasını içe aktaramaz. Sürümü yalnızca `output` üzerinden veya bir `[target.<name>]` aşamasına yapılan `call()` üzerinden görür. `call` fonksiyonunu `from openascent import call` ile içe aktarın. `[run]` giriş noktası veya `[target.<name>]` aşaması olmadan Skynet `optimize.toml` dosyasını reddeder.
 
 > [!NOTE]
 > Sürümleri yazan kodlama ajanı, puanlayıcının kaynak kodunu, beklenen değerleri veya çalıştırma gizli anahtarlarını göremez.
