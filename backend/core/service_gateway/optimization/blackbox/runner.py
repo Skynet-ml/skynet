@@ -172,11 +172,12 @@ MAX_RUN_STDOUT_BYTES = 1024 * 1024
 # limit, so that ``call_run`` stops the command and reports the limit itself.
 _COMMAND_STOP_SECONDS = 10.0
 # The largest ``output.json`` the supervisor reads from a command entry's
-# process. That process writes the checked output again with ``json.dumps``,
-# which can make it up to about 3.8 times larger than the command's own file
-# (``1e15`` becomes ``1000000000000000.0``, and a non-ASCII letter becomes a
-# six-character escape). The cap stops a process that left the entry's
-# session from making the supervisor read a huge file in its place (SKY-757).
+# process. That process writes the checked output again with ``json.dumps``
+# and ``ensure_ascii=False``. No string grows then: strict JSON already escapes
+# each character that the dump escapes. Only a number grows, at most 3.8
+# times: ``1e15,`` (5 bytes) becomes ``1000000000000000.0,`` (19 bytes). The
+# cap stops a process that left the entry's session from making the supervisor
+# read a huge file in its place (SKY-757).
 _COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
 # The characters of a failed command's stderr and of its stdout that its error
 # shows (SKY-757).
@@ -2166,13 +2167,13 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             env=env,
             max_output_bytes=MAX_RUN_STDOUT_BYTES,
         )
-        sys.stderr.write(_join_logs(call.stdout, call.stderr))
+        sys.stderr.write(_join_logs(_whole_lines(ascent, call.stdout), _whole_lines(ascent, call.stderr)))
         # Compact, so the supervisor's answer cap holds for any output under the package limit.
-        text = json.dumps({"output": call.output}, allow_nan=False, separators=(",", ":"))
+        text = json.dumps({"output": call.output}, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
     except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
         if ascent is not None and isinstance(exc, ascent.AscentError):
             # The same logs as a passed call: stdout, then stderr (SKY-757).
-            sys.stderr.write(_join_logs(exc.stdout, exc.stderr))
+            sys.stderr.write(_join_logs(_whole_lines(ascent, exc.stdout), _whole_lines(ascent, exc.stderr)))
             # The parent masks the secrets and only then cuts each log to
             # COMMAND_LOG_CHARS. It drops the edge of a log cut here (SKY-757).
             cause = INVALID_JSON_CAUSE if isinstance(exc, ascent.InvalidJsonError) else str(exc)
@@ -2187,6 +2188,28 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
         text = json.dumps(document)
     _write_output(call_dir, text)
     return 0
+
+
+def _whole_lines(ascent: types.ModuleType, log: str) -> str:
+    """Drop the first line of a log that OpenAscent may have cut.
+
+    OpenAscent keeps only the last ``LOG_TAIL_BYTES`` of each log, cut at any
+    byte and with no mark. The run-log scrubber masks only whole secrets, so a
+    cut through a secret would log its end. The first line holds that cut
+    (SKY-757). A replaced bad byte encodes longer, so a log at the limit may
+    also be one that OpenAscent did not cut: it loses its first line too.
+
+    Args:
+        ascent: The loaded OpenAscent package.
+        log: One log of the call, as OpenAscent returned it.
+
+    Returns:
+        The log, without its first line when it may be cut: empty when it has no line break.
+    """
+    if len(log.encode("utf-8")) < ascent.component.LOG_TAIL_BYTES:
+        return log
+    _, newline, rest = log.partition("\n")
+    return rest if newline else ""
 
 
 def _join_logs(stdout: str, stderr: str) -> str:

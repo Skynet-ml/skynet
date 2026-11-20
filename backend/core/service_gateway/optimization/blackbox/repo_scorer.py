@@ -485,13 +485,19 @@ class RepoScorer:
                     finally:
                         self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
-                    error = runner.command_error(
-                        ran,
-                        lambda text: _scrub(RUN_FAILED + redact(text, secrets), opened.root, self._hidden)[
-                            len(RUN_FAILED) :
-                        ],
-                        secrets,
-                    )
+                    # A function entry's error is its traceback, with the exception at
+                    # its end, so only a command's cause and logs take the command cuts.
+                    if isinstance(self._run_entry, str):
+                        error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
+                        error = error[len(RUN_FAILED) :]
+                    else:
+                        error = runner.command_error(
+                            ran,
+                            lambda text: _scrub(RUN_FAILED + redact(text, secrets), opened.root, self._hidden)[
+                                len(RUN_FAILED) :
+                            ],
+                            secrets,
+                        )
                     # SKY-751: only the metric makes a score, so a failed run has none.
                     return {
                         "score": None,

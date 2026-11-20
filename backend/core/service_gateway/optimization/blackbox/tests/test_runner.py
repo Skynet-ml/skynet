@@ -1147,6 +1147,31 @@ def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> No
     assert "out-text\nerr-text" in completed.stderr
 
 
+@_needs_openascent
+def test_the_box_logs_no_part_of_a_secret_that_the_package_tail_cut_splits(tmp_path: Path) -> None:
+    """OpenAscent keeps the last 64 KiB of a log; the box drops the cut first line before it logs (SKY-757)."""
+    secret = "test-value-1234567890abcdef"
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    # The tail starts 12 characters before the end of the secret.
+    after = 64 * 1024 - 12
+    script = f"import sys; sys.stderr.write('a' * 100 + {secret!r} + '\\n' + 'b' * {after - 1}); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[:200]
+    assert "b" * 1_000 in completed.stderr
+    assert not [i for i in range(len(secret) - 7) if secret[i : i + 8] in completed.stderr]
+
+
 def test_a_command_error_cuts_a_long_cause_so_both_tails_fit_the_run_feedback() -> None:
     """A long cause keeps its first ``COMMAND_CAUSE_CHARS``, after the mask (SKY-757)."""
     secret = "secret-value-9876"
@@ -1604,6 +1629,25 @@ def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Pat
     ran = _candidate(tmp_path, [sys.executable, "-c", script])
     assert ran["error"] is None
     assert len(ran["output"]) == count
+
+
+@_needs_openascent
+@pytest.mark.parametrize(("char", "count"), [("\x7f", 1_000_000), ("\U0001f600", 250_000)], ids=["del", "emoji"])
+def test_a_command_string_output_near_the_limit_passes_the_supervisor_cap(
+    tmp_path: Path, char: str, count: int
+) -> None:
+    """A raw character that an ASCII-only dump would escape keeps its size in the answer (SKY-757).
+
+    A DEL grew from 1 byte to 6, and an emoji from 4 bytes to 12.
+    """
+    script = (
+        "import os\n"
+        f"text = '{{\"output\": \"' + chr({ord(char)}) * {count} + '\"}}'\n"
+        "open(os.environ['ASCENT_OUTPUT'], 'w', encoding='utf-8').write(text)\n"
+    )
+    ran = _candidate(tmp_path, [sys.executable, "-c", script])
+    assert ran["error"] is None
+    assert ran["output"] == char * count
 
 
 def test_the_supervisor_refuses_a_command_answer_over_its_cap(tmp_path: Path) -> None:

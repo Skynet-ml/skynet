@@ -5142,6 +5142,36 @@ def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(
     assert result["feedback"].endswith("out line 100")
 
 
+def test_a_function_entry_keeps_the_end_of_its_traceback_in_the_run_feedback(tmp_path: Path) -> None:
+    """A function entry's error takes no command cut, so the exception line at its end stays (SKY-757)."""
+    frames = "".join(f"def frame_{i}(case):\n    return frame_{i + 1}(case)  # {'padding ' * 8}\n" for i in range(6))
+    source = frames + "def frame_6(case):\n    return {}['missing']\n\ndef run(case):\n    return frame_0(case)\n"
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/cand.py": source})
+    metric = "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n"
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric,
+        timeout_seconds=60,
+        run_entry="src/cand.py:run",
+        run_timeout=10.0,
+    )
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert len(result["feedback"]) > runner.COMMAND_CAUSE_CHARS
+    assert result["feedback"].rstrip().endswith("KeyError: 'missing'")
+
+
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
     """A run without ``[run]`` passes no output to the metric (E38)."""
     metric = (

@@ -391,14 +391,15 @@ follows one rule, the same for the candidate and for each stage (SKY-757):
 - What it prints, on stdout or stderr, goes to the logs only. Nothing goes
   to the logs while the command runs. After the call ends, the logs get the
   last 64 KiB of its stdout, then a line break when stdout does not end with
-  one, then the last 64 KiB of its stderr. Its stdin is
-  empty.
+  one, then the last 64 KiB of its stderr. A log of 64 KiB or more can start
+  inside a secret, so Skynet drops its first line before it logs it. A log
+  with no line break is not logged. Its stdin is empty.
 
 A nonzero exit code, a missing output file, an output that is not valid JSON
 or has another form, a time limit or an output file larger than the limit
 fails the call. For a `[run] entry`, the case then gets no score, and the
 metric does not run (SKY-751). For a stage, the metric's `openascent.call`
-gets the failure as an error. The error shows at most the first 300
+gets the failure as an error. For a command entry, the error shows at most the first 300
 characters of the cause (a longer cause ends with "…"), then the last 800
 characters of the command's stderr and of its stdout, with the run's secrets
 masked. The box sends at most the last 4,000 characters of each log. That cut
@@ -412,7 +413,9 @@ ASCENT_OUTPUT: UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate
 escape." This cause quotes no part of the file. The feedback of a failed
 `[run]` case keeps its last 1,988 characters after "Run failed: ". The cause
 and the two tails always fit in that limit, so the feedback always starts with
-the cause. The error of a failed stage keeps only its first 500 characters.
+the cause. The 300-character cut is for command entries only. A function
+entry's feedback is its traceback, with the secrets masked, cut to the last
+1,988 characters, so it ends with the exception. The error of a failed stage keeps only its first 500 characters.
 Thus it can show less than the full tails: it shows the cause, then the start
 of the stderr part, or of the stdout part when stderr is empty. Each call gets
 a new output path, so a file
