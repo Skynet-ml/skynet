@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -920,14 +921,32 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
     assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
 
 
-def test_a_new_rules_value_that_is_not_a_string_is_not_called_invalid_toml_alone() -> None:
-    """A valid TOML new text with a list rules value gets a refusal that names the value form too."""
-    refusal = workspace_tools.dropped_rule_files(
-        '[proposer]\nillegal = "rules.md"\n', '[proposer]\nillegal = ["do not cheat"]\n'
-    )
+def test_rule_text_in_the_format_before_sky_380_can_move_into_a_rules_file() -> None:
+    """A list of rule text names no file, so the agent can make the move the parser asks for."""
+    current = 'version = 1\n[proposer]\nillegal = ["no cheating"]\n'
+
+    assert workspace_tools.dropped_rule_files(current, 'version = 1\n[proposer]\nillegal = "docs/rules.md"\n') is None
+
+
+def test_an_old_instructions_table_still_names_the_kept_rules_file() -> None:
+    """A valid TOML file with an old [instructions] table names its rules file in the normal refusal."""
+    current = 'version = 1\n[proposer]\nillegal = "docs/rules.md"\n[instructions]\nintent = "x"\n'
+
+    refusal = workspace_tools.dropped_rule_files(current, "version = 1\n")
 
     assert refusal is not None
-    assert "or a rules path in it is not a string" in refusal
+    assert "drops [proposer] illegal = 'docs/rules.md', which the current optimize.toml names" in refusal
+    assert "not valid TOML" not in refusal
+
+
+def test_a_long_run_of_backslashes_does_not_stall_the_guard() -> None:
+    """The escaped-key search stays linear, so a large broken draft cannot block the event loop."""
+    current = 'x = "' + "\\" * 200_000 + "\n"
+    started = time.monotonic()
+
+    workspace_tools.dropped_rule_files(current, OPTIMIZE_TOML_EXAMPLE)
+
+    assert time.monotonic() - started < 1
 
 
 def test_a_commented_rules_path_in_a_broken_current_text_is_not_called_a_named_file() -> None:
@@ -947,7 +966,7 @@ def test_a_new_text_that_is_not_toml_is_refused_when_the_current_text_is_not_tom
     )
 
     assert refusal is not None
-    assert "not valid TOML, or a rules path in it is not a string, so it cannot keep 'docs/rules.md'" in refusal
+    assert "not valid TOML, so it cannot keep 'docs/rules.md'" in refusal
 
 
 @pytest.mark.parametrize(
@@ -985,15 +1004,6 @@ def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(line: str) ->
 
     assert refusal is not None
     assert "cannot be read" in refusal
-
-
-@pytest.mark.parametrize("current", ['instructions = ["docs/intent.md"]\n', "[proposer]\nillegal = 1\n"])
-def test_a_valid_toml_rules_value_that_is_not_a_string_refuses_the_write(current: str) -> None:
-    """A TOML rules value that is not a string cannot be compared, so any new text is refused (fail closed)."""
-    refusal = workspace_tools.dropped_rule_files(current, OPTIMIZE_TOML_EXAMPLE)
-
-    assert refusal is not None
-    assert "the path is not a string" in refusal
 
 
 def test_the_raw_search_decodes_basic_string_escapes() -> None:
