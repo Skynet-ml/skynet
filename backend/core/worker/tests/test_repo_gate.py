@@ -162,6 +162,26 @@ def test_a_resumed_run_may_newly_protect_only_its_compose_file(tmp_path: Path, m
         _stage(tmp_path, monkeypatch, files, {**older, "editable_paths": ["lib"]})
 
 
+def test_a_resumed_run_resumes_when_the_package_moves_its_compose_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The older reader kept a protected compose file in the user's order; the package moves it ahead."""
+    raw = _STAGED.replace(b"[run]", b'protected = ["data", "compose.yaml"]\n[run]') + (
+        b'[sandbox]\ncompose = "compose.yaml"\n'
+    )
+    files = {
+        CONSTRAINTS_FILE: raw,
+        "compose.yaml": b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n",
+    }
+    recorded = _stage(tmp_path, monkeypatch, files)
+    assert recorded["protected_paths"] == [CONSTRAINTS_FILE, "compose.yaml", "data"]
+    older = {**recorded, "protected_paths": [CONSTRAINTS_FILE, "data", "compose.yaml"]}
+
+    assert _stage(tmp_path, monkeypatch, files, older)["protected_paths"] == recorded["protected_paths"]
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths\)"):
+        _stage(tmp_path, monkeypatch, files, {**recorded, "protected_paths": [CONSTRAINTS_FILE, "compose.yaml"]})
+
+
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     """No ascent.toml asks for nothing."""
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []

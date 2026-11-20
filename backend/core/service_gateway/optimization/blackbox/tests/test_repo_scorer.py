@@ -92,13 +92,6 @@ SCORER_RUN = (
     "import json, os; text = open('src/app.py').read() + '---\\n' + open('built.txt').read();"
     " json.dump({'output': text}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
 )
-_needs_openascent = pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
-
-
-def _require_openascent() -> None:
-    """Skip the test when this server has no OpenAscent package, which every command entry needs (SKY-757)."""
-    if repo_scorer.openascent is None:
-        pytest.skip("openascent needs Python 3.12")
 
 
 def _wrapped(command: str) -> tuple[str, ...]:
@@ -110,7 +103,6 @@ def _wrapped(command: str) -> tuple[str, ...]:
     Returns:
         A command entry whose output is ``{"exit_code": <the command's exit code>}``.
     """
-    _require_openascent()
     return ("sh", "-c", f'{command} > /dev/null; echo "{{\\"output\\": {{\\"exit_code\\": $?}}}}" > "$ASCENT_OUTPUT"')
 
 
@@ -181,7 +173,6 @@ def scored(tmp_path: Path) -> Iterator[tuple[RepoScorer, Path, Path]]:
     Yields:
         The scorer, the archive and the scratch folder.
     """
-    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -299,7 +290,6 @@ def _park_scorer(tmp_path: Path, budget: _ParkLog) -> tuple[RepoScorer, Path]:
     Returns:
         The scorer and its archive.
     """
-    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -676,7 +666,6 @@ def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, 
     Returns:
         The scorer, the archive, the recorded rule events and the judge.
     """
-    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "1\n"})
     events: list[dict[str, Any]] = []
     judge = RuleJudge(
@@ -1151,8 +1140,6 @@ def _stage_scorer(
     Returns:
         The scorer and the tree's archive.
     """
-    if any(isinstance(stage.entry, tuple) for stage in stages.values()):
-        _require_openascent()
     files = {**STAGE_TREE, **(tree or {})}
     archive = _archive(tmp_path, {**files, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
     stage_archive = _archive(tmp_path / "stage", files)
@@ -5022,7 +5009,6 @@ def _shell_run_scorer(tmp_path: Path, script: str, secrets: Mapping[str, str] | 
     )
 
 
-@_needs_openascent
 def test_a_shell_command_entry_reads_ascent_input_and_its_output_file_reaches_the_metric(tmp_path: Path) -> None:
     """A real shell ``[run]`` command reads ``ASCENT_INPUT`` and writes ``ASCENT_OUTPUT``; its prints stay out (SKY-757)."""
     script = (
@@ -5039,7 +5025,6 @@ def test_a_shell_command_entry_reads_ascent_input_and_its_output_file_reaches_th
     assert json.loads(result["feedback"]) == {"seen": {"input": {"q": 1}}}
 
 
-@_needs_openascent
 def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Path) -> None:
     """The documented wrapper line turns a failing tool's exit code into the output (SKY-757)."""
     script = 'python3 -c "import sys; sys.exit(3)" > log.txt\necho "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"\n'
@@ -5051,7 +5036,6 @@ def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Pat
     assert json.loads(result["feedback"]) == {"exit_code": 3}
 
 
-@_needs_openascent
 def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
     """A command that prints its answer and writes no output file is a run failure that shows the print, and the metric is not called."""
     scorer = _shell_run_scorer(tmp_path, "echo '{\"output\": 1}'\n")
@@ -5066,7 +5050,6 @@ def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
     )
 
 
-@_needs_openascent
 def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: Path) -> None:
     """Full stderr and stdout tails still leave the cause in the run feedback (SKY-757)."""
     script = 'for i in $(seq 300); do echo "out line $i"; echo "err line $i" >&2; done\nexit 1\n'
@@ -5081,7 +5064,6 @@ def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: 
     assert "err line 300\nstdout: " in result["feedback"]
 
 
-@_needs_openascent
 def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
     """A secret that the 800-character stderr cut would split is masked before the cut, and the cause stays (SKY-757)."""
     secret = "run-secret-value-9876"
@@ -5096,7 +5078,6 @@ def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run
     assert "9876" not in result["feedback"]
 
 
-@_needs_openascent
 def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
     """The parent drops the split copy at the edge of the box's cut, and the cause stays (SKY-757)."""
     scorer = _shell_run_scorer(tmp_path, f"{_REPEAT_SECRET}\nexit 1\n", {"JUDGE_KEY": _LONG_SECRET})
@@ -5110,7 +5091,6 @@ def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_
     assert _no_part_of_the_long_secret(result["feedback"])
 
 
-@_needs_openascent
 @pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
 def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
     tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
@@ -5126,7 +5106,6 @@ def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
     assert not [piece for piece in pieces if piece in result["feedback"]]
 
 
-@_needs_openascent
 def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(tmp_path: Path) -> None:
     """The cause keeps its head, so the feedback's tail cut never drops it (SKY-757)."""
     keys = ", ".join(f'"unknown_key_{i:02d}": 1' for i in range(60))
@@ -5591,7 +5570,6 @@ def _command_scorer(
     return scorer, archive
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 def test_a_bash_metric_scores_each_version_through_the_local_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5608,7 +5586,6 @@ def test_a_bash_metric_scores_each_version_through_the_local_runtime(
     assert improved["scores"] == {"exact": {"score": pytest.approx(1.0), "feedback": ""}}
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 def test_a_metric_setup_builds_the_bash_metric_once_and_each_score_uses_the_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5634,7 +5611,6 @@ def test_a_metric_setup_builds_the_bash_metric_once_and_each_score_uses_the_buil
     assert second["feedback"] == "builds=1"
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 @pytest.mark.parametrize(
     ("metric", "message"),
     [
@@ -5658,7 +5634,6 @@ def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
     assert "secret-stderr" not in str(caught.value)
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 @pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
 def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
     tmp_path: Path,
@@ -5704,7 +5679,6 @@ PY
 """
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 @pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls its stages with curl")
 def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5760,7 +5734,6 @@ printf '{"score": 1, "feedback": "keys=%s status=%s"}' "$keys" "$status" > "$ASC
 """
 
 
-@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
 @pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls the model with curl")
 def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5806,17 +5779,3 @@ def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_
     assert len(metric_envs) == 1
     assert ENV_API_KEY not in metric_envs[0]
     assert "sk-metric-key" not in json.dumps(metric_envs[0])
-
-
-def test_a_command_metric_is_refused_when_the_server_has_no_openascent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A server without the package refuses the command metric with a clear message, before any score."""
-    monkeypatch.setattr(repo_scorer, "openascent", None)
-    monkeypatch.setattr(repo_scorer, "_ascent_files", repo_scorer._ascent_files.__wrapped__)
-    scorer, _ = _command_scorer(tmp_path, _BASH_METRIC, monkeypatch)
-    try:
-        with pytest.raises(RepoScoreError, match="no OpenAscent package"):
-            scorer.score("")
-    finally:
-        scorer.close()

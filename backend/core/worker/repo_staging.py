@@ -883,9 +883,15 @@ def _ensure_unchanged(previous: Any, current: dict[str, Any], *, compose_file: s
         """
         before, after = enforced(previous, name), enforced(current, name)
         # The package reader also protects the [sandbox] compose file, which Skynet's older reader did not, so a run
-        # recorded before SKY-760 resumes with that one path added. More protection keeps the run safe.
-        if name == "protected_paths" and compose_file is not None and isinstance(after, list):
-            return before != [path for path in after if path != compose_file] and before != after
+        # recorded before SKY-760 resumes with that one path added. More protection keeps the run safe. The package
+        # also moves the file ahead of [paths] protected, so it is left out of both lists before the compare.
+        if (
+            name == "protected_paths"
+            and compose_file is not None
+            and isinstance(before, list)
+            and isinstance(after, list)
+        ):
+            return [path for path in before if path != compose_file] != [path for path in after if path != compose_file]
         return before != after
 
     changed = [name for name in _ENFORCED_FIELDS if differs(name)]

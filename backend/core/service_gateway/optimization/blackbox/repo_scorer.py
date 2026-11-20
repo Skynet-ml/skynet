@@ -78,11 +78,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlencode
 
 import httpx
-
-try:
-    import openascent
-except ImportError:  # a server without the package runs only Python metrics
-    openascent = None
+import openascent
 
 from ....billing.budgets import BudgetError, BudgetInsufficientError
 from ....billing.env_connectors import relay_request
@@ -262,12 +258,7 @@ def _ascent_files(target: str) -> dict[str, str]:
 
     Returns:
         Each module's text by its box path under ``target``.
-
-    Raises:
-        RepoScoreError: When this server has no OpenAscent package.
     """
-    if openascent is None:
-        raise RepoScoreError("This server has no OpenAscent package, so a command entry cannot run.")
     folder = Path(openascent.__file__).parent
     return {f"{target}/{path.name}": path.read_text(encoding="utf-8") for path in folder.glob("*.py")}
 
