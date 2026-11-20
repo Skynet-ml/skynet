@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -5675,6 +5676,64 @@ def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
 
     assert runner.INVALID_JSON_CAUSE in caplog.text
     assert not [piece for piece in pieces if piece in caplog.text]
+
+
+# Calls the double stage with curl, checks each refused call, and scores the doubled value (SKY-767).
+_STAGE_BASH_METRIC = """set -euo pipefail
+post() { curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST -d "$2" "$1"; }
+doubled=$(curl -sf --noproxy '*' -X POST -d '{"input": {"v": 3}}' "$ASCENT_STAGE_DOUBLE_URL")
+unknown=$(post "${ASCENT_LOG_URL%/log}/stage/shout" '{"input": "hi"}')
+broken=$(post "$ASCENT_STAGE_BROKEN_URL" '{"input": 1}')
+slow=$(post "$ASCENT_STAGE_SLOW_URL" '{"input": 5}')
+python3 - "$doubled" "$unknown" "$broken" "$slow" "${ASCENT_STAGE_SHOUT_URL-unset}" <<'PY'
+import json, os, sys
+doubled, unknown, broken, slow, shout = sys.argv[1:]
+feedback = f"unknown={unknown} broken={broken} slow={slow} shout={shout}"
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"score": json.loads(doubled)["output"]["v"] / 10, "feedback": feedback}, f)
+PY
+"""
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls its stages with curl")
+def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real bash metric reaches ``[target.double]`` at its URL; other stages and failed stages answer an error."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    stages = {name: STAGES[name] for name in ("double", "broken", "slow")}
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.sh": _STAGE_BASH_METRIC})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        "",
+        timeout_seconds=60,
+        run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+        metric_entry=("bash", "eval/metric.sh"),
+        stages=stages,
+        stage_runtime=RecordingRuntime(),
+        stage_archive=_archive(tmp_path / "stage", STAGE_TREE),
+    )
+    try:
+        baseline = scorer.score("")
+        version = scorer.score(
+            _patch(tmp_path / "v1", archive, {"src/stages.py": STAGE_TREE["src/stages.py"].replace("2", "3")})
+        )
+    finally:
+        scorer.close()
+
+    assert baseline["score"] == pytest.approx(0.6)
+    assert baseline["feedback"] == "unknown=404 broken=502 slow=502 shout=unset"
+    assert version["score"] == pytest.approx(0.9)
 
 
 def test_a_command_metric_is_refused_when_the_server_has_no_openascent(

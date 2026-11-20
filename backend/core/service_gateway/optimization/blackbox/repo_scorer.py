@@ -35,7 +35,8 @@ box for each stage for each candidate evaluation, all before the scorer runs
 (E29). The scorer reaches them with ``call(name, input)``: the call is a
 framed line on the scorer's stdout, the parent runs the stage in its box, and
 writes the answer back into the metric box. That relay is the stages' only
-way out (E27).
+way out (E27). A command metric reaches the same stages, the judge model and
+the run log at loopback URLs that the metric box's runner serves (SKY-767).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the

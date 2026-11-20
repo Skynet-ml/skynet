@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -2154,6 +2155,23 @@ def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]
     Returns:
         The runner's ``output.json``.
     """
+    return _command_metric_run(tmp_path, script, **extra)[0]
+
+
+def _command_metric_run(
+    tmp_path: Path, script: str, *, environ: dict[str, str] | None = None, **extra: Any
+) -> tuple[dict[str, Any], str]:
+    """Run the runner on a command ``[metric] entry``, as ``_command_metric`` does, and keep its stderr.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+        script: The body of ``metric.sh``.
+        environ: More variables for the runner's environment.
+        **extra: Input keys to add or replace; ``drop`` names keys to remove.
+
+    Returns:
+        The runner's ``output.json`` and its stderr.
+    """
     drop = extra.pop("drop", ())
     box = tmp_path / "box"
     box.mkdir()
@@ -2180,11 +2198,11 @@ def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]
         text=True,
         timeout=60,
         cwd=box,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **(environ or {})},
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    return json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    return json.loads((call_dir / runner.OUTPUT_FILE).read_text()), completed.stderr
 
 
 @_needs_openascent
@@ -2241,6 +2259,181 @@ def test_a_failed_command_metric_names_its_cause(tmp_path: Path, script: str, en
     if cause == "nonzero_exit":
         assert output["exit_code"] == 3
         assert "bad" in output["error"]
+
+
+_needs_curl = pytest.mark.skipif(shutil.which("curl") is None, reason="the helper tests call the helpers with curl")
+# Prints the status and body of one helper POST: post <url> <json body>.
+_CURL_POST = (
+    "post() { curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST"
+    " -H 'Content-Type: application/json' -d \"$2\" \"$1\"; printf ' '; cat body.out; echo; }\n"
+)
+
+
+def _events(stderr: str) -> list[dict[str, Any]]:
+    """Return the ``log()`` events that a runner wrote to its stderr.
+
+    Args:
+        stderr: The runner's stderr.
+
+    Returns:
+        Each event line, decoded.
+    """
+    return [
+        json.loads(line[len(runner.EVENT_PREFIX) :])
+        for line in stderr.splitlines()
+        if line.startswith(runner.EVENT_PREFIX)
+    ]
+
+
+@_needs_openascent
+@_needs_curl
+def test_a_command_metric_without_a_judge_model_gets_only_the_log_url(tmp_path: Path) -> None:
+    """Without a gateway the command gets ``ASCENT_LOG_URL`` on loopback and no model variable (SKY-767)."""
+    script = 'env | grep "^ASCENT_" | sort > seen.env\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    output = _command_metric(tmp_path, script)
+    seen = dict(line.split("=", 1) for line in (tmp_path / "box" / "seen.env").read_text().splitlines())
+
+    assert output["score"] == 1.0
+    assert set(seen) == {"ASCENT_INPUT", "ASCENT_OUTPUT", runner.LOG_URL_ENV}
+    assert urllib.parse.urlsplit(seen[runner.LOG_URL_ENV]).hostname == "127.0.0.1"
+
+
+@_needs_openascent
+@_needs_curl
+def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A POST to ``ASCENT_LOG_URL`` gives the run log the line that ``log()`` gives; a bad body is refused."""
+    script = (
+        _CURL_POST
+        + 'post "$ASCENT_LOG_URL" \'{"event": "judge.retry", "fields": {"attempt": 2, "level": "x"}}\' > answers\n'
+        + 'post "$ASCENT_LOG_URL" \'{"event": "", "fields": {}}\' >> answers\n'
+        + 'post "$ASCENT_LOG_URL" \'{"event": "a", "extra": 1}\' >> answers\n'
+        + 'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    )
+    output, stderr = _command_metric_run(tmp_path, script)
+    answers = (tmp_path / "box" / "answers").read_text().splitlines()
+    expected = io.StringIO()
+    monkeypatch.setattr(sys, "__stderr__", expected)
+    runner.log("judge.retry", attempt=2)
+
+    assert output["score"] == 1.0
+    assert answers[0] == "200 {}"
+    assert [answer.split(" ", 1)[0] for answer in answers[1:]] == ["400", "400"]
+    assert all('{"error": ' in answer for answer in answers[1:])
+    want = _events(expected.getvalue())[0]
+    want["fields"]["level"] = "x"
+    assert _events(stderr) == [want]
+
+
+@_needs_openascent
+@_needs_curl
+def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_key(tmp_path: Path) -> None:
+    """With a gateway the command reaches the model through the runner; the key stays out of its environment."""
+    script = (
+        _CURL_POST
+        + 'env | grep -c "^APP_API_KEY=" > keys || true\n'
+        + 'printf "%s|%s\\n" "$ASCENT_MODEL" "${ASCENT_MODEL_KEY-unset}" > model\n'
+        + 'url="$ASCENT_MODEL_URL/chat/completions"\n'
+        + 'post "$url" "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\",'
+        + ' \\"content\\": \\"hi\\"}], \\"max_tokens\\": 5}" > answers\n'
+        + 'post "$url" \'{"model": "other/model", "messages": []}\' >> answers\n'
+        + 'post "$url" \'{"messages": [], "tools": []}\' >> answers\n'
+        + 'post "$url" \'{"messages": [], "stream": true}\' >> answers\n'
+        + 'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    )
+    with FakeGateway(reply="judged", usage=(7, 2)) as gateway:
+        gateway_payload = {"url": gateway.url, "model": "judge-model", "declared_model": "openai/judge-model"}
+        output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"}, gateway=gateway_payload)
+    box = tmp_path / "box"
+    answers = (box / "answers").read_text().splitlines()
+
+    assert output["score"] == 1.0
+    assert output["usage"] == [{"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}]
+    assert (box / "keys").read_text().strip() == "0"
+    assert (box / "model").read_text().strip() == "openai/judge-model|"
+    status, body = answers[0].split(" ", 1)
+    assert status == "200"
+    assert json.loads(body)["choices"][0]["message"]["content"] == "judged"
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0]["authorization"] == "Bearer sk-test"
+    assert gateway.requests[0]["body"]["model"] == "judge-model"
+    assert gateway.requests[0]["body"]["max_tokens"] == 5
+    assert [answer.split(" ", 1)[0] for answer in answers[1:]] == ["400", "400", "400"]
+    assert runner.MODEL_ENV in json.loads(answers[1].split(" ", 1)[1])["error"]
+
+
+@_needs_openascent
+@_needs_curl
+def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) -> None:
+    """A protected gateway's budget stop reaches the output as ``control``, not as the command's score."""
+    script = (
+        _CURL_POST
+        + 'post "$ASCENT_MODEL_URL/chat/completions" \'{"messages": [{"role": "user", "content": "x"}]}\' > answers\n'
+        + 'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    )
+
+    class Stopped(FakeGateway):
+        """Answer every request with the protected gateway's budget stop."""
+
+        def answer(self, request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            """Record the request and refuse it.
+
+            Args:
+                request: The recorded request.
+
+            Returns:
+                A 402 with the ``budget_reached`` error.
+            """
+            self.requests.append(request)
+            return 402, {"error": {"code": "budget_reached", "message": "The run budget is spent."}}
+
+    with Stopped() as gateway:
+        payload = {"url": gateway.url, "model": "judge-model", "protected": True}
+        output = _command_metric(tmp_path, script, gateway=payload)
+
+    assert (tmp_path / "box" / "answers").read_text().split(" ", 1)[0] == "503"
+    assert output["score"] is None
+    assert output["control"] == {"code": "budget_reached", "message": "The run budget is spent."}
+
+
+def test_stage_env_name_follows_the_openascent_rule() -> None:
+    """Each ASCII letter is upper case, each digit stays, and each other character is ``_``."""
+    assert runner.stage_env_name("double") == "ASCENT_STAGE_DOUBLE_URL"
+    assert runner.stage_env_name("judge-2.v") == "ASCENT_STAGE_JUDGE_2_V_URL"
+    assert runner.stage_env_name("straße") == "ASCENT_STAGE_STRA_E_URL"
+
+
+def test_metric_helpers_refuse_a_stage_outside_the_run_and_relay_one_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stage route answers the relay's output, and refuses an unknown stage, a bad body and a failed stage."""
+    sent: list[dict[str, Any]] = []
+    answers = {"good": {"output": {"doubled": 4}}, "bad": {"error": "Stage 'bad' passed its 5s timeout."}}
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, sent))
+    relay = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good", "bad"]})
+    helpers = runner.MetricHelpers(relay, ["good", "bad"], None, None)
+
+    def post(url: str, body: Any) -> tuple[int, Any]:
+        """POST one JSON body and return the status and the decoded answer."""
+        request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    try:
+        good = helpers.env["ASCENT_STAGE_GOOD_URL"]
+        base = good.rsplit("/stage/", 1)[0]
+        assert post(good, {"input": {"x": 2}}) == (200, {"output": {"doubled": 4}})
+        assert post(f"{base}/stage/other", {"input": 1})[0] == 404
+        assert post(good, {"input": 1, "more": 2})[0] == 400
+        status, body = post(helpers.env["ASCENT_STAGE_BAD_URL"], {"input": None})
+        assert (status, "timeout" in body["error"]) == (502, True)
+        assert post(f"{base}/model/chat/completions", {"messages": []})[0] == 404
+    finally:
+        helpers.close()
+    assert [frame["stage"] for frame in sent] == ["good", "bad"]
+    assert runner.MODEL_URL_ENV not in helpers.env
 
 
 def test_the_metric_command_is_the_one_process_the_runner_may_start(tmp_path: Path) -> None:
