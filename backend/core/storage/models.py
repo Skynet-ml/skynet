@@ -716,8 +716,8 @@ class BillingCustomerModel(Base):
         default=0,
         server_default="0",
     )
-    # ``grant_remaining`` is what is left of the account's one-time free
-    # grant (500 cents = $5, seeded once and never renewed). NULL until the first
+    # ``grant_remaining`` is what is left of the account's one-time
+    # grant (seeded once from ``grant_cents()``, never renewed). NULL until the first
     # wallet read or run seeds it; seeding is lazy-evaluated on read, never
     # cron'd.
     grant_remaining: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
@@ -795,7 +795,7 @@ class WalletLedgerModel(Base):
     # None on interactive debits (serve, agent chat), non-run rows, and rows
     # written before run attribution landed.
     optimization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # Cents of a ``run`` row's charge drawn from the free grant; the paid part
+    # Cents of a ``run`` row's charge drawn from the grant; the paid part
     # is ``-delta_cents - from_grant_cents``. On a positive restart-waiver row,
     # the cents returned to the grant. None on non-run and older rows.
     from_grant_cents: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)

@@ -7,7 +7,7 @@ Skynet uses a prepaid balance. You add funds to the balance. Each run has a spen
 
 Your balance is in US dollars. Skynet keeps it in cents.
 
-Skynet gives no free starting balance by default. Add funds before you start your first paid run.
+Skynet gives no starting balance. Add funds before you start your first paid run.
 
 You add funds in **Settings → Billing**. You can pick a fixed amount or enter a custom amount:
 

@@ -7,7 +7,7 @@ Skynet arbeitet mit einem vorausbezahlten Guthaben. Sie laden Geld auf das Gutha
 
 Ihr Guthaben lautet auf US-Dollar. Skynet führt es in Cent.
 
-Skynet gibt standardmäßig kein kostenloses Startguthaben. Laden Sie Guthaben auf, bevor Sie Ihren ersten kostenpflichtigen Durchlauf starten.
+Skynet gibt kein Startguthaben. Laden Sie Guthaben auf, bevor Sie Ihren ersten kostenpflichtigen Durchlauf starten.
 
 Sie laden Guthaben unter **Einstellungen → Abrechnung** auf. Sie können einen festen Betrag wählen oder einen eigenen Betrag eingeben:
 

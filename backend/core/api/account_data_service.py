@@ -14,7 +14,7 @@ Two deliberate exceptions to "hard delete everything":
   and audit basis, so the identity link is severed to a PII-free tombstone
   token, unique to each deletion, while the rows themselves survive.
   The wallet (``billing_customers``) is also *closed*: its spendable balance
-  and free grant go to zero, and a ``closure`` ledger row records the
+  and grant go to zero, and a ``closure`` ledger row records the
   forfeited balance.
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.

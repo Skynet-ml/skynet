@@ -9,11 +9,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ...config import settings
 from ...local import hosted_link
-from ...storage.models import Base
+from ...storage.models import Base, BillingCustomerModel
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers.billing import create_billing_router
@@ -113,3 +114,24 @@ def test_hosted_wallet_tool_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
     assert paths["/billing/wallet"]["get"]["operationId"] == "get_wallet_for_agent"
     assert paths["/billing/wallet"]["get"]["tags"] == ["agent"]
     assert "/billing/wallet/agent" not in paths
+
+
+def test_wallet_shows_one_balance_of_grant_and_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wallet sends one balance, the grant plus the paid balance, and no separate grant."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username=_USER, stripe_customer_id="cus_x", balance_cents=700, grant_remaining=300)
+        )
+        session.commit()
+    app = FastAPI()
+    app.include_router(create_billing_router(job_store=SimpleNamespace(engine=engine)))
+    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(_USER, "user", ())
+    response = TestClient(app).get("/billing/wallet")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["balance_cents"] == 1000
+    assert "free" not in response.text.lower()
+    assert set(body) <= {"balance_cents", "usage", "pricing"}

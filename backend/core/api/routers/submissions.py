@@ -386,13 +386,13 @@ _COMMITTED_JOB_STATUSES = ("pending", "validating", "running", "paused")
 
 
 def _enforce_balance(job_store, username: str, token_source: str) -> int | None:
-    """Block a depleted account from starting a run, and report its free balance.
+    """Block a depleted account from starting a run, and report its spendable balance.
 
     Reads the spendable balance after StripeBillingService has subtracted both
     authoritative operation holds and database-backed legacy job commitments.
     Subtracting the legacy ceilings again would reject funded submissions.
-    Concurrent dispatch is serialized by the shared ledger. There is no free
-    allowance — a brand-new account is gated until it tops up. Both run
+    Concurrent dispatch is serialized by the shared ledger. There is no starting
+    balance — a brand-new account is gated until it tops up. Both run
     modes are gated: a managed run spends its full per-token cost, and a BYOK
     run may spend on sandbox usage even though its model calls carry no fee. The returned balance
     feeds the per-run cost ceiling (see :func:`_cap_cost_ceiling_to_balance`) so

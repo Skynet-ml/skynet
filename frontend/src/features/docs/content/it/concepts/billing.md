@@ -7,7 +7,7 @@ Skynet usa un saldo prepagato. Aggiungi fondi al saldo. Ogni esecuzione ha un li
 
 Il tuo saldo è in dollari USA. Skynet lo conserva in centesimi.
 
-Per impostazione predefinita Skynet non offre un saldo iniziale gratuito. Aggiungi fondi prima di avviare la tua prima esecuzione a pagamento.
+Skynet non offre un saldo iniziale. Aggiungi fondi prima di avviare la tua prima esecuzione a pagamento.
 
 Aggiungi fondi in **Impostazioni → Fatturazione**. Puoi scegliere un importo fisso o inserire un importo personalizzato:
 

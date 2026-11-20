@@ -7,7 +7,7 @@ Skynet utilise un solde prépayé. Vous ajoutez des fonds à ce solde. Chaque ex
 
 Votre solde est en dollars américains. Skynet le conserve en cents.
 
-Par défaut, Skynet n'offre aucun solde de départ gratuit. Ajoutez des fonds avant de lancer votre première exécution payante.
+Skynet n'offre aucun solde de départ. Ajoutez des fonds avant de lancer votre première exécution payante.
 
 Vous ajoutez des fonds dans **Paramètres → Facturation**. Vous pouvez choisir un montant fixe ou saisir un montant personnalisé :
 

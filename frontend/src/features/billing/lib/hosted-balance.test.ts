@@ -12,10 +12,9 @@ import { EMPTY_WALLET, totalCents, walletStatus, type WalletBalance } from "./wa
 const failWith = (status: number) => () =>
   Promise.reject(Object.assign(new Error("x"), { status }));
 
-const hostedWallet = (paid: number, grant = 0): WalletBalance => ({
+const hostedWallet = (balance: number): WalletBalance => ({
   ...EMPTY_WALLET,
-  paidBalanceCents: paid,
-  freeGrant: { centsRemaining: grant, centsTotal: grant },
+  balanceCents: balance,
 });
 
 const api = (wallet: () => Promise<WalletBalance>, linked = async () => true) => ({
@@ -40,10 +39,10 @@ test("an unlinked Mac asks for a link and never reads a wallet", async () => {
   assert.equal(read, false);
 });
 
-test("a linked Mac shows the web total: paid balance plus grant, with the web status", async () => {
+test("a linked Mac shows the web balance and the web status", async () => {
   // SKY-340: the old desktop balance route subtracted the holds of running
   // jobs, so the Mac showed less than the web for the same account.
-  const wallet = hostedWallet(1000, 234);
+  const wallet = hostedWallet(1234);
   assert.deepEqual(await loadHostedBalance(api(async () => wallet)), {
     kind: "hosted",
     cents: totalCents(wallet),

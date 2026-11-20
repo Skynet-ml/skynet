@@ -15,7 +15,7 @@ export const LEGAL_CONFIG = {
   // Dates shown on both documents (ISO, formatted per UI locale). Update
   // lastUpdated whenever the text changes.
   effectiveDate: "2026-08-11",
-  lastUpdated: "2026-11-07",
+  lastUpdated: "2026-11-19",
 
   // The service is operated by an individual (sole proprietor); this legal name is
   // the operating party and, for the Privacy Policy, the data controller.

@@ -84,7 +84,7 @@ def _version(engine: Engine) -> str | None:
 
 
 def _grant(engine: Engine) -> int:
-    """Return the seeded account's remaining free-grant cents."""
+    """Return the seeded account's remaining grant cents."""
     with engine.connect() as conn:
         return conn.execute(text("SELECT grant_remaining FROM billing_customers WHERE username = 'a@x.com'")).scalar()
 
@@ -94,7 +94,7 @@ def _seed(engine: Engine, grant: int) -> None:
 
     Args:
         engine: Engine on the live-Postgres target.
-        grant: Remaining free-grant cents to seed.
+        grant: Remaining grant cents to seed.
     """
     with Session(engine) as session:
         session.add(

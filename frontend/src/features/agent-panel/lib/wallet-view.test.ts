@@ -6,17 +6,14 @@ const { walletView } = await import("./wallet-view.ts");
 // The Mac app's local grant (settings.local_grant_cents); it must never reach the card.
 const LOCAL_GRANT_CENTS = 100_000_000;
 
-test("a web wallet keeps the grant, paid balance and usage", () => {
+test("a web wallet keeps one balance and the usage", () => {
   const view = walletView({
-    paid_balance_cents: 500,
-    free_grant: { cents_remaining: 200, cents_total: 1000 },
+    balance_cents: 700,
     usage: [{ id: "u1", label: "Run", cents: -40 }],
   });
   assert.deepEqual(view, {
     kind: "web",
     totalCents: 700,
-    paidCents: 500,
-    grant: { cents_remaining: 200, cents_total: 1000 },
     usage: [{ id: "u1", label: "Run", cents: -40 }],
   });
 });
@@ -48,4 +45,5 @@ test("an unknown or empty result gives no view", () => {
   assert.equal(walletView(undefined), null);
   assert.equal(walletView([]), null);
   assert.equal(walletView({ paid_balance_cents: 5 }), null);
+  assert.equal(walletView({ balance_cents: "5" }), null);
 });

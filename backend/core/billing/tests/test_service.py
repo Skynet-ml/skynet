@@ -36,7 +36,7 @@ from core.billing.pricing import ModelUsage, cents_for_usage
 from core.billing.service import (
     CUSTOM_CENTS_MAX,
     CUSTOM_CENTS_MIN,
-    FREE_GRANT_CENTS,
+    GRANT_CENTS,
     PACK_CENTS,
     StripeBillingService,
     committed_spend_cents,
@@ -122,8 +122,8 @@ def _grant_remaining(engine: object, username: str) -> int | None:
 
 
 def test_pricing_policy_no_subsidy_packs_at_par() -> None:
-    """The no-subsidy policy: no free allowance, and packs grant exactly their price in cents."""
-    assert FREE_GRANT_CENTS == 0
+    """The no-subsidy policy: no starting grant, and packs grant exactly their price in cents."""
+    assert GRANT_CENTS == 0
     # The balance is kept in cents, so at-par packs must grant exactly the Stripe
     # unit_amount provisioned in scripts/provision_stripe.py ($5 / $20 / $50).
     assert PACK_CENTS == {"starter": 500, "plus": 2000, "pro": 5000}
@@ -151,7 +151,7 @@ def test_purchase_fee_cents_keeps_a_margin_on_non_us_cards() -> None:
 def test_wallet_reports_empty_grant_for_new_account(engine: object) -> None:
     """A brand-new account reads a zero grant without a row being created."""
     snapshot = StripeBillingService(engine=engine).get_wallet("new@x.com")
-    assert snapshot.free_grant_remaining == 0
+    assert snapshot.grant_remaining == 0
     assert snapshot.paid_balance_cents == 0
     with Session(engine) as session:
         assert session.get(BillingCustomerModel, "new@x.com") is None
@@ -161,10 +161,10 @@ def test_wallet_seeds_grant_column_on_first_read(engine: object) -> None:
     """Reading a row with a NULL grant seeds it to the (zero) allowance and persists it."""
     _seed_customer(engine, "u@x.com")
     snapshot = StripeBillingService(engine=engine).get_wallet("u@x.com")
-    assert snapshot.free_grant_remaining == FREE_GRANT_CENTS
+    assert snapshot.grant_remaining == GRANT_CENTS
     with Session(engine) as session:
         customer = session.get(BillingCustomerModel, "u@x.com")
-    assert customer.grant_remaining == FREE_GRANT_CENTS
+    assert customer.grant_remaining == GRANT_CENTS
 
 
 @pytest.mark.parametrize(("environment_name", "expected"), [("staging", 0), ("skynet-pr-662", 1000)])
@@ -177,7 +177,7 @@ def test_new_account_grant_only_in_preview_environments(
     _seed_customer(engine, "u@x.com")
     service = StripeBillingService(engine=engine)
     assert service.spendable_cents("u@x.com") == expected
-    assert service.get_wallet("u@x.com").free_grant_total == expected
+    assert service.get_wallet("u@x.com").grant_remaining == expected
 
 
 def test_debit_run_draws_from_legacy_grant_first(engine: object) -> None:
@@ -199,7 +199,7 @@ def test_debit_run_draws_from_legacy_grant_first(engine: object) -> None:
     assert cost == expected
     assert 0 < expected < 50
     snapshot = service.get_wallet("u@x.com")
-    assert snapshot.free_grant_remaining == 50 - expected
+    assert snapshot.grant_remaining == 50 - expected
     assert snapshot.paid_balance_cents == 0
     with Session(engine) as session:
         rows = session.query(WalletLedgerModel).filter_by(username="u@x.com").all()
@@ -228,14 +228,14 @@ def test_debit_run_overflows_grant_into_paid_balance(engine: object) -> None:
     assert cost == expected
     assert expected > 10  # must exceed the remaining grant to overflow into paid
     snapshot = service.get_wallet("u@x.com")
-    assert snapshot.free_grant_remaining == 0
+    assert snapshot.grant_remaining == 0
     assert snapshot.paid_balance_cents == 100 - (expected - 10)
 
 
 def test_debit_run_creates_local_row_for_customerless_account(engine: object) -> None:
     """A run for an account that never touched Stripe seeds a local billing row.
 
-    The balance is prepaid, so with no free allowance and no purchased balance
+    The balance is prepaid, so with no grant and no purchased balance
     there is nothing to draw from: the charge clamps to zero (the shortfall is
     absorbed, never lent) and the balance stays at exactly zero. The absorbed
     cost is still recorded on a zero-delta ledger row.
@@ -276,7 +276,7 @@ def test_debit_run_clamps_charge_to_available_balance(engine: object) -> None:
     charged = service.debit_run("u@x.com", usages, model=None, description="big")
     assert charged == 8
     snapshot = service.get_wallet("u@x.com")
-    assert snapshot.free_grant_remaining == 0
+    assert snapshot.grant_remaining == 0
     assert snapshot.paid_balance_cents == 0
     with Session(engine) as session:
         (row,) = session.query(WalletLedgerModel).filter_by(username="u@x.com").all()
@@ -338,7 +338,7 @@ def test_debit_run_records_job_and_grant_split(engine: object) -> None:
     assert (row.delta_cents, row.from_grant_cents, row.optimization_id) == (-150, 100, "job-1")
     assert -row.delta_cents - row.from_grant_cents == 50
     snapshot = service.get_wallet("u@x.com")
-    assert (snapshot.free_grant_remaining, snapshot.paid_balance_cents) == (0, 450)
+    assert (snapshot.grant_remaining, snapshot.paid_balance_cents) == (0, 450)
 
 
 def test_debit_run_paid_only_records_zero_from_grant(engine: object) -> None:
@@ -450,10 +450,10 @@ def test_debit_run_zero_cost_writes_nothing(engine: object) -> None:
     assert service.debit_run("u@x.com", [], model=None, description="r") == 0
     with Session(engine) as session:
         assert session.query(WalletLedgerModel).filter_by(username="u@x.com").count() == 0
-        assert session.get(BillingCustomerModel, "u@x.com").grant_remaining in (None, FREE_GRANT_CENTS)
+        assert session.get(BillingCustomerModel, "u@x.com").grant_remaining in (None, GRANT_CENTS)
 
 
-def test_free_grant_is_one_time_and_never_resets(engine: object) -> None:
+def test_grant_is_one_time_and_never_resets(engine: object) -> None:
     """A legacy account's partially-spent grant is honored as-is — never topped up."""
     with Session(engine) as session:
         session.add(
@@ -466,7 +466,7 @@ def test_free_grant_is_one_time_and_never_resets(engine: object) -> None:
         )
         session.commit()
     snapshot = StripeBillingService(engine=engine).get_wallet("u@x.com")
-    assert snapshot.free_grant_remaining == 40
+    assert snapshot.grant_remaining == 40
     assert _grant_remaining(engine, "u@x.com") == 40
 
 
@@ -1338,7 +1338,7 @@ def test_webhook_refund_of_spent_cents_records_debt_and_blocks_spending(engine: 
     assert service.debit_run("u@x.com", _usages(100_000), model=None, description="r") == 0
 
 
-def test_webhook_clawback_drains_free_grant_before_recording_debt(engine: object, webhook_ready: None) -> None:
+def test_webhook_clawback_drains_grant_before_recording_debt(engine: object, webhook_ready: None) -> None:
     """A clawback exceeding the paid balance takes the grant next so it cannot be spent on top of the reversal."""
     with Session(engine) as session:
         session.add(
@@ -1363,7 +1363,7 @@ def _close_wallet(engine: object, username: str) -> None:
 
     Args:
         engine: The SQLite engine holding the seeded wallet.
-        username: The wallet owner whose balance and free grant go to zero.
+        username: The wallet owner whose balance and grant go to zero.
     """
     with Session(engine) as session:
         customer = session.get(BillingCustomerModel, username)

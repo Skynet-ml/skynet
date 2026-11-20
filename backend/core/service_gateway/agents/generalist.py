@@ -1131,7 +1131,7 @@ _ALWAYS_TOOLS = frozenset(
         "get_analytics_summary_analytics_summary_get",
         "get_optimizer_stats_analytics_optimizers_get",
         "get_model_stats_analytics_models_get",
-        # Read-only wallet: balance, free grant, plan, and recent ledger —
+        # Read-only wallet: one balance, plan, and recent ledger —
         # lets the agent answer "how much money do I have left / what did I spend?".
         "get_wallet_for_agent",
         "serve_info_serve",
