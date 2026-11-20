@@ -4797,6 +4797,56 @@ def test_a_command_entry_ignores_request_code_in_the_metric_hash(tmp_path: Path)
     assert facts["metric_sha256"] == hashlib.sha256(_framed("eval/metric.sh", b"exit 0\n")).hexdigest()
 
 
+def test_the_metric_hash_covers_the_metric_setup_command_and_the_record_shows_it(tmp_path: Path) -> None:
+    """``[metric] setup`` is one more framed part, so a changed build changes ``metric_sha256`` (SKY-740)."""
+    archive = _tree(tmp_path, {"eval/metric.sh": "exit 0\n"})
+    facts = {
+        setup: repo_staging._record_facts(
+            archive,
+            contract_sha256="0" * 64,
+            metric_files=("eval",),
+            metric_entry=("bash", "eval/metric.sh"),
+            metric_code="",
+            drafts={},
+            cases_file=None,
+            cases=None,
+            metric_setup=setup,
+        )
+        for setup in (None, "make -C eval", "make -C eval all")
+    }
+
+    assert "metric_setup" not in facts[None]
+    assert facts["make -C eval"]["metric_setup"] == "make -C eval"
+    assert len({fact["metric_sha256"] for fact in facts.values()}) == 3
+    expected = hashlib.sha256(_framed("/[metric] setup", b"make -C eval") + _framed("eval/metric.sh", b"exit 0\n"))
+    assert facts["make -C eval"]["metric_sha256"] == expected.hexdigest()
+
+
+def test_a_metric_setup_stages_into_the_workspace_and_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Staging keeps the ``[metric] setup`` command for the workspace and the run record (SKY-740)."""
+    tree = {
+        **_COMMAND_TREE,
+        "optimize.toml": _COMMAND_TREE["optimize.toml"] + 'setup = "cp eval/words.txt eval/built.txt"\n',
+    }
+    _, staged = _stage_with(tree, monkeypatch, _record_payload())
+    staged.cleanup()
+
+    assert staged.metric_setup == "cp eval/words.txt eval/built.txt"
+    assert staged.record_facts["metric_setup"] == "cp eval/words.txt eval/built.txt"
+
+
+def test_the_pull_request_shows_the_metric_setup_command() -> None:
+    """The record block names the build command, and a backtick in it stays inside the code span (SKY-740)."""
+    result = _recorded(target_reached=True, contract_met=True)
+    result["details"]["record"]["metric_setup"] = "make `nproc`"
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert '- Metric setup: `"make \\u0060nproc\\u0060"`' in body
+    assert _json_block(body) == result["details"]["record"]
+    assert "Metric setup" not in repo_staging._description(_recorded(contract_met=True), _EDIT, "https://x/run")
+
+
 @pytest.mark.parametrize(
     ("baseline", "optimized", "expected"),
     [(0.5, 0.2, _EDIT), (0.5, 0.5, None), (0.5, 0.8, None)],

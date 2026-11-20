@@ -117,9 +117,21 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "setup": frozenset({"command"}),
     # entry and setup name the user's own proposer command (SKY-753).
     "proposer": _ROLE_KEYS | {"entry", "setup"},
-    # direction says which way the score improves (SKY-750).
+    # direction says which way the score improves (SKY-750); setup builds the metric once (SKY-740).
     "metric": frozenset(
-        {"files", "exploits", "reference", "entry", "direction", "mcp", "network", "services", "illegal", "vcpus"}
+        {
+            "files",
+            "exploits",
+            "reference",
+            "entry",
+            "direction",
+            "setup",
+            "mcp",
+            "network",
+            "services",
+            "illegal",
+            "vcpus",
+        }
     ),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
@@ -298,6 +310,8 @@ class MetricSpec:
     # "path.py:function" for request code, or a command list that runs a [metric] files file (SKY-738).
     entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY
     direction: str = MAXIMIZE
+    # One shell command that builds the metric once in the metric setup box (SKY-740).
+    setup: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1331,8 +1345,8 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
 
     Raises:
         ConstraintsError: When a path is malformed or names the whole repository,
-            or when ``entry`` is neither form, or is a command that runs no file
-            from ``[metric] files``.
+            when ``entry`` is neither form, or is a command that runs no file
+            from ``[metric] files``, or when ``setup`` is not bounded text.
     """
     files = _paths(section, "files", "metric") or ()
     exploits = _metric_path(section, "exploits") or _DEFAULT_EXPLOITS
@@ -1357,7 +1371,10 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
             section="metric",
             key="direction",
         )
-    return MetricSpec(files=files, exploits=exploits, reference=reference, entry=entry, direction=direction)
+    setup = _text(section["setup"], "[metric] setup", _MAX_COMMAND_CHARS) if "setup" in section else None
+    return MetricSpec(
+        files=files, exploits=exploits, reference=reference, entry=entry, direction=direction, setup=setup
+    )
 
 
 def _cases_file(section: Mapping[str, Any] | None) -> str | None:

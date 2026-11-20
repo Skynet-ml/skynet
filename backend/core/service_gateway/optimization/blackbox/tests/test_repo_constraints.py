@@ -2428,3 +2428,28 @@ def test_a_bad_metric_direction_names_both_values(value: bytes) -> None:
     with pytest.raises(ConstraintsError, match=r'\[metric\] direction must be "maximize" or "minimize"') as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == ("metric", "direction")
+
+
+@pytest.mark.parametrize(
+    ("line", "setup"),
+    [
+        (b"", None),
+        (b'setup = "go build -o metric ./cmd/metric"\n', "go build -o metric ./cmd/metric"),
+        (b'setup = "  cargo build --release  "\n', "cargo build --release"),
+    ],
+)
+def test_the_metric_setup_is_one_command_or_none(line: bytes, setup: str | None) -> None:
+    """``[metric] setup`` parses as one stripped command; a file without it builds nothing (SKY-740)."""
+    raw = b'version = 1\n[metric]\nfiles = ["eval"]\n' + line + b'[run]\nentry = "src/app.py:run"\n'
+
+    assert parse_constraints(raw).metric.setup == setup
+
+
+@pytest.mark.parametrize("value", [b"1", b'["cargo", "build"]', b'""', b'"   "', b'"' + b"x" * 301 + b'"'])
+def test_a_bad_metric_setup_fails_with_the_setup_command_limit(value: bytes) -> None:
+    """Another type, a blank text or a text over the ``[setup] command`` limit fails with one message (SKY-740)."""
+    raw = b"version = 1\n[metric]\nsetup = " + value + b'\n[run]\nentry = "src/app.py:run"\n'
+
+    with pytest.raises(ConstraintsError, match=r"\[metric\] setup must be text of 1 to 300 characters") as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("metric", "setup")

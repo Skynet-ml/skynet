@@ -53,6 +53,28 @@ before the metric runs. The metric reaches a stage with `call(name, input)`,
 the parent runs the stage in its box, and it writes the answer back into the
 metric box.
 
+The metric setup box makes the saved metric state once for each run
+(`RepoWorkspace._setup_metric`). It opens with `private=True`, no services,
+no secret and the package registry hosts (`PACKAGE_REGISTRY_HOSTS`) as its
+only network. It installs the packages of `.optimize/metric-requirements.txt`.
+When `optimize.toml` sets `[metric] setup` (SKY-740), it then installs the
+metric files into `.app-metric/repo` and runs the command there once, with
+the 30-minute setup time limit. A failed or timed-out build raises
+`RepoSetupError` with the redacted last lines of its output, before any
+candidate box opens. After the build, the box removes the metric files
+again, so the saved state holds the build output but no metric source. The
+parent then saves the box state. The saved state can be the box working
+folder only, so files that the build writes outside it may not be kept;
+build into the metric files' folder. Files inside the working folder are
+kept and enter every metric box. Local Docker boxes and the local runtime
+set `HOME` to the working folder. The image sends the Go and Rust caches to
+`/tmp` (see the table below), but the local runtime does not, so there
+`~/.cargo` and `~/go` stay in the saved state. A metric setup should keep
+its caches small, for example with `CARGO_HOME` or `GOMODCACHE` under
+`/tmp`. Each metric box then extracts the metric files over that folder again, so the built files stay next to them.
+The box has its own `metric-setup` operation key, so its time counts in the
+run's cost.
+
 The parent starts the `[run]` supervisor with `sudo: true`, through the model
 mailbox, so the entry keeps its model route. On Vercel the root exec wrapper
 first makes a root-owned `/tmp/.app-root-output-<token>` folder with mode 0755.

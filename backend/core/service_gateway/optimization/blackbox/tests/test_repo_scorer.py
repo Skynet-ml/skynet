@@ -5200,7 +5200,13 @@ fi
 """
 
 
-def _command_scorer(tmp_path: Path, metric: str, monkeypatch: pytest.MonkeyPatch) -> tuple[RepoScorer, Path]:
+def _command_scorer(
+    tmp_path: Path,
+    metric: str,
+    monkeypatch: pytest.MonkeyPatch,
+    metric_setup: str | None = None,
+    entry: str = "eval/metric.sh",
+) -> tuple[RepoScorer, Path]:
     """Build a scorer whose ``[metric] entry`` is a bash command in the hidden ``eval`` folder (SKY-738).
 
     Args:
@@ -5208,6 +5214,8 @@ def _command_scorer(tmp_path: Path, metric: str, monkeypatch: pytest.MonkeyPatch
         metric: The text of ``eval/metric.sh``.
         monkeypatch: Puts this interpreter's folder first on ``PATH``, since the box's
             ``python3`` must run the OpenAscent package.
+        metric_setup: The ``[metric] setup`` command, or None (SKY-740).
+        entry: The bash script that ``[metric] entry`` runs.
 
     Returns:
         The scorer and its archive.
@@ -5224,11 +5232,12 @@ def _command_scorer(tmp_path: Path, metric: str, monkeypatch: pytest.MonkeyPatch
             setup_command=None,
             secrets={},
             hidden_paths=["eval"],
+            metric_setup=metric_setup,
         ),
         "",
         timeout_seconds=60,
         run_entry=("sh", "-c", "cat src/app.py"),
-        metric_entry=("bash", "eval/metric.sh"),
+        metric_entry=("bash", entry),
     )
     return scorer, archive
 
@@ -5248,6 +5257,32 @@ def test_a_bash_metric_scores_each_version_through_the_local_runtime(
     assert (baseline["score"], baseline["feedback"]) == (pytest.approx(0.1), "not seven")
     assert (improved["score"], improved["feedback"]) == (pytest.approx(0.7), "seven")
     assert improved["scores"] == {"exact": {"score": pytest.approx(1.0), "feedback": ""}}
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+def test_a_metric_setup_builds_the_bash_metric_once_and_each_score_uses_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[metric] setup`` builds the metric one time; each score runs the built file (SKY-740).
+
+    The build writes ``eval/built.sh`` from the checked-in source and adds one line to
+    ``eval/builds.log``. The built metric puts that line count in its feedback, so two
+    scores that both say ``builds=1`` prove that the setup ran once and its files stayed.
+    """
+    template = (
+        "builds=$(wc -l < eval/builds.log | tr -d ' ')\n"
+        'echo "{\\"score\\": 0.7, \\"feedback\\": \\"builds=$builds\\"}" > "$ASCENT_OUTPUT"\n'
+    )
+    build = "cp eval/metric.sh eval/built.sh && echo built >> eval/builds.log"
+    scorer, archive = _command_scorer(tmp_path, template, monkeypatch, metric_setup=build, entry="eval/built.sh")
+    try:
+        first = scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 7\n"}), {"input": 1})
+        second = scorer.score(_patch(tmp_path / "v2", archive, {"src/app.py": "x = 7\n"}), {"input": 2})
+    finally:
+        scorer.close()
+
+    assert (first["score"], first["feedback"]) == (pytest.approx(0.7), "builds=1")
+    assert second["feedback"] == "builds=1"
 
 
 @pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
