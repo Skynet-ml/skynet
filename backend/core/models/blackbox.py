@@ -956,7 +956,11 @@ class BlackboxRunResponse(BaseModel):
     engine_used: str
     baseline_score: float | None = None
     best_score: float | None = None
+    # Positive when the run got better, in the direction below (SKY-750).
     metric_improvement: float | None = None
+    # ``[metric] direction``: every score in this result is the metric's own
+    # score, and for ``minimize`` a lower score is better.
+    direction: Literal["maximize", "minimize"] = "maximize"
     baseline_feedback: str | None = None
     best_feedback: str | None = None
     baseline_named_scores: dict[str, BlackboxNamedScore] = Field(default_factory=dict)

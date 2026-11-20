@@ -36,6 +36,7 @@ from ...models import (
 )
 from ...models.results import result_scores
 from ...service_gateway.language_models import usage_by_model_from_history
+from ...service_gateway.optimization.blackbox.repo_constraints import MINIMIZE
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
 from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, is_admin
@@ -933,7 +934,9 @@ def build_summary(job_data: dict) -> OptimizationSummaryResponse:
 
     metric_improvement = None
     if baseline is not None and optimized is not None:
-        metric_improvement = round(optimized - baseline, 6)
+        # Positive when the run got better, also when a lower score is better (SKY-750).
+        gain = baseline - optimized if result_data.get("direction") == MINIMIZE else optimized - baseline
+        metric_improvement = round(gain, 6)
 
     elapsed_str, elapsed_secs = compute_elapsed(
         created_at, started_at, completed_at, job_data.get("accumulated_runtime_seconds") or 0.0

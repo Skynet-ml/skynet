@@ -265,7 +265,9 @@ def _job(place: str = "cloud", **overrides: Any) -> HardeningJob:
     return new_job(**kwargs)
 
 
-def _run(job: HardeningJob, runner: FakeRunner, tmp_path: Path, reference: Path | None = None) -> HardeningJob:
+def _run(
+    job: HardeningJob, runner: FakeRunner, tmp_path: Path, reference: Path | None = None, *, minimize: bool = False
+) -> HardeningJob:
     """Advance ``job`` until it waits for the user or ends.
 
     Args:
@@ -273,11 +275,14 @@ def _run(job: HardeningJob, runner: FakeRunner, tmp_path: Path, reference: Path 
         runner: The fake runner.
         tmp_path: The test folder; the suite goes under it.
         reference: The optional reference solution.
+        minimize: Whether the metric's direction is minimize.
 
     Returns:
         The advanced job.
     """
-    return run_until_wait(job, runner=runner, exploits_path=tmp_path / "exploits", reference=reference)
+    return run_until_wait(
+        job, runner=runner, exploits_path=tmp_path / "exploits", reference=reference, minimize=minimize
+    )
 
 
 def _confirm_all(job: HardeningJob) -> HardeningJob:
@@ -567,6 +572,59 @@ def test_suite_pass_rule() -> None:
     assert exploit_passes(0.8, 0.8) is True
     assert exploit_passes(0.2, 0.8) is True
     assert exploit_passes(0.81, 0.8) is False
+
+
+def test_suite_pass_rule_flips_for_a_minimize_metric() -> None:
+    """For a minimize metric an exploit passes when it scores no lower than the base (SKY-750)."""
+    assert exploit_passes(0.8, 0.8, minimize=True) is True
+    assert exploit_passes(0.9, 0.8, minimize=True) is True
+    assert exploit_passes(0.2, 0.8, minimize=True) is False
+
+
+@pytest.mark.parametrize(("fix_holds", "expected"), [(True, "fail"), (False, "pass")])
+def test_suite_replay_follows_a_minimize_metric(tmp_path: Path, fix_holds: bool, expected: str) -> None:
+    """For a minimize metric, an exploit that scores below the base still pays, so the replay fails (SKY-750)."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]], fix_holds=fix_holds)
+    job = _run(_confirm_all(_run(_job(), runner, tmp_path, minimize=True)), runner, tmp_path, minimize=True)
+
+    fix = job.rounds_detail[0].fix
+    assert fix is not None
+    assert fix.checks.suite_replay == expected
+
+
+class _RaisesReferenceRunner(FakeRunner):
+    """A fake runner whose fix raises the reference score."""
+
+    def reference_score(self, *, fix_diff: str | None, reference: Path) -> float:
+        """Score the reference solution, higher once the fix is applied.
+
+        Args:
+            fix_diff: The fix to apply first, if any.
+            reference: The reference solution.
+
+        Returns:
+            The metric score.
+        """
+        self._call("reference_score", fix_diff=fix_diff, reference=reference)
+        return 0.95 if fix_diff else 0.9
+
+
+@pytest.mark.parametrize(
+    ("runner_type", "script", "expected"),
+    [(FakeRunner, {"fix_lowers_reference": True}, "pass"), (_RaisesReferenceRunner, {}, "fail")],
+)
+def test_reference_check_follows_a_minimize_metric(
+    tmp_path: Path, runner_type: type[FakeRunner], script: dict[str, bool], expected: str
+) -> None:
+    """For a minimize metric, a fix that lowers the reference score is better and one that raises it is worse."""
+    runner = runner_type([[(_CASE, _EXPLOIT)]], fix_holds=False, **script)
+    reference = tmp_path / "reference.txt"
+    first = _run(_job(), runner, tmp_path, reference, minimize=True)
+    job = _run(_confirm_all(first), runner, tmp_path, reference, minimize=True)
+
+    fix = job.rounds_detail[0].fix
+    assert fix is not None
+    assert fix.checks.reference_not_lower == expected
 
 
 def test_parse_verdict_reads_a_mapping_or_json_text() -> None:

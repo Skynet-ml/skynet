@@ -600,7 +600,10 @@ export interface BlackboxRunResult {
   baseline_score?: number | null;
   /** Fresh final-run score of the winner. */
   best_score?: number | null;
+  /** Positive when the run got better, also for a `minimize` run. */
   metric_improvement?: number | null;
+  /** Which way the score improves (`[metric] direction`); absent on older runs means `maximize`. */
+  direction?: "maximize" | "minimize";
   /** The final run's top-level feedback; null when there are cases (see `case_results`). */
   baseline_feedback?: string | null;
   best_feedback?: string | null;

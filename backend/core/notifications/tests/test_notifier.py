@@ -164,3 +164,12 @@ def test_missing_recipient_is_a_no_op(sent: _Recorder) -> None:
     notify_job_completed("run1", "", "success")
 
     assert sent.calls == []
+
+
+def test_a_minimize_run_reports_a_positive_delta_when_the_score_went_down(sent: _Recorder) -> None:
+    """The delta is positive when the run got better, also when a lower score is better (SKY-750)."""
+    notify_job_completed("run1", "alice", "success", baseline_score=230.0, optimized_score=180.0, direction="minimize")
+    notify_run_new_best("run9", "alice", 0.2, 0.5, direction="minimize")
+
+    assert sent.calls[0]["facts"]["delta"] == 50.0
+    assert sent.calls[1]["facts"]["delta"] == pytest.approx(0.3)

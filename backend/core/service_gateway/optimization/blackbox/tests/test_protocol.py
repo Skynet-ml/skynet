@@ -833,3 +833,55 @@ def test_flat_tool_shapes_round_trip_through_the_openai_form() -> None:
 
     assert {"name": sent["name"], "description": sent["description"], "input_schema": sent["parameters"]} == definition
     assert tool_calls_from_openai(message) == [call]
+
+
+_DIRECTION_SCORES = {"low": 0.2, "mid": 0.5, "high": 0.8}
+
+
+def _direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score each named version with a fixed raw score."""
+    return _DIRECTION_SCORES[candidate], {}
+
+
+def test_a_minimize_server_gives_the_engines_negated_scores_and_the_lowest_version_as_best() -> None:
+    """Every engine maximizes, so a minimize run negates each score; raw_score turns it back (SKY-750)."""
+    seen: list[float | None] = []
+    server = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+
+    scores = [server.evaluate(name)[0] for name in ("mid", "low", "high")]
+
+    assert server.minimizes
+    assert scores == [-0.5, -0.2, -0.8]
+    assert seen == [0.5, 0.2, 0.8]
+    assert server.best_candidate == "low"
+    assert server.raw_score(server.best_score) == 0.2
+    assert server.raw_score(server.raw_score(0.3)) == 0.3
+    assert server.raw_score(None) is None
+
+
+def test_a_minimize_lane_follows_its_root_and_record_external_takes_a_raw_score() -> None:
+    """A lane shares the root's direction, and an outside score is the metric's own score (SKY-750)."""
+    seen: list[float | None] = []
+    root = EvalServer(
+        _direction_scorer, max_evals=10, on_eval=lambda _server, score: seen.append(score), direction="minimize"
+    )
+    lane = root.lane(5)
+
+    lane.charge("ext", 0.1, {})
+
+    assert lane.minimizes
+    assert root.mean_score("ext") == -0.1
+    assert lane.raw_score(lane.mean_score("ext")) == 0.1
+    assert seen == [0.1]
+
+
+def test_a_maximize_server_keeps_raw_scores() -> None:
+    """The default direction leaves every score as the metric gave it."""
+    server = EvalServer(_direction_scorer, max_evals=10)
+
+    assert [server.evaluate(name)[0] for name in ("low", "high")] == [0.2, 0.8]
+    assert not server.minimizes
+    assert server.best_candidate == "high"
+    assert server.raw_score(0.8) == 0.8

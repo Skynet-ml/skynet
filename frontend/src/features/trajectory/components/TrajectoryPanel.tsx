@@ -16,7 +16,7 @@ import {
   extractRejected,
   scopeToLatestLane,
 } from "../lib/extract-events";
-import { layoutTrajectory } from "../lib/layout";
+import { layoutTrajectory, minimizesRun } from "../lib/layout";
 import { rememberTrajectoryView } from "../lib/climb-view-hint";
 import type { BlackboxTrajectoryContext } from "../lib/types";
 import { TimelineScrubber } from "./TimelineScrubber";
@@ -44,6 +44,7 @@ export interface TrajectoryPanelProps {
 
 export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
   const live = isLive(job);
+  const minimize = minimizesRun(job);
   const { candidates, rejected, minibatch } = useMemo(() => {
     const events = job.progress_events ?? [];
     const scoped = scopeToLatestLane(events);
@@ -74,12 +75,12 @@ export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
     return rejected.filter((r) => visibleIds.has(r.parent_id));
   }, [rejected, generationFilter, visibleCandidates]);
   const layout = useMemo(
-    () => layoutTrajectory(visibleCandidates, visibleRejected),
-    [visibleCandidates, visibleRejected],
+    () => layoutTrajectory(visibleCandidates, visibleRejected, minimize),
+    [visibleCandidates, visibleRejected, minimize],
   );
   const layoutWithoutRejected = useMemo(
-    () => layoutTrajectory(visibleCandidates),
-    [visibleCandidates],
+    () => layoutTrajectory(visibleCandidates, [], minimize),
+    [visibleCandidates, minimize],
   );
   const [selected, setSelected] = useState<Selected | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);

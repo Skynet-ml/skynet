@@ -1251,6 +1251,27 @@ def test_list_jobs_prunes_result_to_summary_scalars(store: SQLiteJobStore) -> No
     assert store.get_job("lr-run")["result"] == full_result
 
 
+def test_pruned_result_keeps_the_metric_direction(store: SQLiteJobStore) -> None:
+    """List and analytics rows keep ``direction``, so readers sign a minimize gain right (SKY-750).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("lr-min", username="alice")
+    store.update_job(
+        "lr-min",
+        status="success",
+        result={"baseline_score": 10.0, "best_score": 8.0, "direction": "minimize", "versions": []},
+    )
+    expected = {"baseline_score": 10.0, "best_score": 8.0, "direction": "minimize"}
+
+    [listed] = store.list_jobs()
+    [scanned] = store.scan_jobs_for_analytics()
+
+    assert listed["result"] == expected
+    assert scanned["result"] == expected
+
+
 def test_shared_list_surfaces_prune_result_the_same_way(store: SQLiteJobStore) -> None:
     """The visible-to and shared-with pages carry the same pruned result as list_jobs.
 

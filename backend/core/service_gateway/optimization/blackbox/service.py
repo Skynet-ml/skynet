@@ -47,6 +47,7 @@ from ....constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
     PROGRESS_BASELINE,
+    PROGRESS_CANDIDATE,
     PROGRESS_EVALUATION_STARTED,
     PROGRESS_OPTIMIZED,
     PROGRESS_OPTIMIZER,
@@ -115,7 +116,7 @@ from .protocol import (
     warn_once_without_feedback,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
-from .repo_constraints import CONSTRAINTS_FILE, ConstraintsError, parse_constraints
+from .repo_constraints import CONSTRAINTS_FILE, MAXIMIZE, MINIMIZE, ConstraintsError, parse_constraints
 from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime
@@ -793,6 +794,20 @@ def _reaches(value: float, bound: float) -> bool:
     return value >= bound or math.isclose(value, bound, rel_tol=1e-9, abs_tol=1e-12)
 
 
+def _improvement(baseline: float, optimized: float, direction: str) -> float:
+    """Return how much ``optimized`` beat ``baseline``: positive when the run got better.
+
+    Args:
+        baseline: The starting point's score.
+        optimized: The reported version's score.
+        direction: ``"maximize"`` or ``"minimize"`` (SKY-750).
+
+    Returns:
+        ``optimized - baseline`` for a maximize run, ``baseline - optimized`` for a minimize run.
+    """
+    return baseline - optimized if direction == MINIMIZE else optimized - baseline
+
+
 def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
     """Judge the ``[outcome]`` target and minimums of ``optimize.toml`` on the reported final run.
 
@@ -801,11 +816,12 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
     fail. The verdict only reports: it never changes what the run publishes.
 
     Args:
-        outcome: The snapshot's ``{"target": float | None, "require": {name: minimum}}``.
+        outcome: The snapshot's ``{"target": float | None, "require": {name: minimum}, "direction": str}``.
         best: The reported version's final run, if it had one.
 
     Returns:
-        ``target`` and ``target_reached`` when the file sets a target, and
+        ``target`` and ``target_reached`` when the file sets a target (for a
+        minimize run, a score equal to or below it reaches it), and
         ``minimums_passed`` and ``failed_minimums`` when it sets minimums.
         A version with no final score reaches no target and passes no minimum.
         A score that is not a finite number reaches nothing and is stored as
@@ -815,7 +831,9 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
     verdict: dict[str, Any] = {}
     if outcome.get("target") is not None:
         target = float(outcome["target"])
-        reached = score is not None and math.isfinite(score) and _reaches(score, target)
+        # Named minimums stay minimums; only the total score follows ``[metric] direction`` (SKY-750).
+        sign = -1.0 if outcome.get("direction") == MINIMIZE else 1.0
+        reached = score is not None and math.isfinite(score) and _reaches(sign * score, sign * target)
         verdict.update(target=target, target_reached=reached)
     minimums = outcome.get("require") or {}
     if minimums:
@@ -847,6 +865,54 @@ def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str
 VERSION_SIDE_INFO_BYTE_CAP = 3_000_000
 
 
+# SKY-750: engine events and engine metadata carry engine-scale scores under
+# these keys; a minimize run must show the metric's own scores. Side info
+# (``scores``, ``infos``) and named scores hold the scorer's own numbers, so
+# they are left alone.
+_ENGINE_SCORE_KEYS = frozenset(
+    {
+        "score",
+        "best_score",
+        "val_score",
+        "best_val_score",
+        "parent_score",
+        "proposal_score",
+        "average_score",
+        "development_score",
+    }
+)
+_SCORER_OWNED_KEYS = frozenset({"scores", "infos", "side_info", "scorer_feedback", "named_scores"})
+
+
+def _raw_engine_scores(value: Any, server: EvalServer) -> Any:
+    """Copy an engine payload with each engine-scale score turned back into the metric's own score.
+
+    Args:
+        value: A progress payload, engine metadata, or a part of one.
+        server: The run's root eval server, which knows the run's direction.
+
+    Returns:
+        The same shape; a number under a key of :data:`_ENGINE_SCORE_KEYS` is
+        unchanged for a maximize run and negated for a minimize run.
+    """
+    if not server.minimizes:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: (
+                server.raw_score(item)
+                if key in _ENGINE_SCORE_KEYS and isinstance(item, int | float) and not isinstance(item, bool)
+                else item
+                if key in _SCORER_OWNED_KEYS
+                else _raw_engine_scores(item, server)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_raw_engine_scores(item, server) for item in value]
+    return value
+
+
 def _validation_scores(lanes: list[LaneOutcome]) -> dict[str, float]:
     """Collect each candidate's validation-set score from the lanes that recorded lineage.
 
@@ -869,11 +935,11 @@ def _validation_scores(lanes: list[LaneOutcome]) -> dict[str, float]:
 
 
 def _version_history(server: EvalServer, val_scores: dict[str, float] | None = None) -> list[BlackboxVersion]:
-    """Turn the eval server's records into the persisted version history.
+    """Turn the eval server's records into the persisted version history, with the metric's own scores.
 
     Args:
         server: The run's root eval server.
-        val_scores: Validation-set score per :func:`candidate_key` from the
+        val_scores: Raw validation-set score per :func:`candidate_key` from the
             engines that recorded lineage; a version with one shows it as its
             ``score`` instead of the running mean.
 
@@ -890,8 +956,8 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
             candidate=record.candidate,
             score=None
             if record.metric_error is not None
-            else val_scores.get(candidate_key(record.candidate), record.mean_score),
-            mean_score=record.mean_score,
+            else val_scores.get(candidate_key(record.candidate), server.raw_score(record.mean_score)),
+            mean_score=server.raw_score(record.mean_score),
             evals=record.count,
             first_run=record.first_eval,
             side_info=json.loads(
@@ -911,10 +977,14 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
     ]
     sizes = [len(json.dumps(version.side_info)) for version in versions]
     total = sum(sizes)
-    # An unscored version ranks below every scored one, whatever the sign of the scores.
+    # An unscored version ranks below every scored one, whatever the sign of
+    # the scores; the engine scale puts the best version last in both directions.
     weakest_first = sorted(
         range(len(versions)),
-        key=lambda i: (float("-inf") if versions[i].score is None else versions[i].score, versions[i].first_run),
+        key=lambda i: (
+            float("-inf") if versions[i].score is None else server.raw_score(versions[i].score),
+            versions[i].first_run,
+        ),
     )
     for i in weakest_first[:-1]:
         if total <= VERSION_SIDE_INFO_BYTE_CAP:
@@ -952,14 +1022,16 @@ def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[
                 TQDM_N_KEY: server.used,
                 TQDM_PERCENT_KEY: round(100.0 * server.used / server.max_evals, 1),
                 "last_score": score,
-                "best_score": server.best_score,
+                "best_score": server.raw_score(server.best_score),
             },
         )
 
     return on_eval
 
 
-def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCallback | None:
+def _without_unscored(
+    progress_callback: ProgressCallback | None, server: EvalServer | None = None
+) -> ProgressCallback | None:
     """Wrap the job's progress sink so engine events never show an unscored value.
 
     SKY-367: the pinned upstream engines get ``-inf`` for a metric error case
@@ -969,6 +1041,10 @@ def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCal
 
     Args:
         progress_callback: The job's progress sink, if any.
+        server: The run's root eval server; with one, a minimize run's
+            engine-scale scores go out as the metric's own scores (SKY-750),
+            and its candidate events say ``direction`` so the worker's
+            readers (notifications, recovery) pick the lowest score.
 
     Returns:
         A sink that nulls every non-finite number in the payload, or ``None``
@@ -984,6 +1060,10 @@ def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCal
             event: The progress event name.
             metrics: Its payload.
         """
+        if server is not None and server.minimizes:
+            metrics = _raw_engine_scores(metrics, server)
+            if event == PROGRESS_CANDIDATE:
+                metrics = {**metrics, "direction": MINIMIZE}
         progress_callback(event, finite_json(metrics))
 
     return sink
@@ -1278,12 +1358,16 @@ def _run_job(
         counts.selection_split,
         counts.report_split,
     )
+    # A run stored before SKY-750 has no direction in its snapshot, so it maximizes.
+    outcome_rules = (repo_snapshot or {}).get("outcome") or {}
+    direction = outcome_rules.get("direction") or MAXIMIZE
     server = EvalServer(
         warn_once_without_feedback(scorer),
         max_evals=job.budget.max_scorer_runs,
         on_eval=_progress_listener(progress_callback),
+        direction=direction,
     )
-    engine_progress = _without_unscored(progress_callback)
+    engine_progress = _without_unscored(progress_callback, server)
     seed_candidate = job.seed_candidate
 
     lm = build_language_model(job.reflection_model_settings, disable_cache=True)
@@ -1342,12 +1426,15 @@ def _run_job(
     )
     # A run stored before SKY-691 has no ``[outcome]`` in its snapshot; its
     # retired ``budget.stop_at_score`` stays its stop score.
-    outcome_target = ((repo_snapshot or {}).get("outcome") or {}).get("target")
+    outcome_target = outcome_rules.get("target")
     fields: dict[str, Any] = {
         "native_options": native_options,
         "proposer_token_budget_usd": token_budget,
         "seed": job.seed or 0,
-        "stop_at_score": outcome_target if outcome_target is not None else job.budget._legacy_stop_at_score,
+        # The engines stop on their own scale, so a minimize run stops at the negated target.
+        "stop_at_score": server.raw_score(outcome_target)
+        if outcome_target is not None
+        else job.budget._legacy_stop_at_score,
         "max_iterations": job.budget.max_iterations,
         "progress_callback": engine_progress,
     }
@@ -1420,6 +1507,7 @@ def _run_job(
         result = exc.result
         lanes = exc.evidence.pop("_lanes", [])
         if result is None and seed_candidate is not None:
+            # The Result stays on the engine scale, like an engine's own; the evidence is raw.
             seed_score = server.mean_score(seed_candidate)
             result = Result(
                 best_candidate=seed_candidate,
@@ -1427,7 +1515,9 @@ def _run_job(
                 total_evals=server.used,
                 metadata={"selection_source": "seed"},
             )
-            exc.evidence.update(selection_scope=selection_scope, selection_score=seed_score, candidate_origin="seed")
+            exc.evidence.update(
+                selection_scope=selection_scope, selection_score=server.raw_score(seed_score), candidate_origin="seed"
+            )
         elif result is None:
             raise
 
@@ -1440,7 +1530,11 @@ def _run_job(
             "the engine picked a version with a %s (%s); using the best scored version", METRIC_ERROR, engine_pick_error
         )
         best_candidate = server.best_candidate or seed_candidate or best_candidate
-    logger.info("optimization finished after %d scorer run(s): best score %s", server.used, server.best_score)
+    logger.info(
+        "optimization finished after %d scorer run(s): best score %s",
+        server.used,
+        server.raw_score(server.best_score),
+    )
     if progress_callback is not None:
         progress_callback(PROGRESS_EVALUATION_STARTED, {})
     select_on = selection_cases(splits)
@@ -1485,7 +1579,7 @@ def _run_job(
                 baseline_val is not None
                 and best_val.score is not None
                 and baseline_val.score is not None
-                and best_val.score < baseline_val.score
+                and _improvement(baseline_val.score, best_val.score, direction) < 0
             ):
                 logger.info("the optimized version scored below the starting point on %s; keeping it", selection_scope)
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
@@ -1537,22 +1631,25 @@ def _run_job(
         replace(row, model=canonical_model_id(row.model)) for row in _combined_usage(lms, native_options)
     )
     engine_used = str(result.metadata.get("engine") or job.strategy.engine or BLACKBOX_STRATEGY_AUTO)
+    metadata = _raw_engine_scores(result.metadata, server)
     candidate_tree = [
         BlackboxCandidateNode(**{**node, "val_score": None} if server.metric_error(node["candidate"]) else node)
-        for node in result.metadata.pop("candidate_tree", [])
+        for node in metadata.pop("candidate_tree", [])
     ]
-    optimizer_best_score = None if engine_pick_error is not None else result.best_score
+    optimizer_best_score = None if engine_pick_error is not None else server.raw_score(result.best_score)
     verdict = _outcome_verdict((repo_snapshot or {}).get("outcome") or {}, best_run)
     # The engine metadata comes from the guest's result file; with no rule set, a guest
     # ``outcome`` would otherwise survive the spread below and pass for Skynet's verdict.
-    result.metadata.pop("outcome", None)
+    metadata.pop("outcome", None)
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,
         engine_used=engine_used,
         baseline_score=baseline,
         best_score=optimized,
-        metric_improvement=None if baseline is None or optimized is None else optimized - baseline,
+        metric_improvement=None
+        if baseline is None or optimized is None
+        else _improvement(baseline, optimized, direction),
         baseline_feedback=baseline_run.feedback if baseline_run else None,
         best_feedback=best_run.feedback if best_run else None,
         baseline_named_scores=baseline_run.named if baseline_run else {},
@@ -1570,13 +1667,16 @@ def _run_job(
                 status=lane.status,
                 best_score=None
                 if lane.best_candidate is not None and server.metric_error(lane.best_candidate)
-                else lane.best_score,
+                else server.raw_score(lane.best_score),
                 scorer_runs=lane.scorer_runs,
                 error=lane.error,
             )
             for lane in lanes
         ],
-        versions=_version_history(server, _validation_scores(lanes)),
+        versions=_version_history(
+            server,
+            _validation_scores([replace(lane, metadata=_raw_engine_scores(lane.metadata, server)) for lane in lanes]),
+        ),
         candidate_tree=candidate_tree,
         total_scorer_runs=server.used,
         runtime_seconds=time.perf_counter() - started,
@@ -1595,7 +1695,7 @@ def _run_job(
         details={
             "optimizer_best_score": optimizer_best_score,
             "selection_scope": selection_scope,
-            **finite_json(result.metadata),
+            **finite_json(metadata),
             # SKY-221: how many of the reported version's final cases failed.
             "failed_cases": len(best_run.failures) if best_run else None,
             # SKY-751: whether the starting code's final run had a failed [run]
@@ -1607,6 +1707,7 @@ def _run_job(
             **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,
+        direction=direction,
         baseline_val_score=baseline_val.score if baseline_val else None,
         best_val_score=best_val.score if best_val else None,
     )

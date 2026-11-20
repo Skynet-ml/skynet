@@ -3283,3 +3283,192 @@ def test_a_loop_routed_run_keeps_the_proposer_model_and_budget_checks(
 
     with pytest.raises(ServiceError, match=message):
         service_mod.validate_job(payload)
+
+
+# SKY-750: each version scores the same on every case, so the search, the
+# held-out run and the verdict all see these raw scores.
+_DIRECTION_SCORES = {"hello world": 0.5, "low": 0.2, "equal": 0.5, "high": 0.8}
+_DIRECTION_CODE = f"""
+def score(candidate, case=None):
+    return {{"score": {_DIRECTION_SCORES!r}[candidate], "feedback": "ok"}}
+"""
+
+
+def _direction_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    direction: str | None,
+    *,
+    pick: str | None = None,
+    target: float | None = None,
+) -> tuple[BlackboxRunResponse, list[tuple[str, dict[str, Any]]], list[tuple[float | None, float | None]]]:
+    """Run a search that scores the seed and three versions below, equal to and above it.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        tmp_path: Private optimizer workspace.
+        direction: The snapshot's ``[metric] direction``; ``None`` for a snapshot stored before SKY-750.
+        pick: The version the search reports; ``None`` reports the eval server's best.
+        target: The snapshot's ``[outcome] target``.
+
+    Returns:
+        The response, the progress events, and what the search saw: each
+        version's engine score and its raw score.
+    """
+    seen: list[tuple[float | None, float | None]] = []
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: Any, cb: Any = None, *, caps: object = None
+    ) -> tuple[Result, list[LaneOutcome]]:
+        """Score each version once and report the best one, as an engine does."""
+        for version in ("hello world", "low", "equal", "high"):
+            score, _ = server.evaluate(version, _OUTCOME_CASES[0])
+            seen.append((score, server.raw_score(score)))
+            cb(PROGRESS_CANDIDATE, {"candidate_id": version, "score": score})
+        best = pick or server.best_candidate
+        seen.append((ctx.stop_at_score, None))
+        return Result(best_candidate=best, best_score=server.mean_score(best), total_evals=server.used), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+    events: list[tuple[str, dict[str, Any]]] = []
+    outcome: dict[str, Any] = {"target": target, "require": {}}
+    if direction is not None:
+        outcome["direction"] = direction
+    response = _run(
+        _payload(scorer={"kind": "python", "metric_code": _DIRECTION_CODE}, cases=_OUTCOME_CASES),
+        artifact_id="job-direction",
+        gepa_log_dir_path=str(tmp_path),
+        progress_callback=lambda event, metrics: events.append((event, metrics)),
+        repo_snapshot={"outcome": outcome},
+    )
+    return response, events, seen
+
+
+def test_a_minimize_run_reports_the_lowest_version_as_best_with_raw_scores(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine climbs negated scores; the result, the versions and the progress show raw ones (SKY-750)."""
+    response, events, seen = _direction_run(monkeypatch, tmp_path, "minimize", target=0.3)
+
+    assert seen[:4] == [(-0.5, 0.5), (-0.2, 0.2), (-0.5, 0.5), (-0.8, 0.8)]
+    assert seen[4] == (-0.3, None)
+    assert response.direction == "minimize"
+    assert response.best_candidate == "low"
+    assert (response.baseline_score, response.best_score) == (pytest.approx(0.5), pytest.approx(0.2))
+    assert response.metric_improvement == pytest.approx(0.3)
+    assert response.regression_guard_applied is False
+    assert response.details["optimizer_best_score"] == pytest.approx(0.2)
+    assert response.details["outcome"] == {"target": 0.3, "target_reached": True}
+    assert {v.candidate: v.score for v in response.versions} == pytest.approx(_DIRECTION_SCORES)
+    candidates = [m for e, m in events if e == PROGRESS_CANDIDATE]
+    assert [(m["score"], m["direction"]) for m in candidates] == [
+        (0.5, "minimize"),
+        (0.2, "minimize"),
+        (0.5, "minimize"),
+        (0.8, "minimize"),
+    ]
+    progress = [m for e, m in events if e == PROGRESS_OPTIMIZER and "best_score" in m]
+    assert progress[-1]["best_score"] == pytest.approx(0.2)
+    assert all(m["last_score"] >= 0 for m in progress)
+
+
+@pytest.mark.parametrize("direction", [None, "maximize"])
+def test_a_maximize_run_and_an_old_snapshot_report_the_highest_version(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction: str | None
+) -> None:
+    """With no direction, or ``maximize``, scores pass unchanged and the highest version wins (SKY-750)."""
+    response, events, seen = _direction_run(monkeypatch, tmp_path, direction, target=0.3)
+
+    assert seen[:4] == [(0.5, 0.5), (0.2, 0.2), (0.5, 0.5), (0.8, 0.8)]
+    assert seen[4] == (0.3, None)
+    assert response.direction == "maximize"
+    assert response.best_candidate == "high"
+    assert response.metric_improvement == pytest.approx(0.3)
+    assert response.details["outcome"] == {"target": 0.3, "target_reached": True}
+    assert all("direction" not in m for e, m in events if e == PROGRESS_CANDIDATE)
+
+
+def test_a_minimize_run_keeps_the_seed_when_the_engine_picks_a_higher_version(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression guard treats a higher score as worse in a minimize run (SKY-750)."""
+    response, _, _ = _direction_run(monkeypatch, tmp_path, "minimize", pick="high", target=0.4)
+
+    assert response.regression_guard_applied is True
+    assert response.best_candidate == "hello world"
+    assert response.metric_improvement == pytest.approx(0.0)
+    assert response.details["outcome"] == {"target": 0.4, "target_reached": False}
+
+
+@pytest.mark.parametrize(
+    ("direction", "score", "reached"),
+    [
+        ("minimize", 0.3, True),
+        ("minimize", 0.3 + 1e-13, True),
+        ("minimize", 0.29, True),
+        ("minimize", 0.31, False),
+        ("maximize", 0.29, False),
+        ("maximize", 0.31, True),
+    ],
+)
+def test_a_minimize_target_is_reached_at_or_below_it(direction: str, score: float, reached: bool) -> None:
+    """A minimize run reaches its target at or below it, with the same rounding tolerance (SKY-750)."""
+    run = _constant_run(score, 1)
+
+    verdict = service_mod._outcome_verdict({"target": 0.3, "require": {"accuracy": 0.305}, "direction": direction}, run)
+
+    assert verdict["target_reached"] is reached
+    # Named minimums never follow the direction: only a score at or above 0.305 passes.
+    assert verdict["minimums_passed"] is (score >= 0.305)
+
+
+def test_a_minimize_run_shows_raw_scores_in_engine_payloads() -> None:
+    """Engine score keys turn back into raw scores; the scorer's own numbers stay as they are (SKY-750)."""
+    server = EvalServer(lambda c, e: (1.0, {}), max_evals=1, direction="minimize")
+    payload = {
+        "best_score": -0.2,
+        "candidate_tree": [{"val_score": -0.4, "label": "x"}],
+        "scores": {"latency": {"score": 0.7}},
+        "flag": True,
+    }
+
+    assert service_mod._raw_engine_scores(payload, server) == {
+        "best_score": 0.2,
+        "candidate_tree": [{"val_score": 0.4, "label": "x"}],
+        "scores": {"latency": {"score": 0.7}},
+        "flag": True,
+    }
+    maximize = EvalServer(lambda c, e: (1.0, {}), max_evals=1)
+    assert service_mod._raw_engine_scores(payload, maximize) is payload
+
+
+def test_only_engine_score_keys_outside_scorer_owned_keys_turn_raw() -> None:
+    """Pin the keys a minimize run negates: engine score keys at any depth, never under a scorer-owned key."""
+    server = EvalServer(lambda c, e: (1.0, {}), max_evals=1, direction="minimize")
+    engine_keys = sorted(service_mod._ENGINE_SCORE_KEYS)
+    owned = {key: {"score": 0.7, "best_score": 0.7} for key in service_mod._SCORER_OWNED_KEYS}
+    payload = {"nested": dict.fromkeys(engine_keys, -0.5), "other": -0.5, **owned}
+
+    raw = service_mod._raw_engine_scores(payload, server)
+
+    assert raw["nested"] == dict.fromkeys(engine_keys, 0.5)
+    assert raw["other"] == -0.5
+    for key in service_mod._SCORER_OWNED_KEYS:
+        assert raw[key] == {"score": 0.7, "best_score": 0.7}
+    assert {"scores", "infos", "side_info", "scorer_feedback", "named_scores"} <= service_mod._SCORER_OWNED_KEYS
+
+
+def test_the_side_info_trim_keeps_the_lowest_version_of_a_minimize_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over the byte cap, the trim drops side info from the worst versions first: the highest in a minimize run."""
+    server = EvalServer(
+        lambda c, e: ({"low": 0.2, "high": 0.8}[c], {"feedback": "x" * 100}), max_evals=2, direction="minimize"
+    )
+    server.evaluate("low")
+    server.evaluate("high")
+    monkeypatch.setattr(service_mod, "VERSION_SIDE_INFO_BYTE_CAP", 150)
+    monkeypatch.setattr(service_mod, "without_images", lambda side_info: {"trimmed": True})
+
+    versions = {v.candidate: v for v in service_mod._version_history(server)}
+
+    assert versions["low"].side_info.get("feedback") == "x" * 100
+    assert versions["high"].side_info == {"trimmed": True}

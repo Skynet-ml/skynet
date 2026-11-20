@@ -259,6 +259,17 @@ def test_prompts_hide_the_metric_for_black_box_and_show_it_for_white_box() -> No
     assert "The metric code" not in hs.brief_prompt(count=3, round_index=1, intent="", files=[], known=[], metric="")
 
 
+def test_prompts_ask_to_lower_a_minimize_metric() -> None:
+    """A minimize metric asks the attackers to lower the score; maximize keeps "raise" (SKY-750)."""
+    brief_args = {"count": 3, "round_index": 1, "intent": "", "files": [], "known": [], "metric": ""}
+    session_args = {"brief": "b", "round_index": 1, "tree": "a.py", "known": [], "metric": ""}
+
+    assert "try to lower this repository's metric" in hs.brief_prompt(**brief_args, minimize=True)
+    assert "a change that lowers this repository's metric" in hs.session_prompt(**session_args, minimize=True)
+    assert "try to raise this repository's metric" in hs.brief_prompt(**brief_args)
+    assert "a change that raises this repository's metric" in hs.session_prompt(**session_args)
+
+
 def test_a_session_runs_the_metric_then_writes_its_patch() -> None:
     """The session sees only the score and the feedback, and write_patch ends it with a claim."""
     scored: list[str] = []

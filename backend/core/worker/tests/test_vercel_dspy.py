@@ -287,6 +287,46 @@ def test_an_image_before_19_is_refused_for_a_run_of_a_command_metric(
         assert all(event.get("error") != vercel_dspy.COMMAND_METRIC_IMAGE_MESSAGE for event in seen)
 
 
+@pytest.mark.parametrize(
+    ("image_protocol", "direction", "refused"),
+    [(19, "minimize", True), (19, "maximize", False), (SANDBOX_PROTOCOL, "minimize", False)],
+)
+def test_an_image_before_20_is_refused_for_a_minimize_run(
+    image_protocol: int, direction: str, refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image before 20 ignores the outcome's direction and would maximize a minimize run (SKY-750).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        direction: The staged snapshot's ``outcome.direction``.
+        refused: Whether the worker refuses the image.
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    events: queue.Queue = queue.Queue()
+    outcome = {"target": None, "require": {}, "direction": direction}
+    payload = _descriptor_payload(
+        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "outcome": outcome}
+    )
+
+    vercel_dspy.run_vercel_dspy(payload, "job-direction", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+
+    if refused:
+        assert session.steps == ["probe"]
+        assert seen[0]["error"] == vercel_dspy.DIRECTION_IMAGE_MESSAGE
+    else:
+        assert "optimizer" in session.steps
+        assert all(event.get("error") != vercel_dspy.DIRECTION_IMAGE_MESSAGE for event in seen)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 

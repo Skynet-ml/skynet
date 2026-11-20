@@ -405,6 +405,19 @@ def test_the_job_reads_the_default_exploits_folder_without_a_metric_section(tmp_
     assert workspace is not None
     assert workspace.exploits_path == workspace.trusted_root / ".optimize/exploits"
     assert workspace.reference is None
+    assert workspace.minimize is False
+
+
+def test_the_job_reads_a_minimize_metric_direction(tmp_path: Path) -> None:
+    """``[metric] direction = "minimize"`` reaches the fix checks through the workspace (SKY-750)."""
+    toml = _TOML + b'direction = "minimize"\n'
+    recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: toml})
+
+    _run(recorder, _cloud_job(), local_mode=False)
+
+    workspace = recorder.workspace
+    assert workspace is not None
+    assert workspace.minimize is True
 
 
 def test_staging_gets_the_run_shaped_target_and_binding(tmp_path: Path) -> None:

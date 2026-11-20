@@ -112,9 +112,13 @@ function OverviewTabImpl({
   const bbResult = job.blackbox_result ?? null;
   const baseline = blackboxBaselineScore(bbResult);
   const optimized = blackboxBestScore(bbResult);
+  // SKY-750: the improvement is positive when the run got better, so a
+  // minimize run counts a lower score as a gain.
+  const minimizes = bbResult?.direction === "minimize";
+  const rawGain = (base: number, best: number) => (minimizes ? base - best : best - base);
   const improvement =
     bbResult?.metric_improvement ??
-    (baseline != null && optimized != null ? optimized - baseline : undefined);
+    (baseline != null && optimized != null ? rawGain(baseline, optimized) : undefined);
   // A stage the flow never ran (a black-box run measures no baseline without
   // a starting point) must not read as completed once the run is past it.
   const stageIndex = (stage: PipelineStage | "done") =>
@@ -147,7 +151,9 @@ function OverviewTabImpl({
   // unfinished run reads honestly. Improvement only resolves once both the
   // baseline and the optimized score exist, keeping the three cards coherent.
   const displayImprovement =
-    baseline != null && optimized != null ? (improvement ?? optimized - baseline) : undefined;
+    baseline != null && optimized != null
+      ? (improvement ?? rawGain(baseline, optimized))
+      : undefined;
   // SKY-751: a finished version with a failed case has no score; it says so, never 0.
   // A run with no starting point measures no baseline, so it shows no cards.
   // Only a successful run had its final run, so only there a missing score
@@ -257,6 +263,11 @@ function OverviewTabImpl({
                 <p dir="ltr" className="text-3xl font-mono font-bold text-primary tabular-nums">
                   {showScore(optimized)}
                 </p>
+                {minimizes && (
+                  <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+                    {msg("optimization.overview.lower_is_better")}
+                  </p>
+                )}
               </TiltCard>
             </StaggerItem>
             <StaggerItem>

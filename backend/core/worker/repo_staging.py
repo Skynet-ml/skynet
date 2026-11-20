@@ -81,6 +81,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
     DEFAULT_METRIC_ENTRY,
+    MINIMIZE,
     ConstraintsError,
     MetricSpec,
     RepoConstraints,
@@ -133,7 +134,7 @@ UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove t
 # Rules the run is held to; a resumed run must arrive at exactly these again.
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
-_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}}}
+_ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}, "direction": "maximize"}}
 _SETUP_ANSWER_TOKENS = 1_024
 _JUDGE_ROLE = "judge"
 # The per-run watch hook setting: ``{"enabled", "model", "threshold"}``, each
@@ -843,11 +844,23 @@ def _ensure_unchanged(previous: Any, current: dict[str, Any]) -> None:
     """
     if not isinstance(previous, dict):
         return
-    changed = [
-        name
-        for name in _ENFORCED_FIELDS
-        if previous.get(name, _ENFORCED_DEFAULTS.get(name)) != current.get(name, _ENFORCED_DEFAULTS.get(name))
-    ]
+
+    def enforced(environment: dict[str, Any], name: str) -> Any:
+        """Read one enforced field, with the value it had before the field or its key existed.
+
+        Args:
+            environment: A recorded or a current environment.
+            name: One of :data:`_ENFORCED_FIELDS`.
+
+        Returns:
+            The field's value; an ``outcome`` recorded before SKY-750 maximizes.
+        """
+        value = environment.get(name, _ENFORCED_DEFAULTS.get(name))
+        if name == "outcome" and isinstance(value, dict):
+            return {**_ENFORCED_DEFAULTS["outcome"], **value}
+        return value
+
+    changed = [name for name in _ENFORCED_FIELDS if enforced(previous, name) != enforced(current, name)]
     if changed:
         raise ConstraintsError(
             f"The run's environment changed since it was recorded ({', '.join(changed)}); clone the run to review it."
@@ -1297,18 +1310,33 @@ def _version_score(result: dict[str, Any], candidate: str) -> float | None:
     return None
 
 
+def _minimizes(result: dict[str, Any]) -> bool:
+    """Return whether the run wants the lowest score; a result stored before SKY-750 maximizes.
+
+    Args:
+        result: Finished black-box result.
+
+    Returns:
+        ``True`` for ``[metric] direction = "minimize"``.
+    """
+    return result.get("direction") == MINIMIZE
+
+
 def _ranking_score(result: dict[str, Any], candidate: str) -> float:
-    """Return a version's score for ranking, with unscored versions last.
+    """Return a version's score for ranking, higher is better, with unscored versions last.
 
     Args:
         result: Finished black-box result.
         candidate: The version's patch.
 
     Returns:
-        The recorded score, or negative infinity when the run never scored it.
+        The recorded score (negated for a minimize run), or negative infinity
+        when the run never scored it.
     """
     score = _version_score(result, candidate)
-    return float("-inf") if score is None else score
+    if score is None:
+        return float("-inf")
+    return -score if _minimizes(result) else score
 
 
 def _version_has_no_score(result: dict[str, Any], candidate: str) -> bool:
@@ -1446,7 +1474,8 @@ def improved_patch(result: dict[str, Any]) -> str | None:
         # failed, so the final run's own flag decides when there is one.
         seed_run_failed = run_failed_flag is True if final_run else _seed_run_failed(result)
         return best if seed_run_failed else None
-    return best if optimized > baseline else None
+    better = optimized < baseline if _minimizes(result) else optimized > baseline
+    return best if better else None
 
 
 # The record hashes stream each member in parts of this size, so a large
@@ -1728,7 +1757,10 @@ def _record_block(result: dict[str, Any]) -> str:
             target = ((result.get("details") or {}).get("outcome") or {}).get("target")
             score = result.get("best_score")
             reached = f"{score:.12g}" if _finite_number(score) else "no score"
-            failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
+            if _minimizes(result):
+                failed.append(f"The final score {reached} is not at or below the target {target:.12g}.")
+            else:
+                failed.append(f"The final score {reached} did not reach the target {target:.12g}.")
         failed.extend(str(entry.get("reason")) for entry in record.get("failed_minimums") or [])
         verdict = "This run did not meet the contract. " + " ".join(failed)
     split = record.get("split")
@@ -1784,10 +1816,11 @@ def _description(result: dict[str, Any], patch: str, run_url: str) -> str:
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
     if not _final_run_finished(result):
         baseline, optimized = _version_score(result, result.get("seed_candidate") or ""), _version_score(result, patch)
+    lower = " (lower is better)" if _minimizes(result) else ""
     went = (
-        f"Score went from {baseline:.4g} to {optimized:.4g}."
+        f"Score went from {baseline:.4g} to {optimized:.4g}{lower}."
         if baseline is not None
-        else f"The starting code has no score: it failed on at least one case. This version scored {optimized:.4g}."
+        else f"The starting code has no score: it failed on at least one case. This version scored {optimized:.4g}{lower}."
     )
     files = sorted(set(patch_paths(patch)))
     listed = "\n".join(f"- `{path}`" for path in files[:50])

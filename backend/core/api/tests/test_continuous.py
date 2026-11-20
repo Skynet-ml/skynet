@@ -1990,3 +1990,23 @@ def test_a_repository_fingerprint_changes_with_the_commit_or_the_scorer(env: _En
     assert base is not None
     assert continuous.held_out_fingerprint(other_commit) != base
     assert continuous.held_out_fingerprint(other_scorer) != base
+
+
+@pytest.mark.parametrize(
+    ("best", "status", "code"),
+    [
+        (0.6, "awaiting_review", "continuous.review_ready"),
+        (0.695, "regressed", "continuous.review_within_margin"),
+        (INCUMBENT_SCORE, "regressed", "continuous.review_regressed"),
+        (0.8, "regressed", "continuous.review_regressed"),
+    ],
+)
+def test_a_minimize_review_wins_only_with_a_lower_score(env: _Env, best: float, status: str, code: str) -> None:
+    """For ``[metric] direction = "minimize"`` the candidate must score lower than the incumbent by the margin (SKY-750)."""
+    _source_id, _plan, cycle = _started(env)
+    _finish(env, cycle.optimization_id, result={**_result(0.9, best), "direction": "minimize"})
+
+    continuous.review_cycle(env.store, cycle.id)
+
+    [cycle] = env.cycles()
+    assert (cycle.status, cycle.detail_code) == (status, code)

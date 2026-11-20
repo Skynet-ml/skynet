@@ -447,7 +447,8 @@ def run_strategy(
             {
                 "engine": lane.engine,
                 "phase": lane.phase,
-                "score": lane.best_score,
+                # The API shows raw scores; lane scores are on the engine scale (SKY-750).
+                "score": server.raw_score(lane.best_score),
                 "candidate": lane.best_candidate,
                 "status": lane.status,
             }

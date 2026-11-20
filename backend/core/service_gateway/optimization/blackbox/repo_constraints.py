@@ -106,6 +106,10 @@ _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
 # Every contract written before [metric] entry existed runs as this entry (SKY-738).
 DEFAULT_METRIC_ENTRY = "metric.py:score"
+# ``[metric] direction``: a higher score is better by default; a minimize run wants the lowest (SKY-750).
+MAXIMIZE = "maximize"
+MINIMIZE = "minimize"
+DIRECTIONS = (MAXIMIZE, MINIMIZE)
 _ROLE_KEYS = frozenset({"mcp", "network", "services", "illegal"})
 _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
@@ -113,7 +117,10 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "setup": frozenset({"command"}),
     # entry and setup name the user's own proposer command (SKY-753).
     "proposer": _ROLE_KEYS | {"entry", "setup"},
-    "metric": frozenset({"files", "exploits", "reference", "entry", "mcp", "network", "services", "illegal", "vcpus"}),
+    # direction says which way the score improves (SKY-750).
+    "metric": frozenset(
+        {"files", "exploits", "reference", "entry", "direction", "mcp", "network", "services", "illegal", "vcpus"}
+    ),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
@@ -290,6 +297,7 @@ class MetricSpec:
     reference: str | None = None
     # "path.py:function" for request code, or a command list that runs a [metric] files file (SKY-738).
     entry: str | tuple[str, ...] = DEFAULT_METRIC_ENTRY
+    direction: str = MAXIMIZE
 
 
 @dataclass(frozen=True)
@@ -436,6 +444,7 @@ class RepoEnvironment:
             "outcome": {
                 "target": file.outcome_target if file else None,
                 "require": dict(file.outcome_minimums) if file else {},
+                "direction": file.metric.direction if file else MAXIMIZE,
             },
             # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
             **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
@@ -1341,7 +1350,14 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
             section="metric",
             key="entry",
         )
-    return MetricSpec(files=files, exploits=exploits, reference=reference, entry=entry)
+    direction = section.get("direction", MAXIMIZE)
+    if direction not in DIRECTIONS:
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: [metric] direction must be "{MAXIMIZE}" or "{MINIMIZE}".',
+            section="metric",
+            key="direction",
+        )
+    return MetricSpec(files=files, exploits=exploits, reference=reference, entry=entry, direction=direction)
 
 
 def _cases_file(section: Mapping[str, Any] | None) -> str | None:

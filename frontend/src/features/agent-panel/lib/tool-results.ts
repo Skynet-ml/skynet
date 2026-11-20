@@ -772,6 +772,8 @@ export interface JobRow {
   optimizer: string;
   baseline: number | null;
   optimized: number | null;
+  /** Positive when the run got better, also for a ``minimize`` run (SKY-750). */
+  improvement: number | null;
 }
 
 /**
@@ -800,6 +802,7 @@ export function jobRows(value: unknown): { rows: JobRow[]; total: number | null 
         optimizer: str(r.optimizer_name),
         baseline: num(r.baseline_test_metric),
         optimized: num(r.optimized_test_metric),
+        improvement: num(r.metric_improvement),
       },
     ];
   });

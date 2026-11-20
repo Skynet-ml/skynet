@@ -823,8 +823,8 @@ def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
     first, staged = _stage_with(_TARGETED, monkeypatch)
     staged.cleanup()
 
-    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": 0.9, "require": {}}
-    assert first["target"]["repo"]["environment"]["outcome"] == {"target": 0.9, "require": {}}
+    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": 0.9, "require": {}, "direction": "maximize"}
+    assert first["target"]["repo"]["environment"]["outcome"] == {"target": 0.9, "require": {}, "direction": "maximize"}
 
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
@@ -836,7 +836,7 @@ def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monk
     """An environment saved before the outcome field existed counts as having no target."""
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
-    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}}
+    assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}, "direction": "maximize"}
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = {
         key: value for key, value in first["target"]["repo"]["environment"].items() if key != "outcome"
@@ -844,7 +844,7 @@ def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monk
 
     again, staged = _stage_with(_FILES, monkeypatch, resumed)
     staged.cleanup()
-    assert again[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}}
+    assert again[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}, "direction": "maximize"}
 
     with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
         _stage_with(_TARGETED, monkeypatch, resumed)
@@ -4795,3 +4795,47 @@ def test_a_command_entry_ignores_request_code_in_the_metric_hash(tmp_path: Path)
     )
 
     assert facts["metric_sha256"] == hashlib.sha256(_framed("eval/metric.sh", b"exit 0\n")).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("baseline", "optimized", "expected"),
+    [(0.5, 0.2, _EDIT), (0.5, 0.5, None), (0.5, 0.8, None)],
+)
+def test_a_minimize_run_publishes_only_a_lower_score(baseline: float, optimized: float, expected: str | None) -> None:
+    """For ``[metric] direction = "minimize"`` only a version that scored lower than the start opens a PR (SKY-750)."""
+    assert repo_staging.improved_patch(_result(baseline, optimized, direction="minimize")) == expected
+
+
+def test_a_minimize_run_ranks_the_lowest_score_first_and_an_unscored_version_last() -> None:
+    """The branch ranking follows the direction, and a version without a score stays last (SKY-750)."""
+    versions = [{"candidate": "low", "score": 0.2}, {"candidate": "high", "score": 0.8}, {"candidate": "none"}]
+    minimize = _result(None, None, versions=versions, direction="minimize")
+    maximize = _result(None, None, versions=versions)
+
+    ranked = sorted(
+        ("high", "none", "low"), key=lambda patch: repo_staging._ranking_score(minimize, patch), reverse=True
+    )
+
+    assert ranked == ["low", "high", "none"]
+    assert repo_staging._ranking_score(maximize, "high") > repo_staging._ranking_score(maximize, "low")
+
+
+def test_the_pull_request_of_a_minimize_run_says_lower_is_better_and_names_the_missed_target() -> None:
+    """The PR text reads the right way round for a minimize run (SKY-750)."""
+    result = _recorded(target_reached=False, contract_met=False)
+    result["direction"] = "minimize"
+
+    body = repo_staging._description(result, _EDIT, "https://x/run")
+
+    assert "Score went from 0.5 to 0.85 (lower is better)." in body
+    assert "The final score 0.85 is not at or below the target 0.9." in body
+    assert "lower is better" not in repo_staging._description(_result(0.5, 0.8), _EDIT, "https://x/run")
+
+
+def test_a_run_recorded_before_the_direction_existed_resumes_as_a_maximize_run() -> None:
+    """An outcome saved before SKY-750 has no direction, so it equals a maximize outcome and differs from minimize."""
+    old = {"outcome": {"target": 0.9, "require": {}}}
+
+    repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "maximize"}})
+    with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
+        repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "minimize"}})

@@ -41,6 +41,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     18: {"blackbox": "21df1d4329719130"},
     # scorer.command_metric: a command [metric] entry needs no metric_code (SKY-738).
     19: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; the image obeys the snapshot outcome's direction (SKY-750).
+    20: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

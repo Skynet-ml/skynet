@@ -21,15 +21,19 @@ export type Gain = { text: string; kind: "positive" | "negative" | "neutral" };
  * Baseline→optimized delta on the canonical 0–100 scale. Mirrors the explore
  * slice's ``formatGain`` (kept local so the agent panel doesn't reach across a
  * feature boundary): sub-0.05 swings read as neutral, everything else keeps its
- * sign. Returns null when either endpoint is missing.
+ * sign. Returns null when either endpoint is missing. The server's
+ * ``improvement`` wins when present: it is positive when the run got better,
+ * also for a ``minimize`` run, where ``optimized - baseline`` is negative (SKY-750).
  */
 export function computeGain(
   baseline: number | null | undefined,
   optimized: number | null | undefined,
+  improvement?: number | null,
 ): Gain | null {
   if (baseline == null || optimized == null) return null;
   if (!Number.isFinite(baseline) || !Number.isFinite(optimized)) return null;
-  const gain = optimized - baseline;
+  const gain =
+    improvement != null && Number.isFinite(improvement) ? improvement : optimized - baseline;
   if (Math.abs(gain) < 0.05) return { text: "0.0%", kind: "neutral" };
   if (gain > 0) return { text: `+${gain.toFixed(1)}%`, kind: "positive" };
   return { text: `${gain.toFixed(1)}%`, kind: "negative" };
@@ -76,11 +80,13 @@ export function TypeBadge() {
 export function GainPill({
   baseline,
   optimized,
+  improvement,
 }: {
   baseline: number | null | undefined;
   optimized: number | null | undefined;
+  improvement?: number | null;
 }) {
-  const gain = computeGain(baseline, optimized);
+  const gain = computeGain(baseline, optimized, improvement);
   if (!gain) return null;
   if (gain.kind === "neutral") {
     return (

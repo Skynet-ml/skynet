@@ -48,6 +48,7 @@ from ..constants import PAYLOAD_OVERVIEW_NAME
 from ..models import BlackboxRunRequest
 from ..models.blackbox import STORED_PAYLOAD_CONTEXT
 from ..models.common import OptimizationStatus
+from ..service_gateway.optimization.blackbox.repo_constraints import MINIMIZE
 from ..service_gateway.optimization.blackbox.service import legacy_case_splits
 from ..storage.models import ContinuousCycleModel, ContinuousPlanModel, ExecutionBudgetModel
 from .continuous_schedule import ScheduleRule, legacy_rule, next_runs
@@ -963,7 +964,8 @@ def review_cycle(job_store: Any, cycle_id: str) -> None:
 
     The scores compare only when both runs held out the very same test cases.
     A candidate is kept for review when its run succeeded on held-out test
-    cases and scored at least ``WIN_MARGIN`` higher. Anything else leaves the
+    cases and scored at least ``WIN_MARGIN`` better: higher, or lower for a
+    ``[metric] direction = "minimize"`` run (SKY-750). Anything else leaves the
     incumbent in place. Only a real comparison marks the run's models as
     tried, so a run that failed (a provider outage) or could not be compared
     tries the same models again on the next check.
@@ -1014,10 +1016,10 @@ def review_cycle(job_store: Any, cycle_id: str) -> None:
         if not (split.get("test") and split.get("held_out")):
             # Without separate test cases the split that picked the candidate would also judge it.
             _finish_cycle(session, cycle, CYCLE_REGRESSED, "continuous.review_not_held_out")
-        elif best <= current:
+        elif (gain := current - best if result.get("direction") == MINIMIZE else best - current) <= 0:
             _finish_cycle(session, cycle, CYCLE_REGRESSED, "continuous.review_regressed")
         # Rounded, so a gain of exactly the margin (0.56 to 0.57) is not lost to float error.
-        elif round(best - current, 9) < WIN_MARGIN:
+        elif round(gain, 9) < WIN_MARGIN:
             _finish_cycle(session, cycle, CYCLE_REGRESSED, "continuous.review_within_margin")
         else:
             _finish_cycle(session, cycle, CYCLE_AWAITING_REVIEW, "continuous.review_ready")
