@@ -142,11 +142,13 @@ ENV_ENTRY_PATH = "APP_ENTRY_PATH"
 _LEGACY_ENV_PREFIX = "SKYNET_"
 # A command metric reaches the model and the stages only through its helper
 # URLs (SKY-767), which meter each call and check each stage. These names hold
-# the model key, the protected model mailbox and the tool relay token that the
-# box (or a contained session, ``sandbox_runtime._contained_environment``)
-# sets, so they stay out of the command's environment, the ``APP_*`` names in
-# both spellings. The box's own ``ASCENT_MODEL*`` values go too: the command
-# gets these names only from its helpers, and only with a judge model.
+# the model key and the protected model mailbox that the box (or a contained
+# session, ``sandbox_runtime._contained_environment``) sets, so they stay out
+# of the command's environment, the ``APP_*`` names in both spellings. The
+# tool relay token goes too: no current runtime sets it, but an older pinned
+# sandbox image's guest wrote it into the environment (SKY-880). The box's
+# own ``ASCENT_MODEL*`` values go too: the command gets these names only from
+# its helpers, and only with a judge model.
 _COMMAND_HIDDEN_ENV = (
     *(
         name
@@ -1943,8 +1945,9 @@ def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) ->
     # The command runs as this process's user, and this process holds the
     # model key in memory and the relay values in its environment. So this
     # process's /proc/<pid>/mem and environ must not be readable. The flag
-    # does not reach the command (execve resets it), and it does not cover a
-    # parent process that a contained session keeps alive.
+    # does not reach the command (execve resets it). In a contained session
+    # the box shell execs this process, and the guest above it sets the flag
+    # for itself (``isolated_runner``, SKY-880).
     _block_tracing()
     key = _take_model_key(call_dir)
     relay = StageClient(stages) if isinstance(stages, dict) else None
@@ -2727,4 +2730,9 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
 
 
 if __name__ == "__main__":
+    # Every mode, before any code runs: in a contained session the metric
+    # command runs as the same user as a stage or [run] call, whose environment
+    # holds the model route. Not inside main: tests call it in the pytest
+    # process (SKY-880).
+    _block_tracing()
     sys.exit(main())

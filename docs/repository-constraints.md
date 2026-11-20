@@ -775,9 +775,22 @@ in the call folder, and the runner reads and deletes the file before the
 command starts. The runner also blocks same-user reads of its own memory
 and environment, so the command cannot read them from `/proc`. No process
 that starts the metric has the model key in its environment. On a Vercel
-box, the processes above the runner also have no relay values. A contained
-session can keep a parent process alive that has the relay address in its
-environment.
+box, the processes above the runner also have no relay values. In a
+contained session, the guest process that runs the session starts with the
+relay address in its environment. The guest blocks same-user reads of its
+memory and environment before it starts a command, so the metric command
+cannot read them from `/proc` either (SKY-880). If the kernel refuses the
+flag, the guest stops. The runner does the same in every mode, so a stage
+or `[run]` call that runs in the same session is not readable either. For
+the runner the flag is best effort: if the kernel refuses it, the runner
+continues. The guest keeps the tool relay token in its own memory, not in
+its environment. So no command of a contained session gets the token, and
+no child that copies the guest's environment gets it either (a proposer,
+`git apply`, a served program). Only the guest's own ReAct tools use the
+token. A command stage or a proposer still has the mailbox address in its
+environment, and so does the shell that starts a command stage's runner,
+because they reach models through it. Hiding the address is defense in
+depth: the command can also find the mailbox port in `/proc/net/tcp`.
 
 A Python metric gets none of these variables, because it imports the helpers.
 

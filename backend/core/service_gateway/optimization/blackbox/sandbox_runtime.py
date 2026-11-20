@@ -75,7 +75,6 @@ COVERAGE_SLICE_SECONDS = 600
 _LOCAL_ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _LOCAL_KILLED_EXIT_CODE = 137
 _BUDGET_RELAY_ENV = "APP_BUDGET_RELAY_URL"
-_TOOL_RELAY_ENV = "APP_TOOL_RELAY_TOKEN"
 _RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "ASCENT_MODEL_URL")
 
 
@@ -373,7 +372,7 @@ class ContainedSubprocessRuntime:
     contained = True
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
-        """Open a local workspace while retaining only parent-issued relay capabilities.
+        """Open a local workspace whose commands reach models only through the parent's mailbox.
 
         Args:
             spec: Command environment and lifetime already covered by the outer sandbox.
@@ -388,10 +387,10 @@ class ContainedSubprocessRuntime:
         relay = app_env(_BUDGET_RELAY_ENV)
         if not relay:
             raise ServiceError("Contained execution requires the protected model mailbox.")
+        # No tool relay token: only the guest's own ReAct tools use it, and every
+        # process of a session runs as the guest's user, so a metric command could
+        # read it from another command's /proc/<pid>/environ (SKY-880).
         environment = _contained_environment(spec.env, relay)
-        tool_token = app_env(_TOOL_RELAY_ENV)
-        if tool_token:
-            environment.update(with_legacy_env({_TOOL_RELAY_ENV: tool_token}))
         return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay)
 
 
