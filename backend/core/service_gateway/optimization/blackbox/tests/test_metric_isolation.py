@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import threading
 import time
+import urllib.parse
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -1205,3 +1206,15 @@ def test_a_declared_metric_package_imports_in_the_metric_box(tmp_path: Path) -> 
     assert f"/{METRIC_DIR}/site/inflection" in seen["file"], seen
     assert result["score"] == 1.0
     assert _containers(tag) == []
+
+
+def test_the_metric_helpers_listen_on_the_loopback_address_only() -> None:
+    """Each helper URL names 127.0.0.1, and the server's socket is bound there, so no other host reaches it."""
+    helpers = runner.MetricHelpers(None, ["judge"], None, None)
+    try:
+        host, _ = helpers._server.server_address[:2]
+        hosts = {urllib.parse.urlsplit(url).hostname for url in helpers.env.values()}
+    finally:
+        helpers.close()
+    assert host == "127.0.0.1"
+    assert hosts == {"127.0.0.1"}
