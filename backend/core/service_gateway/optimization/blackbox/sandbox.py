@@ -90,9 +90,6 @@ from .sandbox_runtime import (
     _SHELL_FLAGS as _SHELL_FLAGS,
 )
 from .sandbox_runtime import (
-    _TOOL_RELAY_ENV as _TOOL_RELAY_ENV,
-)
-from .sandbox_runtime import (
     CODEX_REQUIREMENTS as CODEX_REQUIREMENTS,
 )
 from .sandbox_runtime import (

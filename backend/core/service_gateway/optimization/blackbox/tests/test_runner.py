@@ -3015,8 +3015,9 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
 
     The stage box command starts the runner's stage mode as the scorer does,
     and the session gives the stage the mailbox address. The runner blocks
-    tracing in every mode, so the scan cannot read the stage's process, and no
-    process holds the guest's tool relay token (SKY-880). ``open`` is the
+    tracing in every mode, so the scan cannot read the stage's process. No
+    process that the scan can read holds the relay address or the tool relay
+    token (SKY-880). ``open`` is the
     control: the stage makes itself dumpable again, and the scan must find
     the relay address in the stage's environment.
 
@@ -3079,7 +3080,85 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     if mode == "open":
         assert f"{stage_pid} {relay}" in found
     else:
+        assert found == []
         assert stage_pid not in (box / "readable").read_text().split()
+
+
+# Runs the shipped guest entry point, as ``_CONTAINED_GUEST`` does, with a job that starts a child with a copy of
+# ``os.environ``, as the proposer, ``git apply`` and a served program do, and reads the child's start environment.
+# Argument 1 is the request file. Argument 2 "open" copies the token into ``os.environ`` first, as the old guest did,
+# so the control can see that the read finds it there.
+_ENVIRON_CHILD_GUEST = """
+import os, runpy, subprocess, sys
+from core.service_gateway.optimization.training_ground import run_react
+from core.worker import subprocess_runner
+
+request, mode = sys.argv[1:3]
+
+def run(payload, artifact_id, events):
+    if mode == "open":
+        os.environ["APP_TOOL_RELAY_TOKEN"] = run_react._tool_relay_token
+    child = subprocess.Popen(
+        [sys.executable, "-c", "print('ready', flush=True); import time; time.sleep(30)"],
+        env={**os.environ},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        child.stdout.readline()
+        environ = open(f"/proc/{child.pid}/environ", "rb").read().decode()
+    finally:
+        child.kill()
+        child.wait()
+    events.put({"type": "child", "token": run_react._tool_relay_token, "environ": environ.split("\\0")})
+
+subprocess_runner.run_service_in_subprocess = run
+sys.argv = ["isolated_runner", request]
+runpy.run_module("core.worker.isolated_runner", run_name="__main__", alter_sys=True)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux only")
+@pytest.mark.parametrize("mode", ["blocked", "open"])
+def test_a_child_that_copies_the_guest_environment_gets_no_tool_relay_token(tmp_path: Path, mode: str) -> None:
+    """A child that the guest starts with a copy of ``os.environ`` has no tool relay token in its start environment.
+
+    execve makes such a child (a proposer, ``git apply``, a served program)
+    dumpable again, so a metric command can read its ``/proc/<pid>/environ``.
+    The guest holds the token in process only and still gives it to the
+    ReAct tool code (SKY-880). ``open`` is the control: the token goes into
+    ``os.environ``, and the read must find it in the child.
+
+    Args:
+        tmp_path: The test's folder.
+        mode: ``blocked`` runs the guest as shipped; ``open`` copies the token into ``os.environ``.
+    """
+    request = tmp_path / "request.json"
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    request.write_text(
+        json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
+    )
+    backend = Path(__file__).resolve().parents[5]
+    python = shlex.quote(sys.executable)
+    start = f"PYTHONPATH={shlex.quote(str(backend))} {python} -c {shlex.quote(_ENVIRON_CHILD_GUEST)}"
+    start += f" {shlex.quote(str(request))} {mode}"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
+    env["APP_BUDGET_RELAY_URL"] = "http://relay.invalid/v1"
+    process = subprocess.Popen(
+        ["bash", *vercel.SHELL_FLAGS, start], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    stdout, stderr = process.communicate(timeout=120)
+    events = [json.loads(line.split(" ", 2)[2]) for line in stdout.splitlines() if line.startswith("SKYNET_JOB_EVENT ")]
+
+    assert process.returncode == 0, stderr
+    [child] = [event for event in events if event["type"] == "child"]
+    assert child["token"] == "relay-token-scan"
+    assert "APP_BUDGET_RELAY_URL=http://relay.invalid/v1" in child["environ"]
+    holds_token = [line for line in child["environ"] if line.endswith("relay-token-scan")]
+    if mode == "open":
+        assert holds_token == ["APP_TOOL_RELAY_TOKEN=relay-token-scan"]
+    else:
+        assert holds_token == []
 
 
 def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:

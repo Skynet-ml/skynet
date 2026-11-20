@@ -37,6 +37,21 @@ description — it is DSPy's fixed loop-exit action."""
 # neither roster lists these tools (SKY-266).
 HUMAN_CONFIRM_ONLY_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
 
+# The guest holds the tool relay token in this module, not in os.environ: a
+# child process that copies os.environ (a proposer, git, a served program)
+# would hold it in a readable start environment (SKY-880).
+_tool_relay_token: str | None = None
+
+
+def use_tool_relay_token(token: str | None) -> None:
+    """Route the live tool roster through the guest's scoped relay with this token.
+
+    Args:
+        token: The relay token for the tool roster, or ``None`` to list tools directly.
+    """
+    global _tool_relay_token
+    _tool_relay_token = token
+
 
 def _list_live_tools(mcp_url: str, auth_header: str | None) -> list[dspy.Tool]:
     """List the live MCP roster and wrap each tool for threaded sync rollouts.
@@ -55,7 +70,7 @@ def _list_live_tools(mcp_url: str, auth_header: str | None) -> list[dspy.Tool]:
         List of dspy.Tool objects, one per MCP-exposed tool except
         :data:`HUMAN_CONFIRM_ONLY_TOOLS`.
     """
-    relay_token = app_env("APP_TOOL_RELAY_TOKEN")
+    relay_token = _tool_relay_token
     if relay_token:
         mcp_url = f"{_relay_url().rstrip('/')}/_mcp"
         auth_header = f"Bearer {relay_token}"
@@ -75,7 +90,7 @@ def _list_live_tools(mcp_url: str, auth_header: str | None) -> list[dspy.Tool]:
 
 def _raise_tool_budget_stop() -> None:
     """Restore authoritative budget stops before ReAct can treat them as tool observations."""
-    token = app_env("APP_TOOL_RELAY_TOKEN")
+    token = _tool_relay_token
     if token:
         raise_gateway_stop({"url": _relay_url(), "token": token})
 

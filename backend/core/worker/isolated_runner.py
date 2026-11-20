@@ -23,6 +23,7 @@ from core.service_gateway.optimization.blackbox.sandbox_runtime import (
     current_sandbox_runtime,
     sandbox_runtime_context,
 )
+from core.service_gateway.optimization.training_ground.run_react import use_tool_relay_token
 from core.worker.interaction import run_interaction
 from core.worker.preflight import run_dspy_preflight
 from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
@@ -164,7 +165,8 @@ def main() -> None:
     if tools_route is not None:
         if not app_env("APP_BUDGET_RELAY_URL"):
             raise RuntimeError("The protected tool roster requires its isolated mailbox relay.")
-        os.environ["APP_TOOL_RELAY_TOKEN"] = str(tools_route["token"])
+        # In process only: os.environ reaches every child that copies it (SKY-880).
+        use_tool_relay_token(str(tools_route["token"]))
     packages_route = document["payload"].pop("_skynet_packages_route", None)
     if packages_route is not None:
         os.environ["APP_PACKAGE_RELAY_TOKEN"] = str(packages_route["token"])

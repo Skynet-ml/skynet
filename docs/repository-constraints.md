@@ -779,10 +779,15 @@ box, the processes above the runner also have no relay values. In a
 contained session, the guest process that runs the session starts with the
 relay address in its environment. The guest blocks same-user reads of its
 memory and environment before it starts a command, so the metric command
-cannot read them from `/proc` either (SKY-880). The runner does the same in
-every mode, so a stage or `[run]` call that runs in the same session is not
-readable either. No command of a contained session gets the tool relay
-token; only the guest's own ReAct tools use it. A command stage or a
+cannot read them from `/proc` either (SKY-880). If the kernel refuses the
+flag, the guest stops. The runner does the same in every mode, so a stage
+or `[run]` call that runs in the same session is not readable either. For
+the runner the flag is best effort: if the kernel refuses it, the runner
+continues. The guest keeps the tool relay token in its own memory, not in
+its environment. So no command of a contained session gets the token, and
+no child that copies the guest's environment gets it either (a proposer,
+`git apply`, a served program). Only the guest's own ReAct tools use the
+token. A command stage or a
 proposer still has the mailbox address in its environment, and so does the
 shell that starts a command stage's runner, because they reach models
 through it. Hiding the address is defense in depth: the command can also
