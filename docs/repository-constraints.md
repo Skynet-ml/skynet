@@ -48,16 +48,14 @@ files = ["eval"]
 # metric code of the run. A command list runs a metric in any language. See
 # "The metric: [metric] entry" below.
 entry = ["bash", "eval/metric.sh"]
+# Optional. "maximize" (the default) or "minimize". With "minimize", a lower
+# score is better.
+direction = "maximize"
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
 # no cases.
 cases = "data/cases.jsonl"
-
-[metric]
-# Optional. "maximize" (the default) or "minimize". With "minimize", a lower
-# score is better.
-direction = "maximize"
 
 [outcome]
 # Optional. The score that is good enough. The search stops when it reaches it.
