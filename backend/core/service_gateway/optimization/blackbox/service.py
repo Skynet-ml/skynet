@@ -445,19 +445,19 @@ def validate_blackbox_payload(
         # A command entry does not run the metric code, so the run's setup checks the command (SKY-738).
         if not isinstance(entry, tuple):
             function = entry.rsplit(":", 1)[1] if entry else None
-            # Without a draft optimize.toml, the repository's own file can name another function.
+            # Without a draft ascent.toml, the repository's own file can name another function.
             entry_known = entry is not None or payload.target.repo is None
             validate_scorer_code(str(payload.scorer.metric_code), entrypoint=function, entry_known=entry_known)
 
 
 def _draft_metric_entry(payload: BlackboxRunRequest) -> str | tuple[str, ...] | None:
-    """Read the ``[metric] entry`` of the request's draft ``optimize.toml`` (SKY-738).
+    """Read the ``[metric] entry`` of the request's draft ``ascent.toml`` (SKY-738).
 
     Args:
         payload: The submitted job.
 
     Returns:
-        The entry, or ``None`` when the request has no draft ``optimize.toml``
+        The entry, or ``None`` when the request has no draft ``ascent.toml``
         or the draft does not parse. The run's staging then checks the
         repository's entry.
     """
@@ -785,7 +785,7 @@ def _reaches(value: float, bound: float) -> bool:
 
     Args:
         value: The measured score; finite.
-        bound: The target or limit from ``optimize.toml``.
+        bound: The target or limit from ``ascent.toml``.
 
     Returns:
         True when ``value`` is above ``bound`` or equal to it within float rounding.
@@ -809,7 +809,7 @@ def _improvement(baseline: float, optimized: float, direction: str) -> float:
 
 
 def _outcome_verdict(outcome: dict[str, Any], best: FinalRun | None) -> dict[str, Any]:
-    """Judge the ``[outcome]`` target and limits of ``optimize.toml`` on the reported final run.
+    """Judge the ``[outcome]`` target and limits of ``ascent.toml`` on the reported final run.
 
     The engine may stop on its search-time score; this verdict uses the final
     run of the reported version, so the search can stop and the target still
@@ -1696,7 +1696,7 @@ def _run_job(
         optimization_metadata={
             "strategy": job.strategy.model_dump(),
             "budget": job.budget.model_dump(),
-            # The guest sees the drafts without optimize.toml, so its validator
+            # The guest sees the drafts without ascent.toml, so its validator
             # resets the source to "repository"; the stored payload keeps the true one.
             "target": target.model_dump(exclude={"repo": {"contract_source"}}),
             "proposer_runtime": job.proposer_runtime,
@@ -1713,7 +1713,7 @@ def _run_job(
             # It stays None unless both final runs finished, so a budget stop
             # in the winner's held-out run never passes for a finished final run.
             "baseline_run_failed": baseline_run.run_failed if baseline_run and best_run else None,
-            # SKY-692: the [outcome] verdict, absent when optimize.toml sets no target and no limit.
+            # SKY-692: the [outcome] verdict, absent when ascent.toml sets no target and no limit.
             **({"outcome": verdict} if verdict else {}),
         },
         split_counts=counts,

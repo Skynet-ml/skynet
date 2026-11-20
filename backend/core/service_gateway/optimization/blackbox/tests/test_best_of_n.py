@@ -656,10 +656,10 @@ def test_a_repository_brief_walks_an_editable_root_and_skips_fixed_and_hidden_pa
         "tests/test_a.py": b"TEST-SOURCE",
         "config.yaml": b"CONFIG-TEXT",
         "eval/metric.py": b"METRIC-SECRET",
-        "optimize.toml": b"OPTIMIZE-SECRET",
+        "ascent.toml": b"OPTIMIZE-SECRET",
     }
 
-    text = brief(files, (".",), hidden=("eval", "optimize.toml"), readonly=("tests",), constrained=("./config.yaml",))
+    text = brief(files, (".",), hidden=("eval", "ascent.toml"), readonly=("tests",), constrained=("./config.yaml",))
 
     assert "You may change: the whole repository." in text
     assert "Do not change: `tests`." in text
@@ -704,15 +704,15 @@ def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_
         "conf/a.yaml": b"CONF-A",
         "config.yaml": b"CONFIG-TEXT",
         "conf/secret.yaml": b"CONF-SECRET",
-        "optimize.toml": b"OPTIMIZE-SECRET",
+        "ascent.toml": b"OPTIMIZE-SECRET",
     }
 
     text = brief(
         files,
         ("src",),
-        hidden=("conf/secret.yaml", "optimize.toml"),
+        hidden=("conf/secret.yaml", "ascent.toml"),
         readonly=("tests",),
-        constrained=("./config.yaml", "conf", "optimize.toml", "conf/secret.yaml"),
+        constrained=("./config.yaml", "conf", "ascent.toml", "conf/secret.yaml"),
     )
 
     assert "Do not change: `tests`." in text
@@ -726,7 +726,7 @@ def test_a_repository_brief_lists_constrained_paths_on_their_own_line_and_shows_
     assert "TEST-SOURCE" not in text
     assert "secret" not in text
     assert "SECRET" not in text
-    assert "optimize.toml" not in text
+    assert "ascent.toml" not in text
 
 
 def test_a_repository_brief_never_shows_a_file_in_a_hidden_folder_or_through_a_dot_slash_path(
@@ -737,9 +737,9 @@ def test_a_repository_brief_never_shows_a_file_in_a_hidden_folder_or_through_a_d
     Args:
         brief: Builds the brief for a seed.
     """
-    files = {"eval/metric.py": b"METRIC-SECRET", "optimize.toml": b"OPTIMIZE-SECRET", "app.py": b"print('app')"}
+    files = {"eval/metric.py": b"METRIC-SECRET", "ascent.toml": b"OPTIMIZE-SECRET", "app.py": b"print('app')"}
 
-    text = brief(files, ("eval/metric.py", "./optimize.toml", "./app.py"), hidden=("eval", "optimize.toml"))
+    text = brief(files, ("eval/metric.py", "./ascent.toml", "./app.py"), hidden=("eval", "ascent.toml"))
 
     assert "METRIC-SECRET" not in text
     assert "OPTIMIZE-SECRET" not in text
@@ -816,20 +816,20 @@ def test_a_repository_brief_names_no_hidden_path_in_its_path_rules(brief: Callab
     Args:
         brief: Builds the brief for a seed.
     """
-    files = {"eval/metric.py": b"m", "optimize.toml": b"t", "src/app.py": b"print('app')"}
+    files = {"eval/metric.py": b"m", "ascent.toml": b"t", "src/app.py": b"print('app')"}
 
     text = brief(
         files,
         ("eval/metric.py", "src"),
-        hidden=("eval", "optimize.toml"),
+        hidden=("eval", "ascent.toml"),
         readonly=("./eval/data",),
-        constrained=("optimize.toml",),
+        constrained=("ascent.toml",),
     )
 
     assert "You may change: `src`." in text
     assert "Do not change" not in text
     assert "eval" not in text
-    assert "optimize.toml" not in text
+    assert "ascent.toml" not in text
     assert "print('app')" in text
 
 

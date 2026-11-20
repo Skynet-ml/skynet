@@ -702,7 +702,7 @@ class FileProposer:
         self._lab = lab
         self._entry = options.proposer.run_command or ""
         self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
-        self._setup_name = f"[proposer] setup command in optimize.toml ({shlex.join(self._setup_argv)})"
+        self._setup_name = f"[proposer] setup command in ascent.toml ({shlex.join(self._setup_argv)})"
         # A protected run's boxes reach the model through the parent's mailbox, which sets APP_GATEWAY_URL and
         # refuses a grant with headers, so the box gets no grant for the gateway. Without a budget route the
         # gateway holds the deployment's managed key, so the box gets no grant and no key, as in SKY-815.

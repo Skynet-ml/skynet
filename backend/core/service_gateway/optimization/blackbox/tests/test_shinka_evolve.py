@@ -2440,7 +2440,7 @@ def test_a_setup_that_changes_or_removes_a_seed_file_stops_the_run(
         proposer.propose({}, "task")
 
     assert str(stopped.value) == (
-        f"The [proposer] setup command in optimize.toml ({shlex.join(setup)}) changed or removed files of the"
+        f"The [proposer] setup command in ascent.toml ({shlex.join(setup)}) changed or removed files of the"
         " repository: main.py, other.py. Those changes would enter every version. Make the setup write only new"
         " files."
     )

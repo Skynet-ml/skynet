@@ -2,9 +2,9 @@ Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。引�
 
 ## 共用合約
 
-每次運行都有一個倉庫、一個有 `[run]` 入口或者 `[target.<name>]` 階段嘅 `optimize.toml` 檔案，同一個評分器。`[run]` 入口會用一個案例運行倉庫嘅一個版本。評分器係一個 Python 函數，佢會收到入口嘅輸出同個案例。
+每次運行都有一個倉庫、一個有 `[run]` 入口或者 `[target.<name>]` 階段嘅 `ascent.toml` 檔案，同一個評分器。`[run]` 入口會用一個案例運行倉庫嘅一個版本。評分器係一個 Python 函數，佢會收到入口嘅輸出同個案例。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 倉庫嘅根目錄有一個 `serve.py` 檔案，入面有 `def serve(input)`。`[run]` 入口會喺自己嘅沙盒入面呼叫佢。運行完之後，Skynet 會用佢嚟提供最好嗰個版本。
 
-評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案，冇版本程式碼，所以評分器唔可以匯入 `serve.py`。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from openascent import call` 匯入 `call`。如果冇 `[run]` 入口，又冇 `[target.<name>]` 階段，Skynet 會拒絕個 `optimize.toml` 檔案。
+評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案，冇版本程式碼，所以評分器唔可以匯入 `serve.py`。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from openascent import call` 匯入 `call`。如果冇 `[run]` 入口，又冇 `[target.<name>]` 階段，Skynet 會拒絕個 `ascent.toml` 檔案。
 
 > [!NOTE]
 > 寫版本嘅編程 agent 睇唔到評分器原始碼、預期值，亦都睇唔到運行密鑰。

@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | dict. يحتوي `case["input"]` على حقول الإدخال. ويحتوي `case["expected"]` على القيمة المتوقعة، أو `None` |
 | `output`    | ما أرجعه `entry` في `[run]` للحالة، أو `None` إذا لم يحتوِ الملف على `[run]` |
 
-يجب أن يحتوي ملف `optimize.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
+يجب أن يحتوي ملف `ascent.toml` في المستودع على قسم `[run]` أو مرحلة `[target.<name>]`. يشغّل `entry` في `[run]` نسخة واحدة على حالة واحدة، في صندوق معزول خاص به. يرفض Skynet الملف الذي لا يحتوي أيًّا منهما، لأن كل نسخة ستحصل على الدرجة نفسها.
 
 - مدخل من نوع دالة، مثل `entry = "serve.py:serve"`، يتلقى `case["input"]` كوسيطة. و`output` هو قيمة الإرجاع منه.
 - مدخل من نوع أمر، مثل `entry = ["python", "-m", "pytest", "-q"]`، يتلقى الإدخال بصيغة JSON على stdin. و`output` هو `{"exit_code": ..., "stdout": "..."}`.
@@ -69,7 +69,7 @@ def score(repo_path, case, output=None):
 
 ### تطابق تام
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 يشغّل `entry` في `[run]` الاختبارات. ويقرأ المُقيِّم رمز الخروج ومخرجات الاختبارات.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 يمكن للمُقيِّم استدعاء نموذج. استورد `llm` من الوحدة المساعدة `openascent`. يمرّ الاستدعاء عبر بوابة النماذج في Skynet إلى نموذج المُقيِّم في التشغيل.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

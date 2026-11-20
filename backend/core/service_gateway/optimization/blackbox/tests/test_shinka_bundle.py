@@ -378,9 +378,9 @@ def test_crossover_prompts_compare_the_two_versions_file_by_file(bundle: RepoBun
 
 
 # The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
-_HIDDEN = ["optimize.toml", "src/metric", ".optimize/exploits", "src/reference.json", "src/cases.jsonl"]
+_HIDDEN = ["ascent.toml", "src/metric", ".optimize/exploits", "src/reference.json", "src/cases.jsonl"]
 _HIDDEN_FILES = [
-    "optimize.toml",
+    "ascent.toml",
     "src/metric/score.py",
     ".optimize/exploits/log.md",
     "src/reference.json",
@@ -401,7 +401,7 @@ def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
     files = {**_FILES, **dict.fromkeys(_HIDDEN_FILES, "secret = 1\n")}
     repo = {
         "chunks": _chunks(tmp_path, files),
-        "editable_paths": ["src", ".optimize", "optimize.toml"],
+        "editable_paths": ["src", ".optimize", "ascent.toml"],
         "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN),
     }
     return RepoBundle.prepare(repo, "", tmp_path / "checkout", on_refusal=refusals.append), refusals
@@ -411,7 +411,7 @@ def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
 def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reported(tmp_path: Path, path: str) -> None:
     """Refuse an open or an edit of each hidden path by exact name, show no content, and report the tool and kind."""
     bundle, refusals = _hidden_bundle(tmp_path)
-    kind = "config" if path == "optimize.toml" else "scoring"
+    kind = "config" if path == "ascent.toml" else "scoring"
 
     _, _, message = bundle.apply({}, f"<OPEN>{path}</OPEN>")
     assert harness_bridge.GUARD_REFUSAL in str(message)
@@ -422,7 +422,7 @@ def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reporte
     assert refusals == [{"tool": "open", "kind": kind}, {"tool": "edit", "kind": kind}]
 
 
-@pytest.mark.parametrize("path", ["./optimize.toml", "src/../optimize.toml", ".//optimize.toml", "/optimize.toml"])
+@pytest.mark.parametrize("path", ["./ascent.toml", "src/../ascent.toml", ".//ascent.toml", "/ascent.toml"])
 def test_another_form_of_a_hidden_path_is_refused_and_reported(tmp_path: Path, path: str) -> None:
     """Refuse and report an open or an edit of a hidden path written in a form that normalizes to it."""
     bundle, refusals = _hidden_bundle(tmp_path)

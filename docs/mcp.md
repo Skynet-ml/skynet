@@ -64,21 +64,21 @@ knows what to fix and what to do next:
 | Start | `repo_draft_start` (objective, name). It lists the engines. | Yes |
 | Repository | `repo_draft_set_repository` (owner/name, branch or commit, editable paths, setup command) | Yes |
 | Data | `repo_draft_set_data` (inline cases or a staged dataset) | No |
-| Scorer | `repo_draft_set_scorer` (Python metric code; empty when the `optimize.toml` `[metric] entry` is a command, see `repository-constraints.md`) | Yes |
-| Contract | `repo_draft_set_contract` (the `optimize.toml` text) | When the repository has no `optimize.toml` |
+| Scorer | `repo_draft_set_scorer` (Python metric code; empty when the `ascent.toml` `[metric] entry` is a command, see `repository-constraints.md`) | Yes |
+| Contract | `repo_draft_set_contract` (the `ascent.toml` text) | When the repository has no `ascent.toml` |
 | Models | `repo_draft_set_models` (reflection model, token source, more models) | Yes |
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |
-| Budget | `repo_draft_set_budget` (scorer runs, iterations; the run stops at `[outcome] target` in optimize.toml) | No |
+| Budget | `repo_draft_set_budget` (scorer runs, iterations; the run stops at `[outcome] target` in ascent.toml) | No |
 | Review | `repo_draft_review` | Yes |
 | Setup check | `repo_draft_preflight` (paid; it runs the setup check of the run once) | No |
 | Submit | `repo_draft_submit` (optional `hardening_job_id`) | Yes |
 
-Every new run needs an `optimize.toml` contract, in the draft or in the
+Every new run needs an `ascent.toml` contract, in the draft or in the
 repository. `repo_draft_contract_guide` gives the format guide and an example
 file. The setup screen's agent uses the same guide. `repo_draft_set_contract`
 saves the text into the draft, and the run writes it over the repository's
 own file. A parser error is an issue with the parser's message. When the
-repository has an `optimize.toml`, the step is optional. When the draft and
+repository has an `ascent.toml`, the step is optional. When the draft and
 the repository both have none, `repo_draft_review` reports an issue and the
 run does not start.
 
@@ -144,8 +144,8 @@ same session. While a session is open, the draft steps refuse a change
 (`judge.session_open`), and a call with another limit is refused
 (`judge.limit_changed`).
 
-Each call reads `optimize.toml` at the base commit. Skynet refuses a
-candidate that changes `optimize.toml` or a protected path
+Each call reads `ascent.toml` at the base commit. Skynet refuses a
+candidate that changes `ascent.toml` or a protected path
 (`judge.candidate_refused`), and the refusal names every broken rule. Skynet
 also refuses a `candidate_commit` that it cannot fetch or that does not
 descend from the base commit. It refuses a `candidate_commit` that changes a

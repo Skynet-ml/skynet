@@ -31,17 +31,17 @@ test("a turn's edits run from the first write's before-state to the last write's
     role: "assistant" as const,
     content: "",
     toolCalls: [
-      call("a", { metric_code: "x = 1\n", optimize_toml: "version = 1\n" }),
+      call("a", { metric_code: "x = 1\n", ascent_toml: "version = 1\n" }),
       call("b", { metric_code: "x = 2\n" }),
     ],
   };
   const edits = messageEdits(message, {
-    a: { metric_code: "x = 0\n", optimize_toml: null },
+    a: { metric_code: "x = 0\n", ascent_toml: null },
     b: { metric_code: "x = 1\n" },
   });
   assert.deepEqual(edits, [
     { path: "metric.py", before: "x = 0\n", after: "x = 2\n", added: 1, removed: 1 },
-    { path: "optimize.toml", before: "", after: "version = 1\n", added: 1, removed: 0 },
+    { path: "ascent.toml", before: "", after: "version = 1\n", added: 1, removed: 0 },
   ]);
   assert.deepEqual(editTotals(edits), { added: 2, removed: 1 });
 });
@@ -51,13 +51,13 @@ test("a file the draft did not hold diffs against the repository's text", () => 
   const message = {
     role: "assistant" as const,
     content: "",
-    toolCalls: [call("a", { optimize_toml: repoToml.replace("acc", "f1") })],
+    toolCalls: [call("a", { ascent_toml: repoToml.replace("acc", "f1") })],
   };
-  const writeBefore = { a: { optimize_toml: null } };
-  const base = new Map([["optimize.toml", repoToml]]);
+  const writeBefore = { a: { ascent_toml: null } };
+  const base = new Map([["ascent.toml", repoToml]]);
   assert.deepEqual(messageEdits(message, writeBefore, base), [
     {
-      path: "optimize.toml",
+      path: "ascent.toml",
       before: repoToml,
       after: repoToml.replace("acc", "f1"),
       added: 1,

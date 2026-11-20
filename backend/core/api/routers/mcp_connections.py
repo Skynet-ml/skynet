@@ -7,7 +7,7 @@ code to the web app in the URL fragment. The signed-in web app then calls
 sign-in and stores the tokens encrypted. A run payload names the connection
 in ``env_connectors``, and the broker on the parent adds the token to each
 tool call, so the token never reaches the box. The ``[services.<name>]``
-wiring in optimize.toml comes with the SKY-354 follow-up.
+wiring in ascent.toml comes with the SKY-354 follow-up.
 """
 
 from __future__ import annotations

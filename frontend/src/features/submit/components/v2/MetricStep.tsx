@@ -22,7 +22,7 @@ import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
-// The optimize.toml setting that names the metric; code, so never translated.
+// The ascent.toml setting that names the metric; code, so never translated.
 const METRIC_ENTRY = "[metric] entry";
 
 const HOST_ORIGIN: Record<RepoHost, string> = {

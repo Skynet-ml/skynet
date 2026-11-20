@@ -108,7 +108,7 @@ def test_push_commits_the_draft_files_under_the_version(tmp_path: Path) -> None:
     origin = tmp_path / "origin"
     pinned = _repository(origin)
     patch = _patch(origin, pinned)
-    drafts = {"src/settings.py": "debug = False\n", "optimize.toml": "version = 1\n"}
+    drafts = {"src/settings.py": "debug = False\n", "ascent.toml": "version = 1\n"}
 
     push_version(
         "acme/app", pinned, patch, "skynet/optimize-1", "Apply it", None, remote=f"file://{origin}", drafts=drafts
@@ -118,7 +118,7 @@ def test_push_commits_the_draft_files_under_the_version(tmp_path: Path) -> None:
     assert _git(origin, "rev-parse", f"{head}^") == pinned
     assert _git(origin, "show", f"{head}:src/app.py") == "x = 2"
     assert _git(origin, "show", f"{head}:src/settings.py") == "debug = False"
-    assert _git(origin, "show", f"{head}:optimize.toml") == "version = 1"
+    assert _git(origin, "show", f"{head}:ascent.toml") == "version = 1"
 
 
 def test_push_refuses_a_draft_path_that_leaves_the_repository(tmp_path: Path) -> None:

@@ -2,9 +2,9 @@ O Skynet é o Optimize Anything: toda execução otimiza um repositório. Um mot
 
 ## O contrato comum
 
-Toda execução tem um repositório, um arquivo `optimize.toml` com uma entrada `[run]` ou uma etapa `[target.<name>]`, e um avaliador. A entrada `[run]` executa uma versão do repositório em um caso. O avaliador é uma função Python que recebe a saída da entrada e o caso.
+Toda execução tem um repositório, um arquivo `ascent.toml` com uma entrada `[run]` ou uma etapa `[target.<name>]`, e um avaliador. A entrada `[run]` executa uma versão do repositório em um caso. O avaliador é uma função Python que recebe a saída da entrada e o caso.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 O repositório tem um arquivo `serve.py` na raiz com `def serve(input)`. A entrada `[run]` o chama na sua própria sandbox. O Skynet o usa para servir a melhor versão depois da execução.
 
-O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica e nenhum código da versão, então o avaliador não pode importar `serve.py`. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from openascent import call`. Sem uma entrada `[run]` ou uma etapa `[target.<name>]`, o Skynet recusa o arquivo `optimize.toml`.
+O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica e nenhum código da versão, então o avaliador não pode importar `serve.py`. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from openascent import call`. Sem uma entrada `[run]` ou uma etapa `[target.<name>]`, o Skynet recusa o arquivo `ascent.toml`.
 
 > [!NOTE]
 > O agente de código que escreve as versões não vê o código do avaliador, os valores esperados nem os segredos da execução.

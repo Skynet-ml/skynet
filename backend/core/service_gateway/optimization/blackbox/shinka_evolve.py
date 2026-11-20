@@ -219,13 +219,13 @@ class ShinkaEvolveEngine:
             # Upstream's own mutation calls have no tools, so the servers would go unused without a word.
             raise ServiceError(
                 "ShinkaEvolve loads the [proposer] mcp servers only with its agent editor. "
-                "Set the agent editor, choose another engine, or remove [proposer] mcp from optimize.toml."
+                "Set the agent editor, choose another engine, or remove [proposer] mcp from ascent.toml."
             )
         if route.get("services") and agent:
             # The agent's box gets only the proposer's hosts and the mcp servers, so the services would go unused.
             raise ServiceError(
                 "The ShinkaEvolve agent editor cannot give the [proposer] services to its agent yet. "
-                "Choose another engine, or remove [proposer] services from optimize.toml."
+                "Choose another engine, or remove [proposer] services from ascent.toml."
             )
         repo = options.repo if options is not None else None
         # The loop checks the seed's hidden paths against its own (SKY-719), so
@@ -241,14 +241,14 @@ class ShinkaEvolveEngine:
             if route.get("services"):
                 raise ServiceError(
                     "ShinkaEvolve cannot give the [proposer] services to the [proposer] entry command yet. "
-                    "Choose another engine, or remove [proposer] services from optimize.toml."
+                    "Choose another engine, or remove [proposer] services from ascent.toml."
                 )
             # The box may reach only a model route on the user's own key (BYOK), never the deployment's key. A
             # BYOK budget route listens on the worker's loopback gateway, which no box reaches, and the route
             # does not name its charge policy. So every run refuses; SKY-828 lifts this after SKY-728 (SKY-815).
             raise ServiceError(
                 "ShinkaEvolve cannot give the [proposer] entry command a model route on your own key yet. "
-                "Choose another engine, or remove [proposer] entry from optimize.toml."
+                "Choose another engine, or remove [proposer] entry from ascent.toml."
             )
         if repo is None and task.seed_candidate is None:
             # A blank run evolves an empty starting text rather than refusing.
@@ -708,7 +708,7 @@ class _Proposer:
         if not self.setup:
             self.base_ids = self.seed_ids
             return self.seed
-        name = f"[proposer] setup command in optimize.toml ({shlex.join(self.setup)})"
+        name = f"[proposer] setup command in ascent.toml ({shlex.join(self.setup)})"
         result, tree = self.ctx.run_command(self.seed, "\n".join([*self.exports, shlex.join(self.setup)]), self.grants)
         if result.timed_out or result.exit_code != 0:
             raise ServiceError(_command_failure(name, result))

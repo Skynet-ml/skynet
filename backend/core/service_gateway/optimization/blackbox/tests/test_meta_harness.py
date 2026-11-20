@@ -1078,7 +1078,7 @@ def test_a_task_that_holds_the_metric_source_is_refused(
 def test_a_bash_call_cannot_read_a_hidden_path(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The bash tool runs through the loop, so ``cat`` of the hidden ``eval/`` and ``optimize.toml`` gives nothing.
+    """The bash tool runs through the loop, so ``cat`` of the hidden ``eval/`` and ``ascent.toml`` gives nothing.
 
     Args:
         owner: Alice and her budget generation.
@@ -1087,15 +1087,15 @@ def test_a_bash_call_cannot_read_a_hidden_path(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    hidden = hidden_hashes(["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval", "ascent.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Proposer(), generation=1, hidden=hidden)
     # The loop refuses to write a hidden path, so the seed tree goes straight into the tree store.
-    tree = _store(trees, {"eval/metric.py": b"secret", "optimize.toml": b"secret", "src/a.py": b"a"})
+    tree = _store(trees, {"eval/metric.py": b"secret", "ascent.toml": b"secret", "src/a.py": b"a"})
     ctx = loop.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
     config = OptimizeAnythingConfig(engine="meta_harness", run_dir=str(tmp_path / "mh"), engine_config={"model": ""})
     worker = meta_mod._WorkerMetaHarness(config, ctx)
 
-    command = "cat eval/metric.py optimize.toml src/a.py; find . -type f | sort"
+    command = "cat eval/metric.py ascent.toml src/a.py; find . -type f | sort"
     output, after = worker._exec(tree, {"id": "c", "name": "bash", "arguments": {"command": command}})
 
     result = json.loads(output)

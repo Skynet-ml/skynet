@@ -1,4 +1,4 @@
-"""Tests for reading a repository's optimize.toml and the environment its run gets."""
+"""Tests for reading a repository's ascent.toml and the environment its run gets."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def _archive(
         tmp_path: Scratch folder.
         files: Root-relative path to bytes.
         link: When set, a symbolic link named ``link_name`` pointing here.
-        link_name: The path of the link; ``optimize.toml`` unless a test links another file.
+        link_name: The path of the link; ``ascent.toml`` unless a test links another file.
 
     Returns:
         The archive.
@@ -77,7 +77,7 @@ def _read(tmp_path: Path, raw: bytes, files: dict[str, bytes] | None = None) -> 
 
     Args:
         tmp_path: Scratch folder.
-        raw: The optimize.toml bytes.
+        raw: The ascent.toml bytes.
         files: Other files, keyed by root-relative path.
 
     Returns:
@@ -95,6 +95,29 @@ def test_a_repository_without_the_file_keeps_the_approved_settings(tmp_path: Pat
     assert environment.editable_paths == ("src",)
     assert environment.protected_paths == (CONSTRAINTS_FILE,)
     assert environment.setup_command is None
+
+
+# The file name before SKY-746, built from parts so the tree holds no retired name.
+_RETIRED_FILE = "optimize" + ".toml"
+
+
+def test_a_repository_with_only_the_retired_file_has_no_contract(tmp_path: Path) -> None:
+    """Skynet reads only ascent.toml; a repository with only the old file name has no contract (SKY-746)."""
+    assert CONSTRAINTS_FILE == "ascent.toml"
+    archive = _archive(tmp_path, {_RETIRED_FILE: _CFCA + _RUN, "docs/intent.md": _INTENT})
+
+    assert read_constraints(archive) is None
+
+
+def test_a_repository_with_both_files_uses_ascent_toml(tmp_path: Path) -> None:
+    """With both names present, the run reads ascent.toml and ignores the old file (SKY-746)."""
+    retired = b'version = 1\n[paths]\neditable = ["old"]\n[run]\nentry = "old.py:main"\n'
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _CFCA + _RUN, _RETIRED_FILE: retired, "docs/intent.md": _INTENT})
+
+    constraints = read_constraints(archive)
+
+    assert constraints is not None
+    assert constraints.editable_paths == ("bot/geocode",)
 
 
 def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path) -> None:
@@ -293,7 +316,7 @@ def test_a_proposer_command_that_names_a_key_token_fails(key: str, token: str) -
 
 
 def test_the_entry_script_is_protected_when_the_file_proposer_applies(tmp_path: Path) -> None:
-    """A version cannot rewrite the script that proposes the next versions, like ``optimize.toml`` (SKY-753).
+    """A version cannot rewrite the script that proposes the next versions, like ``ascent.toml`` (SKY-753).
 
     Args:
         tmp_path: Folder for the packed snapshot.
@@ -476,7 +499,7 @@ def test_an_editable_path_that_only_the_proposer_command_protects_names_the_comm
 
     assert (caught.value.section, caught.value.key) == ("proposer", "entry")
     with pytest.raises(ConstraintsError, match=r"outside \[paths\] protected editable"):
-        effective_environment(constraints, approved_editable=["optimize.toml"], approved_setup=None)
+        effective_environment(constraints, approved_editable=["ascent.toml"], approved_setup=None)
 
 
 def test_a_proposer_setup_without_entry_fails() -> None:
@@ -502,7 +525,7 @@ def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
             ["bot"],
         ),
         (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\nprotected = ["bot"]\n', ["bot/geocode"]),
-        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["optimize.toml"]\n', ["."]),
+        (b'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["ascent.toml"]\n', ["."]),
     ],
 )
 def test_a_file_that_protects_every_editable_path_fails_the_setup_check(raw: bytes, approved: list[str]) -> None:
@@ -516,7 +539,7 @@ def test_a_file_that_protects_every_editable_path_fails_the_setup_check(raw: byt
 def test_a_run_without_the_file_that_can_only_edit_the_file_fails_the_setup_check() -> None:
     """The constraints file is protected even when absent, so approving only it leaves nothing to change."""
     with pytest.raises(ConstraintsError, match="is always protected, so the approved editable paths"):
-        effective_environment(None, approved_editable=["optimize.toml"], approved_setup=None)
+        effective_environment(None, approved_editable=["ascent.toml"], approved_setup=None)
 
 
 def test_a_file_that_protects_part_of_an_editable_path_still_runs() -> None:
@@ -1938,30 +1961,30 @@ def test_a_run_entry_inside_the_hidden_scoring_files_is_refused(entry: str) -> N
 @pytest.mark.parametrize(
     ("setting", "line"),
     [
-        ("instructions", 'version = 1\ninstructions = "optimize.toml"\n'),
-        ("[proposer] illegal", 'version = 1\n[proposer]\nillegal = "optimize.toml"\n'),
-        ("[run] mcp", 'version = 1\n[run]\nentry = "src/app.py:main"\nmcp = "optimize.toml"\n'),
+        ("instructions", 'version = 1\ninstructions = "ascent.toml"\n'),
+        ("[proposer] illegal", 'version = 1\n[proposer]\nillegal = "ascent.toml"\n'),
+        ("[run] mcp", 'version = 1\n[run]\nentry = "src/app.py:main"\nmcp = "ascent.toml"\n'),
     ],
 )
 def test_a_visible_setting_that_names_the_constraints_file_is_refused(setting: str, line: str) -> None:
-    """``optimize.toml`` names every hidden path, so no visible role can read it (E62)."""
-    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'optimize\.toml' is inside the hidden"):
+    """``ascent.toml`` names every hidden path, so no visible role can read it (E62)."""
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'ascent\.toml' is inside the hidden"):
         parse_constraints(line.encode())
 
 
 def test_the_constraints_file_stays_hidden_when_a_visible_setting_names_it() -> None:
-    """Parsing refuses this case; the hidden list must still never drop ``optimize.toml`` (E62)."""
+    """Parsing refuses this case; the hidden list must still never drop ``ascent.toml`` (E62)."""
     constraints = replace(
-        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n'), instructions_file="optimize.toml"
+        parse_constraints(b'version = 1\n[run]\nentry = "run.py:main"\n'), instructions_file="ascent.toml"
     )
 
-    assert scorer_only_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+    assert scorer_only_paths(constraints) == ("ascent.toml", ".optimize/exploits")
 
 
 @pytest.mark.parametrize(
     ("toml", "path"),
     [
-        ("", "optimize.toml"),
+        ("", "ascent.toml"),
         ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
         ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
@@ -1999,7 +2022,7 @@ def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
         ('version = 1\n[run]\nentry = "run.py:main"\n[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
         ('version = 1\n[run]\nentry = "run.py:main"\n', ".optimize/exploits"),
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
-        ('version = 1\n[run]\nentry = "run.py:main"\n', "optimize.toml"),
+        ('version = 1\n[run]\nentry = "run.py:main"\n', "ascent.toml"),
         ('version = 1\n[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
     ids=[

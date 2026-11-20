@@ -63,7 +63,7 @@ _EXPLOIT = {"label": "exploit", "confidence": 0.95, "reason": "Games the metric.
 _FAILURE = GateFailure(
     key="[proposer] tools",
     place="local",
-    reason="optimize.toml sets [proposer] tools.",
+    reason="ascent.toml sets [proposer] tools.",
     code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
 )
 
@@ -778,7 +778,7 @@ def test_a_gate_that_raises_fails_the_job(tmp_path: Path) -> None:
 
 
 def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> None:
-    """A bad optimize.toml found by the gate is a preflight failure with its reason, not a failed job."""
+    """A bad ascent.toml found by the gate is a preflight failure with its reason, not a failed job."""
     recorder = Recorder(tmp_path)
 
     def refuse(archive: Path, secret_names: Any, *, place: str, require_version: bool) -> list[GateFailure]:
@@ -793,13 +793,13 @@ def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> No
         Raises:
             ConstraintsError: Always.
         """
-        raise ConstraintsError("optimize.toml is not valid TOML.")
+        raise ConstraintsError("ascent.toml is not valid TOML.")
 
     recorder.gate = refuse  # type: ignore[method-assign]
 
     job = _run(recorder, _cloud_job(), local_mode=False)
 
-    assert (job.status, job.preflight_failures) == ("preflight_failed", ["optimize.toml is not valid TOML."])
+    assert (job.status, job.preflight_failures) == ("preflight_failed", ["ascent.toml is not valid TOML."])
     assert job.reserved_usd == 0
     assert "sandbox" not in recorder.events
     assert not recorder.staged.workdir.exists()
@@ -818,13 +818,13 @@ def test_the_gate_gets_secret_names_only(tmp_path: Path) -> None:
     ("error", "failures"),
     [
         (RepoGateError([_FAILURE]), [_FAILURE.reason]),
-        (ConstraintsError("optimize.toml is not valid TOML."), ["optimize.toml is not valid TOML."]),
+        (ConstraintsError("ascent.toml is not valid TOML."), ["ascent.toml is not valid TOML."]),
     ],
 )
 def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
     tmp_path: Path, error: Exception, failures: list[str]
 ) -> None:
-    """A hidden-file leak or a bad optimize.toml found while staging is a preflight failure with its reasons."""
+    """A hidden-file leak or a bad ascent.toml found while staging is a preflight failure with its reasons."""
     recorder = Recorder(tmp_path)
 
     def refuse(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], StagedRepository]:
@@ -858,7 +858,7 @@ def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
     assert "sandbox" not in recorder.events
 
 
-def test_a_new_job_refuses_an_optimize_toml_with_no_version(tmp_path: Path) -> None:
+def test_a_new_job_refuses_an_ascent_toml_with_no_version(tmp_path: Path) -> None:
     """The first pass of a job is strict: a file with no version is a preflight failure (SKY-690)."""
     recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: _TOML.replace(b"version = 1\n", b"")})
 
@@ -869,7 +869,7 @@ def test_a_new_job_refuses_an_optimize_toml_with_no_version(tmp_path: Path) -> N
     assert "version is missing" in job.preflight_failures[0]
 
 
-def test_a_started_job_reads_an_optimize_toml_with_no_version_as_version_1(tmp_path: Path) -> None:
+def test_a_started_job_reads_an_ascent_toml_with_no_version_as_version_1(tmp_path: Path) -> None:
     """A job past its preflight may predate the version key, so every read of its tree in the pass is lenient."""
     (tmp_path / "first").mkdir()
     (tmp_path / "later").mkdir()

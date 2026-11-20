@@ -1112,7 +1112,7 @@ def test_refusal_logger_writes_a_proposer_refusal_run_event(capfd: pytest.Captur
     assert record["event"] == "proposer.refusal"
     assert record["level"] == "WARNING"
     assert record["fields"] == {"tool": "read", "kind": "config"}
-    assert "optimize.toml" not in lines[0]
+    assert "ascent.toml" not in lines[0]
 
 
 def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1128,7 +1128,7 @@ def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, mo
         {
             "chunks": chunks,
             "editable_paths": ["src"],
-            "hidden_hashes": shinka_runner.harness_bridge.hidden_hashes(["optimize.toml", "eval/metric.py"]),
+            "hidden_hashes": shinka_runner.harness_bridge.hidden_hashes(["ascent.toml", "eval/metric.py"]),
         },
         "",
         tmp_path / "guarded-checkout",
@@ -1158,7 +1158,7 @@ def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, mo
     patch, _, success = asyncio.run(runner._run_patch_async(parent, [], [], 1))
 
     assert calls[0]["proposer"]["hidden_hashes"] == shinka_runner.harness_bridge.hidden_hashes(
-        ["optimize.toml", "eval/metric.py"]
+        ["ascent.toml", "eval/metric.py"]
     )
     assert refusals == [{"tool": "read", "kind": "config"}]
     assert success is True

@@ -47,20 +47,20 @@ void it("one file shows its name and the turn's line counts, with no buttons", (
 void it("more files show one row each with its own counts", () => {
   const html = renderToStaticMarkup(
     <EditedFilesCard
-      edits={[edit("metric.py", 1, 0), edit("optimize.toml", 4, 0)]}
+      edits={[edit("metric.py", 1, 0), edit("ascent.toml", 4, 0)]}
       onView={null}
     />,
   );
   assert.equal(html.match(/<li/g)?.length, 2);
   assert.match(html, /metric\.py<\/span>.*?>\+1<.*?>−0</);
-  assert.match(html, /optimize\.toml<\/span>.*?>\+4<.*?>−0</);
+  assert.match(html, /ascent\.toml<\/span>.*?>\+4<.*?>−0</);
   assert.doesNotMatch(html, /<button/);
 });
 
 void it("with a Changes pane, each file row opens its file and no Undo shows", () => {
   const html = renderToStaticMarkup(
     <EditedFilesCard
-      edits={[edit("metric.py", 1, 0), edit("optimize.toml", 4, 0)]}
+      edits={[edit("metric.py", 1, 0), edit("ascent.toml", 4, 0)]}
       onView={() => {}}
     />,
   );
@@ -73,7 +73,7 @@ const many = Array.from({ length: 10 }, (_, i) => edit(`file${i}.py`, i + 1, i %
 void it("more files show the turn's totals under the title", () => {
   const html = renderToStaticMarkup(
     <EditedFilesCard
-      edits={[edit("metric.py", 1, 1), edit("optimize.toml", 4, 0)]}
+      edits={[edit("metric.py", 1, 1), edit("ascent.toml", 4, 0)]}
       onView={null}
     />,
   );

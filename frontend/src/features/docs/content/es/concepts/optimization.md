@@ -2,9 +2,9 @@ Skynet es Optimize Anything: cada ejecución optimiza un repositorio. Un motor p
 
 ## El contrato común
 
-Cada ejecución tiene un repositorio, un archivo `optimize.toml` con una entrada `[run]` o una etapa `[target.<name>]`, y un evaluador. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador es una función de Python que recibe la salida de la entrada y el caso.
+Cada ejecución tiene un repositorio, un archivo `ascent.toml` con una entrada `[run]` o una etapa `[target.<name>]`, y un evaluador. La entrada `[run]` ejecuta una versión del repositorio sobre un caso. El evaluador es una función de Python que recibe la salida de la entrada y el caso.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 El repositorio tiene un archivo `serve.py` en su raíz con `def serve(input)`. La entrada `[run]` lo llama en su propia caja de sandbox. Skynet lo usa para servir la mejor versión después de la ejecución.
 
-El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica y ningún código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from openascent import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `optimize.toml`.
+El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica y ningún código de la versión, así que el evaluador no puede importar `serve.py`. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from openascent import call`. Sin una entrada `[run]` o una etapa `[target.<name>]`, Skynet rechaza el archivo `ascent.toml`.
 
 > [!NOTE]
 > El agente de código que escribe las versiones no puede ver el código fuente del evaluador, los valores esperados ni los secretos de la ejecución.

@@ -55,9 +55,9 @@ Read [Engines](/docs/concepts/engines) to pick a specific engine.
 
 ## 5. Metric & run
 
-The last step is **Metric & run**. The assistant writes the scorer and the `optimize.toml` file for you. You can edit them. The `[run]` entry runs one version of the repository on one case. The scorer gets the output of the entry and the case:
+The last step is **Metric & run**. The assistant writes the scorer and the `ascent.toml` file for you. You can edit them. The `[run]` entry runs one version of the repository on one case. The scorer gets the output of the entry and the case:
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

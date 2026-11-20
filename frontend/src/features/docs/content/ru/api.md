@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ entry = "serve.py:serve"
 - `target.repo.editable_paths` перечисляет файлы и папки, которые оптимизатор может менять. `"."` означает весь репозиторий.
 - `target.repo.commit` необязателен. Это SHA из 40 символов. Без него Skynet использует последний коммит ветки.
 - `target.repo.secrets` необязателен. У каждого секрета есть `name` и `value`. Секрет попадает в ваш код или ваш оценщик только через заголовок `[services.<name>]` или через сервер из файла `mcp` роли, никогда как переменная окружения.
-- `scorer.metric_code` определяет `score(repo_path, case, output=None)`. `output` — то, что точка входа `[run]` вернула для примера. Вкладка `optimize.toml` показывает точку входа `[run]` репозитория из примера. `scorer.model` — модель, которую ваш код и ваш оценщик могут вызывать через шлюз моделей.
+- `scorer.metric_code` определяет `score(repo_path, case, output=None)`. `output` — то, что точка входа `[run]` вернула для примера. Вкладка `ascent.toml` показывает точку входа `[run]` репозитория из примера. `scorer.model` — модель, которую ваш код и ваш оценщик могут вызывать через шлюз моделей.
 - `strategy.mode` — это `auto` (по умолчанию) или `single`. При `single` задайте в `strategy.engine` имя одного движка из `GET /blackbox/engines`.
 - `max_cost_cents` — лимит расходов для этого запуска в центах США.
 - `is_private` по умолчанию равно `false`. Установите `true`, чтобы запуск был приватным.

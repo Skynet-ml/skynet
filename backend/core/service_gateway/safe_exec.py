@@ -394,7 +394,7 @@ def validate_scorer_code(
         code: User-authored scorer source.
         entrypoint: The function that ``[metric] entry`` names. ``None`` keeps
             the default lookup: ``score``, then ``metric``, then the single function.
-        entry_known: ``False`` when the repository's own ``optimize.toml``
+        entry_known: ``False`` when the repository's own ``ascent.toml``
             gives the entry and this check cannot read it. The code must still
             load, but a missing default function is left to the run's setup.
         timeout_seconds: Maximum time to wait for the child to finish.

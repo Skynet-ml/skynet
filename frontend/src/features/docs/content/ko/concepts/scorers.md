@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | dict입니다. `case["input"]`는 입력 필드를 담습니다. `case["expected"]`는 기댓값 또는 `None`을 담습니다 |
 | `output`    | `[run]` 엔트리가 케이스에 대해 반환한 값. 파일에 `[run]`이 없으면 `None` |
 
-리포지토리의 `optimize.toml` 파일에는 `[run]` 섹션 또는 `[target.<name>]` 스테이지가 있어야 합니다. `[run]`의 `entry`는 한 버전을 케이스 하나에 대해 자체 샌드박스에서 실행합니다. 둘 다 없는 파일은 Skynet이 거부합니다. 모든 버전이 같은 점수를 받기 때문입니다.
+리포지토리의 `ascent.toml` 파일에는 `[run]` 섹션 또는 `[target.<name>]` 스테이지가 있어야 합니다. `[run]`의 `entry`는 한 버전을 케이스 하나에 대해 자체 샌드박스에서 실행합니다. 둘 다 없는 파일은 Skynet이 거부합니다. 모든 버전이 같은 점수를 받기 때문입니다.
 
 - 함수 엔트리(예: `entry = "serve.py:serve"`)는 `case["input"]`를 인수로 받습니다. `output`은 그 반환값입니다.
 - 명령 엔트리(예: `entry = ["python", "-m", "pytest", "-q"]`)는 입력을 stdin의 JSON으로 받습니다. `output`은 `{"exit_code": ..., "stdout": "..."}`입니다.
@@ -69,7 +69,7 @@ GEPA와 Auto는 피드백 텍스트를 읽고 다음 버전을 작성합니다. 
 
 ### 정확히 일치
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 `[run]` 엔트리가 테스트를 실행합니다. 채점기는 종료 코드와 테스트 출력을 읽습니다.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 채점기는 모델을 호출할 수 있습니다. `openascent` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

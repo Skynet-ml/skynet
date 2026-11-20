@@ -596,13 +596,13 @@ export interface WizardV2Context {
   /** An i18n key or the exact error text. */
   runBlockedReason: string | null;
   /**
-   * The command that the run's optimize.toml names in `[metric] entry`, from
+   * The command that the run's ascent.toml names in `[metric] entry`, from
    * the server's contract check; null for a Python entry, no entry, or no
    * answer yet. A command needs no metric.py (SKY-770).
    */
   metricCommand: readonly string[] | null;
   /**
-   * The command that the run's optimize.toml names in `[proposer] entry`, from
+   * The command that the run's ascent.toml names in `[proposer] entry`, from
    * the same contract check; null for no entry or no answer yet (SKY-771).
    */
   proposerCommand: readonly string[] | null;

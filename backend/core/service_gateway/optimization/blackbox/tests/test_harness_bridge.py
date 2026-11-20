@@ -658,7 +658,7 @@ def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path)
 
 # The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
 _HIDDEN = [
-    "optimize.toml",
+    "ascent.toml",
     "metric",
     ".optimize/exploits",
     "reference/answers.json",
@@ -666,7 +666,7 @@ _HIDDEN = [
     "rules/illegal.md",
     "tools/mcp_server.py",
 ]
-_HIDDEN_FILES = ["optimize.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
+_HIDDEN_FILES = ["ascent.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
 # One shape per harness tool family: claude, codex, pi, opencode, prime and their shells.
 _TOOL_CALLS = [
     ("Read", lambda path: {"file_path": path}),
@@ -698,7 +698,7 @@ def _policy(tmp_path: Path) -> dict:
 def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: Path, tool, shape, path) -> None:
     """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind."""
     policy = _policy(tmp_path)
-    expected = "config" if path == "optimize.toml" else "scoring"
+    expected = "config" if path == "ascent.toml" else "scoring"
     assert harness_bridge.guard_check(policy, tool, shape(path)) == expected
     absolute = f"{policy['workspace']}/{path}"
     assert harness_bridge.guard_check(policy, tool, shape(absolute)) == expected
@@ -709,10 +709,10 @@ def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: P
     [
         ("Glob", {"pattern": "**/*"}),
         ("Bash", {"command": "ls -R ."}),
-        ("Grep", {"pattern": "optimize.toml", "path": "src"}),
-        ("Read", {"file_path": "src/optimize.toml.md"}),
+        ("Grep", {"pattern": "ascent.toml", "path": "src"}),
+        ("Read", {"file_path": "src/ascent.toml.md"}),
         ("Read", {"file_path": "metrics/score.py"}),
-        ("Read", {"file_path": "../work-other/optimize.toml"}),
+        ("Read", {"file_path": "../work-other/ascent.toml"}),
     ],
 )
 def test_guard_lets_other_paths_and_broad_patterns_run(tmp_path: Path, tool: str, tool_input: dict) -> None:
@@ -730,14 +730,14 @@ def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("tool", "tool_input"),
     [
-        ("Read", {"file_path": "alias/optimize.toml"}),
-        ("Bash", {"command": "cd src && cat ../optimize.toml"}),
+        ("Read", {"file_path": "alias/ascent.toml"}),
+        ("Bash", {"command": "cd src && cat ../ascent.toml"}),
         ("Bash", {"command": "cd src; cd deep && cat ../../metric/score.py"}),
-        ("exec_command", {"cmd": "cat ../optimize.toml", "workdir": "src"}),
-        ("Bash", {"command": 'cat "$(pwd)/optimize.toml"'}),
-        ("Bash", {"command": "cat $(pwd)/optimize.toml"}),
+        ("exec_command", {"cmd": "cat ../ascent.toml", "workdir": "src"}),
+        ("Bash", {"command": 'cat "$(pwd)/ascent.toml"'}),
+        ("Bash", {"command": "cat $(pwd)/ascent.toml"}),
         ("Bash", {"command": "cat `pwd`/data/cases.jsonl"}),
-        ("Read", {"file_path": "${PWD}/optimize.toml"}),
+        ("Read", {"file_path": "${PWD}/ascent.toml"}),
     ],
     ids=[
         "symlink-alias",
@@ -758,9 +758,9 @@ def test_guard_resolves_aliases_working_directories_and_pwd(tmp_path: Path, tool
 
 
 def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
-    """Refuse OPTIMIZE.TOML on a case-folding policy, and only there."""
+    """Refuse ASCENT.TOML on a case-folding policy, and only there."""
     workspace = tmp_path / "work"
-    call = {"file_path": "OPTIMIZE.TOML"}
+    call = {"file_path": "ASCENT.TOML"}
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
     exact = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log")
     assert harness_bridge.guard_check(folded, "Read", call) == "config"
@@ -771,13 +771,13 @@ def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("tool", "tool_input"),
     [
-        ("Bash", {"command": "cat ~/shinka-run/repo/optimize.toml"}),
-        ("Bash", {"command": "cat $HOME/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat ~/shinka-run/repo/ascent.toml"}),
+        ("Bash", {"command": "cat $HOME/shinka-run/repo/ascent.toml"}),
         ("Bash", {"command": "cat ${HOME}/shinka-run/repo/metric/score.py"}),
-        ("Bash", {"command": "cd ~/shinka-run/repo && cat optimize.toml"}),
+        ("Bash", {"command": "cd ~/shinka-run/repo && cat ascent.toml"}),
         ("Bash", {"command": "cd ~ && cat shinka-run/repo/data/cases.jsonl"}),
-        ("Read", {"file_path": "~/shinka-run/repo/optimize.toml"}),
-        ("exec_command", {"cmd": "cat optimize.toml", "workdir": "~/shinka-run/repo"}),
+        ("Read", {"file_path": "~/shinka-run/repo/ascent.toml"}),
+        ("exec_command", {"cmd": "cat ascent.toml", "workdir": "~/shinka-run/repo"}),
     ],
     ids=["tilde", "home", "brace-home", "cd-tilde", "cd-bare-tilde", "read-tilde", "codex-workdir-tilde"],
 )
@@ -793,7 +793,7 @@ def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_inp
 
 @pytest.mark.parametrize(
     "command",
-    ["cat x~/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
+    ["cat x~/shinka-run/repo/ascent.toml", "cat ~/ascent.toml"],
 )
 def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
     """Leave a tilde inside a word, and a home path outside the workspace, alone."""
@@ -807,16 +807,16 @@ def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, comma
 @pytest.mark.parametrize(
     "command",
     [
-        "cat ~+/optimize.toml",
-        "cd metric && cat ~-/optimize.toml",
-        "cat $(pwd -P)/optimize.toml",
-        "cat $(pwd -L)/optimize.toml",
-        "cat ${PWD:-x}/optimize.toml",
-        "cat ${HOME:-x}/shinka-run/repo/optimize.toml",
-        "cat ${HOME%/}/shinka-run/repo/optimize.toml",
-        "cd metric; cat $OLDPWD/optimize.toml",
-        "cat ~agent/shinka-run/repo/optimize.toml",
-        "cat $HOMEDIR/shinka-run/repo/optimize.toml",
+        "cat ~+/ascent.toml",
+        "cd metric && cat ~-/ascent.toml",
+        "cat $(pwd -P)/ascent.toml",
+        "cat $(pwd -L)/ascent.toml",
+        "cat ${PWD:-x}/ascent.toml",
+        "cat ${HOME:-x}/shinka-run/repo/ascent.toml",
+        "cat ${HOME%/}/shinka-run/repo/ascent.toml",
+        "cd metric; cat $OLDPWD/ascent.toml",
+        "cat ~agent/shinka-run/repo/ascent.toml",
+        "cat $HOMEDIR/shinka-run/repo/ascent.toml",
         "cat `pwd -P`/metric/score.py",
         'cat "$(dirname x)"/data/cases.jsonl',
     ],
@@ -834,7 +834,7 @@ def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Pat
     "command",
     [
         "cd src && python $(pwd -P)/solve.py --out ${OUT:-out}/result.json",
-        "echo $PATH ~+ ~- `date` && cat src/optimize.toml.md",
+        "echo $PATH ~+ ~- `date` && cat src/ascent.toml.md",
         "cat ${HOME:-x}/notes/metrics.md",
     ],
 )
@@ -859,7 +859,7 @@ def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
     workspace.mkdir()
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
     first, rest = str(workspace).lstrip("/").split("/", 1)
-    call = {"file_path": f"/{first.upper()}/{rest}/optimize.toml"}
+    call = {"file_path": f"/{first.upper()}/{rest}/ascent.toml"}
     assert harness_bridge.guard_check(folded, "Read", call) == "config"
     assert harness_bridge.guard_check(_policy(tmp_path), "Read", call) is None
 
@@ -886,7 +886,7 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
-    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat optimize.toml"}})
+    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat ascent.toml"}})
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert denied["hookSpecificOutput"]["permissionDecisionReason"] == harness_bridge.GUARD_REFUSAL
     assert _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "ls src"}}) == {}
@@ -981,9 +981,7 @@ def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> Non
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
 
 
-@pytest.mark.parametrize(
-    "command", ["cd; cat shinka-run/repo/optimize.toml", "cd && cat shinka-run/repo/optimize.toml"]
-)
+@pytest.mark.parametrize("command", ["cd; cat shinka-run/repo/ascent.toml", "cd && cat shinka-run/repo/ascent.toml"])
 def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str) -> None:
     """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder."""
     home = tmp_path / "home"
@@ -1075,7 +1073,7 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
         (workspace / f"c{index}").symlink_to(f"c{index + 1}")
     for index in range(3000):
         (workspace / f"e{index}").symlink_to("c0")
-    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " optimize.toml"
+    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " ascent.toml"
     with pytest.raises(ValueError, match="symbolic links"):
         harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
     started = time.monotonic()
@@ -1098,7 +1096,7 @@ def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> No
     """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does."""
     policy = _policy(tmp_path)
     workspace = tmp_path / "work"
-    (workspace / "link2").symlink_to("optimize.toml")
+    (workspace / "link2").symlink_to("ascent.toml")
     (workspace / "sub").mkdir()
     (workspace / "sub" / "link1").symlink_to("../link2")
     (workspace / "link0").symlink_to("sub/link1")
@@ -1159,7 +1157,7 @@ const allowed = await handler({{ toolName: "read", input: {{ path: "src/app.py" 
 const {{ AppGuard }} = await import({json.dumps(plugin_module.as_uri())});
 const hooks = await AppGuard({{}});
 let thrown = null;
-try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
+try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "ascent.toml" }} }}); }}
 catch (error) {{ thrown = error.message; }}
 await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
 console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefused, eveAllowed }}));
@@ -1198,8 +1196,8 @@ def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, brok
         digest = harness_bridge.write_guard_policy(policy_file, {**policy, "hashes": {}})
     else:
         # The lone surrogate comes first, so a strict UTF-8 hash would crash before the hidden name.
-        hook_input = {"cmd": "cat src/\ud800.py optimize.toml"}
-        check_input = {"file_path": "optimize.toml", "path": "src/\ud800.py"}
+        hook_input = {"cmd": "cat src/\ud800.py ascent.toml"}
+        check_input = {"file_path": "ascent.toml", "path": "src/\ud800.py"}
     if mode == "hook":
         raw = json.dumps({"tool_name": "exec_command", "tool_input": hook_input})
     else:
@@ -1317,7 +1315,7 @@ def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) 
 
 
 class _FakeResponses(http.server.BaseHTTPRequestHandler):
-    """Answer the Responses API: one ``cat optimize.toml`` call, then a final message."""
+    """Answer the Responses API: one ``cat ascent.toml`` call, then a final message."""
 
     tool_outputs: list[str] = []
 
@@ -1337,7 +1335,7 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
                 "content": [{"type": "output_text", "text": "done"}],
             }
         else:
-            arguments = json.dumps({"cmd": "cat optimize.toml"})
+            arguments = json.dumps({"cmd": "cat ascent.toml"})
             item = {
                 "type": "function_call",
                 "id": "f1",
@@ -1907,7 +1905,7 @@ def test_a_setup_that_runs_too_long_stops_with_every_process_it_started(tmp_path
 
     started = time.monotonic()
     with pytest.raises(
-        RuntimeError, match=r"(?s)\[proposer\] setup command in optimize.toml .* did not finish within 2 seconds"
+        RuntimeError, match=r"(?s)\[proposer\] setup command in ascent.toml .* did not finish within 2 seconds"
     ):
         harness_bridge.run_setup([sys.executable, "-c", script], tmp_path, timeout_seconds=2)
 
@@ -2174,7 +2172,7 @@ def test_a_setup_that_edits_a_tracked_file_stops_with_its_command_and_the_file(t
     command = [sys.executable, "-c", "open('a.txt', 'a').write('!'); open('new.txt', 'w')"]
 
     with pytest.raises(
-        RuntimeError, match=r"(?s)setup command in optimize.toml \(.*a\.txt.*\) changed tracked files: a\.txt\."
+        RuntimeError, match=r"(?s)setup command in ascent.toml \(.*a\.txt.*\) changed tracked files: a\.txt\."
     ):
         harness_bridge.ensure_setup(command, checkout)
 
@@ -2226,7 +2224,7 @@ def test_a_files_command_outside_a_checkout_without_a_default_agent_stops(tmp_pa
     """
     proposer = {**_PLAIN, "run_command": "echo file-entry", "file_command": True}
 
-    with pytest.raises(RuntimeError, match=r"entry command in optimize.toml runs only in a repository checkout"):
+    with pytest.raises(RuntimeError, match=r"entry command in ascent.toml runs only in a repository checkout"):
         run_session(proposer, workspace=tmp_path / "plain", prompt="x", model="m", session_dir=tmp_path / "s")
 
 
@@ -2449,7 +2447,7 @@ def test_a_setup_that_changes_or_removes_an_untracked_file_of_the_version_stops(
     with pytest.raises(
         RuntimeError,
         match=(
-            r"(?s)setup command in optimize.toml \(.*\) changed or removed files of the version:"
+            r"(?s)setup command in ascent.toml \(.*\) changed or removed files of the version:"
             r" gone\.txt, kept\.txt\."
         ),
     ):
@@ -2493,7 +2491,7 @@ def test_a_setup_that_points_a_link_of_the_version_at_a_new_target_stops(
         "import os; os.remove('link'); os.symlink('two.txt', 'link'); open('new.txt', 'w')",
     ]
 
-    with pytest.raises(RuntimeError, match=rf"(?s)setup command in optimize.toml \(.*\) {error}\."):
+    with pytest.raises(RuntimeError, match=rf"(?s)setup command in ascent.toml \(.*\) {error}\."):
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()
@@ -2761,7 +2759,7 @@ def test_an_unreadable_setup_record_stops_with_a_clear_error(tmp_path: Path) -> 
     (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").write_text("")
 
     with pytest.raises(
-        RuntimeError, match=r"(?s)record of the \[proposer\] setup command in optimize.toml \(.*\) at .*done\.json"
+        RuntimeError, match=r"(?s)record of the \[proposer\] setup command in ascent.toml \(.*\) at .*done\.json"
     ):
         harness_bridge.ensure_setup(command, checkout)
 
@@ -3011,7 +3009,7 @@ def test_a_setup_that_makes_a_commit_stops_with_its_command(tmp_path: Path) -> N
         "echo evil >> a.txt && git -c user.name=t -c user.email=t@example.com commit --quiet --no-verify -am s",
     ]
 
-    with pytest.raises(RuntimeError, match=r"(?s)setup command in optimize.toml \(.*\) moved HEAD from [0-9a-f]+ to"):
+    with pytest.raises(RuntimeError, match=r"(?s)setup command in ascent.toml \(.*\) moved HEAD from [0-9a-f]+ to"):
         harness_bridge.ensure_setup(command, checkout)
 
     assert not (checkout / ".git" / harness_bridge.SETUP_STATE / "done.json").exists()

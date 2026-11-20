@@ -57,7 +57,7 @@ The metric setup box makes the saved metric state once for each run
 (`RepoWorkspace._setup_metric`). It opens with `private=True`, no services,
 no secret and the package registry hosts (`PACKAGE_REGISTRY_HOSTS`) as its
 only network. It installs the packages of `.optimize/metric-requirements.txt`.
-When `optimize.toml` sets `[metric] setup` (SKY-740), it then installs the
+When `ascent.toml` sets `[metric] setup` (SKY-740), it then installs the
 metric files into `.app-metric/repo` and runs the command there once, with
 the 30-minute setup time limit. A failed or timed-out build raises
 `RepoSetupError` with the redacted last lines of its output, before any

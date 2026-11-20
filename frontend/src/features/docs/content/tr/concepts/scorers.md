@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | Bir dict. `case["input"]` girdi alanlarını tutar. `case["expected"]` beklenen değeri veya `None` tutar |
 | `output`    | `[run]` giriş noktasının vaka için döndürdüğü değer veya dosyada `[run]` yoksa `None` |
 
-Deponun `optimize.toml` dosyasında bir `[run]` bölümü veya bir `[target.<name>]` aşaması olmalıdır. `[run]` giriş noktası (`entry`), bir sürümü bir vaka üzerinde kendi sandbox'ında çalıştırır. Skynet ikisi de olmayan bir dosyayı reddeder, çünkü her sürüm aynı puanı alırdı.
+Deponun `ascent.toml` dosyasında bir `[run]` bölümü veya bir `[target.<name>]` aşaması olmalıdır. `[run]` giriş noktası (`entry`), bir sürümü bir vaka üzerinde kendi sandbox'ında çalıştırır. Skynet ikisi de olmayan bir dosyayı reddeder, çünkü her sürüm aynı puanı alırdı.
 
 - Bir fonksiyon giriş noktası, örneğin `entry = "serve.py:serve"`, `case["input"]` değerini argüman olarak alır. `output`, onun döndürdüğü değerdir.
 - Bir komut giriş noktası, örneğin `entry = ["python", "-m", "pytest", "-q"]`, girdiyi stdin üzerinden JSON olarak alır. `output`, `{"exit_code": ..., "stdout": "..."}` değeridir.
@@ -69,7 +69,7 @@ GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnini okur. Ney
 
 ### Tam eşleşme
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 `[run]` giriş noktası testleri çalıştırır. Puanlayıcı çıkış kodunu ve test çıktısını okur.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 Puanlayıcı bir model çağırabilir. `openascent` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

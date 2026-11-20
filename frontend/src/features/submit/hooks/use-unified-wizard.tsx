@@ -38,7 +38,7 @@ import {
   getOptimizerCatalog,
   getLatestHardeningJob,
   getStagedDataset,
-  checkOptimizeToml,
+  checkAscentToml,
   hostedRunsAvailable,
   webPicked,
   isInsufficientFundsError,
@@ -139,14 +139,14 @@ import {
   useSandboxProviders,
 } from "./use-submit-wizard-data";
 
-// A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
-const OPTIMIZE_TOML = "optimize.toml";
+// A repository run's ascent.toml; the coding agent writes it into the draft (SKY-184).
+const ASCENT_TOML = "ascent.toml";
 // The contract check waits this long after the last edit, so typing sends one check.
 const CONTRACT_CHECK_DELAY_MS = 400;
 
-/** The draft's repository files other than optimize.toml, or undefined when there are none. */
+/** The draft's repository files other than ascent.toml, or undefined when there are none. */
 function otherFiles(files: Readonly<Record<string, string>>): Record<string, string> | undefined {
-  const rest = Object.entries(files).filter(([path]) => path !== OPTIMIZE_TOML);
+  const rest = Object.entries(files).filter(([path]) => path !== ASCENT_TOML);
   return rest.length > 0 ? Object.fromEntries(rest) : undefined;
 }
 
@@ -432,7 +432,7 @@ export function WizardV2Provider({
   const modelCatalog = useModelCatalog(runSource);
   const sandboxProviders = useSandboxProviders(runSource);
   // Names and ids only. A repository run sends the saved secrets its
-  // optimize.toml names, so a secret saved once serves every run (SKY-641).
+  // ascent.toml names, so a secret saved once serves every run (SKY-641).
   const [savedSecrets, setSavedSecrets] = useState<SavedSecret[]>([]);
   useEffect(() => {
     let live = true;
@@ -479,9 +479,9 @@ export function WizardV2Provider({
   // A contract whose [metric] entry is a command needs no metric.py, and one
   // whose [proposer] entry names a command offers it in the agent picker. The
   // server's parser names both; the wizard parses no TOML (SKY-770, SKY-771).
-  const repoContract = useWizardStateOptional()?.repoBase?.get(OPTIMIZE_TOML);
+  const repoContract = useWizardStateOptional()?.repoBase?.get(ASCENT_TOML);
   const contract = state.task.repo
-    ? contractText(state.workspace.files[OPTIMIZE_TOML], repoContract)
+    ? contractText(state.workspace.files[ASCENT_TOML], repoContract)
     : "";
   const [checkedContract, setCheckedContract] = useState<{
     text: string;
@@ -492,7 +492,7 @@ export function WizardV2Provider({
     if (!contract.trim()) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      checkOptimizeToml(contract, controller.signal)
+      checkAscentToml(contract, controller.signal)
         .then((result) => {
           if (controller.signal.aborted) return;
           const command = result.ok ? (result.metric_command ?? null) : null;
@@ -1083,9 +1083,9 @@ export function WizardV2Provider({
           if (typeof shared.metric_code === "string")
             patchWorkspace({ metricCode: shared.metric_code });
           break;
-        case "optimize_toml":
-          if (typeof shared.optimize_toml === "string")
-            setWorkspaceFile(OPTIMIZE_TOML, shared.optimize_toml);
+        case "ascent_toml":
+          if (typeof shared.ascent_toml === "string")
+            setWorkspaceFile(ASCENT_TOML, shared.ascent_toml);
           break;
         case "workspace_files":
           for (const [path, text] of Object.entries(shared.workspace_files ?? {}))
@@ -1155,8 +1155,8 @@ export function WizardV2Provider({
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
-      optimize_toml: workspace.files[OPTIMIZE_TOML] || undefined,
-      // optimize.toml has its own field; the agent sees the other repo files here.
+      ascent_toml: workspace.files[ASCENT_TOML] || undefined,
+      // ascent.toml has its own field; the agent sees the other repo files here.
       workspace_files: otherFiles(workspace.files),
       // Only while drafts exist: the agent pins the first new draft to the commit it reads then.
       workspace_base:

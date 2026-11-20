@@ -49,9 +49,7 @@ USER = "alice@example.com"
 ADMIN = AuthenticatedUser(username="admin1", role="admin", groups=())
 BASE = "a" * 40
 GOOD_PATCH = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n"
-CONTRACT_PATCH = (
-    "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n@@ -1 +1 @@\n-a\n+b\n"
-)
+CONTRACT_PATCH = "diff --git a/ascent.toml b/ascent.toml\n--- a/ascent.toml\n+++ b/ascent.toml\n@@ -1 +1 @@\n-a\n+b\n"
 OTHER_PATCH = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-a\n+c\n"
 OUTSIDE_PATCH = "diff --git a/other/x.py b/other/x.py\n--- a/other/x.py\n+++ b/other/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 THIRD_PATCH = "diff --git a/src/c.py b/src/c.py\n--- a/src/c.py\n+++ b/src/c.py\n@@ -1 +1 @@\n-a\n+d\n"
@@ -331,7 +329,7 @@ def test_a_retry_with_the_same_candidate_pays_once(store: SQLiteJobStore, boxes:
 def test_a_candidate_that_changes_the_contract_is_refused_before_any_paid_box(
     store: SQLiteJobStore, boxes: Any
 ) -> None:
-    """Refuse a change to optimize.toml, charge nothing, and replay the refusal."""
+    """Refuse a change to ascent.toml, charge nothing, and replay the refusal."""
     session_id = _session(store, _cases(3))
     with pytest.raises(repo_judge.JudgeError) as refused:
         _call(store, session_id, CONTRACT_PATCH)
@@ -1478,7 +1476,7 @@ def test_a_refusal_names_every_broken_rule(store: SQLiteJobStore, boxes: Any) ->
     session_id = _session(store, _cases(3))
     with pytest.raises(repo_judge.JudgeError) as refused:
         _call(store, session_id, CONTRACT_PATCH + OUTSIDE_PATCH)
-    assert "optimize.toml" in refused.value.detail
+    assert "ascent.toml" in refused.value.detail
     assert "other/x.py" in refused.value.detail
 
 
@@ -1563,7 +1561,7 @@ def test_a_retry_of_a_refusal_stored_pending_replays_it_without_headroom(store: 
     with pytest.raises(repo_judge.JudgeError) as again:
         _call(store, session_id, CONTRACT_PATCH)
     assert again.value.code == "judge.candidate_refused"
-    assert "optimize.toml" in again.value.detail
+    assert "ascent.toml" in again.value.detail
     assert _final_rows(store, session_id) == 0
     assert store.get_job(session_id)["status"] == "running"
     assert len(boxes["staged"]) == staged

@@ -2,9 +2,9 @@ Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Un motore 
 
 ## Il contratto comune
 
-Ogni esecuzione ha un repository, un file `optimize.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
+Ogni esecuzione ha un repository, un file `ascent.toml` con una voce `[run]` o una fase `[target.<name>]`, e uno scorer. La voce `[run]` esegue una versione del repository su un caso. Lo scorer è una funzione Python che riceve l'output della voce e il caso.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 Il repository ha un file `serve.py` nella radice con `def serve(input)`. La voce `[run]` lo chiama nel proprio box della sandbox. Skynet lo usa per servire la versione migliore dopo l'esecuzione.
 
-Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from openascent import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `optimize.toml`.
+Lo scorer gira in un box della sandbox separato. Quel box contiene solo i tuoi file della metrica e nessun codice della versione, quindi lo scorer non può importare `serve.py`. Vede la versione solo attraverso `output`, o attraverso `call()` verso una fase `[target.<name>]`. Importa `call` con `from openascent import call`. Senza una voce `[run]` o una fase `[target.<name>]`, Skynet rifiuta il file `ascent.toml`.
 
 > [!NOTE]
 > L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer, i valori attesi né i segreti dell'esecuzione.

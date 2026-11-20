@@ -357,7 +357,7 @@ interface ScorerDependencyLock {
 export interface BlackboxScorer {
   kind: "python" | "remote";
   metric_code?: string | null;
-  // True when optimize.toml's [metric] entry is a command: the metric box runs
+  // True when ascent.toml's [metric] entry is a command: the metric box runs
   // it, so the request carries no metric_code (SKY-738, SKY-770).
   command_metric?: boolean;
   url?: string | null;
@@ -401,7 +401,7 @@ interface BlackboxRepoSource {
   /** The commit the setup agent read the draft files at; the run refuses them on another commit. */
   draft_base?: string;
   /**
-   * What the server recorded from optimize.toml; `outcome.target` is the score that stops the search,
+   * What the server recorded from ascent.toml; `outcome.target` is the score that stops the search,
    * and `proposer_entry` is the `[proposer] entry` command when the run uses it.
    */
   environment?: { outcome?: { target?: number | null }; proposer_entry?: string[] } | null;

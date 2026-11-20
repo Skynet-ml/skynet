@@ -2,9 +2,9 @@ Skynet הוא Optimize Anything: כל ריצה מייעלת מאגר קוד. מ�
 
 ## החוזה המשותף
 
-לכל ריצה יש מאגר קוד, קובץ `optimize.toml` עם `entry` ב-`[run]` או שלב `[target.<name>]`, ופונקציית ניקוד. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד היא פונקציית Python שמקבלת את הפלט של ה-`entry` ואת המקרה.
+לכל ריצה יש מאגר קוד, קובץ `ascent.toml` עם `entry` ב-`[run]` או שלב `[target.<name>]`, ופונקציית ניקוד. ה-`entry` של `[run]` מריץ גרסה אחת של המאגר על מקרה אחד. פונקציית הניקוד היא פונקציית Python שמקבלת את הפלט של ה-`entry` ואת המקרה.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 בתיקיית השורש של המאגר יש קובץ `serve.py` עם `def serve(input)`. ה-`entry` של `[run]` קורא לו בתיבת sandbox משלו.‏ Skynet משתמש בו כדי להפעיל את הגרסה הטובה ביותר כשירות אחרי הריצה.
 
-פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך ואין קוד של גרסה, ולכן פונקציית הניקוד לא יכולה לייבא את `serve.py`. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. בלי `entry` ב-`[run]` או שלב `[target.<name>]`, ‏Skynet דוחה את הקובץ `optimize.toml`.
+פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך ואין קוד של גרסה, ולכן פונקציית הניקוד לא יכולה לייבא את `serve.py`. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. בלי `entry` ב-`[run]` או שלב `[target.<name>]`, ‏Skynet דוחה את הקובץ `ascent.toml`.
 
 > [!NOTE]
 > סוכן הקוד שכותב את הגרסאות לא רואה את קוד המקור של פונקציית הניקוד, את הערכים הצפויים או את סודות הריצה.

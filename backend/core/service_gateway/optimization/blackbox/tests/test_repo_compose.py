@@ -1,4 +1,4 @@
-"""Tests for the ``[sandbox] compose`` setting of a repository's optimize.toml."""
+"""Tests for the ``[sandbox] compose`` setting of a repository's ascent.toml."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ services:
 
 
 def _toml(extra: str = "") -> bytes:
-    """Return a small optimize.toml that names a compose file.
+    """Return a small ascent.toml that names a compose file.
 
     Args:
         extra: More TOML text, added at the end.

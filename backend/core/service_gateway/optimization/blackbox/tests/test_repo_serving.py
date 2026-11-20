@@ -17,7 +17,7 @@ from core.billing.operation_pricing import json_fingerprint
 from core.worker import repo_staging
 
 from .. import repo_serving, repo_tree
-from ..repo_constraints import ConstraintsError
+from ..repo_constraints import CONSTRAINTS_FILE, ConstraintsError
 from ..repo_serving import (
     INTERACTION_KIND,
     check_serve_contract,
@@ -230,7 +230,7 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=object(), owner="alice") as staged:
+    with staged_snapshot(payload, engine=object(), owner="alice", protected_paths=(CONSTRAINTS_FILE,)) as staged:
         archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
         assert archive.is_file()
         assert REPO_SNAPSHOT_KEY not in payload
@@ -238,6 +238,27 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     assert calls["token"] == "token-for-alice"
     assert calls["commit"] == "a" * 40
     assert not calls["workdir"].exists()
+
+
+def test_serving_refuses_a_run_recorded_under_the_old_contract_file_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that did not protect ascent.toml started under the old file name, so its hidden list is unknown (SKY-746).
+
+    Args:
+        monkeypatch: Records any fetch of the repository.
+    """
+    fetches: list[str] = []
+    monkeypatch.setattr(
+        repo_serving, "fetch_snapshot", lambda repository, *_args, **_kwargs: fetches.append(repository)
+    )
+    payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
+
+    with (
+        pytest.raises(ConstraintsError, match=r"before the contract file was named ascent\.toml"),
+        staged_snapshot(payload, engine=None, owner=None, protected_paths=("optimize" + ".toml", "eval")),
+    ):
+        pass
+
+    assert fetches == []
 
 
 _HIDDEN_TOML = """version = 1
@@ -260,7 +281,7 @@ mcp = "eval/mcp.json"
 cases = "data/cases.jsonl"
 """
 _SCORING_SIDE = {
-    "optimize.toml": _HIDDEN_TOML,
+    "ascent.toml": _HIDDEN_TOML,
     "eval/scorer.py": "def score(repo_path, case):\n    return 1.0\n",
     "eval/attacks/cheat/why.md": "cheat\n",
     "eval/reference.json": "{}\n",
@@ -300,7 +321,7 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=None, owner=None) as staged:
+    with staged_snapshot(payload, engine=None, owner=None, protected_paths=(CONSTRAINTS_FILE,)) as staged:
         served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
 
     assert served == set(_SERVING_SIDE)
@@ -324,7 +345,7 @@ def test_serving_writes_the_drafts_into_the_tree_and_never_lists_them(
     job["payload"]["target"]["repo"]["draft_files"] = {**_SCORING_SIDE, "src/app.py": "DRAFTED = 1\n"}
     payload = serve_payload(job, patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=None, owner=None) as staged:
+    with staged_snapshot(payload, engine=None, owner=None, protected_paths=(CONSTRAINTS_FILE,)) as staged:
         archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
         served = _members(archive)
         with tarfile.open(archive, "r:gz") as packed:
@@ -357,7 +378,10 @@ def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], patch: str = 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     return staged_snapshot(
-        serve_payload(_job(), patch=patch, inputs={}, optimization_id="opt-1"), engine=None, owner=None
+        serve_payload(_job(), patch=patch, inputs={}, optimization_id="opt-1"),
+        engine=None,
+        owner=None,
+        protected_paths=(CONSTRAINTS_FILE,),
     )
 
 
@@ -369,7 +393,7 @@ def test_a_replay_stored_before_the_strip_keeps_its_request_fingerprint() -> Non
     assert json_fingerprint(payload) == _PRE_STRIP_FINGERPRINT
 
 
-def test_a_commit_from_before_optimize_toml_still_serves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_commit_from_before_ascent_toml_still_serves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run pinned before the constraints file existed serves its tree, without the default exploit folder."""
     files = {"serve.py": _SERVE, "src/app.py": "X = 1\n", ".optimize/exploits/cheat.md": "cheat\n"}
 
@@ -379,11 +403,11 @@ def test_a_commit_from_before_optimize_toml_still_serves(tmp_path: Path, monkeyp
     assert served == {"serve.py", "src/app.py"}
 
 
-def test_a_commit_whose_optimize_toml_has_no_version_still_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_commit_whose_ascent_toml_has_no_version_still_serves(monkeypatch: pytest.MonkeyPatch) -> None:
     """A finished run may predate the required ``version`` key, so serving reads it as 1 and still hides the metric."""
     files = {
         "serve.py": _SERVE,
-        "optimize.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        "ascent.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
         "eval/scorer.py": "def score(repo_path, case):\n    return 0.0\n",
     }
 
@@ -394,16 +418,16 @@ def test_a_commit_whose_optimize_toml_has_no_version_still_serves(monkeypatch: p
     assert "eval/scorer.py" not in served
 
 
-def test_a_commit_whose_optimize_toml_no_longer_validates_fails_clearly(
+def test_a_commit_whose_ascent_toml_no_longer_validates_fails_clearly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse to serve when the hidden list is unknown, and name the broken file."""
     files = {
         "serve.py": _SERVE,
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\nunknown_key = 1\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\nunknown_key = 1\n',
     }
 
-    with pytest.raises(ConstraintsError, match=r"optimize\.toml"), _stage(monkeypatch, files):
+    with pytest.raises(ConstraintsError, match=r"ascent\.toml"), _stage(monkeypatch, files):
         pytest.fail("the snapshot must not be yielded")
 
 
@@ -411,7 +435,7 @@ def test_a_finished_run_with_a_legacy_inline_illegal_list_refuses_to_serve(monke
     """A run pinned while ``[proposer] illegal`` took inline rules now fails closed, because its hidden list is unknown."""
     files = {
         "serve.py": _SERVE,
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n',
         "eval/scorer.py": f"# {_LEAK}\n",
     }
 
@@ -430,7 +454,7 @@ def test_a_best_patch_that_edits_a_hidden_file_serves_only_its_visible_edit(
     files = {
         "serve.py": serve,
         "src/app.py": "X = 1\n",
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
         "eval/scorer.py": "def score(repo_path, case):\n    return 0.0\n",
     }
     patch = _patch(tmp_path, files, {"src/app.py": "X = 2\n", "eval/scorer.py": f"# {_LEAK}\n"})
@@ -457,7 +481,7 @@ def test_a_best_patch_that_moves_a_hidden_file_out_serves_without_it(
     metric = "".join(f"# {_LEAK} {line}\n" for line in range(20))
     files = {
         "serve.py": _SERVE,
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/scorer.py": metric,
     }
     scratch = tmp_path / "patch"
@@ -502,7 +526,7 @@ _LEAK = "SCORING_SECRET_4e2b"
     [
         pytest.param(
             {
-                "optimize.toml": _FOLDER_TOML,
+                "ascent.toml": _FOLDER_TOML,
                 "scoring/score.py": f"def score(repo_path, case):\n    return 1.0  # {_LEAK}\n",
                 "scoring/helpers/util.py": f"K = '{_LEAK}'\n",
                 "scoring/attacks/cheat/why.md": f"{_LEAK}\n",
@@ -510,19 +534,19 @@ _LEAK = "SCORING_SECRET_4e2b"
                 "scoring/cases.jsonl": f'{{"input": {{"q": "a"}}, "expected": "{_LEAK}"}}\n',
             },
             {"serve.py": _SERVE, "src/app.py": "X = 1\n"},
-            ("optimize.toml", "scoring"),
+            ("ascent.toml", "scoring"),
             id="hidden-folder",
         ),
         pytest.param(
             {
-                "optimize.toml": _FILE_TOML,
+                "ascent.toml": _FILE_TOML,
                 "metric.py": f"def score(repo_path, case):\n    return 1.0  # {_LEAK}\n",
                 "reference.json": f'{{"k": "{_LEAK}"}}\n',
                 "cases.jsonl": f'{{"input": {{"q": "a"}}, "expected": "{_LEAK}"}}\n',
                 ".optimize/exploits/cheat.md": f"{_LEAK}\n",
             },
             {"serve.py": _SERVE, "metric_notes.md": "Public notes.\n"},
-            ("optimize.toml", "metric.py", "reference.json", "cases.jsonl", ".optimize/exploits"),
+            ("ascent.toml", "metric.py", "reference.json", "cases.jsonl", ".optimize/exploits"),
             id="single-hidden-files",
         ),
     ],
@@ -543,7 +567,7 @@ def test_no_scoring_file_reaches_the_served_tar_metadata_or_logs(
         caplog: Captures every log record at debug level.
         hidden: Scoring-side files, each holding the leak marker.
         served_side: Files the serving guest needs.
-        roots: The hidden files and folders the commit's ``optimize.toml`` names.
+        roots: The hidden files and folders the commit's ``ascent.toml`` names.
     """
     caplog.set_level(logging.DEBUG)
 
@@ -573,7 +597,7 @@ _RULES = "- Never read the scoring folder.\n"
 def test_a_metric_rule_file_inside_a_hidden_folder_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The scorer's own rule file is scoring side, so the serving tree leaves it out with its folder."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\nillegal = "scoring/rules.md"\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\nillegal = "scoring/rules.md"\n',
         "scoring/score.py": "def score(repo_path, case):\n    return 1.0\n",
         "scoring/rules.md": _RULES,
         "serve.py": _SERVE,
@@ -605,7 +629,7 @@ def test_a_visible_rule_file_inside_a_hidden_folder_refuses_to_serve(
         toml: The commit's constraints file, with ``scoring`` hidden by ``[metric]``.
     """
     files = {
-        "optimize.toml": toml + '\n[metric]\nfiles = ["scoring"]\n',
+        "ascent.toml": toml + '\n[metric]\nfiles = ["scoring"]\n',
         "scoring/score.py": "def score(repo_path, case):\n    return 1.0\n",
         "scoring/rules.md": _RULES,
         "serve.py": _SERVE,
@@ -658,13 +682,18 @@ def _stage_tree(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], links: d
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
-    return staged_snapshot(serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"), engine=None, owner=None)
+    return staged_snapshot(
+        serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"),
+        engine=None,
+        owner=None,
+        protected_paths=(CONSTRAINTS_FILE,),
+    )
 
 
 def test_a_hidden_path_with_a_trailing_slash_is_still_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``scoring/`` names the same folder as ``scoring``."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/"]\n',
         "scoring/score.py": f"# {_LEAK}\n",
         "serve.py": _SERVE,
     }
@@ -680,7 +709,7 @@ def test_a_hidden_path_with_a_dot_slash_prefix_refuses_to_serve(
 ) -> None:
     """A ``./`` path is refused when the file is read, so no unmatched hidden path reaches the strip."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["./scoring"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["./scoring"]\n',
         "scoring/score.py": "x = 1\n",
         "serve.py": _SERVE,
     }
@@ -696,7 +725,7 @@ def test_hidden_paths_match_case_as_the_disk_does(
     """``Scoring`` hides ``scoring`` only on a disk that ignores case, as macOS local mode does (SKY-446)."""
     monkeypatch.setattr(repo_tree, "case_insensitive", lambda directory: ignore_case)
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["Scoring"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["Scoring"]\n',
         "scoring/score.py": "x = 1\n",
         "serve.py": _SERVE,
     }
@@ -708,7 +737,7 @@ def test_hidden_paths_match_case_as_the_disk_does(
 def test_a_symlink_into_a_hidden_folder_carries_no_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A link stays in the served tree, but its target does not, so the guest reads nothing through it."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
         "scoring/score.py": f"# {_LEAK}\n",
         "serve.py": _SERVE,
     }
@@ -735,7 +764,7 @@ def test_a_symlink_into_a_hidden_folder_carries_no_content(tmp_path: Path, monke
 def test_a_hidden_path_that_is_a_symlink_refuses_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     """The strip would drop only the link and keep its target, so serving refuses an older run's commit."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
         "real/score.py": f"# {_LEAK}\n",
         "serve.py": _SERVE,
     }

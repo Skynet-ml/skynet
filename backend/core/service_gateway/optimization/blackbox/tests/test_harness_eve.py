@@ -383,10 +383,10 @@ const workspace = process.env.EVE_WORKSPACE;
 console.log(JSON.stringify({
   env: await run("env"),
   path: await run('printf %s "$PATH"'),
-  readRefused: await refusal(() => connection.readFile({ path: workspace + "/optimize.toml" })),
-  bashRefused: await refusal(() => run("cat optimize.toml")),
-  writeRefused: await refusal(() => connection.writeFiles({ files: [{ path: workspace + "/optimize.toml", content: "x" }] })),
-  removeRefused: await refusal(() => connection.removePath({ path: workspace + "/optimize.toml", force: true })),
+  readRefused: await refusal(() => connection.readFile({ path: workspace + "/ascent.toml" })),
+  bashRefused: await refusal(() => run("cat ascent.toml")),
+  writeRefused: await refusal(() => connection.writeFiles({ files: [{ path: workspace + "/ascent.toml", content: "x" }] })),
+  removeRefused: await refusal(() => connection.removePath({ path: workspace + "/ascent.toml", force: true })),
   allowed: new TextDecoder().decode(await connection.readFile({ path: workspace + "/main.py" })),
 }));
 """
@@ -418,9 +418,9 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     workspace.mkdir()
     tools_bin = tmp_path / "bin"
     tools_bin.mkdir()
-    (workspace / "optimize.toml").write_text("hidden = true\n")
+    (workspace / "ascent.toml").write_text("hidden = true\n")
     (workspace / "main.py").write_text("print(1)\n")
-    guard_env = install_guard(tmp_path / "session", workspace, hidden_hashes(["optimize.toml"]))
+    guard_env = install_guard(tmp_path / "session", workspace, hidden_hashes(["ascent.toml"]))
 
     completed = subprocess.run(
         [_NODE, "--input-type=module", "-e", _SANDBOX_DRIVER, str((project / "sandbox.mjs").as_uri())],
@@ -459,7 +459,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     for key in ("readRefused", "bashRefused", "writeRefused", "removeRefused"):
         assert result[key] == GUARD_REFUSAL, key
     assert result["allowed"] == "print(1)\n"
-    assert (workspace / "optimize.toml").read_text() == "hidden = true\n"
+    assert (workspace / "ascent.toml").read_text() == "hidden = true\n"
 
 
 # Starts a command whose background ``sleep`` holds the stdout pipe, reads the

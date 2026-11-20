@@ -1035,7 +1035,7 @@ class BackgroundWorker:
                         )
                         if gate_failures:
                             raise RepoGateError(gate_failures)
-                        # The broker was bound before staging read optimize.toml, so the
+                        # The broker was bound before staging read ascent.toml, so the
                         # proposer's hosts are granted only now; with none it stays offline.
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
@@ -1090,7 +1090,7 @@ class BackgroundWorker:
                 staged_snapshot = payload_dict.get(REPO_SNAPSHOT_KEY) or {}
                 if staged_snapshot.get("file_proposer") and not runs_proposer_entry(payload_dict.get("strategy") or {}):
                     raise ValueError(
-                        "The stored job runs the [proposer] entry command of optimize.toml, but only a single"
+                        "The stored job runs the [proposer] entry command of ascent.toml, but only a single"
                         " AutoResearch or Meta-Harness run can use it now. Remove [proposer] entry, or choose"
                         " one of those engines, and start the run again."
                     )

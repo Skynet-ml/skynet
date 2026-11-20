@@ -2542,10 +2542,10 @@ def test_the_context_hides_the_hidden_paths_of_the_seed(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """A hidden folder hides its whole subtree from list_files and read_file; its key is a path hash."""
-    hidden = hidden_hashes(["eval/", "optimize.toml"])
-    assert sorted(hidden) == sorted(hashlib.sha256(path.encode()).hexdigest() for path in ["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval/", "ascent.toml"])
+    assert sorted(hidden) == sorted(hashlib.sha256(path.encode()).hexdigest() for path in ["eval", "ascent.toml"])
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
-    tree = _store(trees, {"eval/metric.py": b"m", "eval/data/x.json": b"x", "src/a.py": b"a", "optimize.toml": b"t"})
+    tree = _store(trees, {"eval/metric.py": b"m", "eval/data/x.json": b"x", "src/a.py": b"a", "ascent.toml": b"t"})
     ctx = loop.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
     assert ctx.list_files is not None
     assert ctx.read_file is not None
@@ -2555,7 +2555,7 @@ def test_the_context_hides_the_hidden_paths_of_the_seed(
     assert ctx.list_files(tree, "eval/data") is None
     assert ctx.list_files(tree, "missing") is None
     assert ctx.read_file(tree, "eval/data/x.json") is None
-    assert ctx.read_file(tree, "optimize.toml") is None
+    assert ctx.read_file(tree, "ascent.toml") is None
     assert ctx.read_file(tree, "src/a.py") == b"a"
 
 
@@ -2563,13 +2563,13 @@ def test_a_candidate_box_gets_no_hidden_path_and_no_exploits(
     owner: tuple[User, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
     """An engine command cannot read or list a hidden path or ``.optimize/exploits``; the metric box still can."""
-    hidden = hidden_hashes(["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval", "ascent.toml"])
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
     tree = _store(
         trees,
         {
             "eval/metric.py": b"secret",
-            "optimize.toml": b"secret",
+            "ascent.toml": b"secret",
             ".optimize/exploits/1/patch.diff": b"secret",
             ".optimize/notes.md": b"n",
             "src/a.py": b"a",
@@ -2578,7 +2578,7 @@ def test_a_candidate_box_gets_no_hidden_path_and_no_exploits(
     ctx = loop.context(repo_seed=RepoSeed(tree, hidden_hashes=hidden))
     assert ctx.run_command is not None
 
-    read, after = ctx.run_command(tree, "cat eval/metric.py optimize.toml .optimize/exploits/1/patch.diff", ())
+    read, after = ctx.run_command(tree, "cat eval/metric.py ascent.toml .optimize/exploits/1/patch.diff", ())
     listed, _ = ctx.run_command(tree, "find . -type f | sort", ())
 
     assert "secret" not in read.stdout

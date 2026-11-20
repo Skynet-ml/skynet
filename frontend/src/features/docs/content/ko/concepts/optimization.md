@@ -2,9 +2,9 @@ Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적
 
 ## 공통 계약
 
-모든 실행에는 리포지토리, `[run]` 엔트리 또는 `[target.<name>]` 스테이지가 있는 `optimize.toml` 파일, 채점기가 있습니다. `[run]` 엔트리는 리포지토리의 한 버전을 케이스 하나에 대해 실행합니다. 채점기는 Python 함수입니다. 채점기는 엔트리의 출력과 케이스를 받습니다.
+모든 실행에는 리포지토리, `[run]` 엔트리 또는 `[target.<name>]` 스테이지가 있는 `ascent.toml` 파일, 채점기가 있습니다. `[run]` 엔트리는 리포지토리의 한 버전을 케이스 하나에 대해 실행합니다. 채점기는 Python 함수입니다. 채점기는 엔트리의 출력과 케이스를 받습니다.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -24,7 +24,7 @@ def score(repo_path, case, output=None):
 
 리포지토리 루트에는 `def serve(input)`이 있는 `serve.py` 파일이 있습니다. `[run]` 엔트리는 자체 샌드박스에서 이 함수를 호출합니다. Skynet은 실행 후 이 함수로 가장 좋은 버전을 서빙합니다.
 
-채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있고 버전 코드는 없으므로 채점기는 `serve.py`를 가져올 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from openascent import call`로 가져옵니다. `[run]` 엔트리도 `[target.<name>]` 스테이지도 없으면 Skynet은 `optimize.toml` 파일을 거부합니다.
+채점기는 별도의 샌드박스에서 실행됩니다. 그 샌드박스에는 지표 파일만 있고 버전 코드는 없으므로 채점기는 `serve.py`를 가져올 수 없습니다. 채점기는 `output`을 통해서만, 또는 `[target.<name>]` 스테이지에 대한 `call()`을 통해서만 버전을 봅니다. `call`은 `from openascent import call`로 가져옵니다. `[run]` 엔트리도 `[target.<name>]` 스테이지도 없으면 Skynet은 `ascent.toml` 파일을 거부합니다.
 
 > [!NOTE]
 > 버전을 작성하는 코딩 에이전트는 채점기 소스, 기댓값, 실행 시크릿을 볼 수 없습니다.

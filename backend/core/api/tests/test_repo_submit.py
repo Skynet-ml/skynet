@@ -107,7 +107,7 @@ def test_a_rest_run_cannot_store_an_mcp_contract(client_and_store: tuple[Any, _F
     """Only the MCP draft flow stores ``mcp``; a REST draft contract is the setup screen's (SKY-693)."""
     client, store = client_and_store
     body = repo_payload()
-    body["target"]["repo"]["draft_files"] = {"optimize.toml": "version = 1\n"}
+    body["target"]["repo"]["draft_files"] = {"ascent.toml": "version = 1\n"}
     body["target"]["repo"]["draft_base"] = "0" * 40
     body["target"]["repo"]["contract_source"] = "mcp"
 

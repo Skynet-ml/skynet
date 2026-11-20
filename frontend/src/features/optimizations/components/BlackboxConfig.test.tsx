@@ -169,7 +169,7 @@ void describe("runStopScore", () => {
   const repo = (outcome: unknown) =>
     ({ kind: "repo", repo: { repository: "o/r", editable_paths: ["."], environment: { outcome } } }) as never;
 
-  void it("gives the outcome target the server recorded from optimize.toml", () => {
+  void it("gives the outcome target the server recorded from ascent.toml", () => {
     assert.equal(runStopScore({ max_scorer_runs: 8 }, repo({ target: 0.9, require: {} })), 0.9);
   });
 

@@ -30,7 +30,7 @@ A scorer returns one answer object, like any scorer: ``score``, with optional
 top-level number; each named score, such as one per case, is an axis that
 every engine reflects on and keeps on its Pareto front.
 
-A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
+A run whose ``ascent.toml`` has ``[target.<name>]`` stages opens one offline
 box for each stage for each candidate evaluation, all before the scorer runs
 (E29). The scorer reaches them with ``call(name, input)``: the call is a
 framed line on the scorer's stdout, the parent runs the stage in its box, and
@@ -350,7 +350,7 @@ class RepoScorer:
                 or ``score(repo_path, case, output)``.
             timeout_seconds: Longest one scorer call may run, setup excluded.
             rule_judge: The repository's constraints-file enforcement, when it
-                has an ``optimize.toml``: path-rule refusals then get the fixed
+                has an ``ascent.toml``: path-rule refusals then get the fixed
                 illegal-action message, and the watch hook's warnings open
                 the next scoring feedback. It never changes a score.
             gateway: The run's scoped model route from the trusted parent.
@@ -381,7 +381,7 @@ class RepoScorer:
                 runs through OpenAscent; ``code`` is then unused (SKY-738).
             secret_bindings: ``user`` or ``managed`` for each secret name.
             secret_hosts: The one host each secret may go to, from the
-                repository's ``optimize.toml``.
+                repository's ``ascent.toml``.
             secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
                 the run.
             budget: The run budget, which meters a call with a Skynet key.

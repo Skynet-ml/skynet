@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ entry = "serve.py:serve"
 - `target.repo.editable_paths` 列出优化器可以修改的文件和文件夹。`"."` 表示整个仓库。
 - `target.repo.commit` 是可选字段。它是一个 40 个字符的 SHA。如果不设置，Skynet 使用该分支上的最新提交。
 - `target.repo.secrets` 是可选字段。每个密钥有 `name` 和 `value`。它只通过 `[services.<name>]` 的请求头，或角色 `mcp` 文件中的服务器，传给你的代码或评分器，绝不会以环境变量的形式传入。
-- `scorer.metric_code` 定义 `score(repo_path, case, output=None)`。`output` 是 `[run]` 入口为该用例返回的值。`optimize.toml` 标签页显示示例仓库的 `[run]` 入口。`scorer.model` 是你的代码和评分器可以通过模型网关调用的模型。
+- `scorer.metric_code` 定义 `score(repo_path, case, output=None)`。`output` 是 `[run]` 入口为该用例返回的值。`ascent.toml` 标签页显示示例仓库的 `[run]` 入口。`scorer.model` 是你的代码和评分器可以通过模型网关调用的模型。
 - `strategy.mode` 取值为 `auto`（默认）或 `single`。使用 `single` 时，把 `strategy.engine` 设为 `GET /blackbox/engines` 返回的某个引擎名称。
 - `max_cost_cents` 是本次运行的支出上限，单位为美分。
 - `is_private` 默认为 `false`。设为 `true` 可将运行设为私有。

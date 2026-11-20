@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | dict.‏ `case["input"]` מכיל את שדות הקלט.‏ `case["expected"]` מכיל את הערך הצפוי, או `None` |
 | `output`    | מה שה-`entry` של `[run]` החזיר עבור המקרה, או `None` כשאין בקובץ `[run]` |
 
-בקובץ `optimize.toml` של המאגר חייב להיות קטע `[run]` או שלב `[target.<name>]`. ה-`entry` של `[run]` מריץ גרסה אחת על מקרה אחד, בתיבת sandbox משלו. ‏Skynet דוחה קובץ בלי אף אחד מהם, כי כל גרסה הייתה מקבלת את אותו ציון.
+בקובץ `ascent.toml` של המאגר חייב להיות קטע `[run]` או שלב `[target.<name>]`. ה-`entry` של `[run]` מריץ גרסה אחת על מקרה אחד, בתיבת sandbox משלו. ‏Skynet דוחה קובץ בלי אף אחד מהם, כי כל גרסה הייתה מקבלת את אותו ציון.
 
 - ‏`entry` של פונקציה, למשל `entry = "serve.py:serve"`, מקבל את `case["input"]` כארגומנט.‏ `output` הוא ערך ההחזרה שלו.
 - ‏`entry` של פקודה, למשל `entry = ["python", "-m", "pytest", "-q"]`, מקבל את הקלט כ-JSON ב-stdin.‏ `output` הוא `{"exit_code": ..., "stdout": "..."}`.
@@ -69,7 +69,7 @@ GEPA ו-Auto קוראים את טקסט המשוב כדי לכתוב את הגר
 
 ### התאמה מדויקת
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 ה-`entry` של `[run]` מריץ את הבדיקות. פונקציית הניקוד קוראת את קוד היציאה ואת הפלט של הבדיקות.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 פונקציית הניקוד יכולה לקרוא למודל. ייבא/י את `llm` ממודול העזר `openascent`. הקריאה עוברת דרך שער המודלים של Skynet אל מודל הניקוד של הריצה.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
