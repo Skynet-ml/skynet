@@ -31,7 +31,7 @@ from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobMo
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, _measure, new_job
 from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
-from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
+from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer, openascent
 from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
@@ -1449,19 +1449,21 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
 
 
 # The metric adds the [metric] file's key to the [run] output, so a score
-# proves that the metric box got both.
+# proves that the metric box got both. The [run] command writes the version's
+# source as its output to ASCENT_OUTPUT (SKY-757).
 _METRIC_TREE_SCORER = {
     "metric_code": (
         "from pathlib import Path\n"
         "def score(repo_path, case=None, output=None):\n"
         "    key = int((Path(repo_path) / 'eval' / 'key.txt').read_text())\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': key * 10 + value, 'feedback': 'read'}\n"
     )
 }
 _KEY_FIX = "diff --git a/eval/key.txt b/eval/key.txt\n--- a/eval/key.txt\n+++ b/eval/key.txt\n@@ -1 +1 @@\n-1\n+2\n"
 
 
+@pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
 def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1477,8 +1479,9 @@ def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     (trusted / "eval").mkdir()
     (trusted / "src" / "app.py").write_text("VALUE = 3\n")
     (trusted / "eval" / "key.txt").write_text("1\n")
+    (trusted / "run.sh").write_text('printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"\n')
     (trusted / "optimize.toml").write_text(
-        'version = 1\n[run]\nentry = ["cat", "src/app.py"]\n[metric]\nfiles = ["eval/key.txt"]\n'
+        'version = 1\n[run]\nentry = ["sh", "run.sh"]\n[metric]\nfiles = ["eval/key.txt"]\n'
     )
 
     class LocalGateway:
