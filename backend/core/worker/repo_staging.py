@@ -131,7 +131,7 @@ CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
 MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
 UPLOADED_CASES_REFUSED = "This repo defines its cases in ascent.toml. Remove the uploaded cases."
-# Rules the run is held to; a resumed run must arrive at exactly these again (only the compose file may join).
+# Rules the run is held to; a resumed run must arrive at exactly these again (only the compose file may join or move).
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
 _ENFORCED_DEFAULTS: dict[str, Any] = {"rules": [], "outcome": {"target": None, "require": {}, "direction": "maximize"}}
