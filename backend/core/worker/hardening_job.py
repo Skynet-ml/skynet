@@ -65,6 +65,7 @@ class HardeningWorkspace:
 
 RunnerFactory = Callable[[HardeningWorkspace, HardeningJob], AbstractContextManager[HardeningRunner]]
 Reserve = Callable[[HardeningJob, float], None]
+OnStaged = Callable[[HardeningJob], None]
 
 
 class Stage(Protocol):
@@ -130,6 +131,7 @@ def run_hardening_job(
     reserve: Reserve,
     stage: Stage = stage_repository,
     gate: Gate = check_repository,
+    on_staged: OnStaged = lambda staged_job: None,
 ) -> HardeningJob:
     """Advance a hardening job on its repository until it waits for the user or ends.
 
@@ -148,6 +150,8 @@ def run_hardening_job(
             budget holds once per job, however many passes run.
         stage: Fetches and strips the tree; :func:`stage_repository` by default.
         gate: The preflight gate; :func:`check_repository` by default.
+        on_staged: Called with the job and its metric direction before any
+            sandbox opens, so the caller can save the direction (SKY-867).
 
     Returns:
         The job in a waiting or final state. A job that is not in preflight or
@@ -186,6 +190,9 @@ def run_hardening_job(
                 return _preflight_failed(job, [failure.reason for failure in failures])
             workspace = _workspace(staged, staged_payload, job)
             job = job.model_copy(update={"minimize": workspace.minimize})
+            # The page polls the stored row during the round, before the pass
+            # result is written, so the direction must reach the row now.
+            on_staged(job)
             with runner_factory(workspace, job) as runner:
                 result = run_until_wait(
                     job,

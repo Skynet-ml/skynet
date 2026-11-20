@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from core.i18n_keys import I18nKey
-from core.models.hardening import HardeningJob, HardeningNoise
+from core.models.hardening import HardeningJob, HardeningJobModel, HardeningNoise
 from core.service_gateway.optimization.blackbox.hardening import (
     AttackResult,
     Candidate,
@@ -27,7 +29,9 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
 )
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, strip_archive
+from core.storage.models import Base
 from core.worker.hardening_job import HardeningWorkspace, required_reservation, run_hardening_job
+from core.worker.hardening_runner import store_job_direction
 from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
@@ -433,6 +437,62 @@ def test_the_job_saves_the_metric_direction_for_the_page(tmp_path: Path) -> None
     assert minimized.status == maximized.status == "waiting_review"
     assert minimized.minimize is True
     assert maximized.minimize is False
+
+
+def test_the_stored_job_has_the_direction_before_the_pass_result(tmp_path: Path) -> None:
+    """The row says ``minimize`` before any sandbox opens, so the live tree picks the lowest score (SKY-867)."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'jobs.db'}")
+    Base.metadata.create_all(engine)
+    job = _cloud_job()
+    claim = "pod-a:claim"
+    with Session(engine) as session:
+        session.add(
+            HardeningJobModel(
+                id=job.id,
+                username="alice",
+                draft_id="draft-1",
+                status=job.status,
+                job=job.model_dump(mode="json"),
+                claimed_by=claim,
+            )
+        )
+        session.commit()
+    recorder = Recorder(tmp_path, files={**_FILES, CONSTRAINTS_FILE: _TOML + b'direction = "minimize"\n'})
+    stored: list[Any] = []
+
+    def factory(workspace: HardeningWorkspace, factory_job: HardeningJob) -> Any:
+        """Read the stored row as the pass opens its sandbox, then open the fake runner.
+
+        Args:
+            workspace: The pass's trees.
+            factory_job: The job.
+
+        Returns:
+            The fake runner's context manager.
+        """
+        with Session(engine) as session:
+            row = session.get(HardeningJobModel, job.id)
+            assert row is not None
+            stored.append(row.job.get("minimize"))
+        return recorder.runner_factory(workspace, factory_job)
+
+    run_hardening_job(
+        job,
+        payload=_PAYLOAD,
+        binding_id="budget-1",
+        username="alice",
+        engine=None,
+        local_mode=False,
+        runner_factory=factory,
+        reserve=recorder.reserve,
+        stage=recorder.stage,
+        gate=recorder.gate,
+        on_staged=lambda staged_job: store_job_direction(engine, job.id, minimize=staged_job.minimize, claim=claim),
+    )
+
+    assert stored == [True]
+    assert store_job_direction(engine, job.id, minimize=False, claim="pod-b:other") is False
+    engine.dispose()
 
 
 def test_staging_gets_the_run_shaped_target_and_binding(tmp_path: Path) -> None:
