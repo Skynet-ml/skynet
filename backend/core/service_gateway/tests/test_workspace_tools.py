@@ -1042,6 +1042,7 @@ def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line
         '"\\u0069llegal" = "rules.md"',
         "illegal = rules.md",
         'instructions = ["docs/intent.md"]',
+        'illegal = "docs/ru\\"les.md"',
     ],
 )
 def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(line: str) -> None:

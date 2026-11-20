@@ -346,33 +346,37 @@ def _rule_settings(text: str) -> dict[str, str] | None:
     return {setting: _clean_rule_path(value) for setting, value in raw.items() if isinstance(value, str)}
 
 
-def _decode_string(match: re.Match[str]) -> str:
+def _decode_string(match: re.Match[str]) -> str | None:
     """Decode the escapes of a basic TOML string the raw search found, as the TOML reader would.
 
     Args:
         match: A :data:`_RULE_STRING` match.
 
     Returns:
-        The decoded value; the raw text for a literal (single-quote) string or an escape TOML refuses.
+        The decoded value; the raw text for a literal (single-quote) string; ``None``
+        when TOML refuses the string, such as a path cut at an escaped quote.
     """
     if match["s"].startswith("'"):
         return match["path"]
     try:
         return str(tomllib.loads(f"x = {match['s']}{match['path']}{match['s']}")["x"])
     except tomllib.TOMLDecodeError:
-        return match["path"]
+        return None
 
 
-def _rule_line_paths(text: str) -> list[str]:
+def _rule_line_paths(text: str) -> list[str] | None:
     """Find the paths of the ``instructions`` and ``illegal`` keys of a text that is not TOML.
 
     Args:
         text: The raw file text.
 
     Returns:
-        The distinct cleaned paths, in file order.
+        The distinct cleaned paths, in file order; ``None`` when one cannot be read.
     """
-    return list(dict.fromkeys(_clean_rule_path(_decode_string(match)) for match in _RULE_STRING.finditer(text)))
+    decoded = [_decode_string(match) for match in _RULE_STRING.finditer(text)]
+    if None in decoded:
+        return None
+    return list(dict.fromkeys(_clean_rule_path(path) for path in decoded if path is not None))
 
 
 def dropped_rule_files(current: str, text: str) -> str | None:
@@ -392,13 +396,15 @@ def dropped_rule_files(current: str, text: str) -> str | None:
     before = _rule_settings(current)
     after = _rule_settings(text)
     # A current text that is not TOML gives only its paths; the raw search never runs on the new text.
-    raw_paths = _rule_line_paths(current) if before is None else []
+    found = _rule_line_paths(current) if before is None else []
+    raw_paths = found or []
     if before is None:
         named = [f"{path!r}" for path in raw_paths]
     else:
         named = [f"{setting} = {path!r}" for setting, path in before.items()]
     if before is None and (
-        _ESCAPED_KEY.search(current)
+        found is None
+        or _ESCAPED_KEY.search(current)
         or any(not _RULE_STRING.match(current, key.start()) for key in _RULE_KEY.finditer(current))
     ):
         # A rules path the raw search cannot read could be dropped unseen, so refuse (fail closed).
