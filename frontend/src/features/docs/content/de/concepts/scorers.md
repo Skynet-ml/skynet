@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen `OPENAI_BASE_URL`, `APP_API_KEY` und `APP_MODEL` verwenden. Das Gateway akzeptiert nur das Scorer-Modell des Durchlaufs.
+Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` und `ASCENT_MODEL` verwenden. Das Gateway akzeptiert nur das Scorer-Modell des Durchlaufs.
 
 ## Modellaufrufe und Secrets
 

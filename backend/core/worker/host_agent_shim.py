@@ -63,6 +63,7 @@ def _env(name: str, default: str = "") -> str:
 
     Args:
         name: Variable name with the ``APP_`` prefix.
+        default: The value when neither spelling is set.
 
     Returns:
         The value, or ``default`` when neither spelling is set.
@@ -79,7 +80,7 @@ def endpoint_url() -> str:
     Raises:
         RuntimeError: When neither a relay nor a gateway URL is set.
     """
-    base = _env("APP_BUDGET_RELAY_URL") or _env("APP_GATEWAY_URL")
+    base = _env("APP_BUDGET_RELAY_URL") or os.environ.get("ASCENT_MODEL_URL", "")
     if not base:
         raise RuntimeError("No model gateway is configured for the host agent.")
     return base.rstrip("/").removesuffix("/v1") + CAPABILITY_PATH
@@ -304,14 +305,14 @@ def main() -> int:
         0 when the edited tree was applied, otherwise a non-zero status.
     """
     workspace = Path.cwd()
-    prompt_file = _env("APP_PROMPT_FILE")
+    prompt_file = os.environ.get("ASCENT_TASK", "")
     prompt = Path(prompt_file).read_text(encoding="utf-8") if prompt_file else ""
     prompt += skill_text(workspace)
     archive, shipped = pack_workspace(workspace)
     # The parent takes the CLI and its permission from the run settings only.
     body = json.dumps(
         {
-            "model": _env("APP_MODEL"),
+            "model": os.environ.get("ASCENT_MODEL", ""),
             "prompt": prompt,
             "workspace_tar_b64": base64.b64encode(archive).decode("ascii"),
         }

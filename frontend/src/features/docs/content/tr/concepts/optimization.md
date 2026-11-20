@@ -37,9 +37,9 @@ Depo kodunuz ve puanlayıcınız, Skynet'in model ağ geçidi üzerinden bir mod
 
 | Değişken             | Ne tutar                                                           |
 | -------------------- | ------------------------------------------------------------------ |
-| `OPENAI_BASE_URL`    | Ağ geçidi URL'si. `APP_GATEWAY_URL` aynı değeri tutar.             |
-| `APP_API_KEY`        | Yalnızca bu çalıştırma için bir belirteç. Sağlayıcı anahtarı değildir. |
-| `APP_MODEL`          | Gönderilecek model adı. Çalıştırmanın puanlayıcı modelidir.        |
+| `OPENAI_BASE_URL`    | Ağ geçidi URL'si. `ASCENT_MODEL_URL` aynı değeri tutar.            |
+| `ASCENT_MODEL_KEY`   | Yalnızca bu çalıştırma için bir belirteç. Sağlayıcı anahtarı değildir. |
+| `ASCENT_MODEL`       | Gönderilecek model adı. Çalıştırmanın puanlayıcı modelidir.        |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK'ları için ağ geçidi URL'si.                          |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

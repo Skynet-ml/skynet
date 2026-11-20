@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-评分器也可以使用任何兼容 OpenAI 的客户端，配合 `OPENAI_BASE_URL`、`APP_API_KEY` 和 `APP_MODEL` 环境变量。网关只接受本次运行的评分器模型。
+评分器也可以使用任何兼容 OpenAI 的客户端，配合 `OPENAI_BASE_URL`、`ASCENT_MODEL_KEY` 和 `ASCENT_MODEL` 环境变量。网关只接受本次运行的评分器模型。
 
 ## 模型调用和密钥
 

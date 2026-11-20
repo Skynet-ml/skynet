@@ -40,10 +40,14 @@ from typing import IO, Any
 Usage = dict[str, int]
 
 CONFIG_ENV = "APP_PROPOSER_CONFIG"
-KEY_ENV = "APP_API_KEY"
+KEY_ENV = "ASCENT_MODEL_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
-KEY_TOKEN = "__APP_API_KEY__"
+# The openascent parser refuses it in the contract file's own commands (SKY-776).
+KEY_TOKEN = "__ASCENT_MODEL_KEY__"
+# The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
+# otherwise its harness would send the token's text as the key and fail auth with no clear reason.
+_OLD_KEY_TOKEN = re.compile(r"__(?:APP|SKYNET)_API_KEY__")
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
@@ -74,7 +78,6 @@ _DEFERRED_STOP: list[int] = []
 # This file runs alone in the sandbox, without ``core.config``; saved custom
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
-_LEGACY_KEY_TOKEN = "__SKYNET_API_KEY__"
 SHIM_DIR = ".local/app-bin"
 SESSIONS_DIR = ".app-bridge"
 # Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
@@ -97,20 +100,23 @@ _RESUME_NOTE = (
 
 
 def _env(name: str, default: str = "") -> str:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
-        default: Value returned when neither name is set.
+        name: Variable name.
+        default: Value returned when no name is set.
 
     Returns:
         The first non-empty value found, else ``default``.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) or default
+    legacy = os.environ.get(_LEGACY_PREFIX + name.removeprefix("APP_")) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or default
 
 
 def _with_key(text: str, api_key: str) -> str:
-    """Restore the gateway key in place of either key token.
+    """Restore the gateway key in place of the key token.
 
     Args:
         text: A launch command, file or environment value.
@@ -119,7 +125,32 @@ def _with_key(text: str, api_key: str) -> str:
     Returns:
         ``text`` with every key token replaced.
     """
-    return text.replace(KEY_TOKEN, api_key).replace(_LEGACY_KEY_TOKEN, api_key)
+    return text.replace(KEY_TOKEN, api_key)
+
+
+def _refuse_old_key_token(proposer: dict[str, Any]) -> None:
+    """Refuse a launch whose command, environment or files still hold a key token from before SKY-776.
+
+    The contract file's own command (``file_command``) is the user's text, so it is not checked here.
+
+    Args:
+        proposer: The serialized launch.
+
+    Raises:
+        RuntimeError: When a part of the launch holds an old key token.
+    """
+    parts = {
+        **({} if proposer.get("file_command") else {"run_command": proposer["run_command"]}),
+        **{f"env {name}": value for name, value in (proposer.get("env") or {}).items()},
+        **{f"file {path}": content for path, content in (proposer.get("files") or {}).items()},
+    }
+    for where, text in parts.items():
+        old = _OLD_KEY_TOKEN.search(text)
+        if old:
+            raise RuntimeError(
+                f"The proposer launch's {where} holds the old key token {old.group()}. Use {KEY_TOKEN} in its place,"
+                " or start the run again."
+            )
 
 
 def _json_lines(stdout: str) -> Iterator[dict[str, Any]]:
@@ -2181,13 +2212,21 @@ def reaper_main(command: list[str]) -> int:
 
 
 def _arm_stop_grace(*_: Any) -> None:
-    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends.
+
+    Args:
+        *_: The signal number and frame, which the handler ignores.
+    """
     if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
         signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
 
 
 def _kill_descendants(*_: Any) -> None:
-    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    """Kill every descendant of this process, so the reaper's wait for the shell ends.
+
+    Args:
+        *_: The timer or signal values, which the handler ignores.
+    """
     for pid in _descendants(_proc_stats() or {}, os.getpid()):
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)
@@ -2244,14 +2283,15 @@ def run_session(
         timeout_seconds: Kill the harness after this many seconds.
         extra_env: Environment overrides layered on top of the launch env.
         api_key: Route key substituted for the launch's key token; defaults
-            to the proposer key in ``APP_API_KEY``.
+            to the proposer key in ``ASCENT_MODEL_KEY``.
 
     Returns:
         The parsed answer, raw transcript, usage and exit status.
 
     Raises:
-        RuntimeError: When the setup fails or uses up the session's time, or a ``file_command`` session
-            outside a checkout has no ``outside_checkout`` launch.
+        RuntimeError: When the setup fails or uses up the session's time, a ``file_command`` session
+            outside a checkout has no ``outside_checkout`` launch, or the launch holds a key token from
+            before SKY-776.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -2265,6 +2305,7 @@ def run_session(
                 f"The [proposer] entry command in ascent.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    _refuse_old_key_token(proposer)
     if api_key is None:
         api_key = _env(KEY_ENV)
     env = {
@@ -2313,9 +2354,10 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
+    # The harness proposer box's proxy env has no ASCENT_MODEL, so the proxy model check does not run there
+    # and the gateway refuses other models. SKY-884 tracks that refusal text.
+    env["ASCENT_MODEL"] = model
     for name, value in (
-        ("MODEL", model),
-        ("PROMPT_FILE", str(prompt_file)),
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
         # A harness with native resume keeps its own session state here, so the committed tree carries it.
         ("SESSION_DIR", str(session_dir)),
@@ -2655,7 +2697,7 @@ def main(argv: list[str]) -> int:
     proposer = json.loads(Path(config_path).read_text(encoding="utf-8"))
     resumed = args.resume or args.r
     session_id = args.session_id or resumed or uuid.uuid4().hex
-    model = args.model or str(proposer.get("model") or _env("APP_MODEL"))
+    model = args.model or str(proposer.get("model") or _env("ASCENT_MODEL"))
     workspace = Path.cwd()
     session_dir = Path.home() / SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)

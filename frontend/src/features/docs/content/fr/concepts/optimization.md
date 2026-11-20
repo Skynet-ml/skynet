@@ -37,9 +37,9 @@ Le code de votre dépôt et votre évaluateur peuvent appeler un modèle via la 
 
 | Variable             | Ce qu'elle contient                                                   |
 | -------------------- | --------------------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | L'URL de la passerelle. `APP_GATEWAY_URL` contient la même valeur.    |
-| `APP_API_KEY`        | Un jeton pour cette exécution seulement. Ce n'est pas une clé de fournisseur. |
-| `APP_MODEL`          | Le nom du modèle à envoyer. C'est le modèle de l'évaluateur de l'exécution. |
+| `OPENAI_BASE_URL`    | L'URL de la passerelle. `ASCENT_MODEL_URL` contient la même valeur.   |
+| `ASCENT_MODEL_KEY`   | Un jeton pour cette exécution seulement. Ce n'est pas une clé de fournisseur. |
+| `ASCENT_MODEL`       | Le nom du modèle à envoyer. C'est le modèle de l'évaluateur de l'exécution. |
 | `ANTHROPIC_BASE_URL` | L'URL de la passerelle pour les SDK Anthropic.                        |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

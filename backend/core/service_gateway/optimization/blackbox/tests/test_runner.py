@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import openai
 import pytest
 
 try:
@@ -248,7 +249,11 @@ def test_accepts_case_reads_the_positional_arity() -> None:
 
 
 def test_image_content_part_reads_every_documented_shape(tmp_path: Path) -> None:
-    """Bytes, paths, URLs, base64, ``Image`` objects and ready parts all become ``image_url`` parts."""
+    """Bytes, paths, URLs, base64, ``Image`` objects and ready parts all become ``image_url`` parts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     file_path = tmp_path / "view.jpg"
     file_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 8)
     part = {"type": "image_url", "image_url": {"url": "https://x/y.png"}}
@@ -347,12 +352,23 @@ def test_gateway_client_guards_model_and_applies_per_call_overrides() -> None:
 
 
 def test_openrouter_gateway_translates_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Send OpenRouter's native reasoning settings with a per-call effort."""
+    """Send OpenRouter's native reasoning settings with a per-call effort.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     requests: list[dict[str, Any]] = []
     client = GatewayClient("https://openrouter.ai/api/v1", "anthropic/example")
 
     def post(data: bytes) -> dict[str, Any]:
-        """Record the request body and return a fixed completion."""
+        """Record the request body and return a fixed completion.
+
+        Args:
+            data: The request body.
+
+        Returns:
+            A fixed completion.
+        """
         requests.append(json.loads(data))
         return {"choices": [{"message": {"content": "ok"}}]}
 
@@ -362,11 +378,23 @@ def test_openrouter_gateway_translates_reasoning_effort(monkeypatch: pytest.Monk
 
 
 def test_protected_gateway_translates_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Honor the gateway flag passed to the runner for a protected route."""
+    """Honor the gateway flag passed to the runner for a protected route.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     requests: list[dict[str, Any]] = []
 
     def post(_self: GatewayClient, data: bytes) -> dict[str, Any]:
-        """Capture the body without contacting a gateway."""
+        """Capture the body without contacting a gateway.
+
+        Args:
+            _self: The gateway client.
+            data: The request body.
+
+        Returns:
+            A fixed completion.
+        """
         requests.append(json.loads(data))
         return {"choices": [{"message": {"content": "0.5"}}]}
 
@@ -437,7 +465,11 @@ def test_gateway_client_always_caps_the_output() -> None:
 
 
 def test_gateway_client_retries_transient_statuses_and_gives_up_on_others(monkeypatch: pytest.MonkeyPatch) -> None:
-    """5xx/429 answers are retried a few times; a 4xx is reported at once with the body."""
+    """5xx/429 answers are retried a few times; a 4xx is reported at once with the body.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(runner, "_BACKOFF_SECONDS", 0.0)
     with FakeGateway(statuses=[503, 429]) as gateway:
         assert GatewayClient(gateway.url, "m")("p") == "0.5"
@@ -456,7 +488,11 @@ def test_gateway_client_retries_transient_statuses_and_gives_up_on_others(monkey
 
 
 def test_gateway_client_reports_unreachable_gateways(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dead endpoint surfaces as an ``llm()`` failure, not a raw socket error."""
+    """A dead endpoint surfaces as an ``llm()`` failure, not a raw socket error.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(runner, "_BACKOFF_SECONDS", 0.0)
     with FakeGateway() as gateway:
         url = gateway.url
@@ -525,7 +561,11 @@ def test_run_call_reports_scorer_failures_as_data(code: str, error: str) -> None
 def test_run_call_binds_llm_to_the_gateway_with_the_key_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``llm()`` posts to the payload's gateway, authenticates from the environment and reports its usage."""
+    """``llm()`` posts to the payload's gateway, authenticates from the environment and reports its usage.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setenv(runner.ENV_API_KEY, "env-key")
     with FakeGateway(reply="0.75", usage=(3, 1)) as gateway:
         payload = {
@@ -556,7 +596,11 @@ def test_run_call_binds_llm_to_the_gateway_with_the_key_from_the_environment(
 
 
 def test_run_call_prefers_a_key_in_the_payload_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit ``api_key`` in the gateway section wins over ``APP_API_KEY``."""
+    """An explicit ``api_key`` in the gateway section wins over ``ASCENT_MODEL_KEY``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setenv(runner.ENV_API_KEY, "env-key")
     with FakeGateway() as gateway:
         run_call(
@@ -620,7 +664,11 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
 
 
 def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(tmp_path: Path) -> None:
-    """Under ``python3 -I`` a metric still imports a user-site dependency, and no ``.pth`` file there runs (E38, E40)."""
+    """Under ``python3 -I`` a metric still imports a user-site dependency, and no ``.pth`` file there runs (E38, E40).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     base = getattr(sys, "_base_executable", sys.executable)
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
     folder = subprocess.run(
@@ -656,14 +704,22 @@ def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(t
 
 
 def test_main_wants_exactly_one_argument(capsys: pytest.CaptureFixture[str]) -> None:
-    """Anything but a single call directory is a usage error."""
+    """Anything but a single call directory is a usage error.
+
+    Args:
+        capsys: Pytest output capture fixture.
+    """
     assert runner.main([]) == 2
     assert runner.main(["a", "b"]) == 2
     assert "usage:" in capsys.readouterr().err
 
 
 def test_log_writes_one_framed_event_to_the_real_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fields of any type travel as strict JSON; a redirected sys.stderr does not swallow it."""
+    """Fields of any type travel as strict JSON; a redirected sys.stderr does not swallow it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     real, redirected = io.StringIO(), io.StringIO()
     monkeypatch.setattr(sys, "__stderr__", real)
     monkeypatch.setattr(sys, "stderr", redirected)
@@ -683,7 +739,12 @@ def test_log_writes_one_framed_event_to_the_real_stderr(monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize(("event", "level"), [("", "INFO"), ("  ", "INFO"), ("ok", "CRITICAL"), ("ok", "loud")])
 def test_log_rejects_a_missing_name_or_an_unknown_level(event: str, level: str) -> None:
-    """A scorer learns about a bad call at once, not from a silent log."""
+    """A scorer learns about a bad call at once, not from a silent log.
+
+    Args:
+        event: The event name of the log call.
+        level: The level of the log call.
+    """
     with pytest.raises(ValueError):
         log(event, level=level)
 
@@ -696,15 +757,20 @@ def test_scorer_code_imports_log_from_openascent() -> None:
     assert fn("x") == {"score": 1.0}
 
 
-def test_env_value_prefers_the_new_name_and_falls_back_to_the_legacy_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Read ``APP_*`` first, then the pre-rename ``SKYNET_*`` spelling an older caller sets."""
-    monkeypatch.delenv("APP_API_KEY", raising=False)
-    monkeypatch.delenv("SKYNET_API_KEY", raising=False)
-    assert runner.env_value("APP_API_KEY") is None
-    monkeypatch.setenv("SKYNET_API_KEY", "old")
-    assert runner.env_value("APP_API_KEY") == "old"
-    monkeypatch.setenv("APP_API_KEY", "new")
-    assert runner.env_value("APP_API_KEY") == "new"
+def test_env_value_falls_back_to_the_legacy_name_only_for_app_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read ``APP_*`` first, then its pre-rename ``SKYNET_*`` spelling; ``ASCENT_*`` names get no fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.setenv("SKYNET_BUDGET_RELAY_URL", "old")
+    assert runner.env_value("APP_BUDGET_RELAY_URL") == "old"
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "new")
+    assert runner.env_value("APP_BUDGET_RELAY_URL") == "new"
+    monkeypatch.delenv("ASCENT_MODEL_KEY", raising=False)
+    monkeypatch.setenv("SKYNET_MODEL_KEY", "old")
+    assert runner.env_value("ASCENT_MODEL_KEY") is None
 
 
 def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sent: list[dict[str, Any]]) -> Any:
@@ -742,7 +808,12 @@ def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sen
 
 
 def test_stage_call_returns_the_output_and_raises_stage_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``call`` sends one frame, returns the stage output, and turns a stage failure into ``StageError``."""
+    """``call`` sends one frame, returns the stage output, and turns a stage failure into ``StageError``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     sent: list[dict[str, Any]] = []
     answers = {"good": {"output": {"doubled": 4}}, "bad": {"error": "Stage 'bad' passed its 5s timeout."}}
     monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, sent))
@@ -759,7 +830,12 @@ def test_stage_call_returns_the_output_and_raises_stage_errors(tmp_path: Path, m
 def test_stage_client_yields_each_streamed_part_and_removes_its_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An answer with ``"more": true`` is followed by ``<id>.1.json`` and on, until a part has ``"more": false``."""
+    """An answer with ``"more": true`` is followed by ``<id>.1.json`` and on, until a part has ``"more": false``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
 
     class Relay(io.StringIO):
         """Write the answer and both parts for each frame."""
@@ -792,7 +868,12 @@ def test_stage_client_yields_each_streamed_part_and_removes_its_file(
 def test_stage_client_tells_the_parent_to_stop_a_stream_it_closes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Closing the answers before the end part sends a stop frame with the stream's id; a whole answer sends none."""
+    """Closing the answers before the end part sends a stop frame with the stream's id; a whole answer sends none.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     frames: list[dict[str, Any]] = []
 
     class Relay(io.StringIO):
@@ -832,7 +913,12 @@ def test_stage_client_tells_the_parent_to_stop_a_stream_it_closes(
 
 
 def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown stage name fails at once with the run's stage names, and no frame leaves the box."""
+    """An unknown stage name fails at once with the run's stage names, and no frame leaves the box.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     sent: list[dict[str, Any]] = []
     monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, {}, sent))
     client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
@@ -842,7 +928,12 @@ def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypat
 
 
 def test_stage_call_raises_the_budget_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A budget stop on the parent reaches the scorer as the gateway's control signal."""
+    """A budget stop on the parent reaches the scorer as the gateway's control signal.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     answers = {"good": {"control": {"code": "budget_reached", "message": "spent"}}}
     monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, []))
     client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
@@ -872,7 +963,13 @@ def test_a_run_without_stages_has_a_call_that_explains_itself() -> None:
     ],
 )
 def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer: dict[str, Any]) -> None:
-    """``--stage`` loads ``path:function`` from the tree and writes its output or its error."""
+    """``--stage`` loads ``path:function`` from the tree and writes its output or its error.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        source: The source of the entry function.
+        answer: The answer the stage must write.
+    """
     tree = tmp_path / "tree"
     (tree / "pkg").mkdir(parents=True)
     (tree / "pkg" / "stage.py").write_text(source)
@@ -921,7 +1018,11 @@ def _stage_call(tmp_path: Path, port: int, call: str = "one", mcp: tuple[str, ..
 
 
 def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_path: Path) -> None:
-    """``--stage`` with a relay config gives the entry its MCP variables and the call's own MCP file (SKY-624)."""
+    """``--stage`` with a relay config gives the entry its MCP variables and the call's own MCP file (SKY-624).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     tree, call_dir = _stage_call(tmp_path, 0)
     (tree / "stage.py").write_text(
         "import os\n"
@@ -948,7 +1049,11 @@ def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_
 
 
 def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_file(tmp_path: Path) -> None:
-    """Two calls that run at the same time in one stage box serve their relays on two ports (SKY-624)."""
+    """Two calls that run at the same time in one stage box serve their relays on two ports (SKY-624).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     entry = (
         "import json, os, time\n"
         "def run(value):\n"
@@ -981,7 +1086,11 @@ def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_fil
 
 
 def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_path: Path) -> None:
-    """Servers "a-b" and "a_b" share one variable name, so the call's MCP file must name each one's own URL."""
+    """Servers "a-b" and "a_b" share one variable name, so the call's MCP file must name each one's own URL.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     tree, call_dir = _stage_call(tmp_path, 0, mcp=("a-b", "a_b"))
     (tree / "stage.py").write_text("def run(value):\n    return value\n")
     completed = subprocess.run(
@@ -1001,7 +1110,11 @@ def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_pat
 
 @_needs_openascent
 def test_stage_command_mode_serves_the_relay_and_uses_the_two_files(tmp_path: Path) -> None:
-    """``--stage-command`` gives the command ``ASCENT_INPUT`` and the relay's variables, and keeps its ``output`` (SKY-757)."""
+    """``--stage-command`` gives the command ``ASCENT_INPUT`` and the relay's variables, and keeps its ``output`` (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     tree, call_dir = _stage_call(tmp_path, 0)
     script = (
         "import json, os, sys\n"
@@ -1038,7 +1151,11 @@ def test_stage_command_mode_serves_the_relay_and_uses_the_two_files(tmp_path: Pa
 
 @_needs_openascent
 def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_path: Path) -> None:
-    """A call with no relay config runs the command with the box's own environment only."""
+    """A call with no relay config runs the command with the box's own environment only.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("{}")
@@ -1071,7 +1188,11 @@ def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_pa
 
 @_needs_openascent
 def test_a_failed_stage_command_writes_the_package_error(tmp_path: Path) -> None:
-    """A command stage that exits nonzero writes ``{"error": ...}`` with the cause and its stderr tail (SKY-757)."""
+    """A command stage that exits nonzero writes ``{"error": ...}`` with the cause and its stderr tail (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("null")
@@ -1108,7 +1229,11 @@ def test_a_command_error_drops_a_split_secret_at_the_edge_of_a_log_the_box_cut()
 
 @_needs_openascent
 def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
-    """A command log over the box's bound reaches the parent cut, with a ``_cut`` mark (SKY-757)."""
+    """A command log over the box's bound reaches the parent cut, with a ``_cut`` mark (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("null")
@@ -1133,7 +1258,11 @@ def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
 
 @_needs_openascent
 def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> None:
-    """The box writes a line break between a stdout without one and the stderr (SKY-757)."""
+    """The box writes a line break between a stdout without one and the stderr (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("null")
@@ -1154,7 +1283,11 @@ def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> No
 
 @_needs_openascent
 def test_the_box_logs_no_part_of_a_secret_that_the_package_tail_cut_splits(tmp_path: Path) -> None:
-    """OpenAscent keeps the last 64 KiB of a log; the box drops the cut first line before it logs (SKY-757)."""
+    """OpenAscent keeps the last 64 KiB of a log; the box drops the cut first line before it logs (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     secret = "test-value-1234567890abcdef"
     call_dir = tmp_path / "call"
     call_dir.mkdir()
@@ -1206,7 +1339,11 @@ def test_a_command_error_masks_each_log_before_it_cuts_it() -> None:
 
 
 def test_a_stage_command_without_the_package_writes_an_error(tmp_path: Path) -> None:
-    """A box that has no package folder fails the call with a plain reason, not a crash."""
+    """A box that has no package folder fails the call with a plain reason, not a crash.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("null")
@@ -1565,7 +1702,11 @@ def _candidate(
 
 
 def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Path) -> None:
-    """A ``path.py:function`` entry gets the case input; its JSON return value is the output."""
+    """A ``path.py:function`` entry gets the case input; its JSON return value is the output.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, "cand.py:echo", {"a": 1})
     assert ran.pop(runner.ELAPSED_PARAM) >= 0
     assert ran == {"output": {"got": {"a": 1}}, "error": None}
@@ -1586,6 +1727,9 @@ def test_a_command_entry_reads_ascent_input_and_writes_ascent_output(tmp_path: P
     """The command gets ``{"input": ...}`` in ``ASCENT_INPUT`` and an empty stdin; its file's ``output`` is the output (SKY-757).
 
     Its print is not part of the output, and each call gets a new output path.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     first = _candidate(tmp_path, [sys.executable, "-c", _TWO_FILE_COMMAND], {"a": 1})
     second = _candidate(tmp_path, [sys.executable, "-c", _TWO_FILE_COMMAND], {"a": 1})
@@ -1597,14 +1741,22 @@ def test_a_command_entry_reads_ascent_input_and_writes_ascent_output(tmp_path: P
 
 @_needs_openascent
 def test_a_command_entry_with_no_cases_gets_a_null_input(tmp_path: Path) -> None:
-    """A run with no cases writes ``{"input": null}`` to the input file."""
+    """A run with no cases writes ``{"input": null}`` to the input file.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, ["sh", "-c", 'printf \'{"output": %s}\' "$(cat "$ASCENT_INPUT")" > "$ASCENT_OUTPUT"'])
     assert ran["output"] == {"input": None}
 
 
 @_needs_openascent
 def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
-    """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout."""
+    """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, ["sh", "-c", "echo '{\"output\": 1}'"])
     assert ran["output"] is None
     assert ran["error"] == "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
@@ -1613,7 +1765,11 @@ def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
 
 @_needs_openascent
 def test_a_command_output_file_is_capped(tmp_path: Path) -> None:
-    """An output file over ``MAX_RUN_STDOUT_BYTES`` fails the run."""
+    """An output file over ``MAX_RUN_STDOUT_BYTES`` fails the run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = "import json, os\njson.dump({'output': 'x' * 2_000_000}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
     ran = _candidate(tmp_path, [sys.executable, "-c", script])
     assert ran["output"] is None
@@ -1625,6 +1781,9 @@ def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Pat
     """An output file just under the package limit still passes after the child writes it again (SKY-757).
 
     ``1e15`` grows the most when it is written again, so the supervisor's cap must allow for it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     count = (runner.MAX_RUN_STDOUT_BYTES - 100) // 5
     script = (
@@ -1644,6 +1803,11 @@ def test_a_command_string_output_near_the_limit_passes_the_supervisor_cap(
     """A raw character that an ASCII-only dump would escape keeps its size in the answer (SKY-757).
 
     A DEL grew from 1 byte to 6, and an emoji from 4 bytes to 12.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        char: The character that fills the output.
+        count: The number of characters.
     """
     script = (
         "import os\n"
@@ -1656,7 +1820,11 @@ def test_a_command_string_output_near_the_limit_passes_the_supervisor_cap(
 
 
 def test_the_supervisor_refuses_a_command_answer_over_its_cap(tmp_path: Path) -> None:
-    """A huge answer file in place of the child's own fails the call, and the supervisor reads no more than the cap."""
+    """A huge answer file in place of the child's own fails the call, and the supervisor reads no more than the cap.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     path = tmp_path / runner.OUTPUT_FILE
     path.write_bytes(b'{"output": "' + b"x" * 200 + b'"}')
     assert runner._read_answer(path, None, 100) == {"error": "The command's answer file is larger than 100 bytes."}
@@ -1673,7 +1841,11 @@ _DETACHED_CHILD = (
 
 @_needs_openascent
 def test_a_command_entry_does_not_wait_for_a_child_in_its_own_session(tmp_path: Path) -> None:
-    """A child that the command starts in a new session neither holds the result nor counts in the run time (SKY-757)."""
+    """A child that the command starts in a new session neither holds the result nor counts in the run time (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, [sys.executable, "-c", _DETACHED_CHILD])
     assert ran.pop(runner.ELAPSED_PARAM) < 5
     assert ran == {"output": 7, "error": None}
@@ -1688,7 +1860,13 @@ def test_a_command_entry_does_not_wait_for_a_child_in_its_own_session(tmp_path: 
     ],
 )
 def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
-    """A raise, a non-JSON return and a timeout of a function entry are failures."""
+    """A raise, a non-JSON return and a timeout of a function entry are failures.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        entry: The function entry that fails.
+        error: A part of the error the failure must name.
+    """
     # Only the timeout cases get the short limit; a loaded test host can
     # take over a second just to start Python.
     ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
@@ -1709,7 +1887,13 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
     ],
 )
 def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
-    """A timeout, a start failure, a signal, a nonzero exit, bad JSON and the wrong form fail a command (SKY-757)."""
+    """A timeout, a start failure, a signal, a nonzero exit, bad JSON and the wrong form fail a command (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        entry: The command entry that fails.
+        error: A part of the error the failure must name.
+    """
     ran = _candidate(tmp_path, entry, timeout=1 if "time limit" in error else 30)
     assert ran["output"] is None
     assert error in ran["error"]
@@ -1719,7 +1903,11 @@ def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: 
 
 @_needs_openascent
 def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path) -> None:
-    """A command that fails keeps its stdout tail next to its stderr, in the logs and in the error (SKY-757)."""
+    """A command that fails keeps its stdout tail next to its stderr, in the logs and in the error (SKY-757).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     logs: list[str] = []
     ran = _candidate(tmp_path, ["sh", "-c", "echo said-on-stdout; echo said-on-stderr >&2; exit 1"], logs=logs)
     assert ran["output"] is None
@@ -1733,6 +1921,9 @@ def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path:
 
     Closing the candidate box ends that process; the supervisor only kills
     the entry's own process group.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
     assert ran.pop(runner.ELAPSED_PARAM) < 5
@@ -1740,7 +1931,11 @@ def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path:
 
 
 def test_a_stage_client_names_its_role_in_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each frame carries the box's role, so the parent can refuse a frame from the other box (SKY-398)."""
+    """Each frame carries the box's role, so the parent can refuse a frame from the other box (SKY-398).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     stream = io.StringIO()
     monkeypatch.setattr(sys, "__stdout__", stream)
     client = runner.StageClient({"prefix": "@@", "response_dir": "r", "names": [], "role": "run"})
@@ -1758,7 +1953,11 @@ def test_accepts_output_counts_the_third_argument() -> None:
 
 
 def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp_path: Path) -> None:
-    """The run time comes from the supervisor's process; a patched clock or a faked output cannot lower it (SKY-642)."""
+    """The run time comes from the supervisor's process; a patched clock or a faked output cannot lower it (SKY-642).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, "cand.py:fakes_its_time", 0.4)
     assert ran["error"] is None
     assert ran["output"] == {"elapsed_s": 0.0}
@@ -1767,7 +1966,11 @@ def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp
 
 @_needs_openascent
 def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
-    """A command entry gets the same time from the supervisor (SKY-642)."""
+    """A command entry gets the same time from the supervisor (SKY-642).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, ["sh", "-c", 'sleep 0.4; echo \'{"output": 1}\' > "$ASCENT_OUTPUT"'])
     assert ran["error"] is None
     assert 0.4 <= ran[runner.ELAPSED_PARAM] < 30
@@ -1775,7 +1978,11 @@ def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
 
 @_needs_openascent
 def test_a_timed_out_entry_still_reports_its_time(tmp_path: Path) -> None:
-    """A timeout is a failure; its time is about the timeout (SKY-642)."""
+    """A timeout is a failure; its time is about the timeout (SKY-642).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     ran = _candidate(tmp_path, ["sh", "-c", "sleep 30"], timeout=1)
     assert "time limit" in ran["error"]
     assert 1 <= ran[runner.ELAPSED_PARAM] < 30
@@ -1821,20 +2028,34 @@ def _metric_call(tmp_path: Path, code: str, document: dict[str, Any]) -> dict[st
     ],
 )
 def test_the_metric_gets_the_run_time_only_when_it_asks(tmp_path: Path, code: str, expected: float) -> None:
-    """A metric that names ``elapsed_s`` gets the time; older 1-, 2- and 3-argument metrics get the same call (SKY-642)."""
+    """A metric that names ``elapsed_s`` gets the time; older 1-, 2- and 3-argument metrics get the same call (SKY-642).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        code: The metric source.
+        expected: The score the metric must give.
+    """
     result = _metric_call(tmp_path, code, {"output": {"n": 0.5}, runner.ELAPSED_PARAM: 0.75})
     assert result["error"] is None
     assert result["score"] == pytest.approx(expected)
 
 
 def test_a_metric_without_a_run_gets_no_time(tmp_path: Path) -> None:
-    """With no ``[run]`` entry, ``elapsed_s`` keeps its default (SKY-642)."""
+    """With no ``[run]`` entry, ``elapsed_s`` keeps its default (SKY-642).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     code = "def score(repo_path, case, output=None, elapsed_s=None):\n    return {'score': 1.0 if elapsed_s is None else 0.0}\n"
     assert _metric_call(tmp_path, code, {})["score"] == 1.0
 
 
 def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:
-    """With an output in the input, the metric may start no process, even when it catches the refusal (E40)."""
+    """With an output in the input, the metric may start no process, even when it catches the refusal (E40).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     code = (
@@ -1855,7 +2076,11 @@ def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path)
 
 
 def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> None:
-    """``score(repo_path, case, output)`` receives the run's output and the full case."""
+    """``score(repo_path, case, output)`` receives the run's output and the full case.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     code = "def score(repo_path, case, output):\n    return {'score': output['n'] / 10, 'feedback': case['expected']}\n"
@@ -1869,7 +2094,12 @@ def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> Non
 
 
 def test_the_metric_site_goes_before_the_image_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The metric's installed packages win over the image's, and a missing or repeated folder changes nothing."""
+    """The metric's installed packages win over the image's, and a missing or repeated folder changes nothing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     site = tmp_path / "site"
     site.mkdir()
     monkeypatch.setattr(sys, "path", ["/usr/lib/python313.zip", "/app/.venv/lib/python3.13/site-packages"])
@@ -1954,7 +2184,11 @@ def _wrapper_stdout(
 
 
 def test_a_root_file_in_the_wrappers_root_folder_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Accept the root wrapper's own output file, and create its exit code file in the same folder (TU-1)."""
+    """Accept the root wrapper's own output file, and create its exit code file in the same folder (TU-1).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     created = _wrapper_stdout(monkeypatch, f"{_FOLDER}/output.out")
 
     assert runner.unsafe_output() is None
@@ -1975,7 +2209,14 @@ def test_a_root_file_in_the_wrappers_root_folder_is_safe(monkeypatch: pytest.Mon
 def test_a_root_file_outside_a_root_only_wrapper_folder_is_refused(
     monkeypatch: pytest.MonkeyPatch, path: str, options: dict[str, int], refusal: str
 ) -> None:
-    """Refuse the old ``/tmp`` name and a folder that another user could plant into, and create no exit file (TU-1)."""
+    """Refuse the old ``/tmp`` name and a folder that another user could plant into, and create no exit file (TU-1).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        path: The root file path.
+        options: The extra options for the path check.
+        refusal: A part of the refusal the check must give.
+    """
     created = _wrapper_stdout(monkeypatch, path, **options)
 
     assert refusal in (runner.unsafe_output() or "")
@@ -1999,7 +2240,11 @@ def test_a_pipe_stdout_is_safe_for_the_result_frame() -> None:
 
 
 def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: Path) -> None:
-    """A stdout file that the test's user owns, outside the wrapper's names, could carry a forged frame."""
+    """A stdout file that the test's user owns, outside the wrapper's names, could carry a forged frame.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with (tmp_path / "out").open("w") as out:
         done = subprocess.run(
             [sys.executable, "-c", _UNSAFE_OUTPUT, runner.__file__],
@@ -2058,7 +2303,7 @@ def _root_supervisor(
         tmp_path: The candidate tree, owned by the test user.
         capabilities: ``caps`` when the fake root holds capabilities.
         prctl: ``fails`` when every prctl call fails.
-        call_dir: The call folder, to run the whole candidate path.
+        *call_dir: The call folder, to run the whole candidate path.
         entry_path: The image's ``APP_ENTRY_PATH``, or ``None`` for an image without it.
 
     Returns:
@@ -2084,7 +2329,13 @@ def _root_supervisor(
 def test_a_root_with_capabilities_drops_the_entry_to_the_tree_owner_also_with_a_pipe(
     tmp_path: Path, capabilities: str, switched: bool
 ) -> None:
-    """Only a root with no capability, as in a local Docker box, keeps the entry as itself (SKY-398)."""
+    """Only a root with no capability, as in a local Docker box, keeps the entry as itself (SKY-398).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        capabilities: Whether the root has capabilities, ``caps`` or ``none``.
+        switched: Whether the entry must run as the tree owner.
+    """
     chosen = _root_supervisor(tmp_path, capabilities, "works")["chosen"]
     assert chosen == ({"user": os.getuid(), "group": os.getgid(), "extra_groups": []} if switched else {})
 
@@ -2101,7 +2352,14 @@ def test_a_root_with_capabilities_drops_the_entry_to_the_tree_owner_also_with_a_
 def test_only_a_user_switch_gives_the_entry_the_image_box_path(
     tmp_path: Path, capabilities: str, entry_path: str | None, path: str | None
 ) -> None:
-    """sudo gives root a secure PATH, so the switched entry gets the box PATH with the [setup] venv back."""
+    """sudo gives root a secure PATH, so the switched entry gets the box PATH with the [setup] venv back.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        capabilities: Whether the root has capabilities, ``caps`` or ``none``.
+        entry_path: The PATH of the entry, or None for no PATH.
+        path: The PATH the switched entry must get, or None.
+    """
     assert _root_supervisor(tmp_path, capabilities, "works", entry_path=entry_path)["path"] == path
 
 
@@ -2109,12 +2367,22 @@ def test_only_a_user_switch_gives_the_entry_the_image_box_path(
 def test_only_a_user_switch_sets_no_new_privs_on_the_supervisor(
     tmp_path: Path, capabilities: str, calls: list[list[int]]
 ) -> None:
-    """The entry that runs as the tree owner inherits no_new_privs, so the box's sudo cannot raise it (SKY-398)."""
+    """The entry that runs as the tree owner inherits no_new_privs, so the box's sudo cannot raise it (SKY-398).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        capabilities: Whether the root has capabilities, ``caps`` or ``none``.
+        calls: The ``prctl`` calls the supervisor must make.
+    """
     assert _root_supervisor(tmp_path, capabilities, "works")["calls"] == calls
 
 
 def test_the_entry_does_not_start_when_no_new_privs_cannot_be_set(tmp_path: Path) -> None:
-    """A root supervisor that cannot set no_new_privs refuses the run and never starts the entry."""
+    """A root supervisor that cannot set no_new_privs refuses the run and never starts the entry.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     payload = {"entry": ["sh", "-c", "touch started"], "input": None, "timeout": 30, "stages": None}
@@ -2130,7 +2398,11 @@ def test_the_entry_does_not_start_when_no_new_privs_cannot_be_set(tmp_path: Path
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="no_new_privs is a Linux process flag")
 def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp_path: Path) -> None:
-    """The real prctl call sets the flag that the entry inherits."""
+    """The real prctl call sets the flag that the entry inherits.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         "import importlib.util,sys;"
         "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
@@ -2219,7 +2491,11 @@ def _command_metric_run(
 
 @_needs_openascent
 def test_a_command_metric_reads_ascent_input_and_writes_ascent_output(tmp_path: Path) -> None:
-    """The command gets the documented input fields and its answer becomes the score (SKY-738)."""
+    """The command gets the documented input fields and its answer becomes the score (SKY-738).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         'cp "$ASCENT_INPUT" seen.json\n'
         'printf \'{"score": 0.75, "feedback": "close", "scores": {"exact": {"score": 1}}}\' > "$ASCENT_OUTPUT"\n'
@@ -2239,7 +2515,11 @@ def test_a_command_metric_reads_ascent_input_and_writes_ascent_output(tmp_path: 
 
 @_needs_openascent
 def test_a_command_metric_without_expected_or_elapsed_gets_only_input_and_output(tmp_path: Path) -> None:
-    """``expected`` and ``elapsed_s`` are optional: a case without them gives the command neither key."""
+    """``expected`` and ``elapsed_s`` are optional: a case without them gives the command neither key.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = 'cp "$ASCENT_INPUT" seen.json\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
     payload = {"candidate": "x", "case": {"input": "q"}, "output": None}
     output = _command_metric(tmp_path, script, **payload, drop=(runner.ELAPSED_PARAM,))
@@ -2262,7 +2542,14 @@ def test_a_command_metric_without_expected_or_elapsed_gets_only_input_and_output
     ],
 )
 def test_a_failed_command_metric_names_its_cause(tmp_path: Path, script: str, entry: list[str], cause: str) -> None:
-    """Each failure has no score and the OpenAscent cause code, and an exit code when there is one."""
+    """Each failure has no score and the OpenAscent cause code, and an exit code when there is one.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        script: The metric script.
+        entry: The metric command.
+        cause: The OpenAscent cause code the failure must have.
+    """
     output = _command_metric(tmp_path, script, **{runner.METRIC_ENTRY_PARAM: entry, runner.METRIC_TIMEOUT_PARAM: 1})
 
     assert output["score"] is None
@@ -2300,7 +2587,11 @@ def _events(stderr: str) -> list[dict[str, Any]]:
 @_needs_openascent
 @_needs_curl
 def test_a_command_metric_without_a_judge_model_gets_only_the_log_url(tmp_path: Path) -> None:
-    """Without a gateway the command gets ``ASCENT_LOG_URL`` on loopback and no model variable (SKY-767)."""
+    """Without a gateway the command gets ``ASCENT_LOG_URL`` on loopback and no model variable (SKY-767).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = 'env | grep "^ASCENT_" | sort > seen.env\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
     output = _command_metric(tmp_path, script)
     seen = dict(line.split("=", 1) for line in (tmp_path / "box" / "seen.env").read_text().splitlines())
@@ -2313,7 +2604,12 @@ def test_a_command_metric_without_a_judge_model_gets_only_the_log_url(tmp_path: 
 @_needs_openascent
 @_needs_curl
 def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A POST to ``ASCENT_LOG_URL`` gives the run log the line that ``log()`` gives; a bad body is refused."""
+    """A POST to ``ASCENT_LOG_URL`` gives the run log the line that ``log()`` gives; a bad body is refused.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     script = (
         _CURL_POST
         + 'post "$ASCENT_LOG_URL" \'{"event": "judge.retry", "fields": {"attempt": 2, "level": "x"}}\' > answers\n'
@@ -2339,10 +2635,14 @@ def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: p
 @_needs_openascent
 @_needs_curl
 def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_key(tmp_path: Path) -> None:
-    """With a gateway the command reaches the model through the runner; the key stays out of its environment."""
+    """With a gateway the command reaches the model through the runner; the key stays out of its environment.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     script = (
         _CURL_POST
-        + 'env | grep -c "^APP_API_KEY=" > keys || true\n'
+        + 'env | grep -c "sk-test" > keys || true\n'
         + 'printf "%s|%s\\n" "$ASCENT_MODEL" "${ASCENT_MODEL_KEY-unset}" > model\n'
         + 'url="$ASCENT_MODEL_URL/chat/completions"\n'
         + 'post "$url" "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\",'
@@ -2354,12 +2654,13 @@ def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_k
     )
     with FakeGateway(reply="judged", usage=(7, 2)) as gateway:
         gateway_payload = {"url": gateway.url, "model": "judge-model", "declared_model": "openai/judge-model"}
-        output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"}, gateway=gateway_payload)
+        output = _command_metric(tmp_path, script, environ={"ASCENT_MODEL_KEY": "sk-test"}, gateway=gateway_payload)
     box = tmp_path / "box"
     answers = (box / "answers").read_text().splitlines()
 
     assert output["score"] == 1.0
     assert output["usage"] == [{"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}]
+    # The box and the helper both use ASCENT_MODEL_KEY (SKY-776), so the check counts the key's value.
     assert (box / "keys").read_text().strip() == "0"
     assert (box / "model").read_text().strip() == "openai/judge-model|"
     status, body = answers[0].split(" ", 1)
@@ -2373,10 +2674,43 @@ def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_k
     assert runner.MODEL_ENV in json.loads(answers[1].split(" ", 1)[1])["error"]
 
 
+def test_a_stock_openai_client_reaches_the_judge_model_through_the_metric_model_url() -> None:
+    """In the metric box a stock OpenAI client on ``ASCENT_MODEL_URL`` gets the judge's answer.
+
+    A request for another model gets an error that names ``ASCENT_MODEL`` and never reaches the gateway.
+    """
+    with FakeGateway(reply="judged") as gateway:
+        client_of_gateway = GatewayClient(
+            gateway.url, "judge-model", api_key="sk-test", declared_model="openai/judge-model"
+        )
+        helpers = runner.MetricHelpers(None, [], client_of_gateway, "openai/judge-model")
+        try:
+            env = helpers.env
+            client = openai.OpenAI(base_url=env["ASCENT_MODEL_URL"], api_key=env["ASCENT_MODEL_KEY"], max_retries=0)
+            ask = [{"role": "user", "content": "hi"}]
+            answer = client.chat.completions.create(
+                model=env["ASCENT_MODEL"], messages=ask, max_tokens=5, temperature=0
+            )
+            with pytest.raises(openai.BadRequestError) as refused:
+                client.chat.completions.create(model="other/model", messages=ask)
+        finally:
+            helpers.close()
+
+    assert answer.choices[0].message.content == "judged"
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0]["authorization"] == "Bearer sk-test"
+    assert gateway.requests[0]["body"]["max_tokens"] == 5
+    assert "ASCENT_MODEL" in str(refused.value)
+
+
 @_needs_openascent
 @_needs_curl
 def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) -> None:
-    """A protected gateway's budget stop reaches the output as ``control``, not as the command's score."""
+    """A protected gateway's budget stop reaches the output as ``control``, not as the command's score.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         _CURL_POST
         + 'post "$ASCENT_MODEL_URL/chat/completions" \'{"messages": [{"role": "user", "content": "x"}]}\' > answers\n'
@@ -2409,7 +2743,11 @@ def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) ->
 
 @_needs_openascent
 def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Path) -> None:
-    """Each key, model mailbox and tool relay name stays out of the command; other variables stay in."""
+    """Each key, model mailbox and tool relay name stays out of the command; other variables stay in.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     hidden = dict.fromkeys(runner._COMMAND_HIDDEN_ENV, "secret-value")
     output = _command_metric(
         tmp_path, 'env > seen\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n', environ={**hidden, "KEEP_ME": "1"}
@@ -2417,8 +2755,8 @@ def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Pat
     seen = (tmp_path / "box" / "seen").read_text()
 
     assert output["score"] == 1.0
-    assert {"APP_API_KEY", "SKYNET_API_KEY", "APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"} <= set(hidden)
-    assert {"APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} <= set(hidden)
+    assert {"ASCENT_MODEL_KEY", "ASCENT_MODEL", "APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"} <= set(hidden)
+    assert {"ASCENT_MODEL_URL", "APP_TOOL_RELAY_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} <= set(hidden)
     assert "secret-value" not in seen
     assert "KEEP_ME=1" in seen.splitlines()
 
@@ -2426,14 +2764,18 @@ def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Pat
 @_needs_openascent
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
 def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> None:
-    """The runner holds the model key in its start environment; its child command cannot read it from /proc."""
+    """The runner holds the model key in its start environment; its child command cannot read it from /proc.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+    """
     script = (
         'tr "\\0" " " < "/proc/$PPID/cmdline" > parent\n'
-        'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^APP_API_KEY="; then\n'
+        'if tr "\\0" "\\n" < "/proc/$PPID/environ" 2>/dev/null | grep -q "^ASCENT_MODEL_KEY="; then\n'
         "  echo read > seen\nelse\n  echo refused > seen\nfi\n"
         'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
     )
-    output = _command_metric(tmp_path, script, environ={"APP_API_KEY": "sk-test"})
+    output = _command_metric(tmp_path, script, environ={"ASCENT_MODEL_KEY": "sk-test"})
     box = tmp_path / "box"
 
     assert output["score"] == 1.0
@@ -2444,7 +2786,11 @@ def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> 
 @_needs_openascent
 @_needs_curl
 def test_the_model_key_file_reaches_the_gateway_and_is_gone_before_the_command(tmp_path: Path) -> None:
-    """The runner reads the scorer's key file and deletes it before the command starts; the model call uses the key."""
+    """The runner reads the scorer's key file and deletes it before the command starts; the model call uses the key.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         _CURL_POST
         + 'if [ -e "$CALL_DIR/model_key" ]; then echo present > keyfile; else echo gone > keyfile; fi\n'
@@ -2495,6 +2841,10 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     address and token. It does not copy the session's own parent process.
     ``vercel_key_in_env`` is the old scorer, which put the key in the command
     env: the scan must find it in the wrapper shell, so the scan works.
+
+    Args:
+        tmp_path: The test's folder, which stands for the metric box.
+        chain: The process chain that runs the metric, as the summary says.
     """
     box = tmp_path / "box"
     box.mkdir()
@@ -2516,7 +2866,7 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     start += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
     if chain == "vercel_key_in_env":
-        env["APP_API_KEY"] = "sk-scan"
+        env["ASCENT_MODEL_KEY"] = "sk-scan"
     if chain.startswith("vercel"):
         inner = f"/usr/bin/timeout --signal=KILL 60s /bin/bash {' '.join(vercel.SHELL_FLAGS)} {shlex.quote(start)}"
         script = vercel._wrapper(inner, uuid.uuid4().hex, sudo=False)[0]
@@ -2538,7 +2888,11 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
 
 
 def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``run_metric_command`` makes the runner non-dumpable before it starts anything; ``run_call`` does not."""
+    """``run_metric_command`` makes the runner non-dumpable before it starts anything; ``run_call`` does not.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
 
     class BlockedError(Exception):
         """Raised by the stand-in for ``_block_tracing``."""
@@ -2573,7 +2927,12 @@ def test_stage_env_name_follows_the_openascent_rule() -> None:
 def test_metric_helpers_refuse_a_stage_outside_the_run_and_relay_one_inside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stage route answers the relay's output, and refuses an unknown stage, a bad body and a failed stage."""
+    """The stage route answers the relay's output, and refuses an unknown stage, a bad body and a failed stage.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     sent: list[dict[str, Any]] = []
     answers = {"good": {"output": {"doubled": 4}}, "bad": {"error": "Stage 'bad' passed its 5s timeout."}}
     monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, sent))
@@ -2581,7 +2940,15 @@ def test_metric_helpers_refuse_a_stage_outside_the_run_and_relay_one_inside(
     helpers = runner.MetricHelpers(relay, ["good", "bad"], None, None)
 
     def post(url: str, body: Any) -> tuple[int, Any]:
-        """POST one JSON body and return the status and the decoded answer."""
+        """POST one JSON body and return the status and the decoded answer.
+
+        Args:
+            url: The URL to post to.
+            body: The JSON body.
+
+        Returns:
+            The status and the decoded answer.
+        """
         request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST")
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -2625,7 +2992,11 @@ def _post_raw(url: str, data: bytes) -> tuple[int, Any]:
 def test_metric_helpers_refuse_deep_nesting_and_non_finite_numbers_with_400(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """A deeply nested body and ``NaN`` or ``Infinity`` get a 400 JSON answer and print no traceback."""
+    """A deeply nested body and ``NaN`` or ``Infinity`` get a 400 JSON answer and print no traceback.
+
+    Args:
+        capfd: Pytest capture fixture for the process's stderr.
+    """
     helpers = runner.MetricHelpers(None, [], None, None)
     try:
         log_url = helpers.env[runner.LOG_URL_ENV]
@@ -2640,11 +3011,21 @@ def test_metric_helpers_refuse_deep_nesting_and_non_finite_numbers_with_400(
 def test_metric_helpers_answer_an_unexpected_failure_with_500_and_no_traceback(
     capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A helper failure outside ``_HelperError`` gets a 500 JSON answer, and stderr, where log() events go, stays clean."""
+    """A helper failure outside ``_HelperError`` gets a 500 JSON answer, and stderr, where log() events go, stays clean.
+
+    Args:
+        capfd: Pytest capture fixture for the process's stderr.
+        monkeypatch: Pytest monkeypatch.
+    """
     helpers = runner.MetricHelpers(None, [], None, None)
 
     def fail(path: str, body: Any) -> dict[str, Any]:
-        """Fail as an unexpected bug would."""
+        """Fail as an unexpected bug would.
+
+        Args:
+            path: The helper path.
+            body: The request body.
+        """
         raise RuntimeError("secret detail")
 
     monkeypatch.setattr(helpers, "answer", fail)
@@ -2660,12 +3041,25 @@ def test_metric_helpers_answer_an_unexpected_failure_with_500_and_no_traceback(
 def test_metric_helpers_print_no_traceback_when_the_client_leaves_before_the_answer(
     capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A metric command that closes its socket before the answer (``curl --max-time``) leaves stderr clean."""
+    """A metric command that closes its socket before the answer (``curl --max-time``) leaves stderr clean.
+
+    Args:
+        capfd: Pytest capture fixture for the process's stderr.
+        monkeypatch: Pytest monkeypatch.
+    """
     helpers = runner.MetricHelpers(None, [], None, None)
     left, done = threading.Event(), threading.Event()
 
     def slow(path: str, body: Any) -> dict[str, Any]:
-        """Answer only after the client left, with a body larger than a socket buffer."""
+        """Answer only after the client left, with a body larger than a socket buffer.
+
+        Args:
+            path: The helper path.
+            body: The request body.
+
+        Returns:
+            An answer larger than a socket buffer.
+        """
         left.wait(10)
         time.sleep(0.2)
         return {"output": "x" * 4_000_000}
@@ -2673,7 +3067,11 @@ def test_metric_helpers_print_no_traceback_when_the_client_leaves_before_the_ans
     finish = helpers._server.shutdown_request
 
     def shutdown_request(request: Any) -> None:
-        """Mark the end of the request, which comes after any error report."""
+        """Mark the end of the request, which comes after any error report.
+
+        Args:
+            request: The request that ends.
+        """
         finish(request)
         done.set()
 
@@ -2695,7 +3093,11 @@ def test_metric_helpers_print_no_traceback_when_the_client_leaves_before_the_ans
 
 
 def test_the_metric_command_is_the_one_process_the_runner_may_start(tmp_path: Path) -> None:
-    """The audit hook lets exactly one start of the command through; a second start or another command is refused."""
+    """The audit hook lets exactly one start of the command through; a second start or another command is refused.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         "import subprocess, sys\n"
         f"sys.path.insert(0, {str(Path(runner.__file__).parent)!r})\n"
@@ -2718,7 +3120,11 @@ def test_the_metric_command_is_the_one_process_the_runner_may_start(tmp_path: Pa
 
 
 def test_without_an_allowed_command_every_process_start_is_refused(tmp_path: Path) -> None:
-    """A Python metric keeps the old rule: no process start at all (E40)."""
+    """A Python metric keeps the old rule: no process start at all (E40).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     script = (
         "import subprocess, sys\n"
         f"sys.path.insert(0, {str(Path(runner.__file__).parent)!r})\n"

@@ -37,9 +37,9 @@ def score(repo_path, case, output=None):
 
 | متغیر                | چه چیزی را نگه می‌دارد                                     |
 | -------------------- | ---------------------------------------------------------- |
-| `OPENAI_BASE_URL`    | نشانی دروازه. `APP_GATEWAY_URL` همان مقدار را نگه می‌دارد. |
-| `APP_API_KEY`        | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
-| `APP_MODEL`          | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
+| `OPENAI_BASE_URL`    | نشانی دروازه. `ASCENT_MODEL_URL` همان مقدار را نگه می‌دارد. |
+| `ASCENT_MODEL_KEY`   | یک توکن فقط برای این اجرا. کلید ارائه‌دهنده نیست.           |
+| `ASCENT_MODEL`       | نام مدلی که باید بفرستید. این مدل امتیازدهندهٔ اجراست.      |
 | `ANTHROPIC_BASE_URL` | نشانی دروازه برای SDKهای Anthropic.                         |
 
 ```python tab="pipeline.py"
@@ -47,12 +47,12 @@ import os
 
 from openai import OpenAI
 
-client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["ASCENT_MODEL_KEY"])
 
 
 def label(message):
     response = client.chat.completions.create(
-        model=os.environ["APP_MODEL"],
+        model=os.environ["ASCENT_MODEL"],
         messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
     )
     return response.choices[0].message.content

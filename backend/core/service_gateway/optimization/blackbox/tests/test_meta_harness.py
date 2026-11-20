@@ -710,7 +710,7 @@ def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
         del case
         return float(len(loop.read_file(candidate, "a.py") or b"")), {}
 
-    relay = '[ "$APP_API_KEY" = route-key ] && [ "$APP_MODEL" = m ]'
+    relay = '[ "$ASCENT_MODEL_KEY" = route-key ] && [ "$ASCENT_MODEL" = m ]'
     options = _options(harness=BLACKBOX_HARNESS_CUSTOM, run_command=f"{relay} && printf x >> a.py")
     options.budget_route = {"url": "https://gw.example/v1", "token": "route-key"}
     options.gateway = SimpleNamespace(url="https://gw.example/v1", api_key="route-key")

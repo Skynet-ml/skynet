@@ -347,8 +347,9 @@ class RepoScorer:
                 the next scoring feedback. It never changes a score.
             gateway: The run's scoped model route from the trusted parent.
                 The scorer's ``llm()`` and the version's own code reach it
-                with ``APP_API_KEY`` and ``APP_MODEL``; the box itself stays
-                offline and talks to the parent through the model mailbox.
+                with ``ASCENT_MODEL_KEY`` and ``ASCENT_MODEL``; the box itself
+                stays offline and talks to the parent through the model
+                mailbox, whose proxy sets ``ASCENT_MODEL_URL``.
             stages: The ``[target.<name>]`` stages the scorer may ``call``;
                 none keeps the scorer as it was.
             stage_runtime: Opens the stage boxes; required with stages.
@@ -811,7 +812,7 @@ class RepoScorer:
         """Return the env that points code in the box at the run's model route.
 
         Returns:
-            ``APP_API_KEY`` and ``APP_MODEL``, or nothing without a route.
+            ``ASCENT_MODEL_KEY`` and ``ASCENT_MODEL``, or nothing without a route.
         """
         gateway = self._gateway
         if gateway is None or not gateway.api_key:

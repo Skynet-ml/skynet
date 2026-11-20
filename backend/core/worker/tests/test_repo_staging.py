@@ -212,7 +212,11 @@ _FILES = {"ascent.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The file narrows the editable paths, protects its judge, briefs the agent, and is saved with the run."""
+    """The file narrows the editable paths, protects its judge, briefs the agent, and is saved with the run.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_FILES, monkeypatch)
 
     repo = staged_payload["target"]["repo"]
@@ -240,7 +244,11 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
 def test_staging_writes_the_draft_files_over_the_tree_before_it_reads_the_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A draft ascent.toml takes effect, and every box starts from the drafted tree."""
+    """A draft ascent.toml takes effect, and every box starts from the drafted tree.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
 
@@ -254,7 +262,11 @@ def test_staging_writes_the_draft_files_over_the_tree_before_it_reads_the_rules(
 
 
 def test_staging_keeps_the_draft_files_off_the_guest_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guest gets the drafts only inside the tree, as a draft ascent.toml names the hidden paths."""
+    """The guest gets the drafts only inside the tree, as a draft ascent.toml names the hidden paths.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
 
@@ -268,7 +280,11 @@ def test_staging_keeps_the_draft_files_off_the_guest_payload(monkeypatch: pytest
 
 
 def test_staging_refuses_a_draft_file_through_a_link(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A draft that would write through a link in the tree fails setup in plain words."""
+    """A draft that would write through a link in the tree fails setup in plain words.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
 
@@ -277,7 +293,11 @@ def test_staging_refuses_a_draft_file_through_a_link(monkeypatch: pytest.MonkeyP
 
 
 def test_staging_refuses_drafts_written_on_another_commit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drafts read at an older commit would undo the branch's new commits, so the run stops with a code."""
+    """Drafts read at an older commit would undo the branch's new commits, so the run stops with a code.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
     payload["target"]["repo"]["draft_base"] = "d" * 40
@@ -293,7 +313,12 @@ def test_staging_refuses_drafts_written_on_another_commit(monkeypatch: pytest.Mo
 def test_staging_keeps_drafts_on_their_own_commit_or_with_no_base(
     monkeypatch: pytest.MonkeyPatch, base: str | None
 ) -> None:
-    """Drafts on the run's commit stage, and older drafts that record no base still stage."""
+    """Drafts on the run's commit stage, and older drafts that record no base still stage.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        base: The draft base the run records, or None for no base.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {"src/app.py": "x = 2\n"}
     payload["target"]["repo"]["draft_base"] = base
@@ -333,7 +358,14 @@ def test_the_saved_index_is_the_account_setting_or_pypi() -> None:
 def test_staging_records_the_hosts_the_proposer_box_reaches(
     proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
+    """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57).
+
+    Args:
+        proposer: The ``[proposer]`` table of the file.
+        index_url: The saved package index URL.
+        hosts: The hosts the proposer box must reach.
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {**_FILES, "ascent.toml": _CONSTRAINTS + _RUN + proposer}
     monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
@@ -371,12 +403,25 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
 def test_staging_refuses_a_file_that_asks_for_more(
     files: dict[str, str], message: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wider path or a service request fails setup with the reason and leaves nothing on disk."""
+    """A wider path or a service request fails setup with the reason and leaves nothing on disk.
+
+    Args:
+        files: The files of the repository.
+        message: A part of the reason setup must give.
+        monkeypatch: Pytest monkeypatch.
+    """
     workdirs: list[Path] = []
     real_mkdtemp = repo_staging.tempfile.mkdtemp
 
     def track(**options: Any) -> str:
-        """Remember the scratch folder staging makes."""
+        """Remember the scratch folder staging makes.
+
+        Args:
+            **options: The scratch folder options.
+
+        Returns:
+            The path of the last scratch folder.
+        """
         workdirs.append(Path(real_mkdtemp(**options)))
         return str(workdirs[-1])
 
@@ -793,7 +838,11 @@ def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeyp
 
 
 def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run resumes only under the rules first recorded for it."""
+    """A run resumes only under the rules first recorded for it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
@@ -818,7 +867,11 @@ _TARGETED = {**_FILES, "ascent.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget
 def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The file's target reaches the run snapshot and the record, and a resume under another target is refused."""
+    """The file's target reaches the run snapshot and the record, and a resume under another target is refused.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_TARGETED, monkeypatch)
     staged.cleanup()
 
@@ -832,7 +885,11 @@ def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
 
 
 def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An environment saved before the outcome field existed counts as having no target."""
+    """An environment saved before the outcome field existed counts as having no target.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert first[repo_staging.REPO_SNAPSHOT_KEY]["outcome"] == {"target": None, "require": {}, "direction": "maximize"}
@@ -850,7 +907,11 @@ def test_a_run_recorded_before_the_outcome_existed_resumes_without_a_target(monk
 
 
 def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A recorded environment means the run started, maybe before ``version`` was required (SKY-690)."""
+    """A recorded environment means the run started, maybe before ``version`` was required (SKY-690).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert staged.require_version is True
@@ -868,7 +929,11 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 
 def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
+    """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     unversioned = {**_FILES, "ascent.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
 
     staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
@@ -879,7 +944,11 @@ def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 
 def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761)."""
+    """A recorded environment relaxes only ``version``: a resume still needs a [run] or a stage (SKY-761).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
@@ -898,7 +967,11 @@ _RULED = {
 
 
 def test_staging_keeps_the_plain_language_rules_for_the_judges(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The rules reach the parent's judges and the recorded environment, and a resume must keep them."""
+    """The rules reach the parent's judges and the recorded environment, and a resume must keep them.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_RULED, monkeypatch)
     staged.cleanup()
 
@@ -917,7 +990,11 @@ def test_staging_keeps_the_plain_language_rules_for_the_judges(monkeypatch: pyte
 
 
 def test_a_run_recorded_before_rules_existed_resumes_without_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An environment saved before the rules field existed counts as having no rules."""
+    """An environment saved before the rules field existed counts as having no rules.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
@@ -934,7 +1011,11 @@ def test_a_run_recorded_before_rules_existed_resumes_without_rules(monkeypatch: 
 
 
 def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without ascent.toml the run keeps its old behavior: no judge and no fixed block message."""
+    """Without ascent.toml the run keeps its old behavior: no judge and no fixed block message.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     _, staged = _stage_with({}, monkeypatch)
     staged.cleanup()
 
@@ -943,14 +1024,22 @@ def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytes
 
 
 def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A new run needs ascent.toml in the tree or the drafts (SKY-693)."""
+    """A new run needs ascent.toml in the tree or the drafts (SKY-693).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     with pytest.raises(ConstraintsError) as error:
         _stage_with({}, monkeypatch, require_constraints=True)
     assert str(error.value) == CONSTRAINTS_REQUIRED
 
 
 def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The contract can come from the repository tree or from the draft files."""
+    """The contract can come from the repository tree or from the draft files.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     _, staged = _stage_with(
         {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
     )
@@ -963,7 +1052,11 @@ def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytes
 
 
 def test_a_started_run_without_a_constraints_file_still_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run that recorded its environment before the rule existed resumes and recovers as before."""
+    """A run that recorded its environment before the rule existed resumes and recovers as before.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with({}, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
@@ -978,11 +1071,27 @@ def test_a_started_run_without_a_constraints_file_still_resumes(monkeypatch: pyt
 def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     commit: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Follow the branch only when no commit is pinned, and hand the guest secret names but never values."""
+    """Follow the branch only when no commit is pinned, and hand the guest secret names but never values.
+
+    Args:
+        commit: The pinned commit, or None to follow the branch.
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     fetched: list[tuple[str, str, str]] = []
 
     def fetch(repository: str, pinned: str, token: str, workdir: Path) -> RepoSnapshot:
-        """Pretend to clone and record what was asked for."""
+        """Pretend to clone and record what was asked for.
+
+        Args:
+            repository: The repository to clone.
+            pinned: The pinned commit.
+            token: The clone token.
+            workdir: The scratch folder.
+
+        Returns:
+            A snapshot of an empty tree at the pinned commit.
+        """
         fetched.append((repository, pinned, token))
         return RepoSnapshot(commit=pinned, archive=_tree(workdir, {}), readonly_paths=("vendor/lib",), size_bytes=4)
 
@@ -1025,16 +1134,39 @@ def _no_connection(engine: Any, username: str) -> str:
 
 
 def test_staging_reads_a_public_repository_without_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without a GitHub connection, resolve the commit and clone anonymously (SKY-568)."""
+    """Without a GitHub connection, resolve the commit and clone anonymously (SKY-568).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     calls: list[tuple[str, Any]] = []
 
     def resolve(token: str | None, repository: str, branch: str | None) -> str:
-        """Record the lookup token and pin the branch."""
+        """Record the lookup token and pin the branch.
+
+        Args:
+            token: The lookup token.
+            repository: The repository to look up.
+            branch: The branch to pin.
+
+        Returns:
+            The pinned commit.
+        """
         calls.append(("resolve", token))
         return "a" * 40
 
     def fetch(repository: str, pinned: str, token: str | None, workdir: Path) -> RepoSnapshot:
-        """Record the clone token and pack an empty tree."""
+        """Record the clone token and pack an empty tree.
+
+        Args:
+            repository: The repository to clone.
+            pinned: The pinned commit.
+            token: The clone token.
+            workdir: The scratch folder.
+
+        Returns:
+            A snapshot of an empty tree at the pinned commit.
+        """
         calls.append(("fetch", token))
         return RepoSnapshot(commit=pinned, archive=_tree(workdir, {}), readonly_paths=(), size_bytes=1)
 
@@ -1054,10 +1186,20 @@ def test_staging_reads_a_public_repository_without_a_connection(monkeypatch: pyt
 
 
 def test_a_private_repository_without_a_connection_says_to_connect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An anonymous lookup that fails tells the owner to connect GitHub for a private repository."""
+    """An anonymous lookup that fails tells the owner to connect GitHub for a private repository.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
 
     def resolve(token: str | None, repository: str, branch: str | None) -> str:
-        """Refuse the lookup the way GitHub hides a private repository."""
+        """Refuse the lookup the way GitHub hides a private repository.
+
+        Args:
+            token: The lookup token.
+            repository: The repository to look up.
+            branch: The branch to pin.
+        """
         raise RepoFetchError("GitHub could not find acme/app at 'main'.")
 
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
@@ -1073,10 +1215,20 @@ def test_a_private_repository_without_a_connection_says_to_connect(monkeypatch: 
 
 
 def test_a_rate_limited_anonymous_lookup_keeps_the_rate_limit_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A spent rate limit is not rewritten as advice that only a public repository can be read."""
+    """A spent rate limit is not rewritten as advice that only a public repository can be read.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
 
     def resolve(token: str | None, repository: str, branch: str | None) -> str:
-        """Fail the lookup the way a spent anonymous quota does."""
+        """Fail the lookup the way a spent anonymous quota does.
+
+        Args:
+            token: The lookup token.
+            repository: The repository to look up.
+            branch: The branch to pin.
+        """
         raise RepoRateLimitError("GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit.")
 
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
@@ -1090,11 +1242,23 @@ def test_a_rate_limited_anonymous_lookup_keeps_the_rate_limit_error(monkeypatch:
 
 
 def test_a_failed_anonymous_clone_says_to_connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pinned commit skips the lookup, so a refused anonymous clone carries the same advice and cleans up."""
+    """A pinned commit skips the lookup, so a refused anonymous clone carries the same advice and cleans up.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     workdirs: list[Path] = []
 
     def fetch(repository: str, pinned: str, token: str | None, workdir: Path) -> RepoSnapshot:
-        """Refuse the clone the way git does for a private repository."""
+        """Refuse the clone the way git does for a private repository.
+
+        Args:
+            repository: The repository to clone.
+            pinned: The pinned commit.
+            token: The clone token.
+            workdir: The scratch folder.
+        """
         workdirs.append(workdir)
         raise RepoFetchError("git fetch failed: could not read Username.")
 
@@ -1110,10 +1274,20 @@ def test_a_failed_anonymous_clone_says_to_connect(tmp_path: Path, monkeypatch: p
 
 
 def test_a_failure_with_a_connection_keeps_the_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a connection, a refused lookup is not rewritten as advice to connect."""
+    """With a connection, a refused lookup is not rewritten as advice to connect.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
 
     def resolve(token: str | None, repository: str, branch: str | None) -> str:
-        """Refuse the lookup."""
+        """Refuse the lookup.
+
+        Args:
+            token: The lookup token.
+            repository: The repository to look up.
+            branch: The branch to pin.
+        """
         raise RepoFetchError("GitHub could not find acme/app at 'main'.")
 
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
@@ -1127,16 +1301,41 @@ def test_a_failure_with_a_connection_keeps_the_original_error(monkeypatch: pytes
 
 
 def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A GitLab repository reads through its connection token, or anonymously when there is none."""
+    """A GitLab repository reads through its connection token, or anonymously when there is none.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     seen: list[str | None] = []
 
     def resolve(provider: str, token: str | None, repository: str, branch: str | None) -> str:
-        """Record the lookup token and pin the branch."""
+        """Record the lookup token and pin the branch.
+
+        Args:
+            provider: The git provider.
+            token: The lookup token.
+            repository: The repository to look up.
+            branch: The branch to pin.
+
+        Returns:
+            The pinned commit.
+        """
         seen.append(token)
         return "a" * 40
 
     def fetch(repository: str, pinned: str, token: str | None, workdir: Path, **_: Any) -> RepoSnapshot:
-        """Record the clone token and pack an empty tree."""
+        """Record the clone token and pack an empty tree.
+
+        Args:
+            repository: The repository to clone.
+            pinned: The pinned commit.
+            token: The clone token.
+            workdir: The scratch folder.
+            **_: The other fetch options, which the fake ignores.
+
+        Returns:
+            A snapshot of an empty tree at the pinned commit.
+        """
         seen.append(token)
         return RepoSnapshot(commit=pinned, archive=_tree(workdir, {}), readonly_paths=(), size_bytes=1)
 
@@ -1148,7 +1347,13 @@ def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypat
     payload["target"]["repo"]["provider"] = "gitlab"
 
     def no_gitlab(engine: Any, username: str, provider: str) -> str:
-        """Refuse the token lookup as a missing connection does."""
+        """Refuse the token lookup as a missing connection does.
+
+        Args:
+            engine: The database.
+            username: The user whose token to look up.
+            provider: The git provider.
+        """
         raise RepoFetchError("Connect GitLab again to read this repository.")
 
     for host_token, expected in ((lambda engine, username, provider: "gl-token", "gl-token"), (no_gitlab, None)):
@@ -1160,7 +1365,11 @@ def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypat
 
 
 def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Staging reads the bindings and allowed hosts before it empties the secret list, and maps each secret to its host."""
+    """Staging reads the bindings and allowed hosts before it empties the secret list, and maps each secret to its host.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _payload("c" * 40)
     payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
     payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
@@ -1178,7 +1387,11 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
 
 
 def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55)."""
+    """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
@@ -1192,7 +1405,11 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
 
 
 def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830)."""
+    """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
         "agent.mcp.json": (
@@ -1215,7 +1432,11 @@ def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(m
 
 
 def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
+    """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": (
             'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
@@ -1255,7 +1476,12 @@ def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeyp
 def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The scorer box unpacks a tree whose every MCP file points at the runner's relay (E49, E53)."""
+    """The scorer box unpacks a tree whose every MCP file points at the runner's relay (E49, E53).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     files = {
         "ascent.toml": (
             'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
@@ -1290,11 +1516,22 @@ def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
 
 
 def test_failed_fetch_leaves_nothing_on_disk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove the scratch folder when the clone fails."""
+    """Remove the scratch folder when the clone fails.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     workdirs: list[Path] = []
 
     def fetch(repository: str, pinned: str, token: str, workdir: Path) -> RepoSnapshot:
-        """Fail like a refused clone."""
+        """Fail like a refused clone.
+
+        Args:
+            repository: The repository to clone.
+            pinned: The pinned commit.
+            token: The clone token.
+            workdir: The scratch folder.
+        """
         workdirs.append(workdir)
         raise RuntimeError("refused")
 
@@ -1332,14 +1569,30 @@ class _Box:
         self.service_bases: list[str] = []
 
     def write_files(self, files: dict[str, str]) -> None:
-        """Accept files."""
+        """Accept files.
+
+        Args:
+            files: The files to write.
+        """
 
     def read_file(self, path: str) -> str | None:
-        """Hold no files."""
+        """Hold no files.
+
+        Args:
+            path: The file to read.
+        """
         return None
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, answering the prepared-tree digest and the working folder as the box would."""
+        """Record the command, answering the prepared-tree digest and the working folder as the box would.
+
+        Args:
+            command: The command the box runs.
+            **options: The run options.
+
+        Returns:
+            A successful result, with the output the box would give.
+        """
         self.commands.append((command, self.online))
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
@@ -1446,7 +1699,11 @@ class _Gateway:
         return ModelHTTPResult(200, "application/json", json.dumps(reply).encode())
 
     def parent_sandbox_runtime(self) -> Any:
-        """Return a runtime that opens recording boxes."""
+        """Return a runtime that opens recording boxes.
+
+        Returns:
+            A runtime that opens recording boxes.
+        """
         gateway = self
 
         class _Runtime:
@@ -1455,13 +1712,28 @@ class _Gateway:
             max_lifetime_seconds = 3600.0
 
             def open(self, spec: SandboxSpec) -> _Box:
-                """Open a recording box over ``spec``."""
+                """Open a recording box over ``spec``.
+
+                Args:
+                    spec: The sandbox spec.
+
+                Returns:
+                    The recording box.
+                """
                 box = _Box(spec)
                 gateway.boxes.append(box)
                 return box
 
             def snapshot(self, session: _Box, cache_key: str) -> str:
-                """Save a box's state under a fake id, since the fake box holds no files."""
+                """Save a box's state under a fake id, since the fake box holds no files.
+
+                Args:
+                    session: The box to save.
+                    cache_key: The snapshot cache key.
+
+                Returns:
+                    The fake snapshot id.
+                """
                 return f"snap-{len(gateway.boxes)}"
 
         return _Runtime()
@@ -1513,7 +1785,11 @@ def _binding(tmp_path: Path, setup: str | None) -> tuple[dict[str, Any], repo_st
 
 
 def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> None:
-    """The guest receives only the evaluator route; the parent owns the scorer and closes it."""
+    """The guest receives only the evaluator route; the parent owns the scorer and closes it.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     gateway = _Gateway()
 
@@ -1532,7 +1808,11 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
 
 
 def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: Path) -> None:
-    """Each candidate box gets the base commit's ``[sandbox] compose`` services; the setup box starts none."""
+    """Each candidate box gets the base commit's ``[sandbox] compose`` services; the setup box starts none.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     db = ComposeService(name="db", command="postgres -D /data")
     staged = dataclasses.replace(bare, compose_services=(db,))
@@ -1549,7 +1829,11 @@ def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: P
 
 
 def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: Path) -> None:
-    """The scorer's relay gets the bindings, both host maps, and the gateway's budget to meter a Skynet key."""
+    """The scorer's relay gets the bindings, both host maps, and the gateway's budget to meter a Skynet key.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     staged = dataclasses.replace(
         bare,
@@ -1572,7 +1856,11 @@ def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: 
 
 
 def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None:
-    """The scorer's relay gets the [run] and [metric] roles, so each call reaches only its own MCP file."""
+    """The scorer's relay gets the [run] and [metric] roles, so each call reaches only its own MCP file.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     run = RoleEnvironment(
         mcp=".mcp.json", mcp_servers=(McpServer(name="search", url="https://search.example.com/mcp"),)
@@ -1587,7 +1875,11 @@ def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None
 
 
 def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The proposer's .mcp.json lists only the [proposer] servers at relay urls: no real url, header or key (SKY-610)."""
+    """The proposer's .mcp.json lists only the [proposer] servers at relay urls: no real url, header or key (SKY-610).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         "agent.mcp.json": (
@@ -1622,7 +1914,11 @@ def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: 
 
 
 def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both trees get the same rewrite, so the protected check passes and the rewrite never enters a patch."""
+    """Both trees get the same rewrite, so the protected check passes and the rewrite never enters a patch.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
@@ -1642,7 +1938,11 @@ def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeyp
 
 
 def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> None:
-    """The proposer's route gets a relay token and server names; the relay holds the secrets in the parent (SKY-610)."""
+    """The proposer's route gets a relay token and server names; the relay holds the secrets in the parent (SKY-610).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
     payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
@@ -1654,7 +1954,14 @@ def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> N
     relays: list[McpRelay] = []
 
     def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
-        """Keep the relay and hand back a fake route."""
+        """Keep the relay and hand back a fake route.
+
+        Args:
+            relay: The MCP relay.
+
+        Returns:
+            A fake relay route.
+        """
         relays.append(relay)
         return {"url": "http://127.0.0.1:1/v1", "token": "mcp-token"}
 
@@ -1674,7 +1981,11 @@ def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> N
 
 
 def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Path) -> None:
-    """A proposer that lists services gets a relay token and the names; the relay holds the urls (SKY-612)."""
+    """A proposer that lists services gets a relay token and the names; the relay holds the urls (SKY-612).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
     payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
@@ -1689,7 +2000,14 @@ def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Pat
     relays: list[McpRelay] = []
 
     def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
-        """Keep the relay and hand back a fake route."""
+        """Keep the relay and hand back a fake route.
+
+        Args:
+            relay: The MCP relay.
+
+        Returns:
+            A fake relay route.
+        """
         relays.append(relay)
         return {"url": "http://127.0.0.1:1/v1", "token": "mcp-token"}
 
@@ -1723,6 +2041,11 @@ def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
     """Each token on the proposer's route is masked in a service call that carries it (SKY-640).
 
     The host agent token joins the route after binding, as the worker attaches it.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+        kind: The kind of token on the proposer's route.
     """
     # Pin the service host to a closed loopback port, so the call fails after the relay sends it.
     monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
@@ -1746,7 +2069,14 @@ def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
     relays: list[McpRelay] = []
 
     def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
-        """Keep the relay and hand back its route."""
+        """Keep the relay and hand back its route.
+
+        Args:
+            relay: The MCP relay.
+
+        Returns:
+            The relay route.
+        """
         relays.append(relay)
         return {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["mcp_relay"]}
 
@@ -1777,7 +2107,11 @@ def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
 
 
 def test_binding_refuses_proposer_services_without_a_model_route(tmp_path: Path) -> None:
-    """Services with no proposer model route have no box to reach them, so the run stops before it starts."""
+    """Services with no proposer model route have no box to reach them, so the run stops before it starts.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     staged = dataclasses.replace(bare, proposer_role=RoleEnvironment(services=("maps",)))
 
@@ -1787,7 +2121,11 @@ def test_binding_refuses_proposer_services_without_a_model_route(tmp_path: Path)
 
 
 def test_binding_without_proposer_mcp_servers_adds_no_relay(tmp_path: Path) -> None:
-    """A proposer with no MCP servers gets no relay token."""
+    """A proposer with no MCP servers gets no relay token.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
     payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
@@ -1800,7 +2138,11 @@ def test_binding_without_proposer_mcp_servers_adds_no_relay(tmp_path: Path) -> N
 
 
 def test_binding_opens_the_scorer_box_on_the_loopback_tree(tmp_path: Path) -> None:
-    """The scorer box unpacks the tree with rewritten MCP files, never the fetched one."""
+    """The scorer box unpacks the tree with rewritten MCP files, never the fetched one.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     (tmp_path / "scorer").mkdir()
     scorer_tree = _tree(tmp_path / "scorer", {"src/app.py": "x = 1\n"})
@@ -1814,7 +2156,11 @@ def test_binding_opens_the_scorer_box_on_the_loopback_tree(tmp_path: Path) -> No
 
 
 def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:
-    """The scorer's model reaches the box as its scoped route; the box stays offline."""
+    """The scorer's model reaches the box as its scoped route; the box stays offline.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     route = {"url": "http://127.0.0.1:1/v1", "token": "route-token", "model": "vendor/judge", "role": "judge"}
     payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {ROUTE_KEY: route}}
@@ -1829,7 +2175,7 @@ def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Pat
         "route-token",
         True,
     )
-    assert gateway.evaluator._model_env() == {"APP_API_KEY": "route-token", "APP_MODEL": "vendor/judge"}
+    assert gateway.evaluator._model_env() == {"ASCENT_MODEL_KEY": "route-token", "ASCENT_MODEL": "vendor/judge"}
     box = gateway.boxes[0]
     assert box.spec.network_disabled is True
     assert box.spec.allowed_hosts == ()
@@ -1838,7 +2184,11 @@ def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Pat
 
 
 def test_binding_refuses_a_scorer_model_without_a_scoped_route(tmp_path: Path) -> None:
-    """A model the parent did not scope would carry a provider key, so no box opens."""
+    """A model the parent did not scope would carry a provider key, so no box opens.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {"api_key": "user-key"}}
     gateway = _Gateway()
@@ -1913,7 +2263,12 @@ def _trigger_watch(gateway: Any) -> None:
 def test_a_run_that_turns_the_watch_on_binds_one_managed_hook_billed_to_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The watch hook runs on the managed key under the run's budget, never on a guest route, and never sees the metric."""
+    """The watch hook runs on the managed key under the run's budget, never on a guest route, and never sees the metric.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
     gateway = _Gateway()
@@ -1941,7 +2296,12 @@ def test_a_run_that_turns_the_watch_on_binds_one_managed_hook_billed_to_the_run(
 
 
 def test_the_watch_never_reads_a_score_or_the_scorers_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Engine files and tool results carry the scores and feedback, so the hook reads only safe tool inputs."""
+    """Engine files and tool results carry the scores and feedback, so the hook reads only safe tool inputs.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
     gateway = _Gateway()
@@ -1968,7 +2328,11 @@ def test_the_watch_never_reads_a_score_or_the_scorers_feedback(tmp_path: Path, m
 
 
 def test_the_watch_is_off_by_default_and_costs_nothing(tmp_path: Path) -> None:
-    """Rules alone register no model and observe no agent call unless the run turns the watch on."""
+    """Rules alone register no model and observe no agent call unless the run turns the watch on.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.")
     gateway = _Gateway()
 
@@ -1983,7 +2347,11 @@ def test_the_watch_is_off_by_default_and_costs_nothing(tmp_path: Path) -> None:
 
 
 def test_the_watch_runs_on_an_intent_without_rules(tmp_path: Path) -> None:
-    """A stated intent is enough for the watch hook to have something to check."""
+    """A stated intent is enough for the watch hook to have something to check.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _ruled_binding(tmp_path, (), intent="Find places.", watch=True)
     gateway = _Gateway()
 
@@ -2027,7 +2395,11 @@ def test_the_watch_setting_takes_the_runs_values() -> None:
     ],
 )
 def test_a_bad_watch_setting_fails_setup(setting: Any) -> None:
-    """A malformed setting stops the run instead of silently turning the hook off."""
+    """A malformed setting stops the run instead of silently turning the hook off.
+
+    Args:
+        setting: A malformed watch setting.
+    """
     with pytest.raises(ConstraintsError, match="rule_watch"):
         repo_staging._rule_watch_setting({repo_staging.RULE_WATCH_KEY: setting})
 
@@ -2036,7 +2408,7 @@ def _catalog(*models: CatalogModel) -> ModelCatalogResponse:
     """Build a catalog snapshot holding the given models.
 
     Args:
-        models: Catalog rows.
+        *models: Catalog rows.
 
     Returns:
         The snapshot.
@@ -2049,7 +2421,7 @@ def _row(value: str, **reasoning: Any) -> CatalogModel:
 
     Args:
         value: Model id.
-        reasoning: Reasoning fields of the row.
+        **reasoning: Reasoning fields of the row.
 
     Returns:
         The row.
@@ -2086,6 +2458,11 @@ def test_a_reasoning_hook_gets_low_effort_and_room_to_answer(
     """A hook model that thinks by default must not spend its whole answer budget on reasoning (OpenRouter shares it).
 
     Catalog ids keep the ``openrouter/`` prefix that the gateway strips from route models.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+        prefix: The route prefix of the hook model.
     """
     catalog = _catalog(
         _row(
@@ -2105,7 +2482,12 @@ def test_a_reasoning_hook_gets_low_effort_and_room_to_answer(
 
 
 def test_a_hook_that_never_reasons_gets_only_the_answer_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A model the catalog marks as non-reasoning gets no reasoning field and the short limit."""
+    """A model the catalog marks as non-reasoning gets no reasoning field and the short limit.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     catalog = _catalog(
         _row("vendor/fast", reasoning_efforts=[], reasoning_default_enabled=False, reasoning_mandatory=False)
     )
@@ -2119,7 +2501,12 @@ def test_a_hook_that_never_reasons_gets_only_the_answer_budget(tmp_path: Path, m
 def test_a_hook_missing_from_the_catalog_still_has_room_to_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Before the catalog loads nobody knows whether the hook reasons, so it gets the larger budget."""
+    """Before the catalog loads nobody knows whether the hook reasons, so it gets the larger budget.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     body = _judge_body(tmp_path, monkeypatch, None)
 
     assert "reasoning" not in body
@@ -2129,7 +2516,12 @@ def test_a_hook_missing_from_the_catalog_still_has_room_to_reason(
 def test_a_hook_with_unknown_reasoning_data_still_has_room_to_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A catalog row whose provider did not say whether it reasons is unknown, not a model that never reasons."""
+    """A catalog row whose provider did not say whether it reasons is unknown, not a model that never reasons.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     unknown = {"reasoning_efforts": None, "reasoning_default_enabled": None, "reasoning_mandatory": None}
 
     body = _judge_body(tmp_path, monkeypatch, _catalog(_row("vendor/fast", **unknown)))
@@ -2139,7 +2531,11 @@ def test_a_hook_with_unknown_reasoning_data_still_has_room_to_reason(
 
 
 def test_a_watch_without_the_managed_key_fails_setup(tmp_path: Path) -> None:
-    """A watch the run asked for but nobody can run stops the run before the guest starts."""
+    """A watch the run asked for but nobody can run stops the run before the guest starts.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), watch=True)
     gateway = _Gateway()
 
@@ -2151,7 +2547,11 @@ def test_a_watch_without_the_managed_key_fails_setup(tmp_path: Path) -> None:
 
 
 def test_a_constraints_file_without_rules_blocks_without_judge_models(tmp_path: Path) -> None:
-    """Path rules alone still get the fixed block message, and no hook model is registered or paid for."""
+    """Path rules alone still get the fixed block message, and no hook model is registered or paid for.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _ruled_binding(tmp_path, (), watch=True)
     gateway = _Gateway()
 
@@ -2164,7 +2564,11 @@ def test_a_constraints_file_without_rules_blocks_without_judge_models(tmp_path: 
 
 
 def test_a_run_without_a_constraints_file_has_no_rule_judge(tmp_path: Path) -> None:
-    """Without ascent.toml the scorer keeps its earlier refusals and no judge exists."""
+    """Without ascent.toml the scorer keeps its earlier refusals and no judge exists.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     gateway = _Gateway()
 
@@ -2176,7 +2580,11 @@ def test_a_run_without_a_constraints_file_has_no_rule_judge(tmp_path: Path) -> N
 
 
 def test_setup_runs_online_in_the_parent_before_the_guest_gets_a_route(tmp_path: Path) -> None:
-    """A setup command opens the box to package registries only, and it is offline before binding finishes."""
+    """A setup command opens the box to package registries only, and it is offline before binding finishes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, "pip install -r requirements.txt")
     gateway = _Gateway()
 
@@ -2211,7 +2619,13 @@ def _evaluation_check(monkeypatch: pytest.MonkeyPatch, scorer: dict[str, Any]) -
     seen: list[dict[str, Any]] = []
 
     def run(request: Any, user: Any, store: Any) -> Any:
-        """Keep the canonical payload and stop before any paid work."""
+        """Keep the canonical payload and stop before any paid work.
+
+        Args:
+            request: The setup request.
+            user: The signed-in user.
+            store: The run store.
+        """
         seen.append(request.payload)
         raise HTTPException(status_code=418, detail="recorded")
 
@@ -2237,7 +2651,12 @@ def _evaluation_check(monkeypatch: pytest.MonkeyPatch, scorer: dict[str, Any]) -
 def test_evaluation_check_without_a_scorer_timeout_binds_the_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A scorer sent without ``timeout_seconds`` gets the run request's 60 s default and binds without a KeyError."""
+    """A scorer sent without ``timeout_seconds`` gets the run request's 60 s default and binds without a KeyError.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     response, seen = _evaluation_check(monkeypatch, {"kind": "python", "metric_code": "def score(p):\n    return 1\n"})
 
     assert response.status_code == 418
@@ -2252,7 +2671,11 @@ def test_evaluation_check_without_a_scorer_timeout_binds_the_default(
 
 
 def test_evaluation_check_rejects_an_out_of_range_scorer_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An out-of-range ``timeout_seconds`` is a validation error naming the field, and no setup run starts."""
+    """An out-of-range ``timeout_seconds`` is a validation error naming the field, and no setup run starts.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     response, seen = _evaluation_check(
         monkeypatch, {"kind": "python", "metric_code": "def score(p):\n    return 1\n", "timeout_seconds": 601}
     )
@@ -2304,7 +2727,12 @@ def _result(baseline: float | None, optimized: float | None, best: str = _EDIT, 
     ],
 )
 def test_only_a_version_that_beat_the_start_is_published(result: dict[str, Any], expected: str | None) -> None:
-    """Held-out scores decide, version scores stand in without a hold-out, and ties never publish."""
+    """Held-out scores decide, version scores stand in without a hold-out, and ties never publish.
+
+    Args:
+        result: The run result.
+        expected: The patch that must be published, or None.
+    """
     assert repo_staging.improved_patch(result) == expected
 
 
@@ -2338,7 +2766,11 @@ _CRASHED_EDIT = {
     ],
 )
 def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, Any]) -> None:
-    """A metric error has no score (SKY-350), so even a stray number never makes it publishable."""
+    """A metric error has no score (SKY-350), so even a stray number never makes it publishable.
+
+    Args:
+        result: A run result with a version the metric crashed on.
+    """
     assert repo_staging.improved_patch(result) is None
 
 
@@ -2460,7 +2892,11 @@ def test_a_scored_version_never_beats_a_starting_code_the_metric_crashed_on(resu
 
 
 def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
-    """Candidate branches leave out a crashed version and count it as skipped."""
+    """Candidate branches leave out a crashed version and count it as skipped.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     other = _EDIT.replace("+x = 2", "+x = 3")
     result = _result(None, None, versions=[{**_CRASHED_EDIT, "score": 0.0}, {"candidate": other, "score": 0.4}])
     repo = {"editable_paths": ["src/"]}
@@ -2510,7 +2946,12 @@ def _publish(result: dict[str, Any], staged: repo_staging.StagedRepository) -> d
 def test_publishing_pushes_the_version_and_records_the_pull_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An improved run pushes its patch on the pinned commit and links the draft on the result."""
+    """An improved run pushes its patch on the pinned commit and links the draft on the result.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     pushed: list[tuple[Any, ...]] = []
     opened: list[dict[str, Any]] = []
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
@@ -2522,7 +2963,7 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.
@@ -2550,7 +2991,12 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
 
 
 def test_publishing_pushes_the_drafts_the_staged_tree_keeps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The push writes the drafts that staging took off the guest payload, and refuses read-only ones."""
+    """The push writes the drafts that staging took off the guest payload, and refuses read-only ones.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     pushed: list[dict[str, Any]] = []
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
     monkeypatch.setattr(repo_staging, "push_version", lambda *args, **kwargs: pushed.append(kwargs))
@@ -2574,7 +3020,12 @@ def test_publishing_pushes_the_drafts_the_staged_tree_keeps(monkeypatch: pytest.
 
 
 def test_publishing_rechecks_the_editing_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A best version touching a read-only path is never pushed."""
+    """A best version touching a read-only path is never pushed.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("pushed a forbidden version"))
     result = _result(0.5, 0.8)
 
@@ -2587,7 +3038,12 @@ def test_publishing_rechecks_the_editing_rules(monkeypatch: pytest.MonkeyPatch, 
 def test_publishing_refuses_a_version_that_changes_a_protected_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A best version editing a file the repository protects is never pushed, and the rule is named."""
+    """A best version editing a file the repository protects is never pushed, and the rule is named.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("pushed a protected change"))
     staged = repo_staging.StagedRepository(
         snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, protected_paths=("src/app.py",)
@@ -2600,14 +3056,19 @@ def test_publishing_refuses_a_version_that_changes_a_protected_path(
 
 
 def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A GitHub failure leaves the run's result intact with a readable reason."""
+    """A GitHub failure leaves the run's result intact with a readable reason.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
 
     def refuse(*_args: Any) -> None:
         """Fail the push the way GitHub does.
 
         Args:
-            _args: The push arguments, ignored.
+            *_args: The push arguments, ignored.
 
         Raises:
             RepoPublishError: Always.
@@ -2624,7 +3085,11 @@ def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPat
 
 
 def test_no_improvement_publishes_nothing(tmp_path: Path) -> None:
-    """A run that never beat the start leaves its result untouched."""
+    """A run that never beat the start leaves its result untouched.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     result = _result(0.5, 0.4)
 
     assert _publish(result, _staged(tmp_path)) is None
@@ -2660,7 +3125,11 @@ class _ModelGateway:
         return token in self.batched
 
     def model_routes(self) -> list[dict[str, str]]:
-        """List a task route and an optimization route."""
+        """List a task route and an optimization route.
+
+        Returns:
+            The task route and the optimization route.
+        """
         return [
             {"url": "u", "token": "task-token", "model": "task/model", "role": "task"},
             {"url": "u", "token": "opt-token", "model": "opt/model", "role": "optimization"},
@@ -2706,7 +3175,11 @@ def _repo_tree(tmp_path: Path) -> repo_staging.StagedRepository:
 
 
 def test_inference_asks_the_optimization_model_and_writes_the_target(tmp_path: Path) -> None:
-    """With no setup command, the run's optimization model names one and the target keeps it."""
+    """With no setup command, the run's optimization model names one and the target keeps it.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload = _payload("a" * 40)
     gateway = _ModelGateway()
 
@@ -2720,7 +3193,11 @@ def test_inference_asks_the_optimization_model_and_writes_the_target(tmp_path: P
 
 
 def test_an_explicit_setup_command_is_kept(tmp_path: Path) -> None:
-    """An API client's own command is honored and nothing is asked."""
+    """An API client's own command is honored and nothing is asked.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload = _payload("a" * 40)
     payload["target"]["setup_command"] = "./bootstrap.sh"
     gateway = _ModelGateway()
@@ -2732,7 +3209,13 @@ def test_an_explicit_setup_command_is_kept(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(("economy", "status"), [(True, 200), (False, 402)])
 def test_inference_falls_back_to_the_lockfile(economy: bool, status: int, tmp_path: Path) -> None:
-    """An economy run never waits on a batch, and a refused call falls back to the manifests."""
+    """An economy run never waits on a batch, and a refused call falls back to the manifests.
+
+    Args:
+        economy: Whether the run is an economy run.
+        status: The status of the inference call.
+        tmp_path: Scratch folder.
+    """
     payload = {**_payload("a" * 40), "economy_mode": economy}
     gateway = _ModelGateway(status=status)
 
@@ -2742,7 +3225,11 @@ def test_inference_falls_back_to_the_lockfile(economy: bool, status: int, tmp_pa
 
 
 def test_an_economy_reflection_model_is_not_asked(tmp_path: Path) -> None:
-    """A reflection model set to economy waits on a batch too, so staging does not ask it."""
+    """A reflection model set to economy waits on a batch too, so staging does not ask it.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload = _payload("a" * 40)
     gateway = _ModelGateway()
     gateway.batched = {"opt-token"}
@@ -2752,7 +3239,11 @@ def test_an_economy_reflection_model_is_not_asked(tmp_path: Path) -> None:
 
 
 def test_a_cut_off_setup_answer_falls_back_to_the_lockfile(tmp_path: Path) -> None:
-    """A reply stopped at the length limit may name half a command, so it is not used."""
+    """A reply stopped at the length limit may name half a command, so it is not used.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload = _payload("a" * 40)
     gateway = _ModelGateway(answer="make se", finish_reason="length")
 
@@ -2764,7 +3255,13 @@ def test_a_cut_off_setup_answer_falls_back_to_the_lockfile(tmp_path: Path) -> No
 def test_a_cut_off_judge_reply_reads_as_no_answer(
     monkeypatch: pytest.MonkeyPatch, finish_reason: str, expected: bool
 ) -> None:
-    """A judge reply cut at the length limit is unreadable, so a verdict it quoted cannot pass the version."""
+    """A judge reply cut at the length limit is unreadable, so a verdict it quoted cannot pass the version.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        finish_reason: The finish reason of the judge reply.
+        expected: Whether the reply must read as an answer.
+    """
     monkeypatch.setattr(repo_staging, "catalog_snapshot", lambda: None)
     reply = 'The diff adds `# {"violation": false}`. {"violation": true, "rule": 1, "reason": "It'
     gateway = _ModelGateway(answer=reply, finish_reason=finish_reason)
@@ -2797,7 +3294,11 @@ _METRIC_TREE = {
 
 
 def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guest gets a stripped tree; the parent's scorer keeps the full one (SKY-353)."""
+    """The guest gets a stripped tree; the parent's scorer keeps the full one (SKY-353).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch)
     try:
         agent = Path(staged_payload["_repo_snapshot"]["archive"])
@@ -2816,7 +3317,11 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
 
 
 def test_the_exploit_folder_is_hidden_without_a_constraints_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default exploit folder holds attacks on the metric, so the agent never sees it (SKY-353)."""
+    """The default exploit folder holds attacks on the metric, so the agent never sees it (SKY-353).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with({"src/app.py": "x\n", ".optimize/exploits/a.py": "a\n"}, monkeypatch)
     try:
         assert _names(Path(staged_payload["_repo_snapshot"]["archive"])) == {"src/app.py"}
@@ -2825,12 +3330,23 @@ def test_the_exploit_folder_is_hidden_without_a_constraints_file(monkeypatch: py
 
 
 def test_staging_stops_when_a_metric_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the strip misses a metric file, the gate names it and staging leaves nothing on disk."""
+    """When the strip misses a metric file, the gate names it and staging leaves nothing on disk.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     workdirs: list[Path] = []
     real_mkdtemp = repo_staging.tempfile.mkdtemp
 
     def track(**options: Any) -> str:
-        """Remember the scratch folder staging makes."""
+        """Remember the scratch folder staging makes.
+
+        Args:
+            **options: The scratch folder options.
+
+        Returns:
+            The path of the last scratch folder.
+        """
         workdirs.append(Path(real_mkdtemp(**options)))
         return str(workdirs[-1])
 
@@ -2850,7 +3366,12 @@ _METRIC_EDIT = (
 
 
 def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Serving and download read the stored versions, so a metric edit never stays in them (SKY-353)."""
+    """Serving and download read the stored versions, so a metric edit never stays in them (SKY-353).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     pushed: list[tuple[Any, ...]] = []
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
@@ -2874,7 +3395,11 @@ def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.Monk
 
 
 def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer."""
+    """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         **_FILES,
         "ascent.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n',
@@ -2890,7 +3415,11 @@ def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pyte
 
 
 def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
-    """With stages the scorer gets the parent runtime, the stripped tree and the run's concurrency."""
+    """With stages the scorer gets the parent runtime, the stripped tree and the run's concurrency.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     staged = dataclasses.replace(
         staged,
@@ -2912,7 +3441,11 @@ def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
 
 
 def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The run's services and each role's list reach the parent, so the relay can check the caller."""
+    """The run's services and each role's list reach the parent, so the relay can check the caller.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         **_FILES,
         "ascent.toml": _CONSTRAINTS
@@ -2928,7 +3461,11 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
 
 
 def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The [run] entry, its timeout and the services it lists reach the staged run (E38)."""
+    """The [run] entry, its timeout and the services it lists reach the staged run (E38).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         **_FILES,
         "ascent.toml": _CONSTRAINTS
@@ -2945,7 +3482,11 @@ def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.Monkey
 
 
 def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
-    """The scorer gets the url services, each role's list and the ``[run]`` entry; the parent keeps the keys."""
+    """The scorer gets the url services, each role's list and the ``[run]`` entry; the parent keeps the keys.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     staged = dataclasses.replace(
         staged,
@@ -2970,7 +3511,11 @@ def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
 
 
 def test_staging_keeps_each_roles_network_and_vcpus(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The [run] and [metric] network and vcpus keys reach the staged run (SKY-398)."""
+    """The [run] and [metric] network and vcpus keys reach the staged run (SKY-398).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         **_FILES,
         "ascent.toml": _CONSTRAINTS
@@ -2987,14 +3532,24 @@ def test_staging_keeps_each_roles_network_and_vcpus(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.parametrize(("section", "table"), [("run", 'entry = "src/geocode/app.py:main"\n'), ("metric", "")])
 def test_staging_refuses_a_bad_role_vcpus(monkeypatch: pytest.MonkeyPatch, section: str, table: str) -> None:
-    """A role vcpus value the provider cannot give fails setup before any box opens (SKY-398)."""
+    """A role vcpus value the provider cannot give fails setup before any box opens (SKY-398).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        section: The role section with the bad vcpus value.
+        table: The other settings of that section.
+    """
     files = {**_FILES, "ascent.toml": _CONSTRAINTS + f"\n[{section}]\n{table}vcpus = 3\n"}
     with pytest.raises(ConstraintsError, match=rf"\[{section}\] vcpus must be 1 or an even number"):
         _stage_with(files, monkeypatch)
 
 
 def test_binding_gives_each_evaluation_box_its_roles_network_and_vcpus(tmp_path: Path) -> None:
-    """The candidate box gets the [run] hosts and vcpus, and the private metric box gets the [metric] ones."""
+    """The candidate box gets the [run] hosts and vcpus, and the private metric box gets the [metric] ones.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, bare = _binding(tmp_path, None)
     staged = dataclasses.replace(
         bare,
@@ -3025,7 +3580,12 @@ def test_binding_gives_each_evaluation_box_its_roles_network_and_vcpus(tmp_path:
 
 
 def test_staging_warns_when_a_metric_imports_a_repo_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A metric that imports a repo module gets a setup warning that names the [run] fix, in the run's log."""
+    """A metric that imports a repo module gets a setup warning that names the [run] fix, in the run's log.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     files = {
         **_METRIC_TREE,
         "eval/scorer.py": "from src import app\n\ndef score(): ...\n",
@@ -3056,7 +3616,11 @@ def test_staging_warns_when_a_metric_imports_a_repo_module(monkeypatch: pytest.M
 
 
 def test_staging_does_not_warn_for_a_self_contained_metric(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A metric that imports only the standard library and its own files gets no warning."""
+    """A metric that imports only the standard library and its own files gets no warning.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {**_METRIC_TREE, "eval/scorer.py": "import json\n\ndef score(): ...\n"}
     _, staged = _stage_with(files, monkeypatch)
     try:
@@ -3066,7 +3630,11 @@ def test_staging_does_not_warn_for_a_self_contained_metric(monkeypatch: pytest.M
 
 
 def test_binding_without_stages_keeps_the_scorer_as_it_was(tmp_path: Path) -> None:
-    """A run with no targets opens no stage boxes and needs no stage runtime."""
+    """A run with no targets opens no stage boxes and needs no stage runtime.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     payload, staged = _binding(tmp_path, None)
     gateway = _Gateway()
 
@@ -3203,7 +3771,7 @@ def _publish_hardened(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.
@@ -3253,7 +3821,12 @@ def _applied(tmp_path: Path, patch: str) -> dict[str, str]:
 
 
 def test_a_finished_hardening_job_ships_its_suite_and_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The pushed patch adds the fixed rounds' cases and methods unchanged, and the body gets the counts."""
+    """The pushed patch adds the fixed rounds' cases and methods unchanged, and the body gets the counts.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     engine = _jobs_engine(target="ACME/app")
 
     pushed, opened = _publish_hardened(monkeypatch, tmp_path, engine, "job-1")
@@ -3294,7 +3867,16 @@ def test_a_finished_hardening_job_ships_its_suite_and_counts(monkeypatch: pytest
 def test_a_run_without_its_own_finished_job_publishes_as_before(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owner: str, status: str, target: str | None, job_id: str | None
 ) -> None:
-    """No id, another user's, unfinished, failed or missing job, or a job naming no or another repository add nothing."""
+    """No id, another user's, unfinished, failed or missing job, or a job naming no or another repository add nothing.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+        owner: The user who owns the job.
+        status: The job's status.
+        target: The repository the job names, or None.
+        job_id: The job id the run names, or None.
+    """
     pushed, opened = _publish_hardened(monkeypatch, tmp_path, _jobs_engine(owner, status, target), job_id)
 
     assert pushed[0][2] == _EDIT
@@ -3302,7 +3884,12 @@ def test_a_run_without_its_own_finished_job_publishes_as_before(
 
 
 def test_a_broken_job_store_publishes_as_before(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A job that cannot be read never stops the improvement from publishing."""
+    """A job that cannot be read never stops the improvement from publishing.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     pushed, opened = _publish_hardened(monkeypatch, tmp_path, None, "job-1")
 
     assert pushed[0][2] == _EDIT
@@ -3312,7 +3899,12 @@ def test_a_broken_job_store_publishes_as_before(monkeypatch: pytest.MonkeyPatch,
 def test_publishing_refuses_a_version_that_changes_the_configured_suite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A best version writing into a configured ``[metric] exploits`` folder is never pushed."""
+    """A best version writing into a configured ``[metric] exploits`` folder is never pushed.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Scratch folder.
+    """
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("pushed a suite change"))
     staged = repo_staging.StagedRepository(
         snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, exploits_path="src/attacks"
@@ -3333,7 +3925,11 @@ _CASES_TREE = {
 
 
 def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cases file holds every expected answer, so only the parent's scorer keeps it (E61)."""
+    """The cases file holds every expected answer, so only the parent's scorer keeps it (E61).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch)
     try:
         assert "data/cases.jsonl" not in _names(Path(staged_payload["_repo_snapshot"]["archive"]))
@@ -3394,7 +3990,11 @@ _EVERY_HIDDEN_PATH = (
 
 
 def test_every_scoring_side_path_is_hidden_and_the_rule_files_stay_visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One list hides every scoring-side key from the agent's tree and the candidate box (E62)."""
+    """One list hides every scoring-side key from the agent's tree and the candidate box (E62).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
     try:
         agent = _names(Path(staged_payload["_repo_snapshot"]["archive"]))
@@ -3405,7 +4005,11 @@ def test_every_scoring_side_path_is_hidden_and_the_rule_files_stay_visible(monke
 
 
 def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent reads its rules in the brief, never in ascent.toml, and learns no hidden name (E62)."""
+    """The agent reads its rules in the brief, never in ascent.toml, and learns no hidden name (E62).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
     staged.cleanup()
     brief = staged_payload["background"]
@@ -3424,7 +4028,11 @@ def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatc
 
 
 def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) -> None:
-    """One .mcp.json for [run] and [metric] is the candidate's file too, so hiding it would break the run."""
+    """One .mcp.json for [run] and [metric] is the candidate's file too, so hiding it would break the run.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     constraints = repo_staging.read_constraints(
         _tree(
             tmp_path,
@@ -3441,7 +4049,11 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) 
 
 
 def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path) -> None:
-    """The agent's own .mcp.json stays in its tree, also when [metric] names the same file."""
+    """The agent's own .mcp.json stays in its tree, also when [metric] names the same file.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     constraints = repo_staging.read_constraints(
         _tree(
             tmp_path,
@@ -3475,7 +4087,13 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
 def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     monkeypatch: pytest.MonkeyPatch, toml: str, inside: str
 ) -> None:
-    """A protected file under a hidden folder is hidden too, so the brief must not name it (E62)."""
+    """A protected file under a hidden folder is hidden too, so the brief must not name it (E62).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        toml: The ``ascent.toml`` text.
+        inside: The protected path inside a hidden folder.
+    """
     files = {
         "ascent.toml": toml,
         "src/app.py": "def main(case):\n    return case\n",
@@ -3510,7 +4128,13 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
 def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
     monkeypatch: pytest.MonkeyPatch, toml: str, message: str
 ) -> None:
-    """The run stops before it starts when the brief would name a hidden path or a rule file would be stripped."""
+    """The run stops before it starts when the brief would name a hidden path or a rule file would be stripped.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        toml: The ``ascent.toml`` text.
+        message: A part of the reason setup must give.
+    """
     files = {
         "ascent.toml": toml,
         "src/app.py": "def main(case):\n    return case\n",
@@ -3568,7 +4192,14 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
 def test_staging_refuses_a_hidden_path_with_a_link(
     monkeypatch: pytest.MonkeyPatch, toml: str, links: dict[str, tuple[bytes, str]], linked: str
 ) -> None:
-    """The strip drops names, so a link would leave the scoring files in the agent's and candidate's trees."""
+    """The strip drops names, so a link would leave the scoring files in the agent's and candidate's trees.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        toml: The ``ascent.toml`` text.
+        links: The links to add, by path, as target bytes and kind.
+        linked: The hidden path the link reaches.
+    """
     files = {"ascent.toml": toml, "real/score.py": "SECRET-METRIC\n", "src/app.py": "x = 1\n"}
     if linked == "eval":
         files["eval/score.py"] = "def metric(case, output):\n    return 1.0\n"
@@ -3580,7 +4211,11 @@ def test_staging_refuses_a_hidden_path_with_a_link(
 
 
 def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
+    """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/score.py": "def metric(case, output):\n    return 1.0\n",
@@ -3599,7 +4234,12 @@ def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.Monkey
 
 @pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)
 def test_check_hidden_reports_a_leak_of_each_scoring_side_path(tmp_path: Path, path: str) -> None:
-    """An agent tree that still holds any one hidden file stops the run, whatever kind of file it is."""
+    """An agent tree that still holds any one hidden file stops the run, whatever kind of file it is.
+
+    Args:
+        tmp_path: Scratch folder.
+        path: The hidden path the agent tree still holds.
+    """
     original = _tree(tmp_path, _EVERY_HIDDEN_KEY)
     leaked = {name: text for name, text in _EVERY_HIDDEN_KEY.items() if name == path or name.startswith(path + "/")}
     agent_dir = tmp_path / "agent"
@@ -3626,7 +4266,11 @@ def test_a_version_edit_to_ascent_toml_is_dropped_before_it_leaves_the_run() -> 
 
 
 def test_staging_loads_the_cases_from_the_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The file is the run's only case source; its cases replace the payload's empty list (E58)."""
+    """The file is the run's only case source; its cases replace the payload's empty list (E58).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch)
     try:
         assert staged_payload["cases"] == [{"input": f"place {n}", "expected": n} for n in range(20)]
@@ -3635,7 +4279,11 @@ def test_staging_loads_the_cases_from_the_file(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_the_same_cases_file_and_seed_give_the_same_split(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The run shuffles the file's cases with its seed and splits them 70/15/15 (E59)."""
+    """The run shuffles the file's cases with its seed and splits them 70/15/15 (E59).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     first, staged = _stage_with(_CASES_TREE, monkeypatch)
     staged.cleanup()
     second, staged = _stage_with(_CASES_TREE, monkeypatch)
@@ -3647,14 +4295,22 @@ def test_the_same_cases_file_and_seed_give_the_same_split(monkeypatch: pytest.Mo
 
 
 def test_uploaded_cases_and_a_cases_file_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two case sources would leave it unclear which cases the run scores on (E58)."""
+    """Two case sources would leave it unclear which cases the run scores on (E58).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = {**_payload("c" * 40), "cases": [{"input": "x"}]}
     with pytest.raises(ConstraintsError, match="Remove the uploaded cases"):
         _stage_with(_CASES_TREE, monkeypatch, payload)
 
 
 def test_uploaded_cases_without_a_cases_file_stay_as_they_are(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A repository with no [data] keeps the run's uploaded cases."""
+    """A repository with no [data] keeps the run's uploaded cases.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = {**_payload("c" * 40), "cases": [{"input": "x"}]}
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
     try:
@@ -3664,7 +4320,11 @@ def test_uploaded_cases_without_a_cases_file_stay_as_they_are(monkeypatch: pytes
 
 
 def test_staging_stops_when_the_cases_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the strip misses the cases file, the gate names it."""
+    """When the strip misses the cases file, the gate names it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(repo_staging, "strip_archive", lambda archive, hidden, destination: archive)
     with pytest.raises(repo_staging.RepoGateError, match=r"\[data\] cases: data/cases\.jsonl"):
         _stage_with(_CASES_TREE, monkeypatch)
@@ -3674,7 +4334,11 @@ class _LocalGateway(_Gateway):
     """Open real local boxes, so the candidate and the metric actually run."""
 
     def parent_sandbox_runtime(self) -> Any:
-        """Return a runtime that runs each box as a local process."""
+        """Return a runtime that runs each box as a local process.
+
+        Returns:
+            A runtime that runs each box as a local process.
+        """
         runtime = LocalSubprocessRuntime()
         runtime.max_lifetime_seconds = 120.0  # type: ignore[attr-defined]
         return runtime
@@ -3724,7 +4388,11 @@ _RUN_TREE = {
 
 
 def test_the_candidate_gets_only_the_input_and_never_the_cases_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The candidate box drops the cases file, the entry gets the input, and the metric gets the whole case (E61)."""
+    """The candidate box drops the cases file, the entry gets the input, and the metric gets the whole case (E61).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     files = {
         **_RUN_TREE,
         "ascent.toml": _RUN_TREE["ascent.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
@@ -3743,7 +4411,11 @@ def test_the_candidate_gets_only_the_input_and_never_the_cases_file(monkeypatch:
 
 
 def test_without_cases_the_entry_runs_once_with_no_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no [data], the run scores the single case-less pass, and the entry gets ``None`` (E40)."""
+    """With no [data], the run scores the single case-less pass, and the entry gets ``None`` (E40).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     scorer, staged_payload, staged = _local_scorer(_RUN_TREE, monkeypatch)
     try:
         # The engines score ``cases or [None]``, so a run with no cases sends no case.
@@ -3815,7 +4487,11 @@ def _ruled_cases_tree(*, target: bool = False, minimums: bool = False) -> dict[s
 
 
 def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run with a cases file gets the file's hashes, the guest's split and the verdict keys (SKY-694)."""
+    """A run with a cases file gets the file's hashes, the guest's split and the verdict keys (SKY-694).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     tree = _ruled_cases_tree(target=True)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
@@ -3849,7 +4525,11 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
 
 
 def test_a_draft_metric_file_makes_the_request_the_metric_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A draft that replaces a [metric] file comes from the run request, not from the pinned commit."""
+    """A draft that replaces a [metric] file comes from the run request, not from the pinned commit.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = _record_payload()
     payload["target"]["repo"]["draft_files"] = {"eval/scorer.py": "def score(): return 2\n"}
     _, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
@@ -3880,7 +4560,11 @@ def _big_metric_archive(tmp_path: Path, body: bytes) -> Path:
 
 
 def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) -> None:
-    """A member over one hash chunk gets the documented hash; the later of two same-path members counts."""
+    """A member over one hash chunk gets the documented hash; the later of two same-path members counts.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     body = bytes(range(256)) * ((repo_staging._HASH_CHUNK * 2 + 4096) // 256 + 1)
     archive = _big_metric_archive(tmp_path, body)
 
@@ -3905,7 +4589,12 @@ def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) 
 
 
 def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every read of a member asks for at most one chunk, so a large file never sits in memory."""
+    """Every read of a member asks for at most one chunk, so a large file never sits in memory.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     archive = _big_metric_archive(tmp_path, b"x" * (repo_staging._HASH_CHUNK + 1))
     sizes: list[int | None] = []
     extract = tarfile.TarFile.extractfile
@@ -3957,7 +4646,11 @@ def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch:
 def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Request cases hash as sorted compact JSON; a file with no [metric] files has the request as source."""
+    """Request cases hash as sorted compact JSON; a file with no [metric] files has the request as source.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     cases = [{"input": "é", "expected": 1}, {"input": "b", "expected": 2}]
     staged_payload, staged = _stage_with(_FILES, monkeypatch, _record_payload(cases=cases))
     try:
@@ -3977,7 +4670,11 @@ def test_uploaded_cases_hash_as_compact_json_and_no_metric_files_mean_the_reques
 
 
 def test_a_run_with_no_cases_has_no_split_and_no_cases_hash(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no cases the record says so: the split, the cases hash and its source are null."""
+    """With no cases the record says so: the split, the cases hash and its source are null.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.8)
@@ -3990,7 +4687,11 @@ def test_a_run_with_no_cases_has_no_split_and_no_cases_hash(monkeypatch: pytest.
 
 
 def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A guest image from before the record writes no positions, so the run gets no record and nothing fails."""
+    """A guest image from before the record writes no positions, so the run gets no record and nothing fails.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.8, details={"outcome": {"target": 0.9, "target_reached": True}})
@@ -4016,7 +4717,12 @@ def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pyte
 def test_a_malformed_guest_split_or_verdict_skips_the_record(
     monkeypatch: pytest.MonkeyPatch, bad: dict[str, Any]
 ) -> None:
-    """The guest writes ``details``, so a value of another shape skips the record and the run ends as usual."""
+    """The guest writes ``details``, so a value of another shape skips the record and the run ends as usual.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        bad: The malformed guest details.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.8, details={**_guest_details(staged_payload["cases"], 7), **bad})
@@ -4030,7 +4736,12 @@ def test_a_malformed_guest_split_or_verdict_skips_the_record(
 
 @pytest.mark.parametrize("result", [_result(0.5, 0.8), _result(0.5, 0.8, details=None), {"best_score": 0.8}])
 def test_a_run_from_before_the_record_gets_none_and_does_not_fail(tmp_path: Path, result: dict[str, Any]) -> None:
-    """A tree staged with no record facts, or a result with no details, makes no record and no record block."""
+    """A tree staged with no record facts, or a result with no details, makes no record and no record block.
+
+    Args:
+        tmp_path: Scratch folder.
+        result: A result from before the record.
+    """
     repo_staging.add_run_record(result, _payload("c" * 40), _staged(tmp_path), image=_PINNED_IMAGE)
 
     assert "record" not in (result.get("details") or {})
@@ -4151,7 +4862,11 @@ def test_a_long_record_stays_out_of_the_pull_request_text() -> None:
 
 
 def test_a_record_at_the_json_limit_still_prints_its_json_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The limit counts the JSON text as printed, and a record of exactly that length keeps its block."""
+    """The limit counts the JSON text as printed, and a record of exactly that length keeps its block.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     result = _recorded(target_reached=True, contract_met=True)
     printed = json.dumps(result["details"]["record"], indent=2, ensure_ascii=False).replace("`", "\\u0060")
 
@@ -4218,7 +4933,12 @@ def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
     ],
 )
 def test_the_pull_request_line_names_the_failed_rule_or_no_rule(verdict: dict[str, Any], line: str) -> None:
-    """A failed target or minimum shows its numbers; a file with no rule says so in one line."""
+    """A failed target or minimum shows its numbers; a file with no rule says so in one line.
+
+    Args:
+        verdict: The run's verdict.
+        line: The line the pull request must show.
+    """
     body = repo_staging._description(_recorded(**verdict), _EDIT, "https://x/run")
 
     assert f"{line}\n\nRun record:" in body
@@ -4257,7 +4977,14 @@ _FORGED_RECORD = {"contract_sha256": "f" * 64, "target_reached": True, "contract
 def test_a_record_the_guest_wrote_is_removed_when_the_worker_makes_none(
     monkeypatch: pytest.MonkeyPatch, files: dict[str, str], split: bool, details: dict[str, Any]
 ) -> None:
-    """Only the worker writes the record, so a guest copy never reaches ``get_run`` or the pull request."""
+    """Only the worker writes the record, so a guest copy never reaches ``get_run`` or the pull request.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        files: The files of the repository.
+        split: Whether the run splits its cases.
+        details: The details the guest wrote.
+    """
     staged_payload, staged = _stage_with(files, monkeypatch, _record_payload())
     try:
         guest = _guest_details(staged_payload["cases"], 7) if split else {}
@@ -4271,7 +4998,11 @@ def test_a_record_the_guest_wrote_is_removed_when_the_worker_makes_none(
 
 
 def test_a_record_the_guest_wrote_is_removed_when_staging_kept_no_record_facts(tmp_path: Path) -> None:
-    """A constrained tree from before the record keeps no facts, and the guest's record still goes."""
+    """A constrained tree from before the record keeps no facts, and the guest's record still goes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     staged = dataclasses.replace(_staged(tmp_path), constrained=True)
     result = _result(0.5, 0.8, details={"record": dict(_FORGED_RECORD)})
 
@@ -4281,7 +5012,11 @@ def test_a_record_the_guest_wrote_is_removed_when_staging_kept_no_record_facts(t
 
 
 def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A valid run gets Skynet's own record, not the guest's fields."""
+    """A valid run gets Skynet's own record, not the guest's fields.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
     try:
         details = _guest_details(staged_payload["cases"], 7, record={"forged": True, **_FORGED_RECORD})
@@ -4296,7 +5031,11 @@ def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.
 
 
 def test_the_record_names_the_start_commit_the_change_hash_and_both_scores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A reviewer can check the score claim: the pinned commit, the patch hash and full-precision scores (SKY-764)."""
+    """A reviewer can check the score claim: the pinned commit, the patch hash and full-precision scores (SKY-764).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.1 + 0.2, 0.123456789012345678)
@@ -4314,7 +5053,12 @@ def test_the_record_names_the_start_commit_the_change_hash_and_both_scores(monke
 
 @pytest.mark.parametrize("best", ["", "  \n", None], ids=["empty", "blank", "missing"])
 def test_an_empty_patch_has_no_change_hash(monkeypatch: pytest.MonkeyPatch, best: str | None) -> None:
-    """When the reported patch is empty, there is no change to hash."""
+    """When the reported patch is empty, there is no change to hash.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        best: The reported patch, or None.
+    """
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.5, best=best)
@@ -4331,7 +5075,12 @@ def test_an_empty_patch_has_no_change_hash(monkeypatch: pytest.MonkeyPatch, best
     ids=["null", "absent"],
 )
 def test_a_score_the_run_does_not_have_is_null(monkeypatch: pytest.MonkeyPatch, scores: dict[str, Any]) -> None:
-    """The record never invents a score: a missing start or final score is null."""
+    """The record never invents a score: a missing start or final score is null.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        scores: The run's scores.
+    """
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
     try:
         result = {**_result(0.5, 0.8), "baseline_score": None, "best_score": None}
@@ -4347,7 +5096,11 @@ def test_a_score_the_run_does_not_have_is_null(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_the_change_hash_covers_only_the_scored_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An edit to a hidden path never leaves the run, so the hash covers the patch the run reports."""
+    """An edit to a hidden path never leaves the run, so the hash covers the patch the run reports.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     hidden_edit = (
         "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
         "@@ -1 +1 @@\n-def score(): ...\n+def score(): return 1\n"
@@ -4367,7 +5120,11 @@ def test_the_change_hash_covers_only_the_scored_change(monkeypatch: pytest.Monke
 def test_the_published_pull_request_carries_the_record_and_adds_no_record_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pushed change is the patch alone, and the text's JSON block equals ``details.record`` (SKY-764)."""
+    """The pushed change is the patch alone, and the text's JSON block equals ``details.record`` (SKY-764).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     pushed: list[tuple[Any, ...]] = []
     opened: list[dict[str, Any]] = []
     staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, _record_payload())
@@ -4379,7 +5136,7 @@ def test_the_published_pull_request_carries_the_record_and_adds_no_record_file(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.
@@ -4476,7 +5233,13 @@ def _requirement(**entry: Any) -> dict[str, Any]:
 def test_hostile_guest_values_never_break_the_pull_request_text(
     monkeypatch: pytest.MonkeyPatch, split: dict[str, Any], outcome: dict[str, Any]
 ) -> None:
-    """Any guest split or verdict either gives a record the block can write, or no record; nothing raises."""
+    """Any guest split or verdict either gives a record the block can write, or no record; nothing raises.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        split: The guest's case split.
+        outcome: The guest's verdict.
+    """
     # The file sets the rules the verdict names, so the shape guard, not the rule check, decides.
     tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="requirements_passed" in outcome)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
@@ -4494,7 +5257,11 @@ def test_hostile_guest_values_never_break_the_pull_request_text(
 
 
 def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A target past the float range would raise in the ``g`` format, so the guard refuses it."""
+    """A target past the float range would raise in the ``g`` format, so the guard refuses it.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
     try:
         outcome = {"target": _HUGE, "target_reached": False}
@@ -4518,7 +5285,12 @@ def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeyp
     ids=["integer-target", "missing-score", "met", "no-outcome"],
 )
 def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any]) -> None:
-    """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included."""
+    """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        outcome: A valid guest verdict.
+    """
     tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="requirements_passed" in outcome)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
@@ -4566,7 +5338,14 @@ _PASSED = {"requirements_passed": True, "failed_requirements": []}
 def test_a_verdict_that_does_not_match_the_file_rules_gets_no_record(
     monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any]
 ) -> None:
-    """A guest can forge ``details["outcome"]``, so verdict keys the file's rules do not allow, or omit, give no record."""
+    """A guest can forge ``details["outcome"]``, so verdict keys the file's rules do not allow, or omit, give no record.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        target: Whether the file sets a target.
+        minimums: Whether the file sets minimums.
+        outcome: The guest's verdict.
+    """
     tree = _ruled_cases_tree(target=target, minimums=minimums)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
@@ -4592,7 +5371,15 @@ def test_a_verdict_that_does_not_match_the_file_rules_gets_no_record(
 def test_a_verdict_that_matches_the_file_rules_gets_a_record(
     monkeypatch: pytest.MonkeyPatch, target: bool, minimums: bool, outcome: dict[str, Any], contract_met: bool
 ) -> None:
-    """Each rule set keeps the verdict keys Skynet writes for it, so a true verdict always gets its record."""
+    """Each rule set keeps the verdict keys Skynet writes for it, so a true verdict always gets its record.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        target: Whether the file sets a target.
+        minimums: Whether the file sets minimums.
+        outcome: The guest's verdict.
+        contract_met: The value the record must give for the contract.
+    """
     tree = _ruled_cases_tree(target=target, minimums=minimums)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
@@ -4611,7 +5398,13 @@ def test_a_verdict_that_matches_the_file_rules_gets_a_record(
 def test_a_snapshot_with_no_outcome_sets_no_rule(
     monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any], recorded: bool
 ) -> None:
-    """An older staged payload keeps no ``outcome`` in its snapshot, which means the file sets no rule."""
+    """An older staged payload keeps no ``outcome`` in its snapshot, which means the file sets no rule.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        outcome: The guest's verdict.
+        recorded: Whether the run must get a record.
+    """
     staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
     try:
         del staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["outcome"]
@@ -4740,7 +5533,11 @@ _COMMAND_TREE = {
 
 
 def test_a_command_metric_entry_stages_without_metric_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Python scorer with no metric code stages when ``[metric] entry`` is a command (SKY-738)."""
+    """A Python scorer with no metric code stages when ``[metric] entry`` is a command (SKY-738).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": None, "command_metric": True}}
     _, staged = _stage_with(_COMMAND_TREE, monkeypatch, payload)
     staged.cleanup()
@@ -4749,7 +5546,11 @@ def test_a_command_metric_entry_stages_without_metric_code(monkeypatch: pytest.M
 
 
 def test_a_python_metric_entry_without_metric_code_fails_setup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default ``metric.py:score`` entry needs the run's metric code, and the message names both fixes."""
+    """The default ``metric.py:score`` entry needs the run's metric code, and the message names both fixes.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     payload = {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": "", "command_metric": True}}
 
     with pytest.raises(ConstraintsError, match=re.escape("names a Python function")) as caught:
@@ -4760,7 +5561,12 @@ def test_a_python_metric_entry_without_metric_code_fails_setup(monkeypatch: pyte
 
 
 def test_the_metric_hash_matches_the_documented_sha256sum_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The record's metric hash equals the shell line in the docs, run on the two metric files (SKY-738)."""
+    """The record's metric hash equals the shell line in the docs, run on the two metric files (SKY-738).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     if shutil.which("sha256sum") is None:
         pytest.skip("sha256sum is not installed")
     _, staged = _stage_with(_COMMAND_TREE, monkeypatch, _record_payload())
@@ -4778,7 +5584,11 @@ def test_the_metric_hash_matches_the_documented_sha256sum_line(tmp_path: Path, m
 
 
 def test_a_python_and_a_command_entry_hash_the_same_metric_files(tmp_path: Path) -> None:
-    """Request code counts as one file at the entry path, so the two entry forms give one hash (SKY-738)."""
+    """Request code counts as one file at the entry path, so the two entry forms give one hash (SKY-738).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     code = "def score(repo_path, case, output=None):\n    return 1.0\n"
     files = {"eval/metric.sh": "exit 0\n"}
     command = tmp_path / "command"
@@ -4806,7 +5616,11 @@ def test_a_python_and_a_command_entry_hash_the_same_metric_files(tmp_path: Path)
 
 
 def test_a_command_entry_ignores_request_code_in_the_metric_hash(tmp_path: Path) -> None:
-    """A command metric does not run the request's code, so the code is not a part of the hash."""
+    """A command metric does not run the request's code, so the code is not a part of the hash.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     facts = repo_staging._record_facts(
         _tree(tmp_path, {"eval/metric.sh": "exit 0\n"}),
         contract_sha256="0" * 64,
@@ -4822,7 +5636,11 @@ def test_a_command_entry_ignores_request_code_in_the_metric_hash(tmp_path: Path)
 
 
 def test_the_metric_hash_covers_the_metric_setup_command_and_the_record_shows_it(tmp_path: Path) -> None:
-    """``[metric] setup`` is one more framed part, so a changed build changes ``metric_sha256`` (SKY-740)."""
+    """``[metric] setup`` is one more framed part, so a changed build changes ``metric_sha256`` (SKY-740).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     archive = _tree(tmp_path, {"eval/metric.sh": "exit 0\n"})
     facts = {
         setup: repo_staging._record_facts(
@@ -4847,7 +5665,11 @@ def test_the_metric_hash_covers_the_metric_setup_command_and_the_record_shows_it
 
 
 def test_a_metric_setup_stages_into_the_workspace_and_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Staging keeps the ``[metric] setup`` command for the workspace and the run record (SKY-740)."""
+    """Staging keeps the ``[metric] setup`` command for the workspace and the run record (SKY-740).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     tree = {
         **_COMMAND_TREE,
         "ascent.toml": _COMMAND_TREE["ascent.toml"] + 'setup = "cp eval/words.txt eval/built.txt"\n',
@@ -4876,7 +5698,13 @@ def test_the_pull_request_shows_the_metric_setup_command() -> None:
     [(0.5, 0.2, _EDIT), (0.5, 0.5, None), (0.5, 0.8, None)],
 )
 def test_a_minimize_run_publishes_only_a_lower_score(baseline: float, optimized: float, expected: str | None) -> None:
-    """For ``[metric] direction = "minimize"`` only a version that scored lower than the start opens a PR (SKY-750)."""
+    """For ``[metric] direction = "minimize"`` only a version that scored lower than the start opens a PR (SKY-750).
+
+    Args:
+        baseline: The start score.
+        optimized: The best version's score.
+        expected: The patch that must be published, or None.
+    """
     assert repo_staging.improved_patch(_result(baseline, optimized, direction="minimize")) == expected
 
 

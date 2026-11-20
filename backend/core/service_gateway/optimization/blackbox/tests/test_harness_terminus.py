@@ -126,7 +126,7 @@ class Terminus2:
             **self.seen,
             "instruction": instruction,
             "exit": result.return_code,
-            "shell_keys": sorted(k for k in ("APP_API_KEY", "SKYNET_API_KEY") if k in shell_env),
+            "shell_keys": sorted(k for k in ("ASCENT_MODEL_KEY",) if k in shell_env),
             "tmux_tmpdir_set": "TMUX_TMPDIR" in shell_env,
             "pane_log_in_logs_parent": str(tmux["logging_path"]).startswith(str(os.path.dirname(self.seen["logs_dir"]))),
             "asciinema": [tmux["local_asciinema_recording_path"], tmux["remote_asciinema_recording_path"]],
@@ -231,14 +231,13 @@ def test_spec_is_registered_with_a_pinned_version_and_the_pi_parser() -> None:
 
 
 def test_launch_routes_through_the_gateway_with_blank_provider_keys_and_no_telemetry() -> None:
-    """The env carries the gateway under both names, blanks every direct key and turns telemetry off."""
+    """The env carries the gateway under the one model name set, blanks every direct key and turns telemetry off."""
     launch = SPEC.launch("gpt-x", _GATEWAY)
 
     assert launch.run_command == 'PATH="$HOME/.local/bin:$PATH" uv run --quiet --script .app/terminus/run_agent.py'
     assert launch.instructions_file == "AGENTS.md"
-    for prefix in ("APP_", "SKYNET_"):
-        assert launch.env[f"{prefix}API_KEY"] == _GATEWAY.api_key
-        assert launch.env[f"{prefix}MODEL"] == "gpt-x"
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "gpt-x"
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert launch.env["HARBOR_TELEMETRY"] == "0"
@@ -273,19 +272,31 @@ def test_install_checks_the_pin_then_installs_uv_and_warms_the_cache() -> None:
 
 @pytest.mark.parametrize("effort", _EFFORTS)
 def test_every_supported_effort_passes_unchanged(effort: str) -> None:
-    """Each Skynet effort reaches the runner as the same string, with no remap."""
+    """Each Skynet effort reaches the runner as the same string, with no remap.
+
+    Args:
+        effort: A Skynet effort.
+    """
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_is_left_to_the_model_default(effort: str | None) -> None:
-    """Without an effort, the runner gets none and the model default applies."""
+    """Without an effort, the runner gets none and the model default applies.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
 @pytest.mark.parametrize("effort", ["default", "HIGH", "turbo"])
 def test_unsupported_effort_stops_the_launch(effort: str) -> None:
-    """An effort Terminus 2 does not accept is refused, not dropped or remapped."""
+    """An effort Terminus 2 does not accept is refused, not dropped or remapped.
+
+    Args:
+        effort: An effort Terminus 2 does not accept.
+    """
     with pytest.raises(ServiceError, match="reasoning effort"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
@@ -300,19 +311,27 @@ def test_spec_declares_every_skynet_effort_for_the_submit_check() -> None:
     ["", "gw.example/v1", "ftp://gw.example", "https://user:pw@gw.example", "https://gw.example/v1'", "https://gw ex"],
 )
 def test_launch_refuses_a_bad_gateway_url(url: str) -> None:
-    """Without a clean absolute http(s) URL there is no launch, so no direct provider route."""
+    """Without a clean absolute http(s) URL there is no launch, so no direct provider route.
+
+    Args:
+        url: A gateway URL that is not a clean absolute http(s) URL.
+    """
     with pytest.raises(ServiceError):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 
 
 def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and its files, and cleans up."""
+    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and its files, and cleans up.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("gpt-x", _GATEWAY, reasoning_effort="xhigh")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Write out.txt.\n")
     record = tmp_path / "record.json"
-    env = {k: v for k, v in launch.env.items() if not k.startswith("APP_")}
-    env.update(SKYNET_PROMPT_FILE=str(prompt), FAKE_HARBOR_RECORD=str(record), TMPDIR=str(tmp_path / "tmp"))
+    env = dict(launch.env)
+    env.update(ASCENT_TASK=str(prompt), FAKE_HARBOR_RECORD=str(record), TMPDIR=str(tmp_path / "tmp"))
     (tmp_path / "tmp").mkdir()
 
     result = _run_runner(tmp_path, launch.files, **env)
@@ -345,12 +364,16 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
 
 
 def test_runner_without_an_effort_sends_no_effort(tmp_path: Path) -> None:
-    """Without an effort, the runner adds no ``extra_body`` and the model default applies."""
+    """Without an effort, the runner adds no ``extra_body`` and the model default applies.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("gpt-x", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_TASK": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, **env)
 
@@ -385,7 +408,11 @@ def test_litellm_sends_the_extra_body_effort_unchanged_with_drop_params(model: s
 
 
 def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
-    """A budget or tool-cap stop sends SIGTERM; the runner still kills tmux and removes its temp folder."""
+    """A budget or tool-cap stop sends SIGTERM; the runner still kills tmux and removes its temp folder.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
@@ -394,7 +421,7 @@ def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
     (tmp_path / "tmp").mkdir()
     env = {
         **launch.env,
-        "APP_PROMPT_FILE": str(prompt),
+        "ASCENT_TASK": str(prompt),
         "FAKE_HARBOR_HANG": str(ready),
         "FAKE_TMUX_LOG": str(tmux_log),
         "TMPDIR": str(tmp_path / "tmp"),
@@ -420,10 +447,14 @@ def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any agent call when the gateway token is missing."""
+    """The runner exits before any agent call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_API_KEY": "", "SKYNET_API_KEY": "", "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, **env)
 
@@ -433,12 +464,16 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
 
 
 def test_runner_stops_when_tmux_is_missing(tmp_path: Path) -> None:
-    """Without tmux the runner exits with a clear message instead of Harbor's root package install."""
+    """Without tmux the runner exits with a clear message instead of Harbor's root package install.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
     record = tmp_path / "record.json"
-    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+    env = {**launch.env, "ASCENT_TASK": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
 
     result = _run_runner(tmp_path, launch.files, tmux=False, **env)
 

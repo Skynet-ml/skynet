@@ -966,7 +966,7 @@ def test_runner_drives_upstream_through_a_configured_harness(tmp_path: Path) -> 
     agent = tmp_path / "agent.py"
     agent.write_text(
         "import json, os, pathlib\n"
-        "assert pathlib.Path('AGENTS.md').read_text() and pathlib.Path(os.environ['APP_PROMPT_FILE']).read_text()\n"
+        "assert pathlib.Path('AGENTS.md').read_text() and pathlib.Path(os.environ['ASCENT_TASK']).read_text()\n"
         "schema = pathlib.Path('.autosaddler/session_output_schema.json').read_text()\n"
         "context = json.loads(pathlib.Path('.autosaddler/session_context.json').read_text())\n"
         "if 'diagnosis' in schema:\n"
@@ -1114,7 +1114,7 @@ def test_runner_evolves_repository_versions_scored_by_the_parent(tmp_path: Path)
             "run_command": f'"{python}" "{agent}"',
             "instructions_file": "GUIDE.md",
             "output_format": "plain",
-            "files": {"harness.json": "__APP_API_KEY__"},
+            "files": {"harness.json": "__ASCENT_MODEL_KEY__"},
             "env": {},
             "model": "claude-test",
             "price": {"input": 0.0, "output": 0.0},

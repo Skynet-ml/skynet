@@ -38,7 +38,7 @@ from ....models.blackbox import (
 from ....sandbox.grants import Grant
 from ....sandbox.trees import BoxFailureError, TreeRejectedError
 from ....worker.engine_loop import ModelCallFailedError
-from .harness import ENV_API_KEY
+from .harness import ENV_API_KEY, ENV_MODEL
 from .native_engines import log_event
 from .native_runtime import NativeOptions
 from .protocol import TOO_DEEP_ARGUMENTS, EngineContext, EvalServer, FileTooLargeError, ModelReply
@@ -110,12 +110,20 @@ class Budget:
 
     @property
     def remaining(self) -> int:
-        """Return the scorer calls left."""
+        """Return the scorer calls left.
+
+        Returns:
+            The number of scorer calls left.
+        """
         return self._server.remaining
 
     @property
     def used(self) -> int:
-        """Return the scorer calls spent."""
+        """Return the scorer calls spent.
+
+        Returns:
+            The number of scorer calls spent.
+        """
         return self._server.used
 
 
@@ -703,17 +711,18 @@ class FileProposer:
         self._entry = options.proposer.run_command or ""
         self._setup_argv = [str(part) for part in repo.get("proposer_setup") or ()]
         self._setup_name = f"[proposer] setup command in ascent.toml ({shlex.join(self._setup_argv)})"
-        # A protected run's boxes reach the model through the parent's mailbox, which sets APP_GATEWAY_URL and
+        # A protected run's boxes reach the model through the parent's mailbox, which sets ASCENT_MODEL_URL and
         # refuses a grant with headers, so the box gets no grant for the gateway. Without a budget route the
         # gateway holds the deployment's managed key, so the box gets no grant and no key, as in SKY-815.
         model_host = urlsplit(options.gateway.url or "").hostname
         self._grants = tuple(
             Grant(host) for host in sorted(set(repo.get("proposer_hosts") or ())) if host != model_host
         )
-        self._exports = [f"export APP_MODEL={shlex.quote(str(options.model or ''))}"]
+        self._exports = [f"export {ENV_MODEL}={shlex.quote(str(options.model or ''))}"]
         # The scoped route key goes in the box's environment, not in the script: the step log keeps the script.
+        # The model goes there too, so the box's model proxy sees it and refuses a request for another model.
         protected = options.budget_route is not None and options.gateway.api_key
-        self._env = {ENV_API_KEY: options.gateway.api_key} if protected else None
+        self._env = {ENV_API_KEY: options.gateway.api_key, ENV_MODEL: str(options.model or "")} if protected else None
         self._roots: list[str] | None = None
         # Each version's tree with the setup's output, so the next session from it gets that output back.
         self._full: dict[str, str] = {}
@@ -765,9 +774,7 @@ class FileProposer:
         """
         assert self._ctx.run_command is not None
         task = f"{self._lab}/{TASK_FILE}"
-        script = "\n".join(
-            [*self._exports, f'export ASCENT_TASK="$PWD/{task}" APP_PROMPT_FILE="$PWD/{task}"', self._entry]
-        )
+        script = "\n".join([*self._exports, f'export ASCENT_TASK="$PWD/{task}"', self._entry])
         try:
             result, tree = self._ctx.run_command(
                 start, script, self._grants, timeout_seconds=_COMMAND_TIMEOUT_SECONDS, env=self._env

@@ -45,6 +45,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     20: {"blackbox": "3e02206ab3dc54ab"},
     # The same request; the image obeys the snapshot outcome's named-score directions (SKY-775).
     21: {"blackbox": "3e02206ab3dc54ab"},
+    # The same request; every box gets the ASCENT_MODEL* and ASCENT_TASK names (SKY-776).
+    22: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

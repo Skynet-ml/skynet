@@ -244,9 +244,9 @@ def test_launch_routes_through_the_gateway_without_a_direct_key() -> None:
     """The env carries the gateway token and blanks every direct provider credential."""
     launch = SPEC.launch("claude-sonnet-4-5", _GATEWAY)
 
-    assert launch.env["APP_MODEL"] == "claude-sonnet-4-5"
-    assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "claude-sonnet-4-5"
+    assert launch.env["ASCENT_MODEL_URL"] == _GATEWAY.url
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert launch.env["DO_NOT_TRACK"] == "1"
@@ -295,7 +295,11 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
 
 @pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
 def test_supported_effort_passes_to_the_sdk_unchanged(effort: str) -> None:
-    """Each level the pinned SDK documents reaches the runner exactly as the user chose it."""
+    """Each level the pinned SDK documents reaches the runner exactly as the user chose it.
+
+    Args:
+        effort: An effort the SDK supports.
+    """
     assert effort in EFFORTS
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
@@ -319,7 +323,7 @@ def test_runner_sends_the_effort_in_the_extra_body_for_gpt5_ids(tmp_path: Path, 
     record = tmp_path / "record.json"
 
     result = _run_runner(
-        tmp_path, launch.files, **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)}
+        tmp_path, launch.files, **{**launch.env, "ASCENT_TASK": str(prompt), "FAKE_SDK_RECORD": str(record)}
     )
 
     assert result.returncode == 0, result.stderr
@@ -329,14 +333,18 @@ def test_runner_sends_the_effort_in_the_extra_body_for_gpt5_ids(tmp_path: Path, 
 
 
 def test_runner_sends_no_effort_without_a_choice(tmp_path: Path) -> None:
-    """Without a chosen effort the runner sets neither field, so the SDK keeps its default."""
+    """Without a chosen effort the runner sets neither field, so the SDK keeps its default.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("gpt-5.1", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
     record = tmp_path / "record.json"
 
     result = _run_runner(
-        tmp_path, launch.files, **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)}
+        tmp_path, launch.files, **{**launch.env, "ASCENT_TASK": str(prompt), "FAKE_SDK_RECORD": str(record)}
     )
 
     assert result.returncode == 0, result.stderr
@@ -347,14 +355,22 @@ def test_runner_sends_no_effort_without_a_choice(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", "High", " high", "off"])
 def test_unsupported_effort_is_refused(effort: str) -> None:
-    """A level the SDK does not support stops the launch instead of a silent drop or remap."""
+    """A level the SDK does not support stops the launch instead of a silent drop or remap.
+
+    Args:
+        effort: An effort the SDK does not support.
+    """
     with pytest.raises(ServiceError, match="does not support the effort level"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
-    """No effort sets nothing, so the SDK keeps its own default."""
+    """No effort sets nothing, so the SDK keeps its own default.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
@@ -375,13 +391,21 @@ def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
     ],
 )
 def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
-    """No gateway URL means no launch; the harness never falls back to a direct key."""
+    """No gateway URL means no launch; the harness never falls back to a direct key.
+
+    Args:
+        url: A gateway URL that is missing, relative or not clean.
+    """
     with pytest.raises(ServiceError, match="OpenHands SDK"):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 
 
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake SDK, the runner points the LLM at the gateway, drops direct keys and prints parseable output."""
+    """Against a fake SDK, the runner points the LLM at the gateway, drops direct keys and prints parseable output.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("claude-sonnet-4-5", _GATEWAY, reasoning_effort="high")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -392,7 +416,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         launch.files,
         **{
             **launch.env,
-            "APP_PROMPT_FILE": str(prompt),
+            "ASCENT_TASK": str(prompt),
             "OPENAI_API_KEY": "leaked-direct-key",
             "ANTHROPIC_API_KEY": "leaked-direct-key",
             "FAKE_SDK_RECORD": str(record),
@@ -436,7 +460,11 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
 
 
 def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:
-    """The AGENTS.md candidate reaches the system prompt as raw suffix text, not as an untrusted repo skill."""
+    """The AGENTS.md candidate reaches the system prompt as raw suffix text, not as an untrusted repo skill.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -446,7 +474,7 @@ def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) ->
     result = _run_runner(
         tmp_path,
         {**launch.files, launch.instructions_file: candidate},
-        **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
+        **{**launch.env, "ASCENT_TASK": str(prompt), "FAKE_SDK_RECORD": str(record)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -456,11 +484,17 @@ def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) ->
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any SDK call when the gateway token is missing."""
+    """The runner exits before any SDK call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 
-    result = _run_runner(tmp_path, launch.files, **{**launch.env, "APP_API_KEY": "", "FAKE_SDK_RECORD": str(record)})
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_SDK_RECORD": str(record)}
+    )
 
     assert result.returncode != 0
     assert "gateway" in result.stderr

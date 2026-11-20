@@ -44,7 +44,13 @@ def test_anything_guest_binds_contained_runtime_around_optimizer(
     observed: list[Any] = []
 
     def run(payload: dict[str, Any], artifact_id: str, events: Any) -> None:
-        """Capture the runtime visible at the optimizer entry point."""
+        """Capture the runtime visible at the optimizer entry point.
+
+        Args:
+            payload: The service payload.
+            artifact_id: The artifact id.
+            events: The event sink.
+        """
         observed.append(current_sandbox_runtime())
 
     monkeypatch.setattr(isolated_runner, "run_service_in_subprocess", run)
@@ -68,7 +74,14 @@ def test_anything_continue_uses_one_selected_outer_supervisor(runtime: str, monk
     calls: list[tuple[dict[str, Any], str]] = []
 
     def execute(payload: dict[str, Any], artifact_id: str, events: Any, _start_method: str) -> None:
-        """Record the one outer setup invocation and return its guest evidence."""
+        """Record the one outer setup invocation and return its guest evidence.
+
+        Args:
+            payload: The setup payload.
+            artifact_id: The artifact id.
+            events: The event sink.
+            _start_method: The process start method, which the fake ignores.
+        """
         calls.append((payload, artifact_id))
         events.put({"type": "preflight_result", "result": {"checks": []}})
 
@@ -114,12 +127,27 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
     observed: list[Any] = []
 
     def verify(payload: dict[str, Any], *, scope: str, identity: str, runtime: Any) -> dict[str, Any]:
-        """Capture the runtime enclosing the guest preflight implementation."""
+        """Capture the runtime enclosing the guest preflight implementation.
+
+        Args:
+            payload: The preflight payload.
+            scope: The preflight scope.
+            identity: The caller identity.
+            runtime: The runtime passed to the preflight.
+
+        Returns:
+            A preflight answer with no checks.
+        """
         observed.append((payload, scope, identity, runtime, current_sandbox_runtime()))
         return {"checks": []}
 
     def unexpected(*_args: Any, **_kwargs: Any) -> None:
-        """Fail if the host-style service runner handles setup."""
+        """Fail if the host-style service runner handles setup.
+
+        Args:
+            *_args: The call's positional values, which the fake ignores.
+            **_kwargs: The call's named values, which the fake ignores.
+        """
         raise AssertionError("Anything preflight reached the host-style service runner")
 
     monkeypatch.setattr(isolated_runner, "verify_anything_in_sandbox", verify)
@@ -145,7 +173,14 @@ def test_pending_guest_preflight_does_not_run_parent_model_checks(monkeypatch: p
     """
 
     def execute(_payload: dict[str, Any], _artifact_id: str, events: Any, _start_method: str) -> None:
-        """Return the same early pending evidence emitted by the guest verifier."""
+        """Return the same early pending evidence emitted by the guest verifier.
+
+        Args:
+            _payload: The setup payload, which the fake ignores.
+            _artifact_id: The artifact id, which the fake ignores.
+            events: The event sink.
+            _start_method: The process start method, which the fake ignores.
+        """
         events.put(
             {
                 "type": "preflight_result",
@@ -218,7 +253,7 @@ def test_contained_commands_cannot_restore_provider_endpoints(monkeypatch: pytes
             {
                 "inspect_env.py": (
                     "import json, os\n"
-                    "names = ('SKYNET_BUDGET_RELAY_URL', 'SKYNET_GATEWAY_URL', "
+                    "names = ('SKYNET_BUDGET_RELAY_URL', 'ASCENT_MODEL_URL', "
                     "'OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL')\n"
                     "print(json.dumps({name: os.environ[name] for name in names}))\n"
                 )
@@ -238,7 +273,7 @@ def test_contained_commands_cannot_restore_provider_endpoints(monkeypatch: pytes
     environment = json.loads(result.stdout)
     assert environment == {
         "SKYNET_BUDGET_RELAY_URL": relay,
-        "SKYNET_GATEWAY_URL": relay,
+        "ASCENT_MODEL_URL": relay,
         "OPENAI_BASE_URL": relay,
         "ANTHROPIC_BASE_URL": relay.removesuffix("/v1"),
     }

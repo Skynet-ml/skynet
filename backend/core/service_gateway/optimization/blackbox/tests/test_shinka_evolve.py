@@ -2321,7 +2321,7 @@ def test_each_proposal_runs_the_file_command_on_the_parents_tree_and_files_the_t
     loop, _, boxes = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     ctx = loop.context(repo_seed=RepoSeed(_tree(trees, "main.py", "seed\n")))
     options = _proposer_options(
-        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$APP_MODEL" > model.txt'
+        'cp main.py parent.txt && cp "$ASCENT_TASK" seen.md && printf "%s" "$ASCENT_MODEL" > model.txt'
         " && printf 'child\\n' > main.py",
         setup=["sh", "-c", "printf built > .cache.txt"],
     )
@@ -2727,7 +2727,7 @@ def _box_context(options: SimpleNamespace, tmp_path: Path, **fields: object) -> 
     Args:
         options: The run's native options.
         tmp_path: Pytest's temporary folder.
-        fields: Context fields that replace the fakes.
+        **fields: Context fields that replace the fakes.
 
     Returns:
         The context.
@@ -2765,7 +2765,7 @@ def test_the_proposer_box_gets_each_host_once_and_never_the_gateway(
     proposer = shinka_evolve._Proposer(_box_context(options, tmp_path), options)
 
     assert proposer.grants == (Grant("docs.test"), Grant("pypi.org"))
-    assert proposer.exports == ["export APP_MODEL=test-model"]
+    assert proposer.exports == ["export ASCENT_MODEL=test-model"]
 
 
 def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(
@@ -2794,7 +2794,7 @@ def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(
         """Refuse the grants as a run command that resolves them itself does.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
 
         Raises:
             UnknownCapabilityError: Always.
@@ -2818,7 +2818,7 @@ def test_a_proposal_checks_the_budget_before_the_command_runs(tmp_path: Path) ->
         """Record a command that must not run.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
         """
         commands.append(args)
 
@@ -3683,7 +3683,7 @@ def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: P
         """Refuse the grants as the loop does.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
 
         Raises:
             UnknownCapabilityError: Always.

@@ -76,7 +76,7 @@ _LOCAL_ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _LOCAL_KILLED_EXIT_CODE = 137
 _BUDGET_RELAY_ENV = "APP_BUDGET_RELAY_URL"
 _TOOL_RELAY_ENV = "APP_TOOL_RELAY_TOKEN"
-_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "APP_GATEWAY_URL")
+_RELAY_ENDPOINT_ENVS = ("OPENAI_BASE_URL", "ASCENT_MODEL_URL")
 
 
 # Scorer workspaces live under their own root, apart from proposer workspaces
@@ -95,7 +95,11 @@ _RUNTIME_OVERRIDE: contextvars.ContextVar[SandboxRuntime | None] = contextvars.C
 
 
 def current_sandbox_runtime() -> SandboxRuntime | None:
-    """Return the trusted runtime bound to this isolated child or setup request."""
+    """Return the trusted runtime bound to this isolated child or setup request.
+
+    Returns:
+        The bound runtime, or None when no runtime is bound.
+    """
     return _RUNTIME_OVERRIDE.get()
 
 
@@ -197,7 +201,11 @@ class LocalSubprocessSession:
 
     @property
     def path(self) -> Path:
-        """Return the working directory."""
+        """Return the working directory.
+
+        Returns:
+            The working directory.
+        """
         return self._dir
 
     def _resolve(self, path: str) -> Path:
@@ -632,7 +640,11 @@ class AsyncBridgeRuntime:
 
     @property
     def supports_snapshots(self) -> bool:
-        """Return whether this provider can save and start from after-setup snapshots."""
+        """Return whether this provider can save and start from after-setup snapshots.
+
+        Returns:
+            True when the provider supports after-setup snapshots.
+        """
         return self._capabilities.snapshots
 
     def open(self, spec: SandboxSpec) -> SandboxSession:

@@ -15,10 +15,11 @@ from urllib.parse import quote
 from uuid import uuid4
 
 RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
-GATEWAY_URL_ENV = "APP_GATEWAY_URL"
-# The pinned sandbox image predates the APP_* names and reads only these.
+GATEWAY_URL_ENV = "ASCENT_MODEL_URL"
+# The model of the run. A chat request that names another model gets an error that names this variable (SKY-776).
+MODEL_ENV = "ASCENT_MODEL"
+# The pinned sandbox image predates the APP_* names and reads only this one.
 _LEGACY_RELAY_URL_ENV = "SKYNET_BUDGET_RELAY_URL"
-_LEGACY_GATEWAY_URL_ENV = "SKYNET_GATEWAY_URL"
 _PRINT_LOCK = threading.Lock()
 # Mirrors usage_tags.USAGE_TAGS_HEADERS: this file runs in the sandbox without the
 # backend's code, and an older image still sends the legacy header.
@@ -69,7 +70,12 @@ def main() -> int:
         """Forward model protocol bytes through the trusted supervisor's mailbox."""
 
         def log_message(self, format: str, *args: object) -> None:
-            """Keep scoped tokens and model input out of the command's ordinary logs."""
+            """Keep scoped tokens and model input out of the command's ordinary logs.
+
+            Args:
+                format: The log format string.
+                *args: The values for the format string.
+            """
 
         def do_POST(self) -> None:
             """Relay an inference request through the trusted supervisor."""
@@ -110,6 +116,15 @@ def main() -> int:
             if (self.command == "POST" and length <= 0 and not service) or not 0 <= length <= 32 * 1024 * 1024:
                 self.send_error(413)
                 return
+            body = self.rfile.read(length) if length else b"" if raw else b"{}"
+            refusal = None if raw else _other_model_refusal(self.path, body)
+            if refusal is not None:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(refusal)))
+                self.end_headers()
+                self.wfile.write(refusal)
+                return
             identity = uuid4().hex
             if service:
                 headers = {
@@ -127,7 +142,7 @@ def main() -> int:
             request = {
                 "id": identity,
                 "path": self.path,
-                "body": base64.b64encode(self.rfile.read(length) if length else b"" if raw else b"{}").decode(),
+                "body": base64.b64encode(body).decode(),
                 "headers": headers,
             }
             with _PRINT_LOCK:
@@ -177,7 +192,6 @@ def main() -> int:
         "ANTHROPIC_BASE_URL": endpoint,
         "OPENAI_BASE_URL": f"{endpoint}/v1",
         GATEWAY_URL_ENV: f"{endpoint}/v1",
-        _LEGACY_GATEWAY_URL_ENV: f"{endpoint}/v1",
         **{
             service_env_name(name): f"{endpoint}{SERVICE_PATH}{quote(name, safe='')}/"
             for name in json.loads(os.environ.get(SERVICES_ENV) or "[]")
@@ -189,6 +203,63 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def model_matches(model: object, expected: str) -> bool:
+    """Return whether a request's model name names the run's model.
+
+    It mirrors only the transport-prefix rule of ``runner.model_matches_bound``,
+    for the box's one ``ASCENT_MODEL``: this file runs in the box without the
+    backend's code. The box knows only ``ASCENT_MODEL``, so the proxy refuses
+    the helper's declared model name and a local subscription route's CLI name.
+
+    Args:
+        model: The model that the request names.
+        expected: The run's model, from ``ASCENT_MODEL``.
+
+    Returns:
+        Whether the names match without their transport prefixes.
+    """
+
+    def normalized(value: str) -> str:
+        """Remove transport prefixes without changing the provider model id.
+
+        Args:
+            value: A model name.
+
+        Returns:
+            The model name without its transport prefixes.
+        """
+        return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
+
+    return isinstance(model, str) and normalized(model) == normalized(expected)
+
+
+def _other_model_refusal(path: str, body: bytes) -> bytes | None:
+    """Return the error body for a chat request that names another model than ``ASCENT_MODEL``.
+
+    The gateway refuses such a request too, but its error does not say which
+    variable holds the model, so the box answers first.
+
+    Args:
+        path: The request path on this proxy.
+        body: The raw request body.
+
+    Returns:
+        An OpenAI-shaped error body, or ``None`` when the request may go on.
+    """
+    expected = os.environ.get(MODEL_ENV)
+    if not expected or not path.split("?", 1)[0].endswith("/chat/completions"):
+        return None
+    try:
+        model = json.loads(body).get("model")
+    except (ValueError, AttributeError, RecursionError):
+        return None
+    if model_matches(model, expected):
+        return None
+    message = f"This box serves only the model that {MODEL_ENV} names ({expected}), not {model!r}."
+    error = {"message": message, "type": "invalid_request_error", "param": "model", "code": "model_not_allowed"}
+    return json.dumps({"error": error}).encode()
 
 
 def service_env_name(name: str) -> str:

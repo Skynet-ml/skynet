@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-L'évaluateur peut aussi utiliser n'importe quel client compatible OpenAI avec les variables d'environnement `OPENAI_BASE_URL`, `APP_API_KEY` et `APP_MODEL`. La passerelle n'accepte que le modèle de l'évaluateur de l'exécution.
+L'évaluateur peut aussi utiliser n'importe quel client compatible OpenAI avec les variables d'environnement `OPENAI_BASE_URL`, `ASCENT_MODEL_KEY` et `ASCENT_MODEL`. La passerelle n'accepte que le modèle de l'évaluateur de l'exécution.
 
 ## Appels de modèle et secrets
 

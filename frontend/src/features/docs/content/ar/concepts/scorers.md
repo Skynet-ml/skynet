@@ -143,7 +143,7 @@ def score(repo_path, case, output=None):
     return {"score": 1.0 if passed else 0.0, "feedback": str(verdict)}
 ```
 
-يمكن للمُقيِّم أيضًا استخدام أي عميل متوافق مع OpenAI مع متغيرات البيئة `OPENAI_BASE_URL` و`APP_API_KEY` و`APP_MODEL`. تقبل البوابة نموذج المُقيِّم في التشغيل فقط.
+يمكن للمُقيِّم أيضًا استخدام أي عميل متوافق مع OpenAI مع متغيرات البيئة `OPENAI_BASE_URL` و`ASCENT_MODEL_KEY` و`ASCENT_MODEL`. تقبل البوابة نموذج المُقيِّم في التشغيل فقط.
 
 ## استدعاءات النماذج والأسرار
 

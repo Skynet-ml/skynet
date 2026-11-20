@@ -208,9 +208,9 @@ def test_launch_routes_through_the_gateway_without_a_direct_key() -> None:
     """The env carries the gateway token and blanks every direct Gemini or Google credential."""
     launch = SPEC.launch("gemini-3-pro", _GATEWAY)
 
-    assert launch.env["APP_MODEL"] == "gemini-3-pro"
-    assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["ASCENT_MODEL"] == "gemini-3-pro"
+    assert launch.env["ASCENT_MODEL_URL"] == _GATEWAY.url
+    assert launch.env["ASCENT_MODEL_KEY"] == _GATEWAY.api_key
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert "GOOGLE_GEMINI_BASE_URL" not in launch.env
@@ -260,7 +260,12 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
     [("minimal", "MINIMAL"), ("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH"), ("xhigh", "EXTRA_HIGH")],
 )
 def test_supported_effort_maps_to_its_own_gemini_thinking_level(effort: str, level: str) -> None:
-    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20."""
+    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20.
+
+    Args:
+        effort: The Skynet effort.
+        level: The name of the ``ThinkingLevel`` member it must map to.
+    """
     assert effort in SPEC.supported_efforts
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_THINKING_LEVEL] == level
 
@@ -272,14 +277,22 @@ def test_spec_declares_one_level_per_gemini_thinking_level() -> None:
 
 @pytest.mark.parametrize("effort", ["none", "max", "HIGH", "turbo"])
 def test_unsupported_effort_is_refused_at_launch(effort: str) -> None:
-    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop."""
+    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop.
+
+    Args:
+        effort: An effort with no Gemini thinking level.
+    """
     with pytest.raises(ServiceError, match="does not support the effort level"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
-    """No effort sets no thinking level, so the SDK keeps its own default."""
+    """No effort sets no thinking level, so the SDK keeps its own default.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_THINKING_LEVEL not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
@@ -300,13 +313,21 @@ def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
     ],
 )
 def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
-    """No gateway URL means no launch; the harness never falls back to a direct key."""
+    """No gateway URL means no launch; the harness never falls back to a direct key.
+
+    Args:
+        url: A gateway URL that is missing, relative or not clean.
+    """
     with pytest.raises(ServiceError, match="Antigravity SDK"):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 
 
 def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output."""
+    """Against a fake SDK, the runner sets the gateway base URL, drops direct keys and prints parseable output.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("gemini-3-pro", _GATEWAY, reasoning_effort="high")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -317,7 +338,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         launch.files,
         **{
             **launch.env,
-            "APP_PROMPT_FILE": str(prompt),
+            "ASCENT_TASK": str(prompt),
             "GEMINI_API_KEY": "leaked-direct-key",
             "GOOGLE_API_KEY": "leaked-direct-key",
             "FAKE_SDK_RECORD": str(record),
@@ -349,11 +370,17 @@ def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
-    """The runner exits before any SDK call when the gateway token is missing."""
+    """The runner exits before any SDK call when the gateway token is missing.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake SDK live under it.
+    """
     launch = SPEC.launch("m", _GATEWAY)
     record = tmp_path / "record.json"
 
-    result = _run_runner(tmp_path, launch.files, **{**launch.env, "APP_API_KEY": "", "FAKE_SDK_RECORD": str(record)})
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "ASCENT_MODEL_KEY": "", "FAKE_SDK_RECORD": str(record)}
+    )
 
     assert result.returncode != 0
     assert "gateway" in result.stderr

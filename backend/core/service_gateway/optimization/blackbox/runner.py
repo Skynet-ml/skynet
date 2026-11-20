@@ -83,7 +83,8 @@ through the same relay as ``call()``; ``ASCENT_MODEL_URL`` with
 ``ASCENT_MODEL`` and an empty ``ASCENT_MODEL_KEY`` only with a judge model,
 through the same client as ``llm()``; and ``ASCENT_LOG_URL``, which writes
 the same event as ``log()``. The command's environment holds no model key.
-A Python metric gets none of these variables.
+A Python metric gets none of these helper URLs; it reads the box's own
+``ASCENT_MODEL_KEY`` through ``llm()``.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ SCORER_FILENAME = "<scorer_code>"
 LLM_HELPER_NAME = "llm"
 # The gateway key rides in the environment so it never touches the box
 # filesystem, except for a command metric (``MODEL_KEY_FILE``).
-ENV_API_KEY = "APP_API_KEY"
+ENV_API_KEY = "ASCENT_MODEL_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
 # The image's box PATH, with /app/.venv/bin first after the sudo guard folder.
 # sudo gives a root supervisor a secure PATH without the venv, so the entry
@@ -143,13 +144,18 @@ _LEGACY_ENV_PREFIX = "SKYNET_"
 # URLs (SKY-767), which meter each call and check each stage. These names hold
 # the model key, the protected model mailbox and the tool relay token that the
 # box (or a contained session, ``sandbox_runtime._contained_environment``)
-# sets, so they stay out of the command's environment, in both spellings.
+# sets, so they stay out of the command's environment, the ``APP_*`` names in
+# both spellings. The box's own ``ASCENT_MODEL*`` values go too: the command
+# gets these names only from its helpers, and only with a judge model.
 _COMMAND_HIDDEN_ENV = (
     *(
         name
-        for base in (ENV_API_KEY, ENV_BUDGET_RELAY_URL, "APP_GATEWAY_URL", "APP_TOOL_RELAY_TOKEN")
+        for base in (ENV_BUDGET_RELAY_URL, "APP_TOOL_RELAY_TOKEN")
         for name in (base, _LEGACY_ENV_PREFIX + base.removeprefix("APP_"))
     ),
+    "ASCENT_MODEL_URL",
+    "ASCENT_MODEL",
+    ENV_API_KEY,
     "OPENAI_BASE_URL",
     "ANTHROPIC_BASE_URL",
 )
@@ -505,7 +511,14 @@ def stage_env_name(name: str) -> str:
 
 
 def _env_part(name: str) -> str:
-    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``."""
+    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``.
+
+    Args:
+        name: The name to convert.
+
+    Returns:
+        The name in upper case, with ``_`` for each other character.
+    """
     return "".join(char if char.isalnum() else "_" for char in name.upper())
 
 
@@ -618,7 +631,12 @@ def start_service_proxy(
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = relay  # noqa: N815
 
         def log_message(self, format: str, *args: Any) -> None:
-            """Keep the access log out of the scorer's stderr, where log() events travel."""
+            """Keep the access log out of the scorer's stderr, where log() events travel.
+
+            Args:
+                format: The log format string.
+                *args: The values for the format string.
+            """
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
@@ -667,6 +685,10 @@ def _relay_env(client: StageClient, stages: dict[str, Any], own_mcp_file: Path |
 def missing_stage(name: Any = None, input: Any = None) -> Any:
     """Refuse a stage call in a run that has no ``[target.<name>]`` stages.
 
+    Args:
+        name: The stage name of the call.
+        input: The stage input of the call.
+
     Raises:
         StageError: Always.
     """
@@ -709,15 +731,18 @@ class Image:
 
 
 def env_value(name: str) -> str | None:
-    """Read an ``APP_*`` variable, falling back to its pre-rename ``SKYNET_*`` name.
+    """Read a variable; an ``APP_*`` name falls back to its pre-rename ``SKYNET_*`` name.
+
+    The ``ASCENT_*`` names of the open standard have no legacy name (SKY-776).
 
     Args:
-        name: Variable name starting with ``APP_``.
+        name: Variable name.
 
     Returns:
-        The first non-empty value, or ``None`` when neither name is set.
+        The first non-empty value, or ``None`` when no name is set.
     """
-    return os.environ.get(name) or os.environ.get(_LEGACY_ENV_PREFIX + name[len("APP_") :]) or None
+    legacy = os.environ.get(_LEGACY_ENV_PREFIX + name[len("APP_") :]) if name.startswith("APP_") else None
+    return os.environ.get(name) or legacy or None
 
 
 def _data_url(data: bytes, media_type: str) -> str:
@@ -1284,7 +1309,14 @@ def model_matches_bound(model: str, bound: str, declared: str | None = None) -> 
     """
 
     def normalized(value: str) -> str:
-        """Remove transport prefixes without changing the provider model id."""
+        """Remove transport prefixes without changing the provider model id.
+
+        Args:
+            value: A model name.
+
+        Returns:
+            The model name without its transport prefixes.
+        """
         return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
 
     return normalized(model) == normalized(bound) or bool(declared and normalized(model) == normalized(declared))
@@ -1746,7 +1778,12 @@ class MetricHelpers:
                     raise _HelperError(400, "The request body is not JSON.") from None
 
             def log_message(self, format: str, *args: Any) -> None:
-                """Keep the access log out of the scorer's stderr, where log() events travel."""
+                """Keep the access log out of the scorer's stderr, where log() events travel.
+
+                Args:
+                    format: The log format string.
+                    *args: The values for the format string.
+                """
 
         self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()

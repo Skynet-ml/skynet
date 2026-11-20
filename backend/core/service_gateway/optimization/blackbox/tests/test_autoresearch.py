@@ -1197,7 +1197,7 @@ def test_a_notebook_that_a_repository_session_deletes_does_not_come_back(
 
 
 _ENTRY = (
-    '[ "$APP_PROMPT_FILE" = "$ASCENT_TASK" ] && [ "$APP_MODEL" = m ] '
+    '[ -n "$ASCENT_TASK" ] && [ "$ASCENT_MODEL" = m ] '
     '&& grep -q "^## Directive" "$ASCENT_TASK" && grep -q "^# Research notebook" "$ASCENT_TASK" '
     '&& [ "$(cat deps/lib.txt)" = lib ] && printf x >> a.py && printf n >> .autoresearch/notebook.md'
 )
@@ -1599,7 +1599,7 @@ def test_a_files_proposer_in_a_protected_run_gets_the_scoped_model_key(
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     seed = _tree(trees, "a.py", "a")
-    relay = '[ "$APP_API_KEY" = route-key ] && [ "$APP_MODEL" = m ]'
+    relay = '[ "$ASCENT_MODEL_KEY" = route-key ] && [ "$ASCENT_MODEL" = m ]'
     options = _command_options(
         entry=f"{relay} && printf x >> a.py", setup=["sh", "-c", f"{relay} && mkdir deps && printf lib > deps/lib.txt"]
     )
@@ -1652,7 +1652,7 @@ def test_an_entry_that_prints_the_route_key_leaves_it_out_of_the_step_log_and_th
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     seed = _tree(trees, "a.py", "a")
     events: list[tuple[str, dict[str, Any]]] = []
-    entry = 'echo "$APP_API_KEY"; echo "key $APP_API_KEY" >&2; exit 1'
+    entry = 'echo "$ASCENT_MODEL_KEY"; echo "key $ASCENT_MODEL_KEY" >&2; exit 1'
     options = _protected_options(entry, ["sh", "-c", "mkdir deps"])
 
     with caplog.at_level(logging.WARNING):
@@ -1684,7 +1684,7 @@ def test_a_setup_that_prints_the_route_key_fails_with_it_redacted(
     """
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, _Researcher(), generation=1)
     seed = _tree(trees, "a.py", "a")
-    options = _protected_options("true", ["sh", "-c", 'echo "key $APP_API_KEY" >&2; exit 3'])
+    options = _protected_options("true", ["sh", "-c", 'echo "key $ASCENT_MODEL_KEY" >&2; exit 3'])
 
     with pytest.raises(ServiceError) as error:
         _run(loop, score=_score_a_py, repo_seed=RepoSeed(tree_id=seed), native_options=options)

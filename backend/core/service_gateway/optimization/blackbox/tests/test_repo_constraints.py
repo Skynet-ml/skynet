@@ -90,7 +90,11 @@ def _read(tmp_path: Path, raw: bytes, files: dict[str, bytes] | None = None) -> 
 
 
 def test_a_repository_without_the_file_keeps_the_approved_settings(tmp_path: Path) -> None:
-    """No file means the approved paths and setup stand, and the file name itself is still protected."""
+    """No file means the approved paths and setup stand, and the file name itself is still protected.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     assert read_constraints(_archive(tmp_path, {"src/app.py": b"x = 1\n"})) is None
 
     environment = effective_environment(None, approved_editable=["src"], approved_setup=None)
@@ -105,7 +109,11 @@ _RETIRED_FILE = "optimize" + ".toml"
 
 
 def test_a_repository_with_only_the_retired_file_has_no_contract(tmp_path: Path) -> None:
-    """Skynet reads only ascent.toml; a repository with only the old file name has no contract (SKY-746)."""
+    """Skynet reads only ascent.toml; a repository with only the old file name has no contract (SKY-746).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     assert CONSTRAINTS_FILE == "ascent.toml"
     archive = _archive(tmp_path, {_RETIRED_FILE: _CFCA + _RUN, "docs/intent.md": _INTENT})
 
@@ -113,7 +121,11 @@ def test_a_repository_with_only_the_retired_file_has_no_contract(tmp_path: Path)
 
 
 def test_a_repository_with_both_files_uses_ascent_toml(tmp_path: Path) -> None:
-    """With both names present, the run reads ascent.toml and ignores the old file (SKY-746)."""
+    """With both names present, the run reads ascent.toml and ignores the old file (SKY-746).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     retired = b'version = 1\n[paths]\neditable = ["old"]\n[run]\nentry = "old.py:main"\n'
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: _CFCA + _RUN, _RETIRED_FILE: retired, "docs/intent.md": _INTENT})
 
@@ -124,7 +136,11 @@ def test_a_repository_with_both_files_uses_ascent_toml(tmp_path: Path) -> None:
 
 
 def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path) -> None:
-    """A valid file narrows the editable paths, adds protected ones, and fills in the missing setup."""
+    """A valid file narrows the editable paths, adds protected ones, and fills in the missing setup.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = read_constraints(
         _archive(tmp_path, {CONSTRAINTS_FILE: _CFCA + _RUN, "bot/app.py": b"", "docs/intent.md": _INTENT})
     )
@@ -291,6 +307,45 @@ def test_a_command_path_through_a_tracked_link_is_refused(
     assert (caught.value.section, caught.value.key) == ("proposer", key)
 
 
+@pytest.mark.parametrize("key", ["entry", "setup"])
+def test_a_proposer_command_with_the_launch_key_token_is_refused(tmp_path: Path, key: str) -> None:
+    """The bridge puts the relay key in place of the token, so the package refuses it in a command (SKY-776).
+
+    Args:
+        tmp_path: Folder for the packed snapshot.
+        key: The ``[proposer]`` key that holds the token.
+    """
+    entry = "" if key == "entry" else 'entry = ["node", "main.js"]\n'
+    raw = (
+        f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\n{entry}{key} = ["node", "--key=__ASCENT_MODEL_KEY__"]\n'
+    ).encode()
+
+    with pytest.raises(ConstraintsError, match=r"cannot contain __ASCENT_MODEL_KEY__.*ASCENT_MODEL_KEY") as parsed:
+        parse_constraints(raw)
+    with pytest.raises(ConstraintsError, match="cannot contain __ASCENT_MODEL_KEY__") as read:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+
+    assert (parsed.value.section, parsed.value.key) == ("proposer", key)
+    assert (read.value.section, read.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize("vendor", ["APP", "SKYNET"])
+def test_an_old_key_token_in_the_proposer_entry_names_the_current_key_variable(vendor: str) -> None:
+    """The refusal of a key token from before SKY-776 points at ``ASCENT_MODEL_KEY``, which every box sets.
+
+    Args:
+        vendor: The old token's prefix.
+    """
+    old_variable = f"{vendor}_API_KEY"
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "--key=__{old_variable}__"]\n'
+
+    with pytest.raises(ConstraintsError, match=f"cannot contain __{old_variable}__.*ASCENT_MODEL_KEY") as caught:
+        parse_constraints(raw.encode())
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+    assert "_".join(("APP", "API", "KEY")) not in str(caught.value).replace(f"__{old_variable}__", "")
+
+
 @pytest.mark.parametrize(
     ("key", "link_name"), [("entry", "agent/lib.js"), ("setup", "agent/lib/deep/util.js")], ids=["top", "nested"]
 )
@@ -426,7 +481,12 @@ def test_the_file_cannot_widen_the_approved_editable_paths() -> None:
     ],
 )
 def test_a_file_that_protects_every_editable_path_fails_the_setup_check(raw: bytes, approved: list[str]) -> None:
-    """A run where every edit would be refused as protected fails before it spends its budget."""
+    """A run where every edit would be refused as protected fails before it spends its budget.
+
+    Args:
+        raw: The ``ascent.toml`` bytes.
+        approved: The approved protected paths.
+    """
     constraints = parse_constraints(raw)
 
     with pytest.raises(ConstraintsError, match="protects every editable path"):
@@ -451,7 +511,11 @@ def test_a_file_that_protects_part_of_an_editable_path_still_runs() -> None:
 
 
 def test_a_linked_constraints_file_is_refused(tmp_path: Path) -> None:
-    """A symbolic link could point the rules anywhere, so only a regular file counts."""
+    """A symbolic link could point the rules anywhere, so only a regular file counts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with pytest.raises(ConstraintsError, match="must be a regular file"):
         read_constraints(_archive(tmp_path, {"real.toml": b""}, link="real.toml"))
 
@@ -466,7 +530,11 @@ _RULE_FILE = b"""# Rules for this repository
 
 
 def test_plain_language_rules_are_numbered_recorded_and_put_in_the_brief(tmp_path: Path) -> None:
-    """Every bullet of the rule file reaches the agent at the start, numbered, and is saved with the run."""
+    """Every bullet of the rule file reaches the agent at the start, numbered, and is saved with the run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read(tmp_path, _RULES, {"docs/rules.md": _RULE_FILE})
     assert constraints is not None
 
@@ -521,7 +589,12 @@ def test_a_file_without_rules_records_an_empty_list() -> None:
     ],
 )
 def test_the_record_holds_the_outcome(raw: bytes | None, outcome: dict[str, object]) -> None:
-    """Every new run records the file's target, limits and score directions; a file without them records none."""
+    """Every new run records the file's target, limits and score directions; a file without them records none.
+
+    Args:
+        raw: The ``ascent.toml`` bytes, or None for no file.
+        outcome: The outcome the record must hold.
+    """
     constraints = None if raw is None else parse_constraints(raw)
     environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
 
@@ -560,6 +633,11 @@ def test_each_top_level_bullet_is_one_rule(tmp_path: Path, text: bytes, rules: t
     """Indented and directly following lines continue a bullet; headings and blank lines separate them.
 
     A leading byte-order mark is dropped. A ``#`` line that is not a heading is text, so it continues a bullet.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        text: The rule file's bytes.
+        rules: The rules the file must give, or None for none.
     """
     if rules is None:
         with pytest.raises(ConstraintsError, match=r"line 1 of 'docs/rules\.md' .* is not part of a top-level bullet"):
@@ -591,13 +669,23 @@ def test_each_top_level_bullet_is_one_rule(tmp_path: Path, text: bytes, rules: t
     ],
 )
 def test_a_bad_rule_file_fails_with_a_reason(tmp_path: Path, text: bytes, message: str) -> None:
-    """An empty, oversized or unreadable rule file, or text outside a bullet, fails the setup check."""
+    """An empty, oversized or unreadable rule file, or text outside a bullet, fails the setup check.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        text: The rule file's bytes.
+        message: A pattern of the error the setup check must give.
+    """
     with pytest.raises(ConstraintsError, match=message):
         _read(tmp_path, _RULES, {"docs/rules.md": text})
 
 
 def test_a_missing_rule_or_instructions_file_fails_with_a_reason(tmp_path: Path) -> None:
-    """A path that names no file in the snapshot fails the setup check and names the setting."""
+    """A path that names no file in the snapshot fails the setup check and names the setting.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with pytest.raises(ConstraintsError, match=r"\[proposer\] illegal names 'docs/rules\.md', but .* no such file"):
         _read(tmp_path, _RULES, {"docs/other.md": _RULE_FILE})
     with pytest.raises(ConstraintsError, match=r"instructions names 'docs/intent\.md', but .* no such file"):
@@ -605,7 +693,11 @@ def test_a_missing_rule_or_instructions_file_fails_with_a_reason(tmp_path: Path)
 
 
 def test_a_linked_or_folder_rule_file_is_refused(tmp_path: Path) -> None:
-    """A link could point the rules anywhere, so only a regular file counts."""
+    """A link could point the rules anywhere, so only a regular file counts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     linked = _archive(
         tmp_path, {CONSTRAINTS_FILE: _RULES, "real.md": _RULE_FILE}, link="../real.md", link_name="docs/rules.md"
     )
@@ -625,7 +717,11 @@ def test_a_linked_or_folder_rule_file_is_refused(tmp_path: Path) -> None:
 
 
 def test_an_empty_or_oversized_instructions_file_fails_with_a_reason(tmp_path: Path) -> None:
-    """The intent is the whole instructions file, so it must hold text and fit the agent's brief."""
+    """The intent is the whole instructions file, so it must hold text and fit the agent's brief.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with pytest.raises(ConstraintsError, match=r"instructions names 'docs/intent\.md', but that file is empty"):
         _read(tmp_path, _CFCA + _RUN, {"docs/intent.md": b"  \n\n"})
     with pytest.raises(ConstraintsError, match=r"'docs/intent\.md' is longer than 4000 characters"):
@@ -633,7 +729,11 @@ def test_an_empty_or_oversized_instructions_file_fails_with_a_reason(tmp_path: P
 
 
 def test_every_rule_file_is_protected_once(tmp_path: Path) -> None:
-    """The instructions file and each role's rule file are protected, so no version can change its own rules."""
+    """The instructions file and each role's rule file are protected, so no version can change its own rules.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = _CFCA + (
         b'[proposer]\nillegal = "docs/rules.md"\n'
         b'[run]\nentry = "bot/geocode/app.py:f"\nillegal = "bot/geocode/run_rules.md"\n'
@@ -665,7 +765,11 @@ def test_every_rule_file_is_protected_once(tmp_path: Path) -> None:
 
 
 def test_a_rule_file_that_is_the_only_editable_path_fails_the_setup_check(tmp_path: Path) -> None:
-    """A run that could only edit its own rule file has nothing to change, so it fails before it spends budget."""
+    """A run that could only edit its own rule file has nothing to change, so it fails before it spends budget.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read(tmp_path, _RULES, {"docs/rules.md": _RULE_FILE})
     assert constraints is not None
 
@@ -712,7 +816,11 @@ _ENVIRONMENT_FILES = {
 
 
 def test_the_environment_sections_parse_into_typed_fields(tmp_path: Path) -> None:
-    """Every new key reaches the parsed object, so the runtime issues can enforce it."""
+    """Every new key reaches the parsed object, so the runtime issues can enforce it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = read_constraints(_archive(tmp_path, _ENVIRONMENT_FILES))
     assert constraints is not None
 
@@ -750,7 +858,11 @@ def test_the_environment_sections_parse_into_typed_fields(tmp_path: Path) -> Non
 
 
 def test_the_proposer_rule_file_feeds_the_judges(tmp_path: Path) -> None:
-    """The judges enforce the [proposer] rule file; a target's own rule file stays with its stage."""
+    """The judges enforce the [proposer] rule file; a target's own rule file stays with its stage.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = read_constraints(_archive(tmp_path, _ENVIRONMENT_FILES))
     assert constraints is not None
 
@@ -761,7 +873,11 @@ def test_the_proposer_rule_file_feeds_the_judges(tmp_path: Path) -> None:
 
 
 def test_a_file_without_new_sections_gets_empty_defaults(tmp_path: Path) -> None:
-    """A file with only paths, setup, instructions and rules gets empty defaults for the other sections."""
+    """A file with only paths, setup, instructions and rules gets empty defaults for the other sections.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read(
         tmp_path,
         _CFCA + _RULES.removeprefix(b"version = 1\n"),
@@ -783,7 +899,11 @@ _LIVE_KEY = b"sk-live-" + b"4f9Kq2LmN8pR3t"
 
 
 def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
-    """Reading parses environment keys; the worker's preflight gate decides if a run can enforce them (SKY-352)."""
+    """Reading parses environment keys; the worker's preflight gate decides if a run can enforce them (SKY-352).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = read_constraints(_archive(tmp_path, _ENVIRONMENT_FILES))
     parsed = parse_constraints(_ENVIRONMENT)
 
@@ -799,7 +919,12 @@ def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
     ],
 )
 def test_a_file_that_names_no_rule_file_reads_as_it_parses(tmp_path: Path, raw: bytes) -> None:
-    """Without instructions or rule files, reading the snapshot adds nothing to the parsed file."""
+    """Without instructions or rule files, reading the snapshot adds nothing to the parsed file.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        raw: The ``ascent.toml`` bytes, which name no rule file.
+    """
     assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)
 
 
@@ -810,7 +935,11 @@ _SERVICES = (
 
 
 def test_run_and_metric_accept_the_role_keys(tmp_path: Path) -> None:
-    """[run] and [metric] take mcp, services and illegal; [metric] keeps files, exploits and reference."""
+    """[run] and [metric] take mcp, services and illegal; [metric] keeps files, exploits and reference.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = _SERVICES + (
         b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\nservices = ["maps"]\nillegal = "rules/run.md"\n'
         b'[metric]\nfiles = ["metric.py"]\nreference = "ref"\nservices = ["grader"]\nmcp = "eval/.mcp.json"\n'
@@ -840,7 +969,11 @@ def test_run_and_metric_accept_the_role_keys(tmp_path: Path) -> None:
 
 
 def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
-    """read_constraints accepts an mcp file with no servers; the role gets none (E49)."""
+    """read_constraints accepts an mcp file with no servers; the role gets none (E49).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n[metric]\nmcp = "eval/.mcp.json"\n'
     files = {CONSTRAINTS_FILE: raw, ".mcp.json": b'{"mcpServers": {}}', "eval/.mcp.json": b'{"mcpServers": {}}'}
 
@@ -849,7 +982,12 @@ def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("label", ["run", "metric"])
 def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> None:
-    """An mcp path that names no file in the snapshot fails the setup check (E46)."""
+    """An mcp path that names no file in the snapshot fails the setup check (E46).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        label: The section whose mcp path names no file.
+    """
     entry = b'entry = "a.py:f"\n' if label == "run" else b""
     # A [metric] needs a [run] to judge (SKY-398).
     run = b'[run]\nentry = "a.py:f"\n' if label == "metric" else b""
@@ -873,12 +1011,26 @@ _MCP_TOML = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n[metric]\
 def _read_mcp(
     tmp_path: Path, run: bytes = _MCP_RUN, metric: bytes = _MCP_METRIC, raw: bytes = _MCP_TOML
 ) -> RepoConstraints | None:
-    """Read a file whose [run] and [metric] name the two MCP files given."""
+    """Read a file whose [run] and [metric] name the two MCP files given.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        run: The bytes of the ``[run]`` MCP file.
+        metric: The bytes of the ``[metric]`` MCP file.
+        raw: The ``ascent.toml`` bytes.
+
+    Returns:
+        The constraints the snapshot gives.
+    """
     return read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, ".mcp.json": run, "eval/.mcp.json": metric}))
 
 
 def test_an_mcp_file_with_http_servers_parses(tmp_path: Path) -> None:
-    """The standard mcpServers shape gives each role its own http servers (E49, E64)."""
+    """The standard mcpServers shape gives each role its own http servers (E49, E64).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read_mcp(tmp_path)
     assert constraints is not None
 
@@ -900,7 +1052,11 @@ def test_an_mcp_file_with_http_servers_parses(tmp_path: Path) -> None:
 
 
 def test_the_proposer_gets_none_of_the_metric_servers(tmp_path: Path) -> None:
-    """A role sees only its own MCP file's servers; the proposer and [run] get none of the metric's (E49)."""
+    """A role sees only its own MCP file's servers; the proposer and [run] get none of the metric's (E49).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read_mcp(tmp_path)
     assert constraints is not None
 
@@ -928,7 +1084,16 @@ _MCP_GITHUB_KEY_SERVER = (
 
 
 def _read_agent_mcp(tmp_path: Path, proposer: bytes = _MCP_PROPOSER, raw: bytes = _MCP_AGENT_TOML) -> RepoConstraints:
-    """Read a file whose [proposer] and [target.planner] name the MCP files given."""
+    """Read a file whose [proposer] and [target.planner] name the MCP files given.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        proposer: The bytes of the ``[proposer]`` MCP file.
+        raw: The ``ascent.toml`` bytes.
+
+    Returns:
+        The constraints the snapshot gives.
+    """
     files = {CONSTRAINTS_FILE: raw, "agent/.mcp.json": proposer, "agent/planner.mcp.json": _MCP_PLANNER}
     constraints = read_constraints(_archive(tmp_path, files))
     assert constraints is not None
@@ -936,7 +1101,11 @@ def _read_agent_mcp(tmp_path: Path, proposer: bytes = _MCP_PROPOSER, raw: bytes 
 
 
 def test_a_missing_proposer_or_target_mcp_file_fails(tmp_path: Path) -> None:
-    """An mcp path of the proposer or a target that names no file fails the setup check (E46)."""
+    """An mcp path of the proposer or a target that names no file fails the setup check (E46).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     files = {CONSTRAINTS_FILE: _MCP_AGENT_TOML, "agent/.mcp.json": _MCP_PROPOSER}
 
     with pytest.raises(ConstraintsError, match=r"\[target\.planner\] mcp names 'agent/planner\.mcp\.json'"):
@@ -944,7 +1113,11 @@ def test_a_missing_proposer_or_target_mcp_file_fails(tmp_path: Path) -> None:
 
 
 def test_the_disclosure_and_protection_cover_the_proposer_and_target_files(tmp_path: Path) -> None:
-    """The record lists the proposer's and the target's servers, and both files are protected (E49, E52)."""
+    """The record lists the proposer's and the target's servers, and both files are protected (E49, E52).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read_agent_mcp(tmp_path)
     environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
 
@@ -973,7 +1146,13 @@ def test_the_disclosure_and_protection_cover_the_proposer_and_target_files(tmp_p
     ],
 )
 def test_a_bad_mcp_file_fails_with_a_reason(tmp_path: Path, run: bytes, message: str) -> None:
-    """An MCP file that is not the standard shape, or breaks the url rules, fails the setup check (E49)."""
+    """An MCP file that is not the standard shape, or breaks the url rules, fails the setup check (E49).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        run: The bytes of the ``[run]`` MCP file.
+        message: A pattern of the error the setup check must give.
+    """
     with pytest.raises(ConstraintsError, match=message):
         _read_mcp(tmp_path, run=run)
 
@@ -988,7 +1167,12 @@ def test_a_bad_mcp_file_fails_with_a_reason(tmp_path: Path, run: bytes, message:
     ],
 )
 def test_a_secret_value_in_an_mcp_file_is_refused(tmp_path: Path, run: bytes) -> None:
-    """Header values name secrets only as ${NAME}; a raw value fails with the fix and is not echoed (E49)."""
+    """Header values name secrets only as ${NAME}; a raw value fails with the fix and is not echoed (E49).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        run: The bytes of a ``[run]`` MCP file with a raw secret header value.
+    """
     with pytest.raises(ConstraintsError, match=r"looks like a secret value\. .*\$\{NAME\}") as error:
         _read_mcp(tmp_path, run=run)
 
@@ -997,7 +1181,11 @@ def test_a_secret_value_in_an_mcp_file_is_refused(tmp_path: Path, run: bytes) ->
 
 
 def test_a_shared_file_that_sends_a_secret_to_another_host_fails(tmp_path: Path) -> None:
-    """Each secret may go to one host only, so ${GOOGLE_MAPS_KEY} pointed at a second host fails (E52)."""
+    """Each secret may go to one host only, so ${GOOGLE_MAPS_KEY} pointed at a second host fails (E52).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     metric = (
         b'{"mcpServers": {"evil": {"url": "https://collector.example.net/mcp",'
         b' "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}}}}'
@@ -1008,7 +1196,11 @@ def test_a_shared_file_that_sends_a_secret_to_another_host_fails(tmp_path: Path)
 
 
 def test_a_service_and_an_mcp_server_cannot_send_one_secret_to_two_hosts(tmp_path: Path) -> None:
-    """The host check spans [services] and the MCP files (E52, E53)."""
+    """The host check spans [services] and the MCP files (E52, E53).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = (
         _MCP_TOML
         + b'[services.maps]\nurl = "https://maps.example.com"\nheaders = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
@@ -1019,7 +1211,11 @@ def test_a_service_and_an_mcp_server_cannot_send_one_secret_to_two_hosts(tmp_pat
 
 
 def test_the_mcp_files_are_protected_and_a_proposer_edit_is_refused(tmp_path: Path) -> None:
-    """The proposer cannot change a role's .mcp.json, so a patch that edits it is refused (E52)."""
+    """The proposer cannot change a role's .mcp.json, so a patch that edits it is refused (E52).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read_mcp(tmp_path)
     assert constraints is not None
     environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
@@ -1033,7 +1229,11 @@ def test_the_mcp_files_are_protected_and_a_proposer_edit_is_refused(tmp_path: Pa
 
 
 def test_the_disclosure_lists_each_role_servers_and_the_host_of_each_secret(tmp_path: Path) -> None:
-    """The record shows each role's servers and hosts, the services and each secret's host (E49, E52, E53)."""
+    """The record shows each role's servers and hosts, the services and each secret's host (E49, E52, E53).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = (
         _MCP_TOML + b'[services.judge]\nurl = "https://llm.example.com/v1"\nheaders = { x-api-key = "${JUDGE_KEY}" }\n'
     )
@@ -1069,7 +1269,13 @@ def test_the_disclosure_lists_each_role_servers_and_the_host_of_each_secret(tmp_
     ids=["type-list", "type-object", "deep-nesting"],
 )
 def test_a_hostile_mcp_file_fails_with_a_reason_not_a_crash(tmp_path: Path, run: bytes, message: str) -> None:
-    """A type that is not text, or JSON nested too deep to read, is a ConstraintsError, not a crash."""
+    """A type that is not text, or JSON nested too deep to read, is a ConstraintsError, not a crash.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        run: The bytes of a hostile ``[run]`` MCP file.
+        message: A pattern of the error the setup check must give.
+    """
     with pytest.raises(ConstraintsError, match=message):
         _read_mcp(tmp_path, run=run)
 
@@ -1088,7 +1294,13 @@ def test_a_hostile_mcp_file_fails_with_a_reason_not_a_crash(tmp_path: Path, run:
     ],
 )
 def test_a_secret_value_in_an_mcp_url_is_refused(tmp_path: Path, run: bytes, message: str) -> None:
-    """A raw key in a url path or query fails with the fix and is not echoed (E49)."""
+    """A raw key in a url path or query fails with the fix and is not echoed (E49).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        run: The bytes of a ``[run]`` MCP file with a raw key in a url.
+        message: A pattern of the error the setup check must give.
+    """
     with pytest.raises(ConstraintsError, match=message) as error:
         _read_mcp(tmp_path, run=run)
 
@@ -1115,7 +1327,13 @@ _STDIO_ROLES = {
     ids=["command", "type-stdio", "url-with-env", "type-stdio-upper"],
 )
 def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, server: bytes) -> None:
-    """Only http servers are supported now, so a stdio server in any role's file fails the setup check (E64)."""
+    """Only http servers are supported now, so a stdio server in any role's file fails the setup check (E64).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        role: The role whose MCP file holds the server.
+        server: The bytes of a stdio server entry.
+    """
     raw = _STDIO_ROLES[role] + b'mcp = "roles/.mcp.json"\n'
     files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
 
@@ -1129,7 +1347,12 @@ def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, se
 
 @pytest.mark.parametrize("kind", ["http", "streamable-http", "sse"])
 def test_an_http_type_is_accepted(tmp_path: Path, kind: str) -> None:
-    """Each lowercase http MCP type is an http server (E64)."""
+    """Each lowercase http MCP type is an http server (E64).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        kind: A lowercase http MCP type.
+    """
     raw = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
     server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
     files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
@@ -1142,7 +1365,12 @@ def test_an_http_type_is_accepted(tmp_path: Path, kind: str) -> None:
 
 @pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP"])
 def test_an_mcp_type_not_in_lowercase_is_refused(tmp_path: Path, kind: str) -> None:
-    """A new check matches the MCP type exactly; a started run's re-read accepts any case (SKY-760)."""
+    """A new check matches the MCP type exactly; a started run's re-read accepts any case (SKY-760).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        kind: An MCP type that is not in lowercase.
+    """
     raw = b'version = 1\n[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
     server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
     files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
@@ -1159,7 +1387,11 @@ _CASES = b'{"input": "Paris", "expected": [48.85, 2.35]}\n\n{"input": {"text": "
 
 
 def test_the_data_section_loads_every_case_from_the_jsonl_file(tmp_path: Path) -> None:
-    """Each non-blank line is one case; ``expected`` is optional and blank lines are skipped (E58)."""
+    """Each non-blank line is one case; ``expected`` is optional and blank lines are skipped (E58).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read(tmp_path, _DATA, {"data/cases.jsonl": b"\xef\xbb\xbf" + _CASES})
     assert constraints is not None
     assert constraints.cases_file == "data/cases.jsonl"
@@ -1167,7 +1399,11 @@ def test_the_data_section_loads_every_case_from_the_jsonl_file(tmp_path: Path) -
 
 
 def test_a_file_without_a_data_section_has_no_cases(tmp_path: Path) -> None:
-    """With no ``[data]``, the run has no cases from the file and the candidate runs once with no input."""
+    """With no ``[data]``, the run has no cases from the file and the candidate runs once with no input.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     constraints = _read(tmp_path, b'version = 1\n[run]\nentry = "run.py:main"\n')
     assert constraints is not None
     assert constraints.cases_file is None
@@ -1205,7 +1441,12 @@ def test_the_constraints_file_stays_hidden_when_a_visible_setting_names_it() -> 
     ],
 )
 def test_an_editable_path_inside_the_hidden_scoring_files_is_refused(toml: str, editable: str) -> None:
-    """The brief names every editable path, so none can be a hidden path or lie inside one (E62)."""
+    """The brief names every editable path, so none can be a hidden path or lie inside one (E62).
+
+    Args:
+        toml: The ``ascent.toml`` text.
+        editable: The editable path inside the hidden scoring files.
+    """
     constraints = parse_constraints(toml.encode())
 
     with pytest.raises(ConstraintsError, match=rf"'{re.escape(editable)}' is editable, but only the scorer reads it"):
@@ -1236,13 +1477,23 @@ def test_an_editable_mcp_file_shared_with_a_visible_role_is_allowed() -> None:
     ],
 )
 def test_a_bad_cases_file_fails_with_a_reason(tmp_path: Path, text: bytes, message: str) -> None:
-    """An empty or unreadable file, or a line that is not one case, fails the setup check and names the line."""
+    """An empty or unreadable file, or a line that is not one case, fails the setup check and names the line.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        text: The cases file's bytes.
+        message: A pattern of the error the setup check must give.
+    """
     with pytest.raises(ConstraintsError, match=message):
         _read(tmp_path, _DATA, {"data/cases.jsonl": text})
 
 
 def test_a_missing_linked_or_folder_cases_file_is_refused(tmp_path: Path) -> None:
-    """Only a regular file in the snapshot can hold the cases."""
+    """Only a regular file in the snapshot can hold the cases.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with pytest.raises(ConstraintsError, match=r"\[data\] cases names 'data/cases\.jsonl', but .* no such file"):
         _read(tmp_path, _DATA)
     linked = _archive(
@@ -1263,7 +1514,12 @@ def test_a_missing_linked_or_folder_cases_file_is_refused(tmp_path: Path) -> Non
 
 
 def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cases file over the size limit, or with too many cases, fails before the run starts."""
+    """A cases file over the size limit, or with too many cases, fails before the run starts.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     # A scorer load puts the helper module at sys.modules["openascent"], so a dotted-name patch can miss the package.
     monkeypatch.setattr(contract, "_MAX_CASES_FILE_BYTES", 10)
     with pytest.raises(ConstraintsError, match=r"which is larger than"):
@@ -1334,14 +1590,24 @@ def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.
 def test_a_parse_error_names_the_section_and_key_that_caused_it(
     raw: bytes, section: str | None, key: str | None
 ) -> None:
-    """An editor shows each parser error next to the setting that caused it (SKY-184)."""
+    """An editor shows each parser error next to the setting that caused it (SKY-184).
+
+    Args:
+        raw: The ``ascent.toml`` bytes.
+        section: The section the error must name, or None.
+        key: The key the error must name, or None.
+    """
     with pytest.raises(ConstraintsError) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == (section, key)
 
 
 def test_an_mcp_file_error_names_the_role_mcp_setting(tmp_path: Path) -> None:
-    """A bad server in an .mcp.json file points to the role's mcp setting, the place to fix in the toml."""
+    """A bad server in an .mcp.json file points to the role's mcp setting, the place to fix in the toml.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     with pytest.raises(ConstraintsError, match="server 'm' needs a url") as caught:
         _read_mcp(tmp_path, run=b'{"mcpServers": {"m": {"type": "http"}}}')
     assert (caught.value.section, caught.value.key) == ("run", "mcp")
@@ -1358,7 +1624,11 @@ def test_a_constraints_error_keeps_its_section_and_key_through_pickle() -> None:
 
 @pytest.mark.parametrize("raw", [b"", b"[paths]\neditable = ['src']\n", b'instructions = "docs/intent.md"\n'])
 def test_a_file_without_a_version_fails_and_shows_the_fix(raw: bytes) -> None:
-    """``version`` is required, so an empty file fails too, and the error shows ``version = 1`` (SKY-690)."""
+    """``version`` is required, so an empty file fails too, and the error shows ``version = 1`` (SKY-690).
+
+    Args:
+        raw: The ``ascent.toml`` bytes, with no ``version``.
+    """
     with pytest.raises(ConstraintsError, match=r"version is missing\. Put version = 1 at the top") as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == (None, "version")
@@ -1386,7 +1656,11 @@ def test_the_public_names_are_the_package_objects() -> None:
 
 @pytest.mark.parametrize("vcpus", [1, 2, 32])
 def test_a_vcpu_count_up_to_the_vercel_cap_parses(vcpus: int) -> None:
-    """Skynet's cap is the Vercel Sandbox vCPU cap (SKY-760)."""
+    """Skynet's cap is the Vercel Sandbox vCPU cap (SKY-760).
+
+    Args:
+        vcpus: A vCPU count up to the cap.
+    """
     raw = f'version = 1\n[run]\nentry = "run.py:main"\nvcpus = {vcpus}\n'.encode()
 
     assert parse_constraints(raw).run_vcpus == vcpus
@@ -1394,7 +1668,11 @@ def test_a_vcpu_count_up_to_the_vercel_cap_parses(vcpus: int) -> None:
 
 @pytest.mark.parametrize("vcpus", [3, 34])
 def test_a_vcpu_count_over_the_cap_or_odd_fails_with_the_cap(vcpus: int) -> None:
-    """A count that no Vercel Sandbox has fails and names the allowed counts (SKY-760)."""
+    """A count that no Vercel Sandbox has fails and names the allowed counts (SKY-760).
+
+    Args:
+        vcpus: A vCPU count over the cap, or an odd count.
+    """
     raw = f'version = 1\n[run]\nentry = "run.py:main"\nvcpus = {vcpus}\n'.encode()
 
     with pytest.raises(ConstraintsError, match=r"vcpus must be 1 or an even number from 2 to 32") as caught:
@@ -1413,7 +1691,11 @@ _COMPOSE = b"services:\n  db:\n    image: postgres:16\n    command: postgres -D 
 
 
 def test_the_compose_file_fills_the_compose_services(tmp_path: Path) -> None:
-    """``read_constraints`` reads the ``[sandbox] compose`` file with Skynet's Compose parser (SKY-760)."""
+    """``read_constraints`` reads the ``[sandbox] compose`` file with Skynet's Compose parser (SKY-760).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = b'version = 1\n[run]\nentry = "run.py:main"\n[sandbox]\ncompose = "compose.yaml"\n'
 
     constraints = _read(tmp_path, raw, {"compose.yaml": _COMPOSE})
@@ -1426,7 +1708,11 @@ def test_the_compose_file_fills_the_compose_services(tmp_path: Path) -> None:
 
 
 def test_a_bad_compose_file_fails_at_the_sandbox_compose_setting(tmp_path: Path) -> None:
-    """A Compose error from Skynet's parser becomes a ConstraintsError at ``[sandbox] compose`` (SKY-760)."""
+    """A Compose error from Skynet's parser becomes a ConstraintsError at ``[sandbox] compose`` (SKY-760).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     raw = b'version = 1\n[run]\nentry = "run.py:main"\n[sandbox]\ncompose = "compose.yaml"\n'
 
     with pytest.raises(ConstraintsError, match=r"\[sandbox\] compose names 'compose.yaml': .*'services'") as caught:
@@ -1446,7 +1732,11 @@ def test_a_new_check_refuses_an_older_form() -> None:
 
 
 def test_the_wrappers_pass_legacy_forms_to_the_package(tmp_path: Path) -> None:
-    """``legacy_forms=True`` reads the older forms as the older reader did, in both wrappers (SKY-760)."""
+    """``legacy_forms=True`` reads the older forms as the older reader did, in both wrappers (SKY-760).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     assert parse_constraints(_LEGACY, legacy_forms=True).metric.files == ("scoring",)
     constraints = read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: _LEGACY}), legacy_forms=True)
     assert constraints is not None
@@ -1464,7 +1754,11 @@ def test_a_legacy_network_entry_must_still_name_a_public_host() -> None:
 
 
 def test_a_started_hardening_pass_rereads_the_older_forms(tmp_path: Path) -> None:
-    """The trusted tree of a started pass reads as its staging did; a new pass stays strict (SKY-760)."""
+    """The trusted tree of a started pass reads as its staging did; a new pass stays strict (SKY-760).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     (tmp_path / CONSTRAINTS_FILE).write_bytes(_LEGACY)
 
     started = hardening_runner._trusted_constraints(tmp_path, require_version=False)

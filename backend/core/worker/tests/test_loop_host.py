@@ -309,7 +309,15 @@ def _seed(trees: TreeStore) -> RepoSeed:
 def test_an_evaluation_commits_once_and_a_resume_replays_it_with_no_work(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The first generation runs the evaluation; the second gets the committed result and runs nothing."""
+    """The first generation runs the evaluation; the second gets the committed result and runs nothing.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
     runs: list[int] = []
 
     def work() -> dict[str, Any]:
@@ -345,7 +353,15 @@ def test_an_evaluation_commits_once_and_a_resume_replays_it_with_no_work(
 def test_an_evaluation_replay_with_another_key_diverges(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A resume that evaluates another version at the same place gets no committed result."""
+    """A resume that evaluates another version at the same place gets no committed result.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
     first = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     first.evaluate({"candidate": "p", "case": None}, lambda: {"score": 1.0})
     first.close()
@@ -359,7 +375,15 @@ def test_an_evaluation_replay_with_another_key_diverges(
 def test_an_evaluation_error_stops_the_loop_and_commits_nothing(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """An error of the evaluation is no result: the loop stops, keeps the stop and has no step."""
+    """An error of the evaluation is no result: the loop stops, keeps the stop and has no step.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
 
     def broken() -> dict[str, Any]:
@@ -380,7 +404,15 @@ def test_an_evaluation_error_stops_the_loop_and_commits_nothing(
 def test_a_refused_version_commits_and_its_replay_raises_the_same_error_with_no_scorer_call(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """A 422 from the repository scorer is a final answer, so the step keeps it and a resume does not ask again."""
+    """A 422 from the repository scorer is a final answer, so the step keeps it and a resume does not ask again.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
     calls: list[tuple[str, Any]] = []
 
     def refuses(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
@@ -485,6 +517,11 @@ def test_a_scorer_error_that_can_pass_on_a_new_try_requeues_the_run_and_commits_
 
     Args:
         error: The scorer's error.
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
     """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     server = EvalServer(_LoopBinding(loop, trees, RUN_ID, _seed(trees)).scorer(_failing(error)), max_evals=4)
@@ -516,6 +553,11 @@ def test_a_scorer_error_that_fails_again_on_a_new_try_ends_the_run_and_commits_n
 
     Args:
         error: The scorer's error.
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
     """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _LoopBinding(loop, trees, RUN_ID, _seed(trees)).scorer(_failing(error))
@@ -543,6 +585,11 @@ def test_a_scorer_refusal_commits_the_refusal(
 
     Args:
         error: The scorer's error.
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
     """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _LoopBinding(loop, trees, RUN_ID, _seed(trees)).scorer(_failing(error))
@@ -555,7 +602,15 @@ def test_a_scorer_refusal_commits_the_refusal(
 def test_a_scorer_bug_stops_the_loop_and_commits_nothing(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """An error that is not the scorer's answer is a bug: no step records it, and the run ends."""
+    """An error that is not the scorer's answer is a bug: no step records it, and the run ends.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
     scorer = _LoopBinding(loop, trees, RUN_ID, _seed(trees)).scorer(_failing(ValueError("bug")))
     with pytest.raises(LoopStoppedError) as stopped:
@@ -587,6 +642,11 @@ def test_an_evaluation_budget_error_stops_the_loop_and_only_pending_usage_requeu
     Args:
         error: The evaluation's error.
         interrupted: Whether the run must requeue.
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
     """
     loop = _loop(owner, engine, step_log, trees, tmp_path, generation=1)
 
@@ -607,7 +667,15 @@ def test_an_evaluation_budget_error_stops_the_loop_and_only_pending_usage_requeu
 def test_a_live_score_gives_the_side_info_in_the_form_of_its_replay(
     owner: tuple[User, str, int], engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
 ) -> None:
-    """The replay reads the side info from JSON, so the live engine sees the same values and makes the same steps."""
+    """The replay reads the side info from JSON, so the live engine sees the same values and makes the same steps.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+    """
 
     def scores(candidate: Any, case: Any = None) -> tuple[float | None, dict[str, Any]]:
         """Score with side info that JSON changes.
@@ -634,7 +702,16 @@ def test_a_tree_version_reaches_the_scorer_as_a_patch_against_the_seed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The engine's tree id becomes the patch that the repository scorer takes, and the score comes back."""
+    """The engine's tree id becomes the patch that the repository scorer takes, and the score comes back.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store over the step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     # Git ignores inode and ctime here, as it does when Linux reuses the inode, so
     # the same-size edit stays hidden on every OS unless the stats are dropped (SKY-843).
     for index, (key, value) in enumerate((("core.checkStat", "minimal"), ("core.trustctime", "false"))):
@@ -673,7 +750,11 @@ def test_a_tree_version_reaches_the_scorer_as_a_patch_against_the_seed(
 
 
 def test_tree_patch_is_empty_for_the_same_tree(trees: TreeStore) -> None:
-    """Two trees with the same files give no patch."""
+    """Two trees with the same files give no patch.
+
+    Args:
+        trees: The tree store over the step log.
+    """
     seed = _seed(trees).tree_id
 
     assert tree_patch(trees, RUN_ID, seed, seed) == ""
@@ -946,7 +1027,11 @@ def test_a_model_the_loop_cannot_bill_is_refused(
 
 
 def test_a_byok_call_uses_the_user_key_and_costs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The user's provider bills a BYOK call, so the lease pays nothing for it."""
+    """The user's provider bills a BYOK call, so the lease pays nothing for it.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     calls: list[dict[str, Any]] = []
 
     def completion(**request: Any) -> Any:
@@ -1003,7 +1088,11 @@ def _custom_byok(**extra: Any) -> LeaseModelClient:
 
 
 def test_a_custom_byok_endpoint_on_a_private_address_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The user names the host, so a name that resolves into the worker's network must not get a call."""
+    """The user names the host, so a name that resolves into the worker's network must not get a call.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     monkeypatch.setattr(
         mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("10.0.0.5", 443))]
     )
@@ -1013,7 +1102,11 @@ def test_a_custom_byok_endpoint_on_a_private_address_is_refused(monkeypatch: pyt
 
 
 def test_a_custom_byok_call_goes_to_the_checked_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each call uses the one address that the check accepted, so a new DNS answer cannot move it."""
+    """Each call uses the one address that the check accepted, so a new DNS answer cannot move it.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     pins: list[tuple[str, str]] = []
     requests: list[httpx.Request] = []
 
@@ -1093,7 +1186,11 @@ def _record_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Client]:
 
 
 def test_close_closes_the_pinned_http_client_that_the_model_client_opened(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A custom BYOK client opens only its pinned client, and close closes it."""
+    """A custom BYOK client opens only its pinned client, and close closes it.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     opened = _record_clients(monkeypatch)
     monkeypatch.setattr(
         mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("93.184.216.34", 443))]
@@ -1106,7 +1203,11 @@ def test_close_closes_the_pinned_http_client_that_the_model_client_opened(monkey
 
 
 def test_a_refused_custom_byok_endpoint_leaves_no_http_client_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The caller gets no model client to close, so a refused endpoint must not leave an open client."""
+    """The caller gets no model client to close, so a refused endpoint must not leave an open client.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     opened = _record_clients(monkeypatch)
     monkeypatch.setattr(
         mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("10.0.0.5", 443))]
@@ -1119,7 +1220,11 @@ def test_a_refused_custom_byok_endpoint_leaves_no_http_client_open(monkeypatch: 
 
 
 def test_a_failed_managed_slug_lookup_closes_the_http_client_that_it_opened(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The caller gets no model client to close, so a failed slug lookup must close the client it opened."""
+    """The caller gets no model client to close, so a failed slug lookup must close the client it opened.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     opened = _record_clients(monkeypatch)
 
     def fail(*args: Any, **kwargs: Any) -> str:
@@ -1145,14 +1250,24 @@ def test_a_failed_managed_slug_lookup_closes_the_http_client_that_it_opened(monk
 
 @pytest.mark.parametrize("fails", [False, True], ids=["finished", "host-raised"])
 def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
-    """The child process closes the model client when the loop ends, also when the loop raises."""
+    """The child process closes the model client when the loop ends, also when the loop raises.
+
+    Args:
+        monkeypatch: The test's patcher.
+        fails: Whether the loop raises.
+    """
     closed: list[bool] = []
 
     class _Model:
         """A model client that records its close."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            """Take the real client's arguments."""
+            """Take the real client's arguments.
+
+            Args:
+                *args: The real client's positional values.
+                **kwargs: The real client's named values.
+            """
 
         def close(self) -> None:
             """Record the close."""
@@ -1207,7 +1322,14 @@ def test_close_keeps_a_given_http_client_open() -> None:
 def test_the_host_removes_the_run_folder_that_it_made(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A host with no run folder makes a temporary one, and removes it also when the job fails to start."""
+    """A host with no run folder makes a temporary one, and removes it also when the job fails to start.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     made = tmp_path / "made"
 
     def mkdtemp(prefix: str) -> str:
@@ -1389,6 +1511,12 @@ def test_a_killed_run_resumes_on_the_host_and_repeats_no_evaluation_or_model_cal
 
     The resume gets the first reply and the first score from the log, and only new calls reach the model and
     the scorer. Every scorer call is one step, so no call happened twice.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
     """
     payload = _host_payload(owner, tmp_path, monkeypatch)
 
@@ -1487,6 +1615,12 @@ def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
     """An Auto repository run uses the loop, and a resume repeats no committed model or scorer call (SKY-832).
 
     The resume gets a larger scorer allowance, so only the committed lane plan keeps the lane allowances.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
     """
     payload = {**_host_payload(owner, tmp_path, monkeypatch), "strategy": {"mode": "auto"}}
     monkeypatch.setattr(service, "run_strategy", auto.run_strategy)
@@ -1524,7 +1658,14 @@ def test_a_killed_auto_repo_run_resumes_on_the_host_and_repeats_no_lane_call(
 def test_the_job_budget_pays_for_the_run_when_the_workspace_points_at_another_budget(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The user can move the workspace to a new budget while a run waits, but the run's own budget still pays."""
+    """The user can move the workspace to a new budget while a run waits, but the run's own budget still pays.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     user, budget_id, _ = owner
     budgets = BudgetService(engine=engine)
     other = budgets.create("alice", 500, idempotency_key="other-budget")
@@ -1541,7 +1682,14 @@ def test_the_job_budget_pays_for_the_run_when_the_workspace_points_at_another_bu
 def test_a_command_with_a_long_limit_gets_a_box_that_outlives_it(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 30-minute file proposer command gets a box for its limit and the pack, and another command keeps 900 s."""
+    """A 30-minute file proposer command gets a box for its limit and the pack, and another command keeps 900 s.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     lifetimes: list[float] = []
     real_open = LocalSubprocessRuntime.open
 
@@ -1596,6 +1744,12 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     """The broker refuses a box past the run's deadline, so a 30-minute command in a 1000 s run gets a 1000 s box
     and a 700 s limit, which leaves the pack room to end before the box dies. The command's own environment, such
     as the file proposer's route key, reaches the loop.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
     """
     lifetimes: list[float] = []
     timeouts: list[float | None] = []
@@ -1648,7 +1802,7 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
         """
         assert ctx.run_command is not None
         assert ctx.repo_seed is not None
-        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"APP_API_KEY": "route-key"})
+        ctx.run_command(ctx.repo_seed.tree_id, "true", timeout_seconds=1800, env={"ASCENT_MODEL_KEY": "route-key"})
         return Result(best_candidate=ctx.repo_seed.tree_id, best_score=0.5, total_evals=server.used), []
 
     payload = _host_payload(owner, tmp_path, monkeypatch)
@@ -1660,11 +1814,15 @@ def test_a_command_box_fits_the_run_deadline_and_its_command_times_out_first(
     events = _host(payload, owner, engine, tmp_path, generation=1, model=_Model())
 
     assert [event["type"] for event in events][-1] == "result"
-    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"APP_API_KEY": "route-key"})
+    assert (lifetimes[0], timeouts[0], envs[0]) == (1000, 700, {"ASCENT_MODEL_KEY": "route-key"})
 
 
 def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The provider refuses a longer box, so the configured sandbox lifetime caps a command box."""
+    """The provider refuses a longer box, so the configured sandbox lifetime caps a command box.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     monkeypatch.setattr(loop_host.settings, "vercel_sandbox_max_lifetime_seconds", 1000)
 
     assert loop_host.command_box_seconds(1800) == 1000
@@ -1673,7 +1831,14 @@ def test_a_command_box_never_outlives_the_configured_sandbox_lifetime(monkeypatc
 def test_the_host_checks_that_the_run_replayed_every_step(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A run that ends before it replays each committed step lost work, so the host checks the log at the end."""
+    """A run that ends before it replays each committed step lost work, so the host checks the log at the end.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     finishes: list[None] = []
     real_finish = _LoopBinding.finish
 
@@ -1699,7 +1864,15 @@ def test_the_host_checks_that_the_run_replayed_every_step(
 def test_a_loop_routed_run_with_an_entry_runs_the_contract_files_command(
     engine_name: str, owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The real engine on the loop runs the ``[proposer] entry`` command, not its built-in tool loop (SKY-816)."""
+    """The real engine on the loop runs the ``[proposer] entry`` command, not its built-in tool loop (SKY-816).
+
+    Args:
+        engine_name: The engine that runs on the loop.
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
     # The real engine, not the fake strategy of the other host tests.
     real_strategy = service.run_strategy
     payload = _host_payload(owner, tmp_path, monkeypatch)
@@ -1721,7 +1894,14 @@ def test_a_loop_routed_run_with_an_entry_runs_the_contract_files_command(
 def test_a_scorer_outage_in_the_final_run_requeues_the_run(
     owner: tuple[User, str, int], engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The final run scores through the loop too, so its outage must reach the worker as an interruption."""
+    """The final run scores through the loop too, so its outage must reach the worker as an interruption.
+
+    Args:
+        owner: Alice, her budget id and the budget generation.
+        engine: The database.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: The test's patcher.
+    """
 
     class _DownAtTheEnd(_FakeRepoScorer):
         """Score the engine's versions, then fail as a server error on the starting point."""
@@ -1756,7 +1936,11 @@ def test_a_scorer_outage_in_the_final_run_requeues_the_run(
 def test_the_worker_starts_a_loop_routed_run_on_the_host_with_its_trusted_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A routed run's child is the loop host, and the claimed job row, not the payload, names its run and budget."""
+    """A routed run's child is the loop host, and the claimed job row, not the payload, names its run and budget.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
     monkeypatch.setattr(
         process_job_tests,
         "BlackboxRunRequest",
@@ -1843,6 +2027,7 @@ def test_a_crashed_loop_requeues_and_bills_only_the_steps_that_the_resume_keeps(
 
     Args:
         close: Whether the worker closed the loop before it died.
+        tmp_path: Pytest's temporary folder.
     """
     store = _crashed_run(tmp_path, close=close)
 
@@ -1875,6 +2060,9 @@ def test_a_fenced_worker_that_is_still_alive_charges_nothing_for_its_late_call(t
 
     The late usage must not count against the run's limit either: it holds no coverage, so settled and
     reserved together could pass the budget total.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     store = _crashed_run(tmp_path, close=False)
     assert store.recover_orphaned_jobs() == 1
@@ -1900,7 +2088,11 @@ def test_a_fenced_worker_that_is_still_alive_charges_nothing_for_its_late_call(t
 
 
 def test_the_fence_keeps_a_lease_slice_whose_settle_the_ledger_refused(tmp_path: Path) -> None:
-    """A refused settle needs review, so the fence must not end its slice or release its coverage."""
+    """A refused settle needs review, so the fence must not end its slice or release its coverage.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     store = _crashed_run(tmp_path, close=False)
     budgets = BudgetService(engine=store.engine)
     budget_id = store.get_job(RUN_ID)["execution_budget_id"]
