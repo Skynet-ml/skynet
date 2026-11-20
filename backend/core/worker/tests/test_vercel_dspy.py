@@ -327,6 +327,51 @@ def test_an_image_before_20_is_refused_for_a_minimize_run(
         assert all(event.get("error") != vercel_dspy.DIRECTION_IMAGE_MESSAGE for event in seen)
 
 
+@pytest.mark.parametrize(
+    ("image_protocol", "scores", "refused"),
+    [
+        (20, {"cost_usd": "minimize", "recall": "maximize"}, True),
+        (20, {"recall": "maximize"}, False),
+        (SANDBOX_PROTOCOL, {"cost_usd": "minimize"}, False),
+    ],
+)
+def test_an_image_before_21_is_refused_for_a_minimize_named_score(
+    image_protocol: int, scores: dict[str, str], refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image before 21 would judge a minimize score's limit as a minimum (SKY-775).
+
+    Args:
+        image_protocol: The protocol the image answers to the probe.
+        scores: The staged snapshot's ``outcome.scores``.
+        refused: Whether the worker refuses the image.
+        tmp_path: Checkpoint directory and the packed tree's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    session = FakeSession()
+    session.image_protocol = image_protocol
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    events: queue.Queue = queue.Queue()
+    outcome = {"target": None, "require": {"cost_usd": 0.05}, "direction": "maximize", "scores": scores}
+    payload = _descriptor_payload(
+        tmp_path, _repo_snapshot={"archive": str(archive), "commit": "c" * 40, "outcome": outcome}
+    )
+
+    vercel_dspy.run_vercel_dspy(payload, "job-score-direction", events, "spawn")
+    seen = []
+    while not events.empty():
+        seen.append(events.get_nowait())
+
+    if refused:
+        assert session.steps == ["probe"]
+        assert seen[0]["error"] == vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE
+        assert "rebuild and re-pin the sandbox image" in seen[0]["error"]
+    else:
+        assert "optimizer" in session.steps
+        assert all(event.get("error") != vercel_dspy.SCORE_DIRECTION_IMAGE_MESSAGE for event in seen)
+
+
 def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     """Build a run payload that carries the parent's opaque sandbox descriptor.
 

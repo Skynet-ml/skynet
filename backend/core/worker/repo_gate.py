@@ -66,13 +66,15 @@ _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
 _OUTCOME_TARGET = frozenset({"outcome.target"})
-# The run end judges each minimum on the final score (SKY-692).
-_OUTCOME_MINIMUMS = frozenset({"outcome.require"})
+# The run end judges each limit on the final score (SKY-692), in its score's direction (SKY-775).
+_OUTCOME_LIMITS = frozenset({"outcome.require"})
 # The metric box calls a Python entry's function, or runs a command entry
 # through OpenAscent under the same [metric] rules (SKY-738).
 _METRIC_ENTRY = frozenset({"metric.entry"})
 # The eval server, the run end and the pull request read the score's direction (SKY-750).
 _METRIC_DIRECTION = frozenset({"metric.direction"})
+# The eval server, the engines and the run end read each named score's direction (SKY-775).
+_METRIC_SCORES = frozenset({"metric.scores"})
 # The metric setup box runs the build once before the first metric call (SKY-740).
 _METRIC_SETUP = frozenset({"metric.setup"})
 _ENFORCED_EVERYWHERE = (
@@ -87,9 +89,10 @@ _ENFORCED_EVERYWHERE = (
     | _RUN_ENTRY
     | _ROLE_BOXES
     | _OUTCOME_TARGET
-    | _OUTCOME_MINIMUMS
+    | _OUTCOME_LIMITS
     | _METRIC_ENTRY
     | _METRIC_DIRECTION
+    | _METRIC_SCORES
     | _METRIC_SETUP
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
@@ -515,6 +518,8 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         "vcpus",
     )
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
+    if "scores" in metric:
+        keys.append(("metric.scores", "[metric.scores]"))
     outcome = document.get("outcome", {})
     if "target" in outcome:
         keys.append(("outcome.target", "[outcome] target"))

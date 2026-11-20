@@ -21,7 +21,7 @@ from ..trajectory import (
     CandidateEvent,
     current_proposal_iteration,
 )
-from .protocol import Candidate, SideInfo
+from .protocol import SCORE_DIRECTION_KEY, Candidate, SideInfo
 from .runner import side_info_json_default
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,10 @@ SCORE_FEEDBACK_KEY = "Feedback per score"
 # Part name a text-only version travels under in candidate events; the
 # frontend keys renders and diffs off it (BLACKBOX_STR_CANDIDATE_KEY).
 STR_CANDIDATE_KEY = "current_candidate"
+# GEPA's frontier treats every named score as higher-is-better, so a ``[metric.scores]`` minimize
+# score reaches it negated; this key lists those names so its reflection can read them raw (SKY-775).
+LOWER_IS_BETTER_KEY = "Lower is better"
+MINIMIZE = "minimize"
 
 
 def is_data_image(value: Any) -> bool:
@@ -156,7 +160,8 @@ def named_scores(side_info: SideInfo) -> dict[str, dict[str, Any]]:
         side_info: What the scorer returned next to the score.
 
     Returns:
-        ``{name: {"score": float, "feedback": str}}``; empty when there are none.
+        ``{name: {"score": float, "feedback": str}}``, plus ``"direction": "minimize"`` on a
+        ``[metric.scores]`` minimize score; empty when there are none. Scores stay raw.
     """
     raw = side_info.get(SCORES_KEY)
     if not isinstance(raw, dict):
@@ -165,6 +170,8 @@ def named_scores(side_info: SideInfo) -> dict[str, dict[str, Any]]:
     for name, entry in raw.items():
         if isinstance(entry, dict) and isinstance(entry.get("score"), int | float):
             named[str(name)] = {"score": float(entry["score"]), "feedback": str(entry.get("feedback") or "")}
+            if entry.get(SCORE_DIRECTION_KEY) == MINIMIZE:
+                named[str(name)][SCORE_DIRECTION_KEY] = MINIMIZE
         elif isinstance(entry, int | float) and not isinstance(entry, bool):
             named[str(name)] = {"score": float(entry), "feedback": ""}
     return named
@@ -177,10 +184,12 @@ def named_score_lines(raw: Any) -> list[str]:
         raw: A side info's ``scores`` value.
 
     Returns:
-        One line per named score, in the scorer's order.
+        One line per named score, in the scorer's order; a minimize score says lower is better.
     """
     return [
-        f"{name}: {entry['score']:.4g}" + (f" — {entry['feedback']}" if entry["feedback"] else "")
+        f"{name}: {entry['score']:.4g}"
+        + (" (lower is better)" if entry.get(SCORE_DIRECTION_KEY) == MINIMIZE else "")
+        + (f" — {entry['feedback']}" if entry["feedback"] else "")
         for name, entry in named_scores({SCORES_KEY: raw}).items()
     ]
 
@@ -193,13 +202,21 @@ def gepa_side_info(side_info: SideInfo) -> SideInfo:
 
     Returns:
         A copy whose ``scores`` maps each name to its number, with each
-        named score's feedback under :data:`SCORE_FEEDBACK_KEY`.
+        named score's feedback under :data:`SCORE_FEEDBACK_KEY`. A minimize
+        score's number is negated, so GEPA's frontier keeps its lowest value,
+        and its name is listed under :data:`LOWER_IS_BETTER_KEY`.
     """
     named = named_scores(side_info)
     if not named:
         return side_info
-    shaped = {**side_info, SCORES_KEY: {name: entry["score"] for name, entry in named.items()}}
+    lower = [name for name, entry in named.items() if entry.get(SCORE_DIRECTION_KEY) == MINIMIZE]
+    shaped = {
+        **side_info,
+        SCORES_KEY: {name: -entry["score"] if name in lower else entry["score"] for name, entry in named.items()},
+    }
     shaped[SCORE_FEEDBACK_KEY] = {name: entry["feedback"] for name, entry in named.items() if entry["feedback"]}
+    if lower:
+        shaped[LOWER_IS_BETTER_KEY] = lower
     return shaped
 
 

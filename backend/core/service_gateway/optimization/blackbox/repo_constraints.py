@@ -31,8 +31,11 @@ parser enforces this), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
 files), and ``[outcome]`` (the ``target`` score and, in ``[outcome.require]``,
-the minimum of each named score; the search stops at the target, and the
-run end judges the target and each minimum on the final score).
+the limit of each named score; the search stops at the target, and the
+run end judges the target and each limit on the final score). A limit is a
+minimum for a maximize named score and a maximum for a minimize one;
+``[metric.scores]`` gives a named score its direction, and a name it omits
+is a maximize score (SKY-775).
 ``version = 1`` is required. Each
 ``[tool.<name>]`` table is accepted and skipped: Skynet reads nothing in it.
 ``[run]`` and ``[metric]`` also take the role keys mcp, network,
@@ -117,7 +120,8 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "setup": frozenset({"command"}),
     # entry and setup name the user's own proposer command (SKY-753).
     "proposer": _ROLE_KEYS | {"entry", "setup"},
-    # direction says which way the score improves (SKY-750); setup builds the metric once (SKY-740).
+    # direction says which way the score improves (SKY-750); setup builds the metric once (SKY-740);
+    # scores gives each named score its own direction (SKY-775).
     "metric": frozenset(
         {
             "files",
@@ -131,6 +135,7 @@ _SECTIONS: dict[str, frozenset[str]] = {
             "services",
             "illegal",
             "vcpus",
+            "scores",
         }
     ),
     "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
@@ -312,6 +317,8 @@ class MetricSpec:
     direction: str = MAXIMIZE
     # One shell command that builds the metric once in the metric setup box (SKY-740).
     setup: str | None = None
+    # [metric.scores]: the direction of each named score the table names; any other name maximizes (SKY-775).
+    scores: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -359,9 +366,9 @@ class RepoConstraints:
     # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
     compose_file: str | None = None
     compose_services: tuple[ComposeService, ...] = ()
-    # [outcome]: the search stops at the target (SKY-691); the run end judges the target and each minimum (SKY-692).
+    # [outcome]: the search stops at the target (SKY-691); the run end judges the target and each limit (SKY-692).
     outcome_target: float | None = None
-    outcome_minimums: Mapping[str, float] = field(default_factory=dict)
+    outcome_limits: Mapping[str, float] = field(default_factory=dict)
 
     @property
     def rule_files(self) -> tuple[str, ...]:
@@ -457,8 +464,10 @@ class RepoEnvironment:
             "notes": list(self.notes),
             "outcome": {
                 "target": file.outcome_target if file else None,
-                "require": dict(file.outcome_minimums) if file else {},
+                "require": dict(file.outcome_limits) if file else {},
                 "direction": file.metric.direction if file else MAXIMIZE,
+                # Only a contract with [metric.scores] has the key, so older records stay equal on resume.
+                **({"scores": dict(file.metric.scores)} if file and file.metric.scores else {}),
             },
             # Only a run that uses the file's proposer has the key, so older records stay equal on resume.
             **({"proposer_entry": list(self.proposer_entry)} if self.proposer_entry is not None else {}),
@@ -948,16 +957,16 @@ def _score_value(value: Any, setting: str, section: str, key: str) -> float:
 
 
 def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]]:
-    """Read the ``[outcome]`` section: the run's target score and the minimum of each named score.
+    """Read the ``[outcome]`` section: the run's target score and the limit of each named score.
 
     Args:
         section: The parsed ``[outcome]`` table; empty when the file has none.
 
     Returns:
-        The target, or ``None`` when the file sets none, and each minimum by score name.
+        The target, or ``None`` when the file sets none, and each limit by score name.
 
     Raises:
-        ConstraintsError: When the target or a minimum is not a finite number, or
+        ConstraintsError: When the target or a limit is not a finite number, or
             ``require`` is not a bounded table of named scores.
     """
     target = _score_value(section["target"], "[outcome] target", "outcome", "target") if "target" in section else None
@@ -965,11 +974,11 @@ def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]
     if not isinstance(require, dict) or len(require) > _MAX_NAMES:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [outcome.require] must be a table of at most {_MAX_NAMES} score names, each"
-            " set to its minimum score.",
+            " set to its limit score.",
             section="outcome",
             key="require",
         )
-    minimums: dict[str, float] = {}
+    limits: dict[str, float] = {}
     for name, value in require.items():
         if not name:
             raise ConstraintsError(
@@ -985,8 +994,8 @@ def _outcome(section: Mapping[str, Any]) -> tuple[float | None, dict[str, float]
                 section="outcome.require",
                 key=name,
             )
-        minimums[name] = _score_value(value, f"[outcome.require] {name}", "outcome.require", name)
-    return target, minimums
+        limits[name] = _score_value(value, f"[outcome.require] {name}", "outcome.require", name)
+    return target, limits
 
 
 def _service(section: Any, name: str) -> ServiceSpec:
@@ -1346,7 +1355,8 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
     Raises:
         ConstraintsError: When a path is malformed or names the whole repository,
             when ``entry`` is neither form, or is a command that runs no file
-            from ``[metric] files``, or when ``setup`` is not bounded text.
+            from ``[metric] files``, when ``setup`` is not bounded text, or when
+            ``[metric.scores]`` is not a bounded table of directions.
     """
     files = _paths(section, "files", "metric") or ()
     exploits = _metric_path(section, "exploits") or _DEFAULT_EXPLOITS
@@ -1373,8 +1383,60 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
         )
     setup = _text(section["setup"], "[metric] setup", _MAX_COMMAND_CHARS) if "setup" in section else None
     return MetricSpec(
-        files=files, exploits=exploits, reference=reference, entry=entry, direction=direction, setup=setup
+        files=files,
+        exploits=exploits,
+        reference=reference,
+        entry=entry,
+        direction=direction,
+        setup=setup,
+        scores=_score_directions(section.get("scores", {})),
     )
+
+
+def _score_directions(table: Any) -> dict[str, str]:
+    """Read ``[metric.scores]``: the direction of each named score that the table names.
+
+    Args:
+        table: The parsed ``[metric.scores]`` table; empty when the file has none.
+
+    Returns:
+        Each direction by score name. A name that the table omits is a maximize score.
+
+    Raises:
+        ConstraintsError: When the table is not a bounded table, a name is empty or
+            unquoted with a dot, or a value is not one of the two directions.
+    """
+    if not isinstance(table, dict) or len(table) > _MAX_NAMES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [metric.scores] must be a table of at most {_MAX_NAMES} score names, each"
+            f' set to "{MAXIMIZE}" or "{MINIMIZE}".',
+            section="metric",
+            key="scores",
+        )
+    directions: dict[str, str] = {}
+    for name, value in table.items():
+        if not name:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [metric.scores] has an empty score name. Use the name the metric gives"
+                " the score.",
+                section="metric.scores",
+            )
+        # TOML reads an unquoted ``rouge.l = "minimize"`` as the table ``rouge = {l = "minimize"}``.
+        if isinstance(value, dict):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [metric.scores] {name} is a table. Quote a score name that has a dot,"
+                f' such as "{name}.{next(iter(value), "l")}" = "{MINIMIZE}".',
+                section="metric.scores",
+                key=name,
+            )
+        if value not in DIRECTIONS:
+            raise ConstraintsError(
+                f'{CONSTRAINTS_FILE}: [metric.scores] {name} must be "{MAXIMIZE}" or "{MINIMIZE}".',
+                section="metric.scores",
+                key=name,
+            )
+        directions[name] = value
+    return directions
 
 
 def _cases_file(section: Mapping[str, Any] | None) -> str | None:
@@ -1604,7 +1666,7 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
     cases_file = _cases_file(document.get("data"))
     sandbox = document.get("sandbox", {})
     compose_file = _one_file(sandbox["compose"], "[sandbox] compose") if "compose" in sandbox else None
-    outcome_target, outcome_minimums = _outcome(document.get("outcome", {}))
+    outcome_target, outcome_limits = _outcome(document.get("outcome", {}))
     rule_files = [("instructions", instructions_file)]
     rule_files += [
         (label, role["illegal_file"])
@@ -1673,7 +1735,7 @@ def parse_constraints(raw: bytes, *, require_version: bool = True) -> RepoConstr
         cases_file=cases_file,
         compose_file=compose_file,
         outcome_target=outcome_target,
-        outcome_minimums=outcome_minimums,
+        outcome_limits=outcome_limits,
     )
 
 

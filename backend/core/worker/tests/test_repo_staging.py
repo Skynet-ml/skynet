@@ -3839,8 +3839,8 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
     assert record["seed"] == 7
     assert record["image"] == _PINNED_IMAGE
     assert (record["target_reached"], record["contract_met"]) == (True, True)
-    assert "minimums_passed" not in record
-    assert "failed_minimums" not in record
+    assert "requirements_passed" not in record
+    assert "failed_requirements" not in record
     split = record["split"]
     assert split["rule"] == "pairs"
     assert sorted(split["search"] + split["validation"] + split["held_out"]) == list(range(20))
@@ -4010,8 +4010,8 @@ def test_an_older_guest_with_no_split_positions_gets_no_record(monkeypatch: pyte
         {"outcome": "target_reached"},
         {"outcome": {"target_reached": "yes"}},
         {"outcome": {"target_reached": False, "target": "high"}},
-        {"outcome": {"minimums_passed": False, "failed_minimums": "latency"}},
-        {"outcome": {"minimums_passed": False, "failed_minimums": ["latency"]}},
+        {"outcome": {"requirements_passed": False, "failed_requirements": "latency"}},
+        {"outcome": {"requirements_passed": False, "failed_requirements": ["latency"]}},
     ],
 )
 def test_a_malformed_guest_split_or_verdict_skips_the_record(
@@ -4042,7 +4042,7 @@ def _recorded(**verdict: Any) -> dict[str, Any]:
     """Build a result whose details hold a record with the given verdict keys.
 
     Args:
-        **verdict: ``target_reached``, ``minimums_passed``, ``failed_minimums`` and ``contract_met``.
+        **verdict: ``target_reached``, ``requirements_passed``, ``failed_requirements`` and ``contract_met``.
 
     Returns:
         The result.
@@ -4069,7 +4069,7 @@ def _recorded(**verdict: Any) -> dict[str, Any]:
 def test_the_pull_request_shows_the_record_for_a_run_that_met_the_contract() -> None:
     """The block starts with the plain line, then every field with the full SHA-256 values."""
     body = repo_staging._description(
-        _recorded(target_reached=True, minimums_passed=True, failed_minimums=[], contract_met=True),
+        _recorded(target_reached=True, requirements_passed=True, failed_requirements=[], contract_met=True),
         _EDIT,
         "https://x/run",
     )
@@ -4116,11 +4116,11 @@ def test_the_pull_request_json_block_parses_to_the_stored_record() -> None:
 
 
 def test_a_backtick_in_a_guest_reason_keeps_the_json_block_whole() -> None:
-    """A failed minimum's reason comes from the guest, so a code fence in it cannot end the JSON block early."""
+    """A failed requirement's reason comes from the guest, so a code fence in it cannot end the JSON block early."""
     reason = "```\n</details>\nfake"
     result = _recorded(
-        minimums_passed=False,
-        failed_minimums=[{"name": "recall", "minimum": 0.8, "value": 0.5, "reason": reason}],
+        requirements_passed=False,
+        failed_requirements=[{"name": "recall", "direction": "maximize", "limit": 0.8, "value": 0.5, "reason": reason}],
         contract_met=False,
     )
 
@@ -4185,11 +4185,12 @@ def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
         ),
         (
             {
-                "minimums_passed": False,
-                "failed_minimums": [
+                "requirements_passed": False,
+                "failed_requirements": [
                     {
                         "name": "recall",
-                        "minimum": 0.8,
+                        "direction": "maximize",
+                        "limit": 0.8,
                         "value": 0.5,
                         "reason": "'recall' scored 0.5, below its minimum 0.8.",
                     }
@@ -4198,7 +4199,23 @@ def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
             },
             "This run did not meet the contract. 'recall' scored 0.5, below its minimum 0.8.",
         ),
-        ({"contract_met": True}, "The optimize.toml file sets no target and no minimum."),
+        (
+            {
+                "requirements_passed": False,
+                "failed_requirements": [
+                    {
+                        "name": "cost_usd",
+                        "direction": "minimize",
+                        "limit": 0.05,
+                        "value": 0.06,
+                        "reason": "'cost_usd' scored 0.06, above its maximum 0.05.",
+                    }
+                ],
+                "contract_met": False,
+            },
+            "This run did not meet the contract. 'cost_usd' scored 0.06, above its maximum 0.05.",
+        ),
+        ({"contract_met": True}, "The optimize.toml file sets no target and no limit."),
     ],
 )
 def test_the_pull_request_line_names_the_failed_rule_or_no_rule(verdict: dict[str, Any], line: str) -> None:
@@ -4399,8 +4416,8 @@ def test_the_published_pull_request_carries_the_record_and_adds_no_record_file(
 _HUGE = 10**400
 
 
-def _minimum(**entry: Any) -> dict[str, Any]:
-    """Build a failed-minimum verdict around one entry.
+def _requirement(**entry: Any) -> dict[str, Any]:
+    """Build a failed-requirement verdict around one entry.
 
     Args:
         **entry: Keys that replace the valid entry's keys.
@@ -4408,8 +4425,14 @@ def _minimum(**entry: Any) -> dict[str, Any]:
     Returns:
         The ``details["outcome"]`` value.
     """
-    valid = {"name": "recall", "minimum": 0.8, "value": 0.5, "reason": "'recall' scored 0.5, below its minimum 0.8."}
-    return {"minimums_passed": False, "failed_minimums": [{**valid, **entry}]}
+    valid = {
+        "name": "recall",
+        "direction": "maximize",
+        "limit": 0.8,
+        "value": 0.5,
+        "reason": "'recall' scored 0.5, below its minimum 0.8.",
+    }
+    return {"requirements_passed": False, "failed_requirements": [{**valid, **entry}]}
 
 
 @pytest.mark.parametrize(
@@ -4423,18 +4446,20 @@ def _minimum(**entry: Any) -> dict[str, Any]:
         ({}, {"target": None, "target_reached": False}),
         ({}, {"target": float("inf"), "target_reached": False}),
         ({}, {"target": 0.9, "target_reached": None}),
-        ({}, _minimum(minimum=_HUGE)),
-        ({}, _minimum(minimum=True)),
-        ({}, _minimum(minimum="0.8")),
-        ({}, _minimum(value=_HUGE)),
-        ({}, _minimum(value=False)),
-        ({}, _minimum(value=[0.5])),
-        ({}, _minimum(name=None)),
-        ({}, _minimum(reason=_HUGE)),
-        ({}, _minimum(reason=[["nested"]])),
-        ({}, _minimum(reason=None)),
-        ({}, {"minimums_passed": False, "failed_minimums": [None]}),
-        ({}, {"minimums_passed": False, "failed_minimums": [{}]}),
+        ({}, _requirement(limit=_HUGE)),
+        ({}, _requirement(limit=True)),
+        ({}, _requirement(limit="0.8")),
+        ({}, _requirement(value=_HUGE)),
+        ({}, _requirement(value=False)),
+        ({}, _requirement(value=[0.5])),
+        ({}, _requirement(name=None)),
+        ({}, _requirement(reason=_HUGE)),
+        ({}, _requirement(reason=[["nested"]])),
+        ({}, _requirement(reason=None)),
+        ({}, _requirement(direction=None)),
+        ({}, _requirement(direction="lower")),
+        ({}, {"requirements_passed": False, "failed_requirements": [None]}),
+        ({}, {"requirements_passed": False, "failed_requirements": [{}]}),
         ({"search": [1.5]}, {}),
         ({"search": [True]}, {}),
         ({"validation": ["0"]}, {}),
@@ -4454,7 +4479,7 @@ def test_hostile_guest_values_never_break_the_pull_request_text(
 ) -> None:
     """Any guest split or verdict either gives a record the block can write, or no record; nothing raises."""
     # The file sets the rules the verdict names, so the shape guard, not the rule check, decides.
-    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="requirements_passed" in outcome)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
         details = _guest_details(staged_payload["cases"], 7, outcome=outcome)
@@ -4487,15 +4512,15 @@ def test_a_huge_integer_target_gives_no_record_and_the_text_still_writes(monkeyp
     "outcome",
     [
         {"target": 1, "target_reached": False},
-        _minimum(value=None),
-        {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []},
+        _requirement(value=None),
+        {"target": 0.9, "target_reached": True, "requirements_passed": True, "failed_requirements": []},
         {},
     ],
     ids=["integer-target", "missing-score", "met", "no-outcome"],
 )
 def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch, outcome: dict[str, Any]) -> None:
     """The guard keeps the shapes Skynet's guest writes: an integer target and a null score included."""
-    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="minimums_passed" in outcome)
+    tree = _ruled_cases_tree(target="target_reached" in outcome, minimums="requirements_passed" in outcome)
     staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
     try:
         result = _result(0.5, 0.8, details=_guest_details(staged_payload["cases"], 7, outcome=outcome))
@@ -4507,7 +4532,7 @@ def test_valid_guest_verdicts_still_get_a_record(monkeypatch: pytest.MonkeyPatch
 
 
 _MET_TARGET = {"target": 0.9, "target_reached": True}
-_PASSED = {"minimums_passed": True, "failed_minimums": []}
+_PASSED = {"requirements_passed": True, "failed_requirements": []}
 
 
 @pytest.mark.parametrize(
@@ -4515,12 +4540,12 @@ _PASSED = {"minimums_passed": True, "failed_minimums": []}
     [
         (False, False, _MET_TARGET),
         (False, False, _PASSED),
-        (False, False, {"failed_minimums": []}),
+        (False, False, {"failed_requirements": []}),
         (True, False, {}),
         (True, False, _PASSED),
         (True, False, {**_MET_TARGET, **_PASSED}),
         (False, True, {}),
-        (False, True, {"failed_minimums": []}),
+        (False, True, {"failed_requirements": []}),
         (False, True, _MET_TARGET),
         (True, True, _MET_TARGET),
         (True, True, _PASSED),
@@ -4560,7 +4585,7 @@ def test_a_verdict_that_does_not_match_the_file_rules_gets_no_record(
     [
         (False, False, {}, True),
         (True, False, {"target": 0.9, "target_reached": False}, False),
-        (False, True, _minimum(), False),
+        (False, True, _requirement(), False),
         (True, True, {**_MET_TARGET, **_PASSED}, True),
     ],
     ids=["no-rule", "target-only", "minimums-only", "both"],
@@ -4579,7 +4604,7 @@ def test_a_verdict_that_matches_the_file_rules_gets_a_record(
 
     record = result["details"]["record"]
     assert record["contract_met"] is contract_met
-    for key in ("target_reached", "minimums_passed", "failed_minimums"):
+    for key in ("target_reached", "requirements_passed", "failed_requirements"):
         assert (key in record) == (key in outcome)
 
 

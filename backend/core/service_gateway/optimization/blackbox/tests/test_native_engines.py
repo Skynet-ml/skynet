@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -216,6 +217,85 @@ def test_repo_gepa_reflection_shows_each_named_score_with_its_feedback() -> None
     assert "overall ok" in text
     assert "tests: 0.5" in text
     assert "two failing" in text
+
+
+class _NamedCostServer:
+    """Answer ``evaluate_examples`` with a fixed score and one minimize ``cost_usd`` named score per version."""
+
+    def __init__(self, costs: dict[str, float]) -> None:
+        """Keep each version's raw cost.
+
+        Args:
+            costs: Raw ``cost_usd`` of each candidate text.
+        """
+        self.costs = costs
+
+    def evaluate_examples(self, candidate: str, example_ids: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score a version 0.5 with its raw cost, marked minimize as the eval server marks it.
+
+        Args:
+            candidate: The candidate text.
+            example_ids: Unused; the version is scored on one case, ``e1``.
+
+        Returns:
+            The mean score and the per-case scores and side info.
+        """
+        cost = {"score": self.costs[candidate], "feedback": "spend", "direction": "minimize"}
+        side_info = {"scores": {"cost_usd": cost, "recall": {"score": 0.9, "feedback": ""}}}
+        return 0.5, {"scores": {"e1": 0.5}, "infos": {"e1": side_info}}
+
+    def log_progress(self, score: float, candidate: str) -> None:
+        """Ignore progress; the test reads the written files.
+
+        Args:
+            score: The version's score.
+            candidate: The candidate text.
+        """
+
+
+def test_the_lowest_minimize_named_score_leads_its_column(tmp_path: Path) -> None:
+    """Of three versions, the lowest raw cost leads ``score:cost_usd``; val.json shows the raw cost (SKY-775)."""
+    engine = native_engines.MetaHarnessEngine(_config("meta_harness"))
+    engine.logs_dir = tmp_path
+    engine.example_ids = ["e1"]
+    server = _NamedCostServer({"a": 0.06, "b": 0.02, "c": 0.04})
+
+    for name in ("a", "b", "c"):
+        engine._benchmark(server, name, name)  # type: ignore[arg-type]
+    engine._write_frontier()
+
+    frontier = json.loads((tmp_path / "frontier_val.json").read_text())
+    assert frontier["score:cost_usd"] == {"system": "b", "val_accuracy": -0.02}
+    table = {name: entry["scores"] for name, entry in engine.results.items()}
+    assert native_engines.pareto_front(table, {"a": 0.5, "b": 0.5, "c": 0.5}) == ["b"]
+    shown = json.loads((tmp_path / "results" / "b" / "val.json").read_text())["named_scores"]
+    assert shown["cost_usd"] == {"score": 0.02, "feedback": "spend", "direction": "minimize"}
+    assert shown["recall"] == {"score": 0.9, "feedback": ""}
+
+
+def test_the_brief_and_columns_say_lower_is_better_for_a_minimize_named_score() -> None:
+    """The agent reads that a lower-is-better column holds the negated value (SKY-775)."""
+    columns, notes = native_engines.named_score_columns(
+        [{"scores": {"cost_usd": {"score": 0.05, "feedback": "", "direction": "minimize"}}}]
+    )
+
+    assert columns == {"score:cost_usd": -0.05}
+    assert notes["score:cost_usd"].startswith("Lower is better")
+    assert "holds its negated value" in native_engines.task_brief(Task(name="t", seed_candidate="s"), [])
+
+
+def test_gepa_reflection_shows_a_minimize_named_score_raw_with_its_direction() -> None:
+    """GEPA's frontier holds the negated cost; the proposer text shows the raw cost and says lower is better."""
+    record = {
+        "Scores (Higher is Better)": {"cost_usd": -0.06, "recall": 0.8},
+        "Lower is better": ["cost_usd"],
+    }
+
+    text = native_engines.record_text(record)
+
+    assert "cost_usd: 0.06 (lower is better)" in text
+    assert "recall: 0.8" in text
+    assert "recall: 0.8 (" not in text
 
 
 def test_a_budget_stop_is_not_a_cli_failure() -> None:

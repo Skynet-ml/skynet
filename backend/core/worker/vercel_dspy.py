@@ -30,6 +30,7 @@ from .sandbox_protocol import (
     OUTCOME_VERDICT_PROTOCOL,
     READABLE_PROTOCOLS,
     SANDBOX_PROTOCOL,
+    SCORE_DIRECTION_PROTOCOL,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,9 @@ COMMAND_METRIC_IMAGE_MESSAGE = (
 )
 DIRECTION_IMAGE_MESSAGE = (
     "The sandbox image is older than [metric] direction support in optimize.toml; rebuild and re-pin the sandbox image."
+)
+SCORE_DIRECTION_IMAGE_MESSAGE = (
+    "The sandbox image is older than [metric.scores] support in optimize.toml; rebuild and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
@@ -256,6 +260,27 @@ def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
         raise RuntimeError(DIRECTION_IMAGE_MESSAGE)
 
 
+def _require_score_direction_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``optimize.toml`` minimizes a named score.
+
+    An image before protocol 21 ignores the snapshot's ``outcome.scores``. It
+    would judge a minimize score's ``[outcome.require]`` limit as a minimum and
+    report a wrong verdict (SKY-775).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and ``[metric.scores]`` minimizes a score.
+    """
+    if image_protocol >= SCORE_DIRECTION_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    directions = (snapshot.get("outcome") or {}).get("scores") or {}
+    if isinstance(directions, dict) and "minimize" in directions.values():
+        raise RuntimeError(SCORE_DIRECTION_IMAGE_MESSAGE)
+
+
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
     """Execute the full optimizer in the pinned backend image without provider credentials.
 
@@ -317,6 +342,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         _require_file_proposer_support(image_protocol, staged)
         _require_command_metric_support(image_protocol, guest_payload)
         _require_direction_support(image_protocol, staged)
+        _require_score_direction_support(image_protocol, staged)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip

@@ -877,6 +877,31 @@ def test_a_minimize_lane_follows_its_root_and_record_external_takes_a_raw_score(
     assert seen == [0.1]
 
 
+def _named_direction_scorer(candidate: Any, _case: Any) -> tuple[float, dict[str, Any]]:
+    """Score every version 0.5, with a raw ``cost_usd`` and ``recall`` named score."""
+    return 0.5, {"scores": {"cost_usd": _DIRECTION_SCORES[candidate], "recall": {"score": 0.9, "feedback": "ok"}}}
+
+
+def test_a_minimize_named_score_stays_raw_and_carries_its_direction() -> None:
+    """Only a [metric.scores] minimize name gets the marker; every named score keeps the metric's value (SKY-775)."""
+    root = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "minimize", "x": "maximize"})
+
+    score, side_info = root.lane(5).evaluate("low")
+
+    assert score == 0.5
+    assert side_info["scores"] == {
+        "cost_usd": {"score": 0.2, "feedback": "", "direction": "minimize"},
+        "recall": {"score": 0.9, "feedback": "ok"},
+    }
+
+
+def test_a_server_with_no_minimize_named_score_keeps_side_info_as_returned() -> None:
+    """Without a minimize name the scorer's side info passes through unchanged."""
+    server = EvalServer(_named_direction_scorer, max_evals=10, score_directions={"cost_usd": "maximize"})
+
+    assert server.evaluate("low")[1]["scores"] == {"cost_usd": 0.2, "recall": {"score": 0.9, "feedback": "ok"}}
+
+
 def test_a_maximize_server_keeps_raw_scores() -> None:
     """The default direction leaves every score as the metric gave it."""
     server = EvalServer(_direction_scorer, max_evals=10)

@@ -2948,7 +2948,7 @@ def test_an_engine_outcome_never_passes_for_the_verdict(
     verdict: dict[str, Any] | None,
 ) -> None:
     """The engine metadata comes from the guest, so its ``outcome`` is dropped and only Skynet's verdict stays."""
-    forged = {"target": 0.9, "target_reached": True, "minimums_passed": True, "failed_minimums": []}
+    forged = {"target": 0.9, "target_reached": True, "requirements_passed": True, "failed_requirements": []}
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -2979,7 +2979,7 @@ def test_minimums_pass_when_each_named_score_reaches_its_minimum(
     """A named score's held-out mean at or above its minimum passes, and a run with no target stores no target."""
     response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": _held_out_mean()}})
 
-    assert response.details["outcome"] == {"minimums_passed": True, "failed_minimums": []}
+    assert response.details["outcome"] == {"requirements_passed": True, "failed_requirements": []}
 
 
 def test_a_named_score_below_its_minimum_fails_with_its_value(
@@ -2989,10 +2989,10 @@ def test_a_named_score_below_its_minimum_fails_with_its_value(
     response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": 0.99}})
 
     outcome = response.details["outcome"]
-    assert outcome["minimums_passed"] is False
-    [failed] = outcome["failed_minimums"]
+    assert outcome["requirements_passed"] is False
+    [failed] = outcome["failed_requirements"]
     assert failed["name"] == "accuracy"
-    assert failed["minimum"] == 0.99
+    assert failed["limit"] == 0.99
     assert failed["value"] == pytest.approx(_held_out_mean())
     assert failed["value"] == pytest.approx(response.best_named_scores["accuracy"].score)
     assert "'accuracy'" in failed["reason"]
@@ -3006,11 +3006,12 @@ def test_a_minimum_for_a_score_the_metric_does_not_return_fails(
     response = _outcome_run(monkeypatch, tmp_path, {"target": None, "require": {"accuracy": 0.0, "latency": 0.5}})
 
     assert response.details["outcome"] == {
-        "minimums_passed": False,
-        "failed_minimums": [
+        "requirements_passed": False,
+        "failed_requirements": [
             {
                 "name": "latency",
-                "minimum": 0.5,
+                "direction": "maximize",
+                "limit": 0.5,
                 "value": None,
                 "reason": "The metric returned no score named 'latency'.",
             }
@@ -3027,8 +3028,8 @@ def test_a_run_without_cases_judges_the_winners_single_score(
     assert response.case_count == 0
     assert response.best_score == pytest.approx(0.6)
     outcome = response.details["outcome"]
-    assert (outcome["target_reached"], outcome["minimums_passed"]) == (True, False)
-    assert outcome["failed_minimums"][0]["value"] == pytest.approx(0.6)
+    assert (outcome["target_reached"], outcome["requirements_passed"]) == (True, False)
+    assert outcome["failed_requirements"][0]["value"] == pytest.approx(0.6)
 
 
 def test_a_version_with_no_final_score_reaches_no_target_and_passes_no_minimum() -> None:
@@ -3039,10 +3040,11 @@ def test_a_version_with_no_final_score_reaches_no_target_and_passes_no_minimum()
         verdict = service_mod._outcome_verdict({"target": 0.5, "require": {"accuracy": 0.5}}, best)
 
         assert verdict["target_reached"] is False
-        assert verdict["failed_minimums"] == [
+        assert verdict["failed_requirements"] == [
             {
                 "name": "accuracy",
-                "minimum": 0.5,
+                "direction": "maximize",
+                "limit": 0.5,
                 "value": None,
                 "reason": "The final run has no score, so 'accuracy' has no value.",
             }
@@ -3079,7 +3081,7 @@ def test_a_mean_equal_to_the_target_reaches_it_despite_float_rounding(value: flo
 
     verdict = service_mod._outcome_verdict({"target": value, "require": {"accuracy": value}}, run)
 
-    assert verdict == {"target": value, "target_reached": True, "minimums_passed": True, "failed_minimums": []}
+    assert verdict == {"target": value, "target_reached": True, "requirements_passed": True, "failed_requirements": []}
 
 
 def test_a_mean_below_the_target_by_a_real_margin_still_fails() -> None:
@@ -3087,17 +3089,18 @@ def test_a_mean_below_the_target_by_a_real_margin_still_fails() -> None:
     verdict = service_mod._outcome_verdict({"target": 0.7, "require": {"accuracy": 0.7}}, _constant_run(0.69, 3))
 
     assert verdict["target_reached"] is False
-    assert verdict["minimums_passed"] is False
+    assert verdict["requirements_passed"] is False
 
 
 def test_the_reason_of_a_near_miss_shows_the_gap_to_the_minimum() -> None:
     """A mean just below the minimum must not print as the minimum itself."""
     verdict = service_mod._outcome_verdict({"target": None, "require": {"accuracy": 0.9}}, _constant_run(0.8996, 1))
 
-    assert verdict["failed_minimums"] == [
+    assert verdict["failed_requirements"] == [
         {
             "name": "accuracy",
-            "minimum": 0.9,
+            "direction": "maximize",
+            "limit": 0.9,
             "value": 0.8996,
             "reason": "'accuracy' scored 0.8996, below its minimum 0.9.",
         }
@@ -3129,8 +3132,8 @@ def test_a_named_score_that_is_not_a_finite_number_fails_its_minimum(value: floa
 
     outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
 
-    assert outcome["minimums_passed"] is False
-    [failed] = outcome["failed_minimums"]
+    assert outcome["requirements_passed"] is False
+    [failed] = outcome["failed_requirements"]
     assert failed["value"] is None
     assert failed["reason"] == "The metric returned a value for 'latency' that is not a finite number."
     json.dumps(outcome, allow_nan=False)
@@ -3158,10 +3161,11 @@ def test_a_named_score_returned_on_only_some_cases_fails_its_minimum() -> None:
     outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
 
     assert run.named["latency"].score == 1.0
-    assert outcome["failed_minimums"] == [
+    assert outcome["failed_requirements"] == [
         {
             "name": "latency",
-            "minimum": 0.9,
+            "direction": "maximize",
+            "limit": 0.9,
             "value": 1.0,
             "reason": "The metric returned 'latency' on only 1 of 3 cases.",
         }
@@ -3175,8 +3179,8 @@ def test_a_crashed_repository_run_counts_as_a_case_without_the_name() -> None:
 
     outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.9}}, run)
 
-    assert outcome["minimums_passed"] is False
-    assert "2 of 3" in outcome["failed_minimums"][0]["reason"]
+    assert outcome["requirements_passed"] is False
+    assert "2 of 3" in outcome["failed_requirements"][0]["reason"]
 
 
 def test_a_case_with_an_error_and_no_named_scores_counts_against_the_name() -> None:
@@ -3185,8 +3189,8 @@ def test_a_case_with_an_error_and_no_named_scores_counts_against_the_name() -> N
 
     outcome = service_mod._outcome_verdict({"target": None, "require": {"latency": 0.4}}, run)
 
-    assert outcome["minimums_passed"] is False
-    assert "1 of 2" in outcome["failed_minimums"][0]["reason"]
+    assert outcome["requirements_passed"] is False
+    assert "1 of 2" in outcome["failed_requirements"][0]["reason"]
 
 
 def test_the_run_writes_the_case_positions_of_the_split_it_made(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
@@ -3418,8 +3422,67 @@ def test_a_minimize_target_is_reached_at_or_below_it(direction: str, score: floa
     verdict = service_mod._outcome_verdict({"target": 0.3, "require": {"accuracy": 0.305}, "direction": direction}, run)
 
     assert verdict["target_reached"] is reached
-    # Named minimums never follow the direction: only a score at or above 0.305 passes.
-    assert verdict["minimums_passed"] is (score >= 0.305)
+    # A named score with no [metric.scores] line maximizes, also in a minimize run (SKY-775).
+    assert verdict["requirements_passed"] is (score >= 0.305)
+
+
+_EXAMPLE_RULES = {
+    "target": None,
+    "require": {"recall": 0.8, "cost_usd": 0.05},
+    "direction": "maximize",
+    "scores": {"cost_usd": "minimize"},
+}
+
+
+@pytest.mark.parametrize(
+    ("recall", "cost", "failed"),
+    [
+        (0.8, 0.05, []),
+        (0.79, 0.05, ["recall"]),
+        (0.8, 0.06, ["cost_usd"]),
+        (0.79, 0.06, ["recall", "cost_usd"]),
+    ],
+)
+def test_each_limit_follows_its_scores_direction(recall: float, cost: float, failed: list[str]) -> None:
+    """``recall`` (no line: maximize) needs at least 0.8; ``cost_usd`` (minimize) needs at most 0.05 (SKY-775)."""
+    run = _named_run([{"scores": {"recall": recall, "cost_usd": {"score": cost, "feedback": ""}}}])
+
+    verdict = service_mod._outcome_verdict(_EXAMPLE_RULES, run)
+
+    assert verdict["requirements_passed"] is not failed
+    assert [entry["name"] for entry in verdict["failed_requirements"]] == failed
+
+
+def test_a_failed_maximum_names_its_direction_limit_and_raw_value() -> None:
+    """A minimize score's failed entry says it is above its maximum and keeps the metric's own value (SKY-775)."""
+    run = _named_run([{"scores": {"recall": 0.9, "cost_usd": 0.06}}])
+
+    verdict = service_mod._outcome_verdict(_EXAMPLE_RULES, run)
+
+    assert verdict == {
+        "requirements_passed": False,
+        "failed_requirements": [
+            {
+                "name": "cost_usd",
+                "direction": "minimize",
+                "limit": 0.05,
+                "value": 0.06,
+                "reason": "'cost_usd' scored 0.06, above its maximum 0.05.",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(("recall", "passed"), [(0.8, True), (0.81, True), (0.79, False)])
+def test_a_minimize_main_score_leaves_an_unlisted_named_score_maximized(recall: float, passed: bool) -> None:
+    """With ``[metric] direction = "minimize"``, a name with no [metric.scores] line still needs at least its limit."""
+    run = _named_run([{"scores": {"recall": recall}}])
+    rules = {"target": None, "require": {"recall": 0.8}, "direction": "minimize", "scores": {}}
+
+    verdict = service_mod._outcome_verdict(rules, run)
+
+    assert verdict["requirements_passed"] is passed
+    assert all(entry["direction"] == "maximize" for entry in verdict["failed_requirements"])
 
 
 def test_a_minimize_run_shows_raw_scores_in_engine_payloads() -> None:

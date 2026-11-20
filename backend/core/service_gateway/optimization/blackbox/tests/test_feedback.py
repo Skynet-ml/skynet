@@ -41,6 +41,24 @@ def test_named_scores_render_one_line_each_with_their_feedback() -> None:
     assert shaped[feedback.SCORE_FEEDBACK_KEY] == {"accuracy": "half wrong", "tone": "warm"}
 
 
+def test_a_minimize_named_score_says_lower_is_better_and_reaches_gepa_negated() -> None:
+    """The text shows the raw value with its direction; GEPA's frontier gets it negated, and the name listed (SKY-775)."""
+    side_info = {
+        "scores": {
+            "cost_usd": {"score": 0.06, "feedback": "pricey", "direction": "minimize"},
+            "recall": {"score": 0.8, "feedback": ""},
+        }
+    }
+
+    assert scorer_feedback_text(side_info) == "cost_usd: 0.06 (lower is better) — pricey\nrecall: 0.8"
+    assert feedback.named_scores(side_info)["cost_usd"]["direction"] == "minimize"
+    assert "direction" not in feedback.named_scores(side_info)["recall"]
+    shaped = feedback.gepa_side_info(side_info)
+    assert shaped["scores"] == {"cost_usd": -0.06, "recall": 0.8}
+    assert shaped[feedback.LOWER_IS_BETTER_KEY] == ["cost_usd"]
+    assert feedback.LOWER_IS_BETTER_KEY not in feedback.gepa_side_info({"scores": {"recall": 0.8}})
+
+
 def test_images_and_empty_values_are_dropped() -> None:
     """Inline renders, ``None`` and empty containers never reach the feedback text."""
     side_info = {"render": PNG, "frames": [PNG, PNG], "feedback": "ok", "missing": None, "extra": {}}
