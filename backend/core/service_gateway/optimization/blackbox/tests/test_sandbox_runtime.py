@@ -270,9 +270,10 @@ def test_only_a_contained_metric_box_runs_its_commands_in_the_pid_namespace(monk
 def _require_user_namespaces() -> None:
     """Skip the test when this host refuses unprivileged user namespaces, unless ``SKY_REQUIRE_USERNS=1``.
 
-    No CI job sets the variable yet. Set it on a Linux host that must run
-    these tests, so a seccomp profile that blocks the namespaces fails the
-    test there instead of skipping it (SKY-885).
+    The ``skynet-ci/backend-gates`` Dagger check sets the variable (SKY-886).
+    Set it on a Linux host that must run these tests, so a seccomp profile
+    that blocks the namespaces fails the test there instead of skipping it
+    (SKY-885).
     """
     try:
         sandbox_runtime._require_pid_namespace()

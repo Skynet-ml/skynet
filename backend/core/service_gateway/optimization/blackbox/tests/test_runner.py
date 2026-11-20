@@ -3151,10 +3151,7 @@ _UMOUNT_PROC = (
 )
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux") and os.environ.get("SKY_REQUIRE_USERNS") != "1",
-    reason="/proc and PID namespaces are Linux only",
-)
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PID namespaces are Linux only")
 @pytest.mark.parametrize("mode", ["blocked", "open"])
 def test_a_contained_metric_cannot_read_a_command_stage_or_a_proposer_model_key(tmp_path: Path, mode: str) -> None:
     """A command metric scans ``/proc/*/environ`` while a command stage and a proposer run in its contained session.

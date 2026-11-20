@@ -40,6 +40,7 @@ class FakeSession:
         self.root_commands: list[str] = []
         self.readback = _CODEX_REQUIREMENTS_READBACK
         self.root_exit = 0
+        self.root_error: Exception | None = None
 
     def write_files(self, files: dict[str, str]) -> None:
         """Store guest files without writing on the host."""
@@ -53,6 +54,8 @@ class FakeSession:
         """Emit deterministic output through the broker's output sink, and answer a root command with a read-back."""
         if kwargs.get("sudo"):
             self.root_commands.append(command)
+            if self.root_error is not None:
+                raise self.root_error
             return CommandResult(exit_code=self.root_exit, stdout=self.readback)
         if kwargs.get("on_output"):
             kwargs["on_output"]("stdout", command)
@@ -504,6 +507,22 @@ def test_a_failed_proc_covers_command_only_logs(caplog: pytest.LogCaptureFixture
     with caplog.at_level(logging.WARNING):
         assert broker.handle("proc_covers", opened) == {}
     assert "covers stay mounted" in caplog.text
+
+
+def test_a_raised_proc_covers_command_only_logs(caplog: pytest.LogCaptureFixture) -> None:
+    """A provider error in the unmount logs only its type and does not fail the run (SKY-885).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    runtime.sessions[0].root_error = RuntimeError("secret-request-detail")
+    with caplog.at_level(logging.WARNING):
+        assert broker.handle("proc_covers", opened) == {}
+    assert "covers stay mounted (RuntimeError)" in caplog.text
+    assert "secret-request-detail" not in caplog.text
 
 
 def test_the_remote_proc_covers_request_names_only_its_box() -> None:

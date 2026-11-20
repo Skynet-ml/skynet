@@ -33,9 +33,11 @@ logger = logging.getLogger(__name__)
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 # Vercel bind-mounts /dev/null over these two /proc files, so the kernel refuses the new /proc that a contained
 # metric box mounts in its own PID namespace (SKY-885). The fixed paths and the device check keep this root
-# command from unmounting anything else, and a path with no cover stays as it is.
+# command from unmounting anything else, and a path with no cover stays as it is. The last check fails when a
+# cover is still a device, so a wrong ``mountpoint`` answer cannot hide a cover that stays.
 PROC_COVERS_COMMAND = (
     'for p in /proc/kcore /proc/keys; do if [ -c "$p" ] && mountpoint -q "$p"; then umount "$p" || exit 1; fi; done'
+    '; for p in /proc/kcore /proc/keys; do [ ! -c "$p" ] || exit 1; done'
 )
 
 
@@ -143,7 +145,15 @@ def _unmount_proc_covers(session: SandboxSession) -> None:
     Args:
         session: The owned box; the command runs in it as root.
     """
-    result = session.run(PROC_COVERS_COMMAND, timeout_seconds=60, sudo=True)
+    try:
+        result = session.run(PROC_COVERS_COMMAND, timeout_seconds=60, sudo=True)
+    except Exception as error:
+        # Only the type name, because a provider error can carry request details.
+        logger.warning(
+            "The /proc covers stay mounted (%s), so a contained metric box in this sandbox does not open.",
+            type(error).__name__,
+        )
+        return
     if not result.ok or result.timed_out:
         logger.warning(
             "The /proc covers stay mounted (exit %s), so a contained metric box in this sandbox does not open.",

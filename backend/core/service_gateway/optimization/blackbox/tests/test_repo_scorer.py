@@ -1582,6 +1582,64 @@ def test_no_shell_stays_alive_above_a_command_stage_runner(tmp_path: Path, monke
     assert parent.read_text().strip() == str(os.getpid())
 
 
+def test_no_shell_stays_alive_above_a_python_stage_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box shell ``exec``s a Python-entry stage's runner too, so no shell keeps the stage's environment (SKY-885).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    parents = tmp_path / "runner-parents"
+    python = tmp_path / "bin" / "python3"
+    python.parent.mkdir()
+    python.write_text(
+        f'#!/bin/sh\necho "$PPID $*" >> {shlex.quote(str(parents))}\nexec {shlex.quote(sys.executable)} "$@"\n'
+    )
+    python.chmod(0o755)
+    # A local box puts the folder of ``sys.executable`` first on PATH, so the stage's ``python3`` is this wrapper.
+    monkeypatch.setattr(sys, "executable", str(python))
+    runtime = RecordingRuntime()
+    open_box = runtime.open
+
+    def open_with_a_trailing_command(spec: SandboxSpec) -> SandboxSession:
+        """Open a box whose shell has one more command after the stage's, so bash cannot ``exec`` the last one itself.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session.
+        """
+        session = open_box(spec)
+        run = session.run
+
+        def run_then_exit(command: str, **kwargs: Any) -> Any:
+            """Run the command with a trailing ``exit``.
+
+            Args:
+                command: The box command.
+                **kwargs: The run options.
+
+            Returns:
+                The command's result.
+            """
+            return run(f"{command}\nexit $?", **kwargs)
+
+        session.run = run_then_exit  # type: ignore[method-assign]
+        return session
+
+    runtime.open = open_with_a_trailing_command  # type: ignore[method-assign]
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': call('double', {'v': 1})['v'] / 10, 'feedback': 'ok'}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        assert scorer.score("")["score"] == 0.2
+    finally:
+        scorer.close()
+    [stage_parent] = [line.split()[0] for line in parents.read_text().splitlines() if f" {runner.STAGE_FLAG} " in line]
+    # A shell left alive between them would be the runner's parent instead of this test process.
+    assert stage_parent == str(os.getpid())
+
+
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
 

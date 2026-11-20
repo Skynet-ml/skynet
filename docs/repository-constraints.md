@@ -803,9 +803,9 @@ falls back to a shared `/proc`. Vercel covers `/proc/kcore` and
 `/proc/keys` with `/dev/null`, and the kernel then refuses the new `/proc`.
 So before the guest starts, the parent runs one fixed root command that
 unmounts only those two covers. If it fails, the parent logs a warning,
-and the check still stops the metric box. The shell that starts a stage's runner `exec`s the
-runner, so no shell stays alive with the stage's environment. Some risks
-stay:
+and the check still stops the metric box. The shell that starts a stage's
+runner `exec`s the runner, so no shell stays alive with the stage's
+environment. Some risks stay:
 
 - A metric can read files in a proposer's workspace that hold the key.
 - A stage can call the metric's helper port.
