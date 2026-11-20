@@ -1493,6 +1493,46 @@ def test_a_command_output_file_is_capped(tmp_path: Path) -> None:
     assert f"larger than {runner.MAX_RUN_STDOUT_BYTES} bytes" in ran["error"]
 
 
+@_needs_openascent
+def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Path) -> None:
+    """An output file just under the package limit still passes after the child writes it again (SKY-757).
+
+    ``1e15`` grows the most when it is written again, so the supervisor's cap must allow for it.
+    """
+    count = (runner.MAX_RUN_STDOUT_BYTES - 100) // 5
+    script = (
+        "import os\n"
+        f"open(os.environ['ASCENT_OUTPUT'], 'w').write('{{\"output\": [' + ','.join(['1e15'] * {count}) + ']}}')\n"
+    )
+    ran = _candidate(tmp_path, [sys.executable, "-c", script])
+    assert ran["error"] is None
+    assert len(ran["output"]) == count
+
+
+def test_the_supervisor_refuses_a_command_answer_over_its_cap(tmp_path: Path) -> None:
+    """A huge answer file in place of the child's own fails the call, and the supervisor reads no more than the cap."""
+    path = tmp_path / runner.OUTPUT_FILE
+    path.write_bytes(b'{"output": "' + b"x" * 200 + b'"}')
+    assert runner._read_answer(path, None, 100) == {"error": "The command's answer file is larger than 100 bytes."}
+    assert runner._read_answer(path, None, 300) == {"output": "x" * 200}
+    assert runner._read_answer(path, None) == {"output": "x" * 200}
+
+
+_DETACHED_CHILD = (
+    "import json, os, subprocess\n"
+    "subprocess.Popen(['sleep', '30'], start_new_session=True)\n"
+    "json.dump({'output': 7}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
+)
+
+
+@_needs_openascent
+def test_a_command_entry_does_not_wait_for_a_child_in_its_own_session(tmp_path: Path) -> None:
+    """A child that the command starts in a new session neither holds the result nor counts in the run time (SKY-757)."""
+    ran = _candidate(tmp_path, [sys.executable, "-c", _DETACHED_CHILD])
+    assert ran.pop(runner.ELAPSED_PARAM) < 5
+    assert ran == {"output": 7, "error": None}
+
+
 @pytest.mark.parametrize(
     ("entry", "error"),
     [

@@ -395,9 +395,9 @@ A nonzero exit code, a missing output file, an output that is not valid JSON
 or has another form, a time limit or an output file larger than the limit
 fails the call. For a `[run] entry`, the case then gets no score, and the
 metric does not run (SKY-751). For a stage, the metric's `openascent.call`
-gets the failure as an error. Each call gets a new output path, so a file from an earlier call
-is never read again. A function entry is not changed: it gets the input as
-its argument, and its return value is the output.
+gets the failure as an error. Each call gets a new output path, so a file
+from an earlier call is never read again. A function entry is not changed:
+it gets the input as its argument, and its return value is the output.
 
 A tool that exits with a nonzero code for a normal result, such as `pytest`
 when some tests fail, needs a wrapper line. The wrapper line writes the exit
@@ -761,7 +761,9 @@ supervisor also starts without site-packages (`-I -S`), and Skynet writes the
 runner again before each case. The supervisor starts a function entry with
 `python3` from `PATH`, so the entry gets the packages that `[setup]`
 installed. The entry is candidate code, so its interpreter does not need
-trust; the clock stays in the supervisor. The shell that starts the
+trust; the clock stays in the supervisor. A command entry's own process
+loads OpenAscent, so it starts with the supervisor's interpreter. The
+command itself still finds `python3` on `PATH`. The shell that starts the
 supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
 for its exit code. These steps make the supervisor harder to change. They
 do not replace the separate boxes; see the residual risk below. Skynet

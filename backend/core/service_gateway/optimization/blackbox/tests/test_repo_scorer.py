@@ -1417,6 +1417,30 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
         assert "[secret]" in text
 
 
+def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_masked(tmp_path: Path) -> None:
+    """A command stage that echoes a secret to stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"echo 'leaked {secret}' >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "leaked [secret]" in feedback
+    assert secret not in feedback
+
+
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
 

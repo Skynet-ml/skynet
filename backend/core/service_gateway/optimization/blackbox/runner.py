@@ -170,6 +170,13 @@ MAX_RUN_STDOUT_BYTES = 1024 * 1024
 # A command entry's own process gets this much time after the command's time
 # limit, so that ``call_run`` stops the command and reports the limit itself.
 _COMMAND_STOP_SECONDS = 10.0
+# The largest ``output.json`` the supervisor reads from a command entry's
+# process. That process writes the checked output again with ``json.dumps``,
+# which can make it up to about 3.8 times larger than the command's own file
+# (``1e15`` becomes ``1000000000000000.0``, and a non-ASCII letter becomes a
+# six-character escape). The cap stops a process that left the entry's
+# session from making the supervisor read a huge file in its place (SKY-757).
+_COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
 # The metric input key that names the folder the metric setup step installed
@@ -1815,15 +1822,16 @@ def _block_privilege_gain() -> None:
         raise EntryUserError("The supervisor cannot set no_new_privs, so it does not start the [run] entry.")
 
 
-def _read_answer(path: Path, user: Any) -> dict[str, Any]:
-    """Read a function entry's ``output.json`` without following a link the entry left.
+def _read_answer(path: Path, user: Any, limit: int | None = None) -> dict[str, Any]:
+    """Read an entry's ``output.json`` without following a link the entry left.
 
     Args:
         path: The answer file.
         user: The entry's uid, or ``None`` when it runs as the supervisor's user.
+        limit: The largest file in bytes, or ``None`` for no limit.
 
     Returns:
-        The answer document.
+        The answer document, or ``{"error"}`` when the file is over ``limit``.
 
     Raises:
         OSError: When the file is missing, a link, not a file, or not the entry's own.
@@ -1834,7 +1842,10 @@ def _read_answer(path: Path, user: Any) -> dict[str, Any]:
         # A root supervisor must not pass on a root file that the entry hard-linked here.
         if not stat.S_ISREG(info.st_mode) or (user is not None and info.st_uid != user):
             raise OSError(f"{path} is not the entry's own file")
-        answer = json.loads(handle.read().decode("utf-8"))
+        data = handle.read() if limit is None else handle.read(limit + 1)
+        if limit is not None and len(data) > limit:
+            return {"error": f"The command's answer file is larger than {limit} bytes."}
+        answer = json.loads(data.decode("utf-8"))
     return answer if isinstance(answer, dict) else {}
 
 
@@ -1909,17 +1920,24 @@ def _run_entry(
         if user is not None:
             os.chown(run_dir, user, switch["group"])
             os.chown(run_dir / INPUT_FILE, user, switch["group"])
-        # The supervisor runs on the base interpreter without site-packages;
-        # the entry is candidate code and needs the box's python3 from PATH,
-        # where [setup] installed its packages (SKY-642).
-        python = shutil.which("python3", path=env.get("PATH")) or sys.executable
-        argv = [python, str(Path(__file__).resolve())]
         if isinstance(entry, str):
-            argv += [RUN_FLAG, str(run_dir), entry]
+            # The supervisor runs on the base interpreter without site-packages;
+            # the entry is candidate code and needs the box's python3 from PATH,
+            # where [setup] installed its packages (SKY-642).
+            python = shutil.which("python3", path=env.get("PATH")) or sys.executable
+            argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            limit = None
         else:
-            argv += [RUN_COMMAND_FLAG, str(run_dir), str(package or ""), f"{timeout:g}"]
-            argv += [str(part) for part in entry]
+            # The command's own process needs only the standard library and the
+            # copied OpenAscent package, which a python3 from PATH may be too old
+            # to load. The supervisor's interpreter is the image's root-owned,
+            # world-executable base python3 (or the PATH one where the image has
+            # none), so the entry's user can run it and cannot replace it. The
+            # command still finds python3 on PATH (SKY-757).
+            argv = [sys.executable, str(Path(__file__).resolve()), RUN_COMMAND_FLAG, str(run_dir)]
+            argv += [str(package or ""), f"{timeout:g}", *(str(part) for part in entry)]
             wait = timeout + _COMMAND_STOP_SECONDS
+            limit = _COMMAND_ANSWER_BYTES
         # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
         started = time.monotonic()
         # Its prints go to stderr: the parent reads relay frames on stdout.
@@ -1942,7 +1960,7 @@ def _run_entry(
         result["error"] = f"killed by signal {_signal_name(-code)}"
     else:
         try:
-            answer = _read_answer(run_dir / OUTPUT_FILE, user)
+            answer = _read_answer(run_dir / OUTPUT_FILE, user, limit)
         except (OSError, ValueError):
             answer = {"error": f"exited with code {code} before it returned"}
         if "output" in answer:
@@ -2068,7 +2086,8 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             max_output_bytes=MAX_RUN_STDOUT_BYTES,
         )
         sys.stderr.write(call.stdout + call.stderr)
-        text = json.dumps({"output": call.output}, allow_nan=False)
+        # Compact, so the supervisor's answer cap holds for any output under the package limit.
+        text = json.dumps({"output": call.output}, allow_nan=False, separators=(",", ":"))
     except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
         if ascent is not None and isinstance(exc, ascent.AscentError):
             error = str(exc)
