@@ -28,10 +28,11 @@ import openai
 import openascent
 import pytest
 
+from core.exceptions import ServiceError
 from core.sandbox.providers import vercel
 from core.worker.sandbox_protocol import SANDBOX_PROTOCOL
 
-from .. import runner
+from .. import runner, sandbox_runtime
 from ..repo_constraints import McpServer, RoleEnvironment
 from ..repo_services import box_mcp_config
 from ..runner import (
@@ -2787,7 +2788,7 @@ _PROC_SCAN = (
     "for p in /proc/[0-9]*; do\n"
     '  if text=$(tr "\\0" "\\n" < "$p/environ" 2>/dev/null); then\n'
     '    echo "${p#/proc/}" >> readable\n'
-    '    for secret in "sk-scan" "http://relay.invalid/v1" "relay-token-scan"; do\n'
+    '    for secret in "sk-scan" "sk-proposer-scan" "http://relay.invalid/v1" "relay-token-scan"; do\n'
     '      case "$text" in *"$secret"*) echo "${p#/proc/} $secret" >> found ;; esac\n'
     "    done\n"
     "  fi\n"
@@ -3084,6 +3085,176 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     else:
         assert found == []
         assert stage_pid not in (box / "readable").read_text().split()
+
+
+def _require_user_namespaces() -> None:
+    """Skip the test when this host refuses unprivileged user namespaces, unless ``SKY_REQUIRE_USERNS=1``.
+
+    CI sets the variable, so a seccomp profile that blocks the namespaces
+    fails the test there instead of skipping it (SKY-885).
+    """
+    try:
+        sandbox_runtime._require_pid_namespace()
+    except ServiceError:
+        if os.environ.get("SKY_REQUIRE_USERNS") == "1":
+            raise
+        pytest.skip("This host refuses unprivileged user and PID namespaces.")
+
+
+# Runs the shipped guest entry point, as ``_CONTAINED_GUEST`` does, with a job that starts a stand-in proposer child
+# with a model key, then runs a command stage call while a metric command runs, in one contained session. Argument 1
+# is the stage box command, argument 2 the metric box command, argument 3 the request file, argument 4 the file that
+# gets the proposer's process id. Argument 5 "blocked" opens the metric box as the scorer does, ``private``; "open"
+# opens it as a plain box, so the scan's control can see the other processes.
+_CONTAINED_COMMAND_STAGE_GUEST = """
+import os, runpy, subprocess, sys, threading
+from pathlib import Path
+from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox_runtime import current_sandbox_runtime
+from core.worker import subprocess_runner
+
+stage_command, metric_command, request, proposer_file, mode = sys.argv[1:6]
+
+def run(payload, artifact_id, events):
+    runtime = current_sandbox_runtime()
+    proposer = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env={**os.environ, "ASCENT_MODEL_KEY": "sk-proposer-scan"},
+    )
+    Path(proposer_file).write_text(str(proposer.pid))
+    stage_box = runtime.open(SandboxSpec(lifetime_seconds=60))
+    metric_box = runtime.open(SandboxSpec(lifetime_seconds=60, private=mode == "blocked"))
+    results = {}
+    stage_env = {"ASCENT_MODEL_KEY": "sk-scan"}
+    thread = threading.Thread(
+        target=lambda: results.update(stage=stage_box.run(stage_command, env=stage_env, timeout_seconds=60))
+    )
+    try:
+        thread.start()
+        results["metric"] = metric_box.run(metric_command, timeout_seconds=60)
+        thread.join()
+    finally:
+        stage_box.close()
+        metric_box.close()
+        proposer.kill()
+        proposer.wait()
+    events.put({
+        "type": "scored",
+        "exit_codes": [results["stage"].exit_code, results["metric"].exit_code],
+        "stderr": results["stage"].stderr[-2000:] + results["metric"].stderr[-2000:],
+    })
+
+subprocess_runner.run_service_in_subprocess = run
+sys.argv = ["isolated_runner", request]
+runpy.run_module("core.worker.isolated_runner", run_name="__main__", alter_sys=True)
+"""
+
+# A command stage that writes its process id, then waits until the metric's scan is over.
+_WAITING_COMMAND_STAGE = (
+    'echo $$ > "$READY"\n'
+    'for _ in $(seq 300); do [ -e "$DONE" ] && break; sleep 0.1; done\n'
+    'echo \'{"output": "staged"}\' > "$ASCENT_OUTPUT"\n'
+)
+
+# Tries to unmount the metric's /proc and writes 0 when the unmount worked, else the errno.
+_UMOUNT_PROC = (
+    "import ctypes, sys\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "result = libc.umount2(b'/proc', 2)\n"
+    "open(sys.argv[1], 'w').write(str(ctypes.get_errno() if result else 0))\n"
+)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") and os.environ.get("SKY_REQUIRE_USERNS") != "1",
+    reason="/proc and PID namespaces are Linux only",
+)
+@pytest.mark.parametrize("mode", ["blocked", "open"])
+def test_a_contained_metric_cannot_read_a_command_stage_or_a_proposer_model_key(tmp_path: Path, mode: str) -> None:
+    """A command metric scans ``/proc/*/environ`` while a command stage and a proposer run in its contained session.
+
+    A command stage's runner ``exec``s the stage command, which resets
+    ``PR_SET_DUMPABLE``, so the stage's environment with the model key is
+    readable by the same user. A proposer child is readable for the same
+    reason. The metric box command therefore runs in its own user, mount and
+    PID namespaces with a fresh /proc (SKY-885). ``blocked`` opens the metric
+    box as the scorer does: the scan finds no key, cannot see either process,
+    and cannot unmount its /proc. ``open`` is the control: a plain box, where
+    the scan must find both keys, so the scan works.
+
+    Args:
+        tmp_path: The test's folder.
+        mode: ``blocked`` opens the metric box ``private``; ``open`` opens it as a plain box.
+    """
+    if mode == "blocked":
+        _require_user_namespaces()
+    box = tmp_path / "box"
+    box.mkdir()
+    ready, done = tmp_path / "stage-ready", tmp_path / "scan-done"
+    proposer_file, umounted = tmp_path / "proposer-pid", tmp_path / "umount-errno"
+    python = shlex.quote(sys.executable)
+    wait = f"for _ in $(seq 300); do [ -s {shlex.quote(str(ready))} ] && break; sleep 0.1; done\n"
+    umount = f"{python} -I -c {shlex.quote(_UMOUNT_PROC)} {shlex.quote(str(umounted))}\n"
+    listing = "ls /proc > listed\n"
+    (box / "metric.sh").write_text(wait + umount + listing + _PROC_SCAN + f"touch {shlex.quote(str(done))}\n")
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    payload = {
+        "candidate": str(box),
+        "case": {"input": "q"},
+        "output": "a",
+        "gateway": {"url": "http://127.0.0.1:9/v1", "model": "judge-model"},
+        runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
+        runner.METRIC_TIMEOUT_PARAM: 40,
+        runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
+    }
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "stage.sh").write_text(_WAITING_COMMAND_STAGE)
+    stage_call = tmp_path / "stage-calls" / "one"
+    stage_call.mkdir(parents=True)
+    (stage_call / runner.INPUT_FILE).write_text("null")
+    request = tmp_path / "request.json"
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    request.write_text(
+        json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
+    )
+    stage = f"cd {shlex.quote(str(tree))} && exec {python} {shlex.quote(runner.__file__)} {runner.STAGE_COMMAND_FLAG}"
+    stage += f" {shlex.quote(str(stage_call))} {shlex.quote(_PACKAGE)} 40 bash stage.sh"
+    stage = f"export READY={shlex.quote(str(ready))} DONE={shlex.quote(str(done))}; {stage}"
+    metric = f"cd {shlex.quote(str(box))} && exec {python} -I -B -u"
+    metric += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
+    backend = Path(__file__).resolve().parents[5]
+    start = f"PYTHONPATH={shlex.quote(str(backend))} {python} -c {shlex.quote(_CONTAINED_COMMAND_STAGE_GUEST)}"
+    start += f" {shlex.quote(stage)} {shlex.quote(metric)} {shlex.quote(str(request))}"
+    start += f" {shlex.quote(str(proposer_file))} {mode}"
+    relay = "http://relay.invalid/v1"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
+    env.update({"APP_BUDGET_RELAY_URL": relay, "OPENAI_BASE_URL": relay, "ASCENT_MODEL_URL": relay})
+    process = subprocess.Popen(
+        ["bash", *vercel.SHELL_FLAGS, start], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    stdout, stderr = process.communicate(timeout=120)
+    events = [json.loads(line.split(" ", 2)[2]) for line in stdout.splitlines() if line.startswith("SKYNET_JOB_EVENT ")]
+
+    assert process.returncode == 0, stderr
+    assert [event["exit_codes"] for event in events if event["type"] == "scored"] == [[0, 0]], events
+    assert json.loads((stage_call / runner.OUTPUT_FILE).read_text()) == {"output": "staged"}
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
+    stage_pid, proposer_pid = ready.read_text().strip(), proposer_file.read_text().strip()
+    found = (box / "found").read_text().splitlines()
+    listed = (box / "listed").read_text().split()
+    if mode == "open":
+        assert f"{stage_pid} sk-scan" in found
+        assert f"{proposer_pid} sk-proposer-scan" in found
+    else:
+        assert found == []
+        # Not only unreadable: the processes do not exist in the metric's /proc.
+        assert stage_pid not in listed
+        assert proposer_pid not in listed
+        assert str(process.pid) not in listed
+        assert umounted.read_text() != "0"
 
 
 # Runs the shipped guest entry point, as ``_CONTAINED_GUEST`` does, with a job that starts a child with a copy of

@@ -788,9 +788,24 @@ its environment. So no command of a contained session gets the token, and
 no child that copies the guest's environment gets it either (a proposer,
 `git apply`, a served program). Only the guest's own ReAct tools use the
 token. A command stage or a proposer still has the mailbox address in its
-environment, and so does the shell that starts a command stage's runner,
-because they reach models through it. Hiding the address is defense in
-depth: the command can also find the mailbox port in `/proc/net/tcp`.
+environment, and a stage can have `ASCENT_MODEL_KEY` too, because they
+reach models through them. The runner cannot block reads of a command that
+it starts, because the kernel resets the flag at `execve`. So in a
+contained session, each metric box command runs in its own user, mount and
+PID namespaces, with a new `/proc` (SKY-885). The metric command then sees
+only its own processes. It cannot read the environment of a stage, a
+proposer or the guest. The namespace maps the guest's user to itself, not
+to root, so the command cannot unmount its `/proc`. When the session opens
+a metric box, it first checks that the sandbox allows these namespaces. If
+the check fails, the metric box does not open; the run never falls back to
+a shared `/proc`. The shell that starts a stage's runner `exec`s the
+runner, so no shell stays alive with the stage's environment. Some risks
+stay:
+
+- A metric can read files in a proposer's workspace that hold the key.
+- A stage can call the metric's helper port.
+- The mailbox port is still in `/proc/net/tcp`, because the namespaces do
+  not separate the network.
 
 A Python metric gets none of these variables, because it imports the helpers.
 

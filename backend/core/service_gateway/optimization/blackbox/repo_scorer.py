@@ -2128,7 +2128,9 @@ class _StageRelay:
         box.write_files(files)
         relative = f"../calls/{identity}"
         runner_file = f"../{RUNNER_PATH.rsplit('/', 1)[1]}"
-        stage_runner = f"python3 {runner_file}"
+        # ``exec`` replaces the shell with the runner, so no shell stays alive
+        # with the stage's model key and mailbox address in its environment (SKY-885).
+        stage_runner = f"exec python3 {runner_file}"
         if isinstance(stage.entry, str):
             command = f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_FLAG} {relative} {shlex.quote(stage.entry)}"
         else:
@@ -2139,7 +2141,7 @@ class _StageRelay:
             # as a [run] command does. The command still finds python3 on PATH.
             command = (
                 f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
-                f'; cd {_STAGE_TREE} && "$p" {runner_file} {runner.STAGE_COMMAND_FLAG} {relative} ../openascent'
+                f'; cd {_STAGE_TREE} && exec "$p" {runner_file} {runner.STAGE_COMMAND_FLAG} {relative} ../openascent'
                 f" {stage.timeout * _COMMAND_TIME_SHARE:g} {shlex.join(stage.entry)}"
             )
         sink = functools.partial(relay.output, source=identity) if relay is not None else sandbox_log.ignore_output

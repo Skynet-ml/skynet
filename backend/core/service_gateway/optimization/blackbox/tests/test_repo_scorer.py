@@ -1559,6 +1559,30 @@ def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatc
     assert marker.exists()
 
 
+def test_no_shell_stays_alive_above_a_command_stage_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box shell ``exec``s the command stage's runner, so no shell keeps the stage's environment (SKY-885).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    parent = tmp_path / "runner-parent"
+    base = tmp_path / "base" / "python3"
+    base.parent.mkdir()
+    base.write_text(
+        f'#!/bin/sh\nps -o comm= -p $PPID > {shlex.quote(str(parent))}\nexec {shlex.quote(sys.executable)} "$@"\n'
+    )
+    base.chmod(0o755)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"shout": STAGES["shout"]})
+    try:
+        assert scorer.score("")["feedback"] == "HI"
+    finally:
+        scorer.close()
+    assert "bash" not in parent.read_text()
+
+
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
 

@@ -125,6 +125,29 @@ def sandbox_runtime_context(runtime: SandboxRuntime) -> Iterator[SandboxRuntime]
 # later box command: the reset, the metric install and the metric step (E38).
 _SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 
+# Every box of a contained session runs as the guest's user, so a metric could
+# read a command stage's or a proposer's model key and mailbox address from
+# /proc/<pid>/environ: PR_SET_DUMPABLE resets at execve, so the runner cannot
+# guard a user command it starts. A metric box's commands therefore run in
+# their own user, mount and PID namespaces with a fresh /proc, where only
+# their own processes exist (SKY-885). No ``-r``: root in the namespace could
+# unmount that /proc and see the real one again.
+_PID_NAMESPACE = (
+    "/usr/bin/unshare",
+    "--user",
+    "--map-current-user",
+    "--mount",
+    "--pid",
+    "--fork",
+    "--mount-proc",
+    "--kill-child",
+    "--",
+)
+# Proves that the command runs as PID 1 of a new namespace, not only that unshare exits 0.
+_PID_NAMESPACE_PROBE = ("/bin/sh", "-c", 'test "$$" = 1')
+_PID_NAMESPACE_PROBE_SECONDS = 30
+_pid_namespace_ready = False
+
 
 def _contained_environment(environment: Mapping[str, str], relay: str) -> dict[str, str]:
     """Route every supported model protocol to the outer sandbox mailbox.
@@ -142,6 +165,43 @@ def _contained_environment(environment: Mapping[str, str], relay: str) -> dict[s
     for name in _RELAY_ENDPOINT_ENVS:
         result[name] = relay
     return with_legacy_env(result)
+
+
+def _require_pid_namespace() -> None:
+    """Check once that a metric box command can run in its own PID namespace.
+
+    Only a success is remembered, so a later open probes again after a failure.
+
+    Raises:
+        ServiceError: When the sandbox refuses unprivileged user or PID
+            namespaces; the session never falls back to a shared /proc.
+    """
+    global _pid_namespace_ready
+    if _pid_namespace_ready:
+        return
+    try:
+        probe = subprocess.run(
+            [*_PID_NAMESPACE, *_PID_NAMESPACE_PROBE],
+            env={"PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_PID_NAMESPACE_PROBE_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        logger.warning("The PID namespace probe did not run: %s", type(error).__name__)
+        ok = False
+    else:
+        ok = probe.returncode == 0
+        if not ok:
+            logger.warning("The PID namespace probe failed (exit %s): %s", probe.returncode, probe.stderr[-500:])
+    if not ok:
+        raise ServiceError(
+            "A contained metric box needs its own user and PID namespaces, and this sandbox refuses them,"
+            " so the metric box does not open."
+        )
+    _pid_namespace_ready = True
 
 
 def _private_root() -> Path:
@@ -168,7 +228,7 @@ class LocalSubprocessSession:
     environment; the directory is removed on :meth:`close`.
     """
 
-    def __init__(self, spec: SandboxSpec, *, protected_relay: str | None = None) -> None:
+    def __init__(self, spec: SandboxSpec, *, protected_relay: str | None = None, pid_namespace: bool = False) -> None:
         """Create the working directory and the environment commands inherit.
 
         Args:
@@ -176,12 +236,15 @@ class LocalSubprocessSession:
                 because per-command timeouts already bound local work. A
                 ``private`` spec opens under the private root.
             protected_relay: Outer sandbox mailbox forced onto nested commands.
+            pid_namespace: Run each command in its own user, mount and PID
+                namespaces, so its /proc shows only its own processes.
         """
         if spec.private:
             self._dir = Path(tempfile.mkdtemp(prefix=f"{uuid.uuid4().hex}-", dir=_private_root())).resolve()
         else:
             self._dir = Path(tempfile.mkdtemp(prefix="app-sandbox-")).resolve()
         self._protected_relay = protected_relay
+        self._prefix = _PID_NAMESPACE if pid_namespace else ()
         self.log_owner = spec.tags.get(JOB_TAG)
         (self._dir / "tmp").mkdir()
         # Not .resolve(): in a venv that follows the symlink to the base
@@ -266,7 +329,7 @@ class LocalSubprocessSession:
         if self._protected_relay is not None:
             command_environment = _contained_environment(command_environment, self._protected_relay)
         process = subprocess.Popen(
-            ["bash", *_SHELL_FLAGS, command],
+            [*self._prefix, "bash", *_SHELL_FLAGS, command],
             cwd=self._dir,
             env={**self._env, **command_environment},
             stdout=subprocess.PIPE,
@@ -381,17 +444,20 @@ class ContainedSubprocessRuntime:
             A temporary subprocess session inside the current sandbox.
 
         Raises:
-            ServiceError: When the spec asks for a GPU, or the outer supervisor did not install its model mailbox.
+            ServiceError: When the spec asks for a GPU, the outer supervisor did not install its model mailbox,
+                or a ``private`` (metric) spec cannot get its own PID namespace.
         """
         _refuse_gpu(spec, "contained")
         relay = app_env(_BUDGET_RELAY_ENV)
         if not relay:
             raise ServiceError("Contained execution requires the protected model mailbox.")
+        if spec.private:
+            _require_pid_namespace()
         # No tool relay token: only the guest's own ReAct tools use it, and every
         # process of a session runs as the guest's user, so a metric command could
         # read it from another command's /proc/<pid>/environ (SKY-880).
         environment = _contained_environment(spec.env, relay)
-        return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay)
+        return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay, pid_namespace=spec.private)
 
 
 @contextlib.contextmanager

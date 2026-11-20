@@ -6,6 +6,8 @@ and every other runtime refuses a GPU spec before a box starts (SKY-804).
 """
 
 import ast
+import os
+import shlex
 import subprocess
 import sys
 from dataclasses import replace
@@ -222,6 +224,81 @@ def test_a_contained_command_gets_the_mailbox_but_no_tool_relay_token(monkeypatc
     assert result.ok
     assert f"OPENAI_BASE_URL={relay}" in result.stdout.splitlines()
     assert "tool-token" not in result.stdout
+
+
+def test_a_contained_metric_box_does_not_open_without_a_pid_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``private`` contained spec fails closed when the namespace probe fails; a plain spec still opens (SKY-885).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(sandbox_runtime, "_pid_namespace_ready", False)
+    monkeypatch.setattr(sandbox_runtime, "_PID_NAMESPACE", ("/nonexistent/unshare", "--"))
+    with pytest.raises(ServiceError, match="needs its own user and PID namespaces"):
+        sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, private=True))
+    monkeypatch.setattr(sandbox_runtime, "_PID_NAMESPACE", ("/bin/sh", "-c", "exit 1", "--"))
+    with pytest.raises(ServiceError, match="needs its own user and PID namespaces"):
+        sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, private=True))
+    assert not sandbox_runtime._pid_namespace_ready
+    sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60)).close()
+
+
+def test_only_a_contained_metric_box_runs_its_commands_in_the_pid_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``private`` contained box puts the namespace prefix before each command; other boxes do not (SKY-885).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(sandbox_runtime, "_pid_namespace_ready", True)
+    monkeypatch.setattr(sandbox_runtime, "_PID_NAMESPACE", ("env", "WRAPPED=yes"))
+    outputs = []
+    for runtime, private in (
+        (sandbox_runtime.ContainedSubprocessRuntime(), True),
+        (sandbox_runtime.ContainedSubprocessRuntime(), False),
+        (sandbox_runtime.LocalSubprocessRuntime(), True),
+    ):
+        session = runtime.open(SandboxSpec(lifetime_seconds=60, private=private))
+        try:
+            outputs.append(session.run('echo "${WRAPPED:-no}"').stdout.strip())
+        finally:
+            session.close()
+    assert outputs == ["yes", "no", "no"]
+
+
+def _require_user_namespaces() -> None:
+    """Skip the test when this host refuses unprivileged user namespaces, unless ``SKY_REQUIRE_USERNS=1``.
+
+    CI sets the variable, so a seccomp profile that blocks the namespaces
+    fails the test there instead of skipping it (SKY-885).
+    """
+    try:
+        sandbox_runtime._require_pid_namespace()
+    except ServiceError:
+        if os.environ.get("SKY_REQUIRE_USERNS") == "1":
+            raise
+        pytest.skip("This host refuses unprivileged user and PID namespaces.")
+
+
+def test_a_contained_metric_box_sees_only_its_own_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real contained metric box lists only its own processes in /proc and cannot unmount it (SKY-885).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _require_user_namespaces()
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:9/v1")
+    session = sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, private=True))
+    umount = "import ctypes; print(ctypes.CDLL(None, use_errno=True).umount2(b'/proc', 2))"
+    try:
+        listed = session.run("echo $$; ls /proc").stdout.split()
+        unmounted = session.run(f"{shlex.quote(sys.executable)} -I -c {shlex.quote(umount)}")
+    finally:
+        session.close()
+    assert listed[0] == "1"
+    assert str(os.getpid()) not in listed
+    assert unmounted.stdout.strip() == "-1"
 
 
 class _NoClient:
