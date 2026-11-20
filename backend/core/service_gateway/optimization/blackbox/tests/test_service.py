@@ -3485,6 +3485,37 @@ def test_a_minimize_main_score_leaves_an_unlisted_named_score_maximized(recall: 
     assert all(entry["direction"] == "maximize" for entry in verdict["failed_requirements"])
 
 
+_COST_CODE = """
+def score(candidate, case=None):
+    return {"score": 0.5, "feedback": "ok", "scores": {"cost_usd": {"score": 0.3, "feedback": "ok"}}}
+"""
+
+
+def test_a_run_gives_the_engine_the_snapshots_named_score_directions(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job's eval server marks a ``[metric.scores]`` minimize score in the side info the engine reads (SKY-775)."""
+    seen: list[dict[str, Any]] = []
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: Any, cb: Any = None, *, caps: object = None
+    ) -> tuple[Result, list[LaneOutcome]]:
+        """Score the seed once and keep the named scores that the engine sees."""
+        score, side_info = server.evaluate("hello world", _OUTCOME_CASES[0])
+        seen.append(side_info["scores"])
+        return Result(best_candidate="hello world", best_score=score, total_evals=server.used), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+    _run(
+        _payload(scorer={"kind": "python", "metric_code": _COST_CODE}, cases=_OUTCOME_CASES),
+        artifact_id="job-score-directions",
+        gepa_log_dir_path=str(tmp_path),
+        repo_snapshot={"outcome": {"target": None, "require": {}, "scores": {"cost_usd": "minimize"}}},
+    )
+
+    assert seen == [{"cost_usd": {"score": 0.3, "feedback": "ok", "direction": "minimize"}}]
+
+
 def test_a_minimize_run_shows_raw_scores_in_engine_payloads() -> None:
     """Engine score keys turn back into raw scores; the scorer's own numbers stay as they are (SKY-750)."""
     server = EvalServer(lambda c, e: (1.0, {}), max_evals=1, direction="minimize")
