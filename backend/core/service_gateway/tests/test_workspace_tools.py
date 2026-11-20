@@ -716,7 +716,7 @@ async def test_write_refuses_an_optimize_toml_that_moves_a_rules_file_or_cannot_
 @pytest.mark.asyncio
 async def test_the_guard_reads_the_rules_files_of_a_current_file_the_parser_refuses() -> None:
     """A current optimize.toml with a parser error still guards the rules files it names."""
-    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["pytest", "-q"]\n', "")
+    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["sh", "run.sh"]\n', "")
     turn = _TurnAuthoringFlag()
 
     result = await _tools({**_REPO_METRIC, "optimize_toml": current}, turn)[WRITE_FILE_TOOL].acall(
@@ -1064,7 +1064,7 @@ def test_the_raw_search_decodes_basic_string_escapes() -> None:
 @pytest.mark.asyncio
 async def test_the_raw_fallback_cleans_paths_the_way_the_parser_does() -> None:
     """A raw path with a backslash, spaces or slashes compares equal to the parser's clean path."""
-    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["pytest", "-q"]\n', "").replace(
+    current = OPTIMIZE_TOML_EXAMPLE.replace('entry = ["sh", "run.sh"]\n', "").replace(
         'illegal = "docs/rules.md"', 'illegal = " docs\\\\rules.md/ "'
     )
     turn = _TurnAuthoringFlag()
@@ -1210,25 +1210,30 @@ def test_guide_has_the_run_entry_write_the_metric_reads_output() -> None:
     assert "``score(repo_path)``, or ``score(repo_path, case)`` when the run has data" not in prompt
 
 
-def test_guide_puts_the_test_command_in_the_run_entry() -> None:
-    """A repository scored by its own tests runs them from [run] entry; the metric only reads its output (E40)."""
+def test_guide_puts_the_test_command_in_a_script_with_the_wrapper_line() -> None:
+    """A repository scored by its own tests runs them from a script whose wrapper line writes the exit code (SKY-757)."""
     prompt = _guide()
 
-    assert 'entry = ["pytest", "-q"]' in prompt
-    assert 'only reads ``output["stdout"]`` and ``output["exit_code"]``' in prompt
-    assert "cannot read a report file that the tests write" in prompt
+    assert 'entry = ["sh", "run.sh"]' in prompt
+    assert 'entry = ["pytest", "-q"]' not in prompt
+    assert (
+        '``pytest -q > log.txt`` and then ``echo "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"``' in prompt
+    )
+    assert 'The metric reads ``output["exit_code"]`` and never runs the tests itself.' in prompt
     assert "junitxml" not in prompt
-    assert "the metric never runs the tests itself" in prompt
+    assert 'output["stdout"]' not in prompt
 
 
-def test_guide_treats_a_nonzero_exit_code_as_output() -> None:
-    """A command entry's nonzero exit code is output that the metric judges, like pytest's 1 on failed tests (E43)."""
+def test_guide_teaches_the_one_call_rule_for_command_entries() -> None:
+    """A command entry reads ASCENT_INPUT, writes ASCENT_OUTPUT, and its prints only reach the logs (SKY-757)."""
     prompt = _guide()
 
-    assert "a nonzero exit code is normal output" in prompt
-    assert "the metric gets ``exit_code`` and decides what it means" in prompt
-    assert "pytest exits 1 when some tests fail" in prompt
-    assert "partial credit" in prompt
+    assert 'reads ``{"input": <the case input>}`` from the JSON file at ``ASCENT_INPUT``' in prompt
+    assert 'writes ``{"output": <any JSON>}`` to the JSON file at ``ASCENT_OUTPUT``' in prompt
+    assert "What it prints goes only to the logs." in prompt
+    assert "A nonzero exit, a missing output file or bad JSON fails the call" in prompt
+    assert "a nonzero exit code is normal output" not in prompt
+    assert "pytest exits 1 when some tests fail" not in prompt
 
 
 def test_guide_places_metric_secrets_and_candidate_mcp_servers() -> None:
@@ -1317,7 +1322,7 @@ def test_guide_example_is_a_valid_optimize_toml() -> None:
     constraints = repo_constraints.parse_constraints(OPTIMIZE_TOML_EXAMPLE.encode())
 
     assert OPTIMIZE_TOML_EXAMPLE in METRIC_GUIDE
-    assert constraints.run_entry == ("pytest", "-q")
+    assert constraints.run_entry == ("sh", "run.sh")
     assert constraints.editable_paths == ("src",)
     assert (constraints.outcome_target, constraints.outcome_minimums) == (0.9, {"pass_rate": 0.8})
 

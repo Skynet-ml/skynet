@@ -43,8 +43,10 @@ one stage call and writes ``{"output": ...}`` or ``{"error": ...}``. When the
 stage's own MCP file holds a server, the parent also writes ``relay.json``
 (the same relay config, with the call's own prefix and answer folder) into
 the call's folder: the call then gets its own loopback relay on a free port,
-checked against the stage's own role, and a command stage runs as
-``--stage-command <call_dir> <command> [<arg> ...]`` behind it. Parallel
+checked against the stage's own role. A command stage runs as
+``--stage-command <call_dir> <package> <timeout> <command> [<arg> ...]``,
+behind that relay when it has one, and writes the same ``{"output": ...}``
+or ``{"error": ...}`` as a Python stage (SKY-757). Parallel
 calls share the stage box, so the tree's MCP file, which names
 ``RELAY_PORT``, reaches no call; each call gets ``mcp.json`` in its folder
 with its own port, and ``ASCENT_MCP_CONFIG`` names that copy (SKY-624).
@@ -57,9 +59,13 @@ its own session with only the case's input (E42), and writes
 every process the entry left ends with it; the metric runs in another box
 that never holds the candidate's code.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
-<entry>`` and its output is its JSON return value; a command entry
-(``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
-``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
+<entry>`` and its output is its JSON return value. A command entry
+(``["sh", "run.sh"]``) runs as ``--run-command <dir> <package> <timeout>
+<command> [<arg> ...]``: OpenAscent's ``call_run`` writes ``{"input": ...}``
+to the file that ``ASCENT_INPUT`` names, starts the command with an empty
+stdin, and takes the ``output`` value of the JSON object that the command
+writes to the file that ``ASCENT_OUTPUT`` names (SKY-757). The command's
+printed text goes to the run logs only. The metric call then gets that output as
 ``score(repo_path, case, output)``, and may start no process of its own (E40).
 Each relay frame names the box's role (``run`` or ``metric``), and the
 parent refuses a frame whose role is not the box's own.
@@ -126,9 +132,14 @@ STAGE_HELPER_NAME = "call"
 STAGE_ERROR_NAME = "StageError"
 # ``app_runner.py --stage <call_dir> <path/file.py:function>`` runs one stage call.
 STAGE_FLAG = "--stage"
-# ``app_runner.py --stage-command <call_dir> <command> [<arg> ...]`` runs one
-# command stage call behind the stage's relay (SKY-611).
+# ``app_runner.py --stage-command <call_dir> <package> <timeout> <command> [<arg> ...]``
+# runs one command stage call, behind the stage's relay when the call has one (SKY-611).
 STAGE_COMMAND_FLAG = "--stage-command"
+# ``app_runner.py --run-command <dir> <package> <timeout> <command> [<arg> ...]`` is
+# the candidate process of a command entry. Both command modes run the command
+# through OpenAscent's ``call_run``, so this file holds no second copy of the
+# two-file rule (SKY-757).
+RUN_COMMAND_FLAG = "--run-command"
 # A stage call's relay config, next to its input; only a stage whose own MCP file holds a server gets one.
 STAGE_RELAY_FILE = "relay.json"
 # The stage call's own MCP file, next to its input, with the call's own relay port (SKY-624).
@@ -154,7 +165,11 @@ RUN_FLAG = "--run"
 WRAPPER_FOLDER_PREFIX = "/tmp/.app-root-output-"
 WRAPPER_OUTPUT_NAME = "output.out"
 WRAPPER_EXIT_NAME = "exit"
+# The largest output file that a command entry or a command stage may write (SKY-757).
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
+# A command entry's own process gets this much time after the command's time
+# limit, so that ``call_run`` stops the command and reports the limit itself.
+_COMMAND_STOP_SECONDS = 10.0
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
 # The metric input key that names the folder the metric setup step installed
@@ -164,7 +179,8 @@ METRIC_SITE_PARAM = "metric_site"
 # A command [metric] entry (SKY-738): the input keys that carry the command, its
 # time limit and the folder the parent copied the OpenAscent package into. The
 # package's call_metric runs the command under the two-file rule, so this file
-# holds no second copy of that rule.
+# holds no second copy of that rule. A command [run] entry's input also names
+# that folder with ASCENT_PACKAGE_PARAM (SKY-757).
 METRIC_ENTRY_PARAM = "metric_entry"
 METRIC_TIMEOUT_PARAM = "metric_timeout"
 ASCENT_PACKAGE_PARAM = "ascent_package"
@@ -1447,10 +1463,10 @@ def _load_openascent(folder: Any) -> types.ModuleType:
     """
     init = Path(str(folder or "")) / "__init__.py"
     if not folder or not init.is_file():
-        raise ScorerError("The metric box has no OpenAscent package, so the metric command cannot run.")
+        raise ScorerError("The box has no OpenAscent package, so the command cannot run.")
     spec = importlib.util.spec_from_file_location("openascent", init, submodule_search_locations=[str(init.parent)])
     if spec is None or spec.loader is None:
-        raise ScorerError("The metric box has no OpenAscent package, so the metric command cannot run.")
+        raise ScorerError("The box has no OpenAscent package, so the command cannot run.")
     module = importlib.util.module_from_spec(spec)
     sys.modules["openascent"] = module
     spec.loader.exec_module(module)
@@ -1550,8 +1566,8 @@ def main(argv: list[str] | None = None) -> int:
         _keep_user_site()
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
-    if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
-        return run_stage_command(Path(args[1]), args[2:])
+    if len(args) >= 5 and args[0] in (STAGE_COMMAND_FLAG, RUN_COMMAND_FLAG):
+        return run_stage_command(Path(args[1]), args[2], float(args[3]), args[4:])
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
         refused = unsafe_output()
         if refused:
@@ -1831,7 +1847,8 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     the only cleanup of every other process (SKY-398).
 
     Args:
-        payload: ``{"entry", "input", "timeout", "stages"}``.
+        payload: ``{"entry", "input", "timeout", "stages"}``, and
+            ``ascent_package`` for a command entry.
         call_dir: The candidate call's folder.
 
     Returns:
@@ -1851,83 +1868,79 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     # call's folder, so a root supervisor must not write or chown there.
     run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
     try:
-        return _run_entry(entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")))
+        return _run_entry(
+            entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")), payload.get(ASCENT_PACKAGE_PARAM)
+        )
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def _run_entry(
-    entry: Any, timeout: float, env: dict[str, str], switch: dict[str, Any], run_dir: Path, body: str
+    entry: Any,
+    timeout: float,
+    env: dict[str, str],
+    switch: dict[str, Any],
+    run_dir: Path,
+    body: str,
+    package: Any = None,
 ) -> dict[str, Any]:
     """Start the entry, wait for it, kill its process group, and read its output.
+
+    A command entry runs in a ``--run-command`` process of this file, as the
+    entry's user. That process calls OpenAscent's ``call_run``, which needs
+    no root and has no user switch of its own (SKY-757).
 
     Args:
         entry: A ``path/file.py:function`` string or a command list.
         timeout: The entry's time limit in seconds.
         env: The entry's environment.
         switch: The ``subprocess.Popen`` arguments that switch the user.
-        run_dir: A new folder for a function entry's input and output.
+        run_dir: A new folder for the entry's input and output.
         body: The case input as JSON.
+        package: The OpenAscent package folder for a command entry.
 
     Returns:
         ``{"output", "error", "elapsed_s"}``.
     """
     user = switch.get("user")
-    captured: list[bytes] = []
-    readers: list[threading.Thread] = []
+    wait = timeout
     try:
+        (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
+        if user is not None:
+            os.chown(run_dir, user, switch["group"])
+            os.chown(run_dir / INPUT_FILE, user, switch["group"])
+        # The supervisor runs on the base interpreter without site-packages;
+        # the entry is candidate code and needs the box's python3 from PATH,
+        # where [setup] installed its packages (SKY-642).
+        python = shutil.which("python3", path=env.get("PATH")) or sys.executable
+        argv = [python, str(Path(__file__).resolve())]
         if isinstance(entry, str):
-            (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
-            if user is not None:
-                os.chown(run_dir, user, switch["group"])
-                os.chown(run_dir / INPUT_FILE, user, switch["group"])
-            # The supervisor runs on the base interpreter without site-packages;
-            # the entry is candidate code and needs the box's python3 from PATH,
-            # where [setup] installed its packages (SKY-642).
-            python = shutil.which("python3", path=env.get("PATH")) or sys.executable
-            argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
-            # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
-            started = time.monotonic()
-            # Its prints go to stderr: the parent reads relay frames on stdout.
-            child = subprocess.Popen(
-                argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch
-            )
+            argv += [RUN_FLAG, str(run_dir), entry]
         else:
-            started = time.monotonic()
-            child = subprocess.Popen(
-                [str(part) for part in entry],
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=2,
-                start_new_session=True,
-                **switch,
-            )
-            readers = [
-                threading.Thread(target=_feed, args=(child.stdin, body.encode("utf-8")), daemon=True),
-                threading.Thread(target=_capture, args=(child.stdout, captured), daemon=True),
-            ]
-            for reader in readers:
-                reader.start()
+            argv += [RUN_COMMAND_FLAG, str(run_dir), str(package or ""), f"{timeout:g}"]
+            argv += [str(part) for part in entry]
+            wait = timeout + _COMMAND_STOP_SECONDS
+        # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
+        started = time.monotonic()
+        # Its prints go to stderr: the parent reads relay frames on stdout.
+        child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch)
     except OSError as exc:
         return {"output": None, "error": f"The command could not start: {exc}"}
     try:
-        code: int | None = child.wait(timeout=timeout)
+        code: int | None = child.wait(timeout=wait)
     except subprocess.TimeoutExpired:
         code = None
     with _quiet():
         os.killpg(child.pid, signal.SIGKILL)
     if code is None:
         child.wait()
-    for reader in readers:
-        reader.join(timeout=5)
     elapsed = time.monotonic() - started
     result: dict[str, Any] = {"output": None, "error": None, ELAPSED_PARAM: round(elapsed, 6)}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
         result["error"] = f"killed by signal {_signal_name(-code)}"
-    elif isinstance(entry, str):
+    else:
         try:
             answer = _read_answer(run_dir / OUTPUT_FILE, user)
         except (OSError, ValueError):
@@ -1936,37 +1949,7 @@ def _run_entry(
             result["output"] = answer["output"]
         else:
             result["error"] = str(answer.get("error") or "returned nothing")
-    else:
-        stdout = b"".join(captured)[:MAX_RUN_STDOUT_BYTES].decode("utf-8", errors="replace")
-        result["output"] = {"exit_code": code, "stdout": stdout}
     return result
-
-
-def _feed(stream: Any, data: bytes) -> None:
-    """Write the case input to a command's stdin and close it, whether or not the command reads it.
-
-    Args:
-        stream: The command's stdin pipe.
-        data: The input as JSON bytes.
-    """
-    with _quiet():
-        stream.write(data)
-    with _quiet():
-        stream.close()
-
-
-def _capture(stream: Any, chunks: list[bytes]) -> None:
-    """Keep the first ``MAX_RUN_STDOUT_BYTES`` of a command's stdout and drain the rest.
-
-    Args:
-        stream: The command's stdout pipe.
-        chunks: Receives the kept bytes.
-    """
-    kept = 0
-    for block in iter(lambda: stream.read(1 << 16), b""):
-        if kept < MAX_RUN_STDOUT_BYTES:
-            chunks.append(block[: MAX_RUN_STDOUT_BYTES - kept])
-            kept += len(chunks[-1])
 
 
 class _quiet:  # noqa: N801
@@ -2052,25 +2035,51 @@ def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:
     return 0
 
 
-def run_stage_command(call_dir: Path, command: Sequence[str]) -> int:
-    """Run one command stage call behind the stage's relay: ``input.json`` on stdin, stdout into ``output.json``.
+def run_stage_command(call_dir: Path, package: str, timeout: float, command: Sequence[str]) -> int:
+    """Run one command call through OpenAscent's ``call_run``: ``input.json`` in, ``output.json`` out.
+
+    A command stage and a command ``[run]`` entry both run here (SKY-757).
+    ``call_run`` writes ``{"input": ...}`` to a new folder, starts the
+    command with ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and an empty stdin,
+    and checks the ``{"output": ...}`` file the command writes. The text the
+    command prints goes to this process's stderr, the run logs, only.
 
     Args:
-        call_dir: The call's folder in the stage box.
-        command: The stage's command and its arguments.
+        call_dir: The call's folder: the stage call's folder in the stage
+            box, or the candidate's new run folder.
+        package: The folder the parent copied the OpenAscent package into.
+        timeout: The command's time limit in seconds.
+        command: The command and its arguments.
 
     Returns:
-        The command's exit code, ``128 + n`` when signal ``n`` killed it, or
-        127 when it could not start.
+        The process exit code: 0 whenever the output was written.
     """
-    env = {**os.environ, **_stage_relay_env(call_dir)}
-    with (call_dir / INPUT_FILE).open("rb") as stdin, (call_dir / OUTPUT_FILE).open("wb") as stdout:
-        try:
-            code = subprocess.run(list(command), env=env, stdin=stdin, stdout=stdout, check=False).returncode
-        except OSError as exc:
-            sys.stderr.write(f"The command could not start: {exc}\n")
-            return 127
-    return code if code >= 0 else 128 - code
+    ascent: types.ModuleType | None = None
+    try:
+        env = {**os.environ, **_stage_relay_env(call_dir)}
+        value = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+        ascent = _load_openascent(package)
+        call = ascent.call_run(
+            tuple(command),
+            value,
+            timeout_s=timeout,
+            cwd=str(Path.cwd()),
+            env=env,
+            max_output_bytes=MAX_RUN_STDOUT_BYTES,
+        )
+        sys.stderr.write(call.stdout + call.stderr)
+        text = json.dumps({"output": call.output}, allow_nan=False)
+    except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
+        if ascent is not None and isinstance(exc, ascent.AscentError):
+            error = str(exc)
+            if exc.stderr:
+                sys.stderr.write(exc.stderr)
+                error += f"\nstderr: {exc.stderr[-1_000:]}"
+        else:
+            error = f"{type(exc).__name__}: {exc}"
+        text = json.dumps({"error": error})
+    _write_output(call_dir, text)
+    return 0
 
 
 def _stage_relay_env(call_dir: Path) -> dict[str, str]:
