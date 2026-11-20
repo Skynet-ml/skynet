@@ -761,15 +761,17 @@ export function OptimizationDetailView({
     [jobIsBlackbox, jobProgressEvents],
   );
   const jobBlackboxResult = job?.blackbox_result;
-  const scorePoints = useMemo(
+  const jobMinimizes = useMemo(
     () =>
-      jobIsBlackbox
-        ? extractBlackboxScorePoints(
-            blackboxCandidates,
-            minimizesRun({ blackbox_result: jobBlackboxResult ?? null, progress_events: jobProgressEvents ?? [] }),
-          )
-        : [],
-    [jobIsBlackbox, blackboxCandidates, jobBlackboxResult, jobProgressEvents],
+      minimizesRun({
+        blackbox_result: jobBlackboxResult ?? null,
+        progress_events: jobProgressEvents ?? [],
+      }),
+    [jobBlackboxResult, jobProgressEvents],
+  );
+  const scorePoints = useMemo(
+    () => (jobIsBlackbox ? extractBlackboxScorePoints(blackboxCandidates, jobMinimizes) : []),
+    [jobIsBlackbox, blackboxCandidates, jobMinimizes],
   );
 
   // A schedule set up in the submit wizard stays on its run when the run fails,
@@ -1271,6 +1273,7 @@ export function OptimizationDetailView({
                   key={`${source}:${job.optimization_id}`}
                   optimizationId={job.optimization_id}
                   source={source}
+                  minimize={jobMinimizes}
                 />
               </TabsContent>
             )}

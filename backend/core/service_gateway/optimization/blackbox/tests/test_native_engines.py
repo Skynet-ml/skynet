@@ -56,6 +56,8 @@ def test_adapted_prompts_replace_the_upstream_domains() -> None:
     assert "agents/<name>.txt" in skill
     assert "MemorySystem" not in skill
     assert "dataset" not in skill.lower()
+    # SKY-750: a minimize run's avg_val is negative, so the note sits beside the val.json description.
+    assert "`infos`). " + native_engines._SCALE_NOTE in skill
     brief = native_engines.AutoResearchEngine(_config("autoresearch"))
     brief.example_ids = ["a"]
     text = brief._brief()

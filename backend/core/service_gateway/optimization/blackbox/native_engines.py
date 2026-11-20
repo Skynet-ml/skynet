@@ -1489,7 +1489,7 @@ class MetaHarnessEngine:
                 "- `agents/seed.txt` is the starting candidate the run began from.\n\n"
                 "## Directory Structure\n\n"
                 "- Val results: `results/<candidate>/val.json` (`avg_val` plus per-example `scores` and evaluator "
-                "`infos`)\n"
+                "`infos`). " + _SCALE_NOTE + "\n"
                 "- Frontier: `frontier_val.json` (`_pareto` ranks candidates by average score; every other key "
                 "is an example or a named score `score:<name>` with the candidate that leads it)\n"
                 "- Named scores: `results/<candidate>/val.json` `named_scores` maps each to its score and "
