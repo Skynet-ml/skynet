@@ -290,8 +290,8 @@ _RULE_STRING = re.compile(
     r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*"
     r"(?P<s>\"\"\"|'''|\"|')(?P<path>[^\"'\n]+)(?P=s)"
 )
-# The same key with any string value, to find a value that _RULE_STRING cannot read (one over many lines).
-_RULE_KEY = re.compile(r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=\s*[\"']")
+# The same key with any value, to find one that _RULE_STRING cannot read (over many lines, or not a string).
+_RULE_KEY = re.compile(r"(?<![\w-])(?P<q>[\"']?)(?:instructions|illegal)(?P=q)\s*=")
 # A quoted key with an escape, which could spell instructions or illegal so that neither search sees it.
 _ESCAPED_KEY = re.compile(r"[\"'][^\"'\n]*\\[^\"'\n]*[\"']\s*=")
 
@@ -317,7 +317,7 @@ def _rule_settings(text: str) -> dict[str, str] | None:
     Returns:
         Setting to path, such as ``{"[proposer] illegal": "docs/rules.md"}``; the
         raw TOML values when the run's parser refuses the file; ``None`` when the
-        text is not TOML.
+        text is not TOML, or names a rules file with a value that is not a string.
     """
     try:
         parsed = parse_constraints(text.encode("utf-8", "surrogatepass"))
@@ -336,6 +336,9 @@ def _rule_settings(text: str) -> dict[str, str] | None:
         tables |= {f"[target.{name}] illegal": stage for name, stage in targets.items()}
     raw = {"instructions": document.get("instructions")}
     raw |= {setting: table.get("illegal") for setting, table in tables.items() if isinstance(table, dict)}
+    if any(value is not None and not isinstance(value, str) for value in raw.values()):
+        # A rules path that is not a string cannot be compared; the raw search then refuses (fails closed).
+        return None
     return {setting: _clean_rule_path(value) for setting, value in raw.items() if isinstance(value, str)}
 
 
@@ -396,9 +399,9 @@ def dropped_rule_files(current: str, text: str) -> str | None:
     ):
         # A rules path the raw search cannot read could be dropped unseen, so refuse (fail closed).
         return (
-            "The current optimize.toml is not valid TOML and names an instructions or illegal rules file "
-            "that cannot be read, so a new optimize.toml could drop it. Ask the user to fix optimize.toml "
-            "in the editor."
+            "The current optimize.toml names an instructions or illegal rules file that cannot be read "
+            "(the file is not valid TOML, or the path is not a string), so a new optimize.toml could drop it. "
+            "Ask the user to fix optimize.toml in the editor."
         )
     if not named:
         return None

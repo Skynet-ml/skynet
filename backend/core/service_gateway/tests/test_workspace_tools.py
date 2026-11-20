@@ -960,14 +960,30 @@ def test_a_current_file_that_is_not_toml_keeps_dotted_and_quoted_rules_keys(line
 
 
 @pytest.mark.parametrize(
-    "line", ['illegal = """\nrules.md"""', 'illegal = "rules\\\n.md"', '"\\u0069llegal" = "rules.md"']
+    "line",
+    [
+        'illegal = """\nrules.md"""',
+        'illegal = "rules\\\n.md"',
+        '"\\u0069llegal" = "rules.md"',
+        "illegal = rules.md",
+        'instructions = ["docs/intent.md"]',
+    ],
 )
 def test_a_rules_path_the_raw_search_cannot_read_refuses_the_write(line: str) -> None:
-    """A non-TOML current text whose rules path spans lines, or whose key is escaped, refuses any new text."""
+    """A non-TOML current text whose rules path spans lines, has an escaped key or no string, refuses any new text."""
     refusal = workspace_tools.dropped_rule_files(f"version = 1\n{line}\n[broken\n", OPTIMIZE_TOML_EXAMPLE)
 
     assert refusal is not None
     assert "cannot be read" in refusal
+
+
+@pytest.mark.parametrize("current", ['instructions = ["docs/intent.md"]\n', "[proposer]\nillegal = 1\n"])
+def test_a_valid_toml_rules_value_that_is_not_a_string_refuses_the_write(current: str) -> None:
+    """A TOML rules value that is not a string cannot be compared, so any new text is refused (fail closed)."""
+    refusal = workspace_tools.dropped_rule_files(current, OPTIMIZE_TOML_EXAMPLE)
+
+    assert refusal is not None
+    assert "the path is not a string" in refusal
 
 
 def test_the_raw_search_decodes_basic_string_escapes() -> None:
