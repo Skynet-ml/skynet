@@ -1279,13 +1279,25 @@ def test_guide_writes_the_rules_into_files_and_their_paths_into_the_toml() -> No
     assert "[rules]" not in prompt
 
 
+def test_guide_lets_the_owner_change_protected_files_in_setup() -> None:
+    """Protected paths bind only the run's versions; in setup the agent makes the owner's edit and never asks who (SKY-793)."""
+    prompt = _guide()
+
+    assert "also the files under ``[paths] protected`` and the metric's files, for example ``evaluation/``" in prompt
+    assert "That protection binds only the candidate versions during a run" in prompt
+    assert "In setup, the signed-in user owns the run." in prompt
+    assert "make the change and tell the user what you changed. Never ask who the user is." in prompt
+    assert "in ``[proposer]``. During a run, " in prompt
+    assert "hidden from the agent" not in prompt
+
+
 def test_guide_writes_the_cases_into_a_jsonl_file_named_in_data() -> None:
     """Cases the metric needs go in a hidden JSONL file named by [data] cases; with no cases, no [data] (E58, E40)."""
     prompt = _guide()
 
     assert 'one ``{"input": ..., "expected": ...}`` object on each line' in prompt
     assert 'set ``cases = "data/cases.jsonl"`` in ``[data]``' in prompt
-    assert "hides the file from the agent and the candidate" in prompt
+    assert "hides the file from the run's optimizer and the candidate" in prompt
     assert "write no ``[data]`` section" in prompt
 
 
