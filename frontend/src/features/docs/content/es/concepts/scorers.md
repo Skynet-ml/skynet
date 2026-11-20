@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 El archivo `ascent.toml` del repositorio debe tener una sección `[run]` o una etapa `[target.<name>]`. El `entry` de `[run]` ejecuta una versión sobre un caso, en su propia caja de sandbox. Skynet rechaza un archivo sin ninguna de las dos, porque cada versión obtendría la misma puntuación.
 
 - Una entrada de función, por ejemplo `entry = "serve.py:serve"`, recibe `case["input"]` como argumento. `output` es su valor devuelto.
-- Una entrada de comando, por ejemplo `entry = ["python", "-m", "pytest", "-q"]`, recibe la entrada como JSON en stdin. `output` es `{"exit_code": ..., "stdout": "..."}`.
+- Una entrada de comando, por ejemplo `entry = ["python", "run_tests.py"]`, lee `{"input": ...}` del archivo JSON en la ruta de `ASCENT_INPUT`. Escribe `{"output": ...}` en la ruta de `ASCENT_OUTPUT`. `output` es el valor bajo `"output"`. Lo que el comando imprime va solo a los registros.
 
 El evaluador se ejecuta en una caja de sandbox separada. Esa caja contiene solo tus archivos de métrica. El evaluador no puede importar ni ejecutar el código de la versión. Ve la versión solo a través de `output`, o a través de `call()` a una etapa `[target.<name>]`. Importa `call` con `from openascent import call`. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### Ejecutar las pruebas del repositorio
 
-La entrada `[run]` ejecuta las pruebas. El evaluador lee el código de salida y la salida de las pruebas.
+La entrada `[run]` ejecuta las pruebas. `pytest` termina con un código de salida distinto de cero cuando falla una prueba, y un código de salida distinto de cero hace fallar el caso. Por eso el envoltorio `run_tests.py` escribe el resultado en `ASCENT_OUTPUT` y termina con 0. El evaluador lee ese resultado.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-Cuando la entrada `[run]` falla en un caso, ese caso no tiene puntuación. Si la entrada no arranca, supera el tiempo límite o una señal la detiene, o si una entrada de función lanza una excepción o termina antes de devolver un valor, el comentario es `Run failed: …`, y Skynet no llama al evaluador. Un código de salida distinto de cero de una entrada de comando no es un fallo: el evaluador lo recibe en `output`. Una versión con un caso así no tiene puntuación. No puede ser la mejor versión, no alcanza ningún `[outcome] target` y no abre ningún pull request. Si un fallo debe contar como un número, captura el fallo en tu programa, escribe una salida y deja que el evaluador la puntúe. Lee las [reglas del repositorio](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Cuando la entrada `[run]` falla en un caso, ese caso no tiene puntuación. Si la entrada no arranca, supera el tiempo límite o una señal la detiene, o si una entrada de función lanza una excepción o termina antes de devolver un valor, el comentario es `Run failed: …`, y Skynet no llama al evaluador. Una entrada de comando también falla cuando termina con un código de salida distinto de cero o no escribe un archivo de salida válido. Una versión con un caso así no tiene puntuación. No puede ser la mejor versión, no alcanza ningún `[outcome] target` y no abre ningún pull request. Si un fallo debe contar como un número, captura el fallo en tu programa, escribe una salida y deja que el evaluador la puntúe. Lee las [reglas del repositorio](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modelo como juez
 

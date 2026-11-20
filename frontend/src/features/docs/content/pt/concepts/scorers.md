@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 O arquivo `ascent.toml` do repositório precisa ter uma seção `[run]` ou uma etapa `[target.<name>]`. A entrada `[run]` (`entry`) executa uma versão em um caso, na sua própria sandbox. O Skynet recusa um arquivo sem nenhuma das duas, porque todas as versões receberiam a mesma pontuação.
 
 - Uma entrada de função, por exemplo `entry = "serve.py:serve"`, recebe `case["input"]` como argumento. `output` é o valor que ela retorna.
-- Uma entrada de comando, por exemplo `entry = ["python", "-m", "pytest", "-q"]`, recebe a entrada do caso como JSON no stdin. `output` é `{"exit_code": ..., "stdout": "..."}`.
+- Uma entrada de comando, por exemplo `entry = ["python", "run_tests.py"]`, lê `{"input": ...}` do arquivo JSON no caminho de `ASCENT_INPUT`. Ela escreve `{"output": ...}` no caminho de `ASCENT_OUTPUT`. `output` é o valor em `"output"`. O que o comando imprime vai só para os logs.
 
 O avaliador roda em outra sandbox. Essa sandbox contém apenas os seus arquivos de métrica. O avaliador não pode importar nem executar o código da versão. Ele vê a versão apenas por meio de `output`, ou por meio de `call()` para uma etapa `[target.<name>]`. Importe `call` com `from openascent import call`. Leia [Como a otimização funciona](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### Rodar os testes do repositório
 
-A entrada `[run]` roda os testes. O avaliador lê o código de saída e a saída dos testes.
+A entrada `[run]` roda os testes. O `pytest` sai com um código diferente de zero quando um teste falha, e um código de saída diferente de zero faz o caso falhar. Por isso o wrapper `run_tests.py` escreve o resultado em `ASCENT_OUTPUT` e sai com 0. O avaliador lê esse resultado.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada não inicia, excede o tempo limite ou um sinal a para, ou se uma entrada de função lança uma exceção ou sai antes de retornar um valor, o feedback é `Run failed: …`, e o Skynet não chama o avaliador. Um código de saída diferente de zero de uma entrada de comando não é uma falha: o avaliador o recebe em `output`. Uma versão com um caso assim não tem nota. Ela não pode ser a melhor versão, não atinge nenhum `[outcome] target` e não abre nenhum pull request. Se uma falha precisa contar como um número, capture a falha no seu programa, escreva uma saída e deixe o avaliador dar uma nota a ela. Leia as [regras do repositório](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Quando a entrada `[run]` falha em um caso, esse caso não tem nota. Se a entrada não inicia, excede o tempo limite ou um sinal a para, ou se uma entrada de função lança uma exceção ou sai antes de retornar um valor, o feedback é `Run failed: …`, e o Skynet não chama o avaliador. Uma entrada de comando também falha quando sai com um código diferente de zero ou não escreve um arquivo de saída válido. Uma versão com um caso assim não tem nota. Ela não pode ser a melhor versão, não atinge nenhum `[outcome] target` e não abre nenhum pull request. Se uma falha precisa contar como um número, capture a falha no seu programa, escreva uma saída e deixe o avaliador dar uma nota a ela. Leia as [regras do repositório](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modelo como juiz
 

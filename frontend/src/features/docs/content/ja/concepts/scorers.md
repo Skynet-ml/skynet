@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 リポジトリの `ascent.toml` ファイルには、`[run]` セクションまたは `[target.<name>]` ステージが必要です。`[run]` の `entry` は、1 つのバージョンを 1 つのケースで、専用のサンドボックスで実行します。どちらもないファイルは Skynet が拒否します。すべてのバージョンが同じスコアになるからです。
 
 - 関数エントリー（例: `entry = "serve.py:serve"`）は、`case["input"]` を引数として受け取ります。`output` はその戻り値です。
-- コマンドエントリー（例: `entry = ["python", "-m", "pytest", "-q"]`）は、入力を JSON として stdin で受け取ります。`output` は `{"exit_code": ..., "stdout": "..."}` です。
+- コマンドエントリー（例: `entry = ["python", "run_tests.py"]`）は、`ASCENT_INPUT` のパスにある JSON ファイルから `{"input": ...}` を読みます。`ASCENT_OUTPUT` のパスに `{"output": ...}` を書きます。`output` は `"output"` の下の値です。コマンドが表示する内容はログにだけ送られます。
 
 スコアラーは別のサンドボックスで実行されます。そのサンドボックスはメトリクスファイルだけを保持します。スコアラーはバージョンのコードをインポートすることも、実行することもできません。スコアラーには `output` を通してだけ、または `[target.<name>]` ステージへの `call()` を通してだけバージョンが見えます。`call` は `from openascent import call` でインポートします。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### リポジトリのテストを実行する
 
-`[run]` エントリーがテストを実行します。スコアラーは終了コードとテストの出力を読みます。
+`[run]` エントリーがテストを実行します。テストが失敗すると `pytest` は 0 以外の終了コードで終わり、0 以外の終了コードはケースを失敗にします。そのため、ラッパー `run_tests.py` が結果を `ASCENT_OUTPUT` に書き、0 で終了します。スコアラーはその結果を読みます。
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-`[run]` エントリーがあるケースで失敗すると、そのケースにはスコアがありません。エントリーが起動できない、タイムアウトする、シグナルで止まる、または関数エントリーが値を返す前に例外を送出するか終了すると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。コマンドエントリーの 0 以外の終了コードは失敗ではありません。スコアラーは `output` でそれを受け取ります。そのようなケースを持つバージョンにはスコアがありません。そのバージョンは最良のバージョンにならず、どの `[outcome] target` にも届かず、pull request も開きません。失敗を数値として数える必要がある場合は、プログラムの中で失敗を捕捉し、出力を書き、スコアラーにその出力を採点させてください。[リポジトリのルール](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) をお読みください。
+`[run]` エントリーがあるケースで失敗すると、そのケースにはスコアがありません。エントリーが起動できない、タイムアウトする、シグナルで止まる、または関数エントリーが値を返す前に例外を送出するか終了すると、フィードバックは `Run failed: …` になり、Skynet はスコアラーを呼び出しません。コマンドエントリーは、0 以外の終了コードで終わったとき、または有効な出力ファイルを書かなかったときにも失敗します。そのようなケースを持つバージョンにはスコアがありません。そのバージョンは最良のバージョンにならず、どの `[outcome] target` にも届かず、pull request も開きません。失敗を数値として数える必要がある場合は、プログラムの中で失敗を捕捉し、出力を書き、スコアラーにその出力を採点させてください。[リポジトリのルール](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) をお読みください。
 
 ### 審査員としてのモデル
 
