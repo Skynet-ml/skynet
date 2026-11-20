@@ -175,11 +175,11 @@ function ResultStep({
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="text-muted-foreground">{children}</p>;
+  return <p className="text-muted-foreground/60">{children}</p>;
 }
 
 function MoreRow({ count }: { count: number }) {
-  return count > 0 ? <li className="text-muted-foreground">{moreText(count)}</li> : null;
+  return count > 0 ? <li className="text-muted-foreground/60">{moreText(count)}</li> : null;
 }
 
 /** A link that leaves the app opens in a new tab; a site path stays in it. */
@@ -233,7 +233,7 @@ function CodeLines({ lines, cut }: { lines: FileLine[]; cut: boolean }) {
           </tbody>
         </table>
         {(cut || lines.length > shown.length) && (
-          <p className="mt-1 font-sans text-muted-foreground">{msg("agent.tool.content.cut")}</p>
+          <p className="mt-1 font-sans text-muted-foreground/60">{msg("agent.tool.content.cut")}</p>
         )}
       </div>
       <CopyButton
@@ -346,7 +346,7 @@ export function WebPagesCard({ call }: { call: AgentToolCall }) {
                 </p>
               )}
               {p.truncated && (
-                <p className="text-[0.6875rem] text-muted-foreground">
+                <p className="text-[0.6875rem] text-muted-foreground/60">
                   {msg("agent.tool.content.cut")}
                 </p>
               )}
@@ -395,8 +395,7 @@ export function RepoFileCard({ call }: { call: AgentToolCall }) {
  */
 export function RepoFolderCard({ call }: { call: AgentToolCall }) {
   const view = useResult(call, repoTree);
-  const path =
-    (argText(call, "path") || call.reason?.trim() || "").replace(/^\/+|\/+$/g, "") || "/";
+  const path = (argText(call, "path") || call.reason?.trim() || "").replace(/^\/+|\/+$/g, "") || "/";
   const tree = view?.kind === "tree" ? view : null;
   const items = tree ? tree.entries.filter((e) => e.more === null && e.depth === 0).length : 0;
   return (
@@ -423,7 +422,7 @@ export function RepoFolderCard({ call }: { call: AgentToolCall }) {
                 style={{ paddingInlineStart: `${e.depth * 0.875}rem` }}
               >
                 {e.more !== null ? (
-                  <span className="text-muted-foreground">{moreText(e.more)}</span>
+                  <span className="text-muted-foreground/60">{moreText(e.more)}</span>
                 ) : (
                   <>
                     {e.dir ? (
@@ -435,7 +434,7 @@ export function RepoFolderCard({ call }: { call: AgentToolCall }) {
                       {e.name}
                     </span>
                     {e.files !== null && (
-                      <span className="shrink-0 font-sans text-muted-foreground">
+                      <span className="shrink-0 font-sans text-muted-foreground/60">
                         {countText("agent.tool.folder.files", e.files)}
                       </span>
                     )}
@@ -449,7 +448,7 @@ export function RepoFolderCard({ call }: { call: AgentToolCall }) {
               </li>
             ))}
           </ul>
-          {tree.cut && <p className="text-muted-foreground">{msg("agent.tool.content.cut")}</p>}
+          {tree.cut && <p className="text-muted-foreground/60">{msg("agent.tool.content.cut")}</p>}
           {tree.keyFiles.length > 0 && (
             <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground/70">
               <span>{msg("agent.tool.folder.read_too")}</span>
@@ -655,9 +654,11 @@ export function GithubToolCard({ call }: { call: AgentToolCall }) {
             parts={[
               whereNode,
               one && <span className="min-w-0 truncate">{one.title}</span>,
-              one?.added != null && one.removed != null && (one.added > 0 || one.removed > 0) && (
-                <LineCounts added={one.added} removed={one.removed} />
-              ),
+              one?.added != null &&
+                one.removed != null &&
+                (one.added > 0 || one.removed > 0) && (
+                  <LineCounts added={one.added} removed={one.removed} />
+                ),
               text?.cut && msg("agent.tool.content.cut"),
             ]}
           />
@@ -717,7 +718,7 @@ export function GithubToolCard({ call }: { call: AgentToolCall }) {
             ))}
             <MoreRow count={list.rows.length - MAX_ROWS} />
           </ul>
-          {list.cut && <p className="text-muted-foreground">{msg("agent.tool.content.cut")}</p>}
+          {list.cut && <p className="text-muted-foreground/60">{msg("agent.tool.content.cut")}</p>}
         </div>
       ) : null}
     </ResultStep>
@@ -869,7 +870,7 @@ export function UsageStatsCard({ call }: { call: AgentToolCall }) {
       {view && view.rows.length > 0 ? (
         <table className="w-full table-fixed border-collapse">
           <thead>
-            <tr className="text-[0.625rem] uppercase tracking-wide text-muted-foreground">
+            <tr className="text-[0.625rem] uppercase tracking-wide text-muted-foreground/60">
               <th className="w-[40%] pb-1 text-start font-normal">
                 <span className="sr-only">{msg("agent.tool.stats.name")}</span>
               </th>
@@ -903,7 +904,7 @@ export function UsageStatsCard({ call }: { call: AgentToolCall }) {
         </table>
       ) : null}
       {view && view.rows.length > MAX_ROWS && (
-        <p className="text-muted-foreground">{moreText(view.rows.length - MAX_ROWS)}</p>
+        <p className="text-muted-foreground/60">{moreText(view.rows.length - MAX_ROWS)}</p>
       )}
     </ResultStep>
   );
@@ -965,7 +966,7 @@ export function RegistryCard({ call }: { call: AgentToolCall }) {
         <dl className="flex flex-col gap-1.5">
           {groups.map(([kind, names]) => (
             <div key={kind} className="min-w-0">
-              <dt className="text-[0.625rem] uppercase tracking-wide text-muted-foreground">
+              <dt className="text-[0.625rem] uppercase tracking-wide text-muted-foreground/60">
                 {registryLabel(kind)}
               </dt>
               <dd dir="ltr" className="flex flex-wrap gap-1">
@@ -978,7 +979,7 @@ export function RegistryCard({ call }: { call: AgentToolCall }) {
                   </code>
                 ))}
                 {names.length > 24 && (
-                  <span className="text-muted-foreground">{moreText(names.length - 24)}</span>
+                  <span className="text-muted-foreground/60">{moreText(names.length - 24)}</span>
                 )}
               </dd>
             </div>
@@ -1085,7 +1086,7 @@ export function SettingsListCard({ call }: { call: AgentToolCall }) {
                   {r.key}
                 </code>
                 {!r.changeable && (
-                  <span className="shrink-0 text-muted-foreground">
+                  <span className="shrink-0 text-muted-foreground/60">
                     {msg("agent.tool.settings.read_only")}
                   </span>
                 )}
@@ -1224,7 +1225,9 @@ export function TaggingGuideCard({ call }: { call: AgentToolCall }) {
                 </li>
               ))}
               {guide.categories.length > 16 && (
-                <li className="text-muted-foreground">{moreText(guide.categories.length - 16)}</li>
+                <li className="text-muted-foreground/60">
+                  {moreText(guide.categories.length - 16)}
+                </li>
               )}
             </ul>
           )}
@@ -1277,7 +1280,7 @@ function TomlDiagnosticList({ items, omitted }: { items: TomlDiagnostic[]; omitt
         </li>
       ))}
       {omitted > 0 && (
-        <li className="text-muted-foreground">
+        <li className="text-muted-foreground/60">
           {formatMsg("submit.setup_check.more", { p1: omitted })}
         </li>
       )}
