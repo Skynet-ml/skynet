@@ -31,7 +31,7 @@ from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobMo
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import AttackFailedError, _draft_fix, _measure, new_job
 from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
-from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer, openascent
+from core.service_gateway.optimization.blackbox.repo_scorer import RUN_FAILED, RepoScorer
 from core.service_gateway.optimization.blackbox.repo_workspace import WORK_DIR
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
@@ -1463,7 +1463,6 @@ _METRIC_TREE_SCORER = {
 _KEY_FIX = "diff --git a/eval/key.txt b/eval/key.txt\n--- a/eval/key.txt\n+++ b/eval/key.txt\n@@ -1 +1 @@\n-1\n+2\n"
 
 
-@pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
 def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
     engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

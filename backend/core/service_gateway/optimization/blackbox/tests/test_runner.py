@@ -25,12 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import openai
+import openascent
 import pytest
-
-try:
-    import openascent
-except ImportError:  # the package needs Python 3.12
-    openascent = None
 
 from core.sandbox.providers import vercel
 
@@ -52,9 +48,8 @@ from ..runner import (
 )
 from .mocks import FakeGateway
 
-_needs_openascent = pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
 # The OpenAscent package folder a command entry gets, as the parent copies it into a box (SKY-757).
-_PACKAGE = str(Path(openascent.__file__).parent) if openascent is not None else ""
+_PACKAGE = str(Path(openascent.__file__).parent)
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
@@ -1108,7 +1103,6 @@ def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_pat
     }
 
 
-@_needs_openascent
 def test_stage_command_mode_serves_the_relay_and_uses_the_two_files(tmp_path: Path) -> None:
     """``--stage-command`` gives the command ``ASCENT_INPUT`` and the relay's variables, and keeps its ``output`` (SKY-757).
 
@@ -1149,7 +1143,6 @@ def test_stage_command_mode_serves_the_relay_and_uses_the_two_files(tmp_path: Pa
     assert written["url"].endswith("/mcp/search")
 
 
-@_needs_openascent
 def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_path: Path) -> None:
     """A call with no relay config runs the command with the box's own environment only.
 
@@ -1186,7 +1179,6 @@ def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_pa
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == {"output": []}
 
 
-@_needs_openascent
 def test_a_failed_stage_command_writes_the_package_error(tmp_path: Path) -> None:
     """A command stage that exits nonzero writes ``{"error": ...}`` with the cause and its stderr tail (SKY-757).
 
@@ -1227,7 +1219,6 @@ def test_a_command_error_drops_a_split_secret_at_the_edge_of_a_log_the_box_cut()
     assert not any(secret[i : i + 8] in error for i in range(len(secret) - 7))
 
 
-@_needs_openascent
 def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
     """A command log over the box's bound reaches the parent cut, with a ``_cut`` mark (SKY-757).
 
@@ -1256,7 +1247,6 @@ def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
     assert "stdout_cut" not in document
 
 
-@_needs_openascent
 def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> None:
     """The box writes a line break between a stdout without one and the stderr (SKY-757).
 
@@ -1281,7 +1271,6 @@ def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> No
     assert "out-text\nerr-text" in completed.stderr
 
 
-@_needs_openascent
 def test_the_box_logs_no_part_of_a_secret_that_the_package_tail_cut_splits(tmp_path: Path) -> None:
     """OpenAscent keeps the last 64 KiB of a log; the box drops the cut first line before it logs (SKY-757).
 
@@ -1722,7 +1711,6 @@ _TWO_FILE_COMMAND = (
 )
 
 
-@_needs_openascent
 def test_a_command_entry_reads_ascent_input_and_writes_ascent_output(tmp_path: Path) -> None:
     """The command gets ``{"input": ...}`` in ``ASCENT_INPUT`` and an empty stdin; its file's ``output`` is the output (SKY-757).
 
@@ -1739,7 +1727,6 @@ def test_a_command_entry_reads_ascent_input_and_writes_ascent_output(tmp_path: P
     assert second["output"]["path"] != path
 
 
-@_needs_openascent
 def test_a_command_entry_with_no_cases_gets_a_null_input(tmp_path: Path) -> None:
     """A run with no cases writes ``{"input": null}`` to the input file.
 
@@ -1750,7 +1737,6 @@ def test_a_command_entry_with_no_cases_gets_a_null_input(tmp_path: Path) -> None
     assert ran["output"] == {"input": None}
 
 
-@_needs_openascent
 def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
     """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout.
 
@@ -1763,7 +1749,6 @@ def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
     assert ran["stdout"] == '{"output": 1}\n'
 
 
-@_needs_openascent
 def test_a_command_output_file_is_capped(tmp_path: Path) -> None:
     """An output file over ``MAX_RUN_STDOUT_BYTES`` fails the run.
 
@@ -1776,7 +1761,6 @@ def test_a_command_output_file_is_capped(tmp_path: Path) -> None:
     assert f"larger than {runner.MAX_RUN_STDOUT_BYTES} bytes" in ran["error"]
 
 
-@_needs_openascent
 def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Path) -> None:
     """An output file just under the package limit still passes after the child writes it again (SKY-757).
 
@@ -1795,7 +1779,6 @@ def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Pat
     assert len(ran["output"]) == count
 
 
-@_needs_openascent
 @pytest.mark.parametrize(("char", "count"), [("\x7f", 1_000_000), ("\U0001f600", 250_000)], ids=["del", "emoji"])
 def test_a_command_string_output_near_the_limit_passes_the_supervisor_cap(
     tmp_path: Path, char: str, count: int
@@ -1839,7 +1822,6 @@ _DETACHED_CHILD = (
 )
 
 
-@_needs_openascent
 def test_a_command_entry_does_not_wait_for_a_child_in_its_own_session(tmp_path: Path) -> None:
     """A child that the command starts in a new session neither holds the result nor counts in the run time (SKY-757).
 
@@ -1874,7 +1856,6 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
     assert error in ran["error"]
 
 
-@_needs_openascent
 @pytest.mark.parametrize(
     ("entry", "error"),
     [
@@ -1901,7 +1882,6 @@ def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: 
         assert ran["stderr"] == "why\n"
 
 
-@_needs_openascent
 def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path) -> None:
     """A command that fails keeps its stdout tail next to its stderr, in the logs and in the error (SKY-757).
 
@@ -1964,7 +1944,6 @@ def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp
     assert ran[runner.ELAPSED_PARAM] >= 0.4
 
 
-@_needs_openascent
 def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
     """A command entry gets the same time from the supervisor (SKY-642).
 
@@ -1976,7 +1955,6 @@ def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
     assert 0.4 <= ran[runner.ELAPSED_PARAM] < 30
 
 
-@_needs_openascent
 def test_a_timed_out_entry_still_reports_its_time(tmp_path: Path) -> None:
     """A timeout is a failure; its time is about the timeout (SKY-642).
 
@@ -2489,7 +2467,6 @@ def _command_metric_run(
     return json.loads((call_dir / runner.OUTPUT_FILE).read_text()), completed.stderr
 
 
-@_needs_openascent
 def test_a_command_metric_reads_ascent_input_and_writes_ascent_output(tmp_path: Path) -> None:
     """The command gets the documented input fields and its answer becomes the score (SKY-738).
 
@@ -2513,7 +2490,6 @@ def test_a_command_metric_reads_ascent_input_and_writes_ascent_output(tmp_path: 
     }
 
 
-@_needs_openascent
 def test_a_command_metric_without_expected_or_elapsed_gets_only_input_and_output(tmp_path: Path) -> None:
     """``expected`` and ``elapsed_s`` are optional: a case without them gives the command neither key.
 
@@ -2529,7 +2505,6 @@ def test_a_command_metric_without_expected_or_elapsed_gets_only_input_and_output
     assert seen == {"input": "q", "output": None}
 
 
-@_needs_openascent
 @pytest.mark.parametrize(
     ("script", "entry", "cause"),
     [
@@ -2584,7 +2559,6 @@ def _events(stderr: str) -> list[dict[str, Any]]:
     ]
 
 
-@_needs_openascent
 @_needs_curl
 def test_a_command_metric_without_a_judge_model_gets_only_the_log_url(tmp_path: Path) -> None:
     """Without a gateway the command gets ``ASCENT_LOG_URL`` on loopback and no model variable (SKY-767).
@@ -2601,7 +2575,6 @@ def test_a_command_metric_without_a_judge_model_gets_only_the_log_url(tmp_path: 
     assert urllib.parse.urlsplit(seen[runner.LOG_URL_ENV]).hostname == "127.0.0.1"
 
 
-@_needs_openascent
 @_needs_curl
 def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A POST to ``ASCENT_LOG_URL`` gives the run log the line that ``log()`` gives; a bad body is refused.
@@ -2632,7 +2605,6 @@ def test_the_log_url_writes_the_same_event_as_log(tmp_path: Path, monkeypatch: p
     assert _events(stderr) == [want]
 
 
-@_needs_openascent
 @_needs_curl
 def test_the_model_url_sends_the_judge_model_through_the_gateway_and_keeps_the_key(tmp_path: Path) -> None:
     """With a gateway the command reaches the model through the runner; the key stays out of its environment.
@@ -2703,7 +2675,6 @@ def test_a_stock_openai_client_reaches_the_judge_model_through_the_metric_model_
     assert "ASCENT_MODEL" in str(refused.value)
 
 
-@_needs_openascent
 @_needs_curl
 def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) -> None:
     """A protected gateway's budget stop reaches the output as ``control``, not as the command's score.
@@ -2741,7 +2712,6 @@ def test_a_budget_stop_on_the_model_url_stops_the_metric_call(tmp_path: Path) ->
     assert output["control"] == {"code": "budget_reached", "message": "The run budget is spent."}
 
 
-@_needs_openascent
 def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Path) -> None:
     """Each key, model mailbox and tool relay name stays out of the command; other variables stay in.
 
@@ -2761,7 +2731,6 @@ def test_the_command_env_holds_no_model_key_mailbox_or_relay_token(tmp_path: Pat
     assert "KEEP_ME=1" in seen.splitlines()
 
 
-@_needs_openascent
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
 def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> None:
     """The runner holds the model key in its start environment; its child command cannot read it from /proc.
@@ -2783,7 +2752,6 @@ def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> 
     assert (box / "seen").read_text().strip() == "refused"
 
 
-@_needs_openascent
 @_needs_curl
 def test_the_model_key_file_reaches_the_gateway_and_is_gone_before_the_command(tmp_path: Path) -> None:
     """The runner reads the scorer's key file and deletes it before the command starts; the model call uses the key.
@@ -2828,7 +2796,6 @@ _PROC_SCAN = (
 )
 
 
-@_needs_openascent
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
 @pytest.mark.parametrize("chain", ["vercel", "contained", "vercel_key_in_env"])
 def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path: Path, chain: str) -> None:
