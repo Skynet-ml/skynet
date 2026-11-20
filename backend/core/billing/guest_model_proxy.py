@@ -203,9 +203,10 @@ def main() -> int:
 def model_matches(model: object, expected: str) -> bool:
     """Return whether a request's model name names the run's model.
 
-    It mirrors ``runner.model_matches_bound``: this file runs in the box
-    without the backend's code, and the proxy must never refuse a name that
-    the gateway accepts for the bound model.
+    It mirrors only the transport-prefix rule of ``runner.model_matches_bound``,
+    for the box's one ``ASCENT_MODEL``: this file runs in the box without the
+    backend's code. The box knows only ``ASCENT_MODEL``, so the proxy refuses
+    the helper's declared model name and a local subscription route's CLI name.
 
     Args:
         model: The model that the request names.
