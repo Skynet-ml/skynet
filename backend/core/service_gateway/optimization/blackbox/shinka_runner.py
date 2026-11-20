@@ -107,12 +107,6 @@ _LOG_PREFIX = "APP_NATIVE_LOG "
 # SKY-751: the parent's side-info status of a case whose [run] entry failed.
 # This module imports no Skynet code, so it repeats ``protocol.RUN_FAILED_STATUS``.
 _RUN_FAILED_STATUS = "run_failed"
-# SKY-750: a minimize run gives upstream negated scores, so every real score can
-# be below 0. Upstream ranks programs by ``combined_score`` in queries that keep
-# incorrect programs too, and it reads a missing score as 0.0. So a program with
-# no score gets this floor: below every real score in either direction, and its
-# sum over 1.7e8 programs stays finite.
-_NO_SCORE_FLOOR = -1e300
 _NO_VERSION_SCORED_RECORD = {
     "level": "WARNING",
     "logger": "app.engine",
@@ -193,7 +187,7 @@ def main():
     pending.rename(pending.with_suffix(".json"))
     answer = QUEUE / "responses" / (request_id + ".json")
     deadline = time.monotonic() + TIMEOUT
-    response = {{"correct": False, "error": "The Skynet scorer did not answer.", "metrics": {{"combined_score": {floor!r}}}}}
+    response = {{"correct": False, "error": "The Skynet scorer did not answer.", "metrics": {{}}}}
     while time.monotonic() < deadline and not (QUEUE / "stop").exists():
         if answer.exists():
             try:
@@ -2219,11 +2213,7 @@ class ProgramScorer:
             request = json.loads(text)
             response = self.score_program(str(request["program_path"]))
         except (Exception, EvaluationStopped) as exc:
-            response = {
-                "correct": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "metrics": {"combined_score": _NO_SCORE_FLOOR},
-            }
+            response = {"correct": False, "error": f"{type(exc).__name__}: {exc}", "metrics": {}}
         answer = self.queue / "responses" / path.name
         pending = answer.with_suffix(".tmp")
         pending.write_text(json.dumps(_json_finite(response), allow_nan=False), encoding="utf-8")
@@ -2240,11 +2230,7 @@ class ProgramScorer:
         """
         generation = generation_of(program_path)
         if generation is None:
-            return {
-                "correct": False,
-                "error": "The program is outside upstream's generation layout.",
-                "metrics": {"combined_score": _NO_SCORE_FLOOR},
-            }
+            return {"correct": False, "error": "The program is outside upstream's generation layout.", "metrics": {}}
         try:
             text = Path(program_path).read_text(encoding="utf-8")
             if self.bundle is not None:
@@ -2255,7 +2241,7 @@ class ProgramScorer:
             return {
                 "correct": False,
                 "error": str(exc),
-                "metrics": {"combined_score": _NO_SCORE_FLOOR, "text_feedback": f"Rejected without scoring: {exc}"},
+                "metrics": {"combined_score": 0.0, "text_feedback": f"Rejected without scoring: {exc}"},
             }
         case_failed = threading.Event()
 
@@ -2327,7 +2313,7 @@ class ProgramScorer:
             return {
                 "correct": False,
                 "error": f"{len(failed)} of {len(results)} case(s) have no score.",
-                "metrics": {"combined_score": _NO_SCORE_FLOOR, "text_feedback": feedback},
+                "metrics": {"combined_score": 0.0, "text_feedback": feedback},
             }
         metrics = summarize_scores(results)
         with self._lock:
@@ -2562,7 +2548,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         job_config=LocalJobConfig(**job_fields(payload)),
         db_config=DatabaseConfig(**config["database"]),
         init_program_str=shinka_bundle.encode_bundle({}) if bundle is not None else pack_program(seed),
-        evaluate_str=_EVALUATE_TEMPLATE.format(queue=str(queue), timeout=timeout, floor=_NO_SCORE_FLOOR),
+        evaluate_str=_EVALUATE_TEMPLATE.format(queue=str(queue), timeout=timeout),
         **config["runner"],
     )
     if stepped:
