@@ -439,7 +439,7 @@ export interface TomlDiagnostic {
  * Returns:
  *   Each diagnostic with a message; an unknown level counts as an error.
  */
-function tomlDiagnostics(value: unknown): TomlDiagnostic[] {
+function readTomlDiagnostics(value: unknown): TomlDiagnostic[] {
   return asList(value).flatMap((e) => {
     const message = str(e.message);
     const where = [str(e.section), str(e.key)].filter(Boolean).join(".");
@@ -452,7 +452,7 @@ export interface WorkspaceSave {
   /** The whole file as the editor now has it. */
   text: string;
   /** Every error and warning of the ``ascent.toml`` parser; empty for a clean file. */
-  tomlErrors: TomlDiagnostic[];
+  tomlDiagnostics: TomlDiagnostic[];
 }
 
 /**
@@ -474,7 +474,7 @@ export function workspaceSave(value: unknown): WorkspaceSave | { note: string } 
   const state = asObj(r.wizard_state);
   const text = state ? Object.values(state).find((v) => typeof v === "string") : undefined;
   if (typeof text !== "string") return null;
-  return { text, tomlErrors: tomlDiagnostics(r.ascent_toml_errors) };
+  return { text, tomlDiagnostics: readTomlDiagnostics(r.ascent_toml_diagnostics) };
 }
 
 /**
@@ -1045,5 +1045,5 @@ export function taggingGuide(value: unknown): TaggingGuideView | null {
 export function setupCheck(value: unknown): { ok: boolean; errors: TomlDiagnostic[] } | null {
   const r = asObj(value);
   if (!r || typeof r.ok !== "boolean") return null;
-  return { ok: r.ok, errors: tomlDiagnostics(r.errors) };
+  return { ok: r.ok, errors: readTomlDiagnostics(r.errors) };
 }

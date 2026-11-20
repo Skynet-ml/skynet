@@ -94,7 +94,7 @@ from .workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
-    ascent_toml_errors,
+    ascent_toml_diagnostics,
     diagnostic_text,
     has_error,
     workspace_tools,
@@ -1714,14 +1714,14 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     # A repository run has no run.py: its scorer reads the checkout itself.
     if screen == "metric" and not str(state.get("metric_code") or "").strip():
         return ["metric_code must be written"]
-    if screen == "metric" and has_error(diagnostics := _setup_errors(state)):
+    if screen == "metric" and has_error(diagnostics := _setup_diagnostics(state)):
         return [f"ascent.toml is not valid: {diagnostic_text(item)}" for item in diagnostics if item["level"] == ERROR]
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
 
 
-def _setup_errors(state: WizardState) -> list[dict[str, Any]]:
+def _setup_diagnostics(state: WizardState) -> list[dict[str, Any]]:
     """Check the setup draft's ``ascent.toml`` with the parser a run uses.
 
     A draft with no ``ascent.toml`` passes: the run then reads the
@@ -1731,11 +1731,11 @@ def _setup_errors(state: WizardState) -> list[dict[str, Any]]:
         state: The wizard snapshot with this turn's writes merged in.
 
     Returns:
-        Every error and warning of the parser, as :func:`ascent_toml_errors`
+        Every error and warning of the parser, as :func:`ascent_toml_diagnostics`
         gives them; empty when the file is valid with no warning, or absent.
     """
     text = str(state.get("ascent_toml") or "")
-    return ascent_toml_errors(text) if text.strip() else []
+    return ascent_toml_diagnostics(text) if text.strip() else []
 
 
 def _limit_below_floor(state: WizardState) -> str | None:
@@ -2084,7 +2084,7 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
 
     async def check_setup() -> Any:
         """Check the setup draft's ascent.toml the way a run reads it."""
-        diagnostics = _setup_errors(cast(WizardState, {**state, **turn.wizard_patch}))
+        diagnostics = _setup_diagnostics(cast(WizardState, {**state, **turn.wizard_patch}))
         return {"ok": not has_error(diagnostics), "errors": diagnostics}
 
     setup_check = [

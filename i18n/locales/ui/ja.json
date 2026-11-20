@@ -4428,7 +4428,7 @@
   "agent.tools.tour.read_repo_file": "リポジトリのファイルとフォルダを読み、プロジェクトの動かし方と評価のされ方を確かめます。",
   "agent.tools.tour.write_workspace_file": "実行の metric.py と ascent.toml をエディターに書き込みます。",
   "agent.tools.tour.edit_workspace_file": "metric.py または ascent.toml の特定の一か所だけを変更し、残りはそのままにします。",
-  "agent.tools.tour.check_setup": "ascent.toml のセットアップを実行時と同じ方法で確認し、最初のエラーを示します。",
+  "agent.tools.tour.check_setup": "ascent.toml のセットアップを実行時と同じ方法で確認し、すべてのエラーと警告を一覧にします。",
   "agent.tools.tour.search_docs": "ドキュメントをもとに質問に答え、ページへのリンクを示します。",
   "agent.tools.tour.web_search": "ウェブを検索し、送られたリンクを読みます。",
   "agent.tools.tour.ask_user": "いくつかの選択肢を付けて質問します。",

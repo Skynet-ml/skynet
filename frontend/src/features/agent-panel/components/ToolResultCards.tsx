@@ -485,7 +485,7 @@ export function WorkspaceWriteCard({ call }: { call: AgentToolCall }) {
           parts={[
             path && <PathDetail path={path} />,
             ok && (counts.added > 0 || counts.removed > 0) && <LineCounts {...counts} />,
-            ok && saved.tomlErrors.some((e) => e.level === "error") && (
+            ok && saved.tomlDiagnostics.some((e) => e.level === "error") && (
               <span className={cn("inline-flex items-center gap-1", ERROR_TONE)}>
                 <Warning className="size-3 shrink-0" aria-hidden />
                 {msg("agent.tool.check_setup.failed")}
@@ -497,7 +497,7 @@ export function WorkspaceWriteCard({ call }: { call: AgentToolCall }) {
     >
       {ok ? (
         <div className="flex flex-col gap-1.5">
-          <TomlDiagnosticList items={saved.tomlErrors} />
+          <TomlDiagnosticList items={saved.tomlDiagnostics} />
           {written.length > 0 && <CodeLines lines={written} cut={false} />}
         </div>
       ) : null}

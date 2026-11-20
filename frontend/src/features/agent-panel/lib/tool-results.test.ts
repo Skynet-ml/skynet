@@ -235,14 +235,14 @@ void test("a workspace save reads the saved file and every toml mistake; a refus
   assert.deepEqual(
     workspaceSave({
       wizard_state: { ascent_toml: "[run]\n" },
-      ascent_toml_errors: [
+      ascent_toml_diagnostics: [
         { level: "error", line: 1, section: "run", key: "entry", message: "entry is missing" },
         { level: "warning", line: null, section: "", key: "", message: "old style" },
       ],
     }),
     {
       text: "[run]\n",
-      tomlErrors: [
+      tomlDiagnostics: [
         { level: "error", line: 1, where: "run.entry", message: "entry is missing" },
         { level: "warning", line: null, where: "", message: "old style" },
       ],
@@ -250,7 +250,7 @@ void test("a workspace save reads the saved file and every toml mistake; a refus
   );
   assert.deepEqual(workspaceSave({ wizard_state: { metric_code: "x" } }), {
     text: "x",
-    tomlErrors: [],
+    tomlDiagnostics: [],
   });
   assert.deepEqual(workspaceSave("Not a file you can write: 'a'."), {
     note: "Not a file you can write: 'a'.",
@@ -266,7 +266,7 @@ void test("a stored workspace save with the retired error key shows no error car
       wizard_state: { [retired]: "[run]\n" },
       [`${retired}_error`]: { section: "run", key: "entry", message: "[run] entry is missing" },
     }),
-    { text: "[run]\n", tomlErrors: [] },
+    { text: "[run]\n", tomlDiagnostics: [] },
   );
 });
 

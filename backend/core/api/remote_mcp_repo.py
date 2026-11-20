@@ -61,7 +61,7 @@ from ..models.blackbox import (
 from ..service_gateway.agents.workspace_tools import (
     ASCENT_TOML_EXAMPLE,
     METRIC_GUIDE,
-    ascent_toml_errors,
+    ascent_toml_diagnostics,
     diagnostic_text,
 )
 from ..service_gateway.optimization.blackbox.repo_constraints import (
@@ -835,7 +835,7 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
         Each error of the parser as an issue, which blocks the run, and the
         notes: each warning, which does not (SKY-763).
     """
-    diagnostics = ascent_toml_errors(text)
+    diagnostics = ascent_toml_diagnostics(text)
     issues = [diagnostic_text(item) for item in diagnostics if item["level"] == ERROR]
     notes = [diagnostic_text(item) for item in diagnostics if item["level"] != ERROR]
     if issues:
@@ -863,10 +863,13 @@ def review_draft(
     missing = _remaining(spec)
     if missing:
         return [_missing_step_issue(step) for step in missing], [], {}
-    repo_problems, notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
-    issues = list(repo_problems)
+    repo_problems, repo_notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
+    issues, notes = list(repo_problems), list(repo_notes)
     if contract := (spec.get("contract") or {}).get("ascent_toml"):
-        issues += contract_issues(contract)[0]
+        # As in repo_draft_set_contract: errors block the run, warnings are notes (SKY-763).
+        contract_problems, contract_notes = contract_issues(contract)
+        issues += contract_problems
+        notes += contract_notes
     elif has_contract is False:
         issues.append(_missing_step_issue("contract"))
     data = spec.get("data") or {}

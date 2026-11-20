@@ -4428,7 +4428,7 @@
   "agent.tools.tour.read_repo_file": "आपकी रिपॉज़िटरी की फ़ाइलें और फ़ोल्डर पढ़ता है, ताकि पता चले कि प्रोजेक्ट कैसे चलता है और उसे कैसे जाँचा जाता है।",
   "agent.tools.tour.write_workspace_file": "आपके रन की metric.py और ascent.toml फ़ाइलें एडिटर में लिखता है।",
   "agent.tools.tour.edit_workspace_file": "metric.py या ascent.toml का एक सटीक हिस्सा बदलता है और बाकी को वैसा ही रखता है।",
-  "agent.tools.tour.check_setup": "आपके ascent.toml सेटअप को वैसे जाँचता है जैसे रन उसे पढ़ता है, और पहली त्रुटि बताता है।",
+  "agent.tools.tour.check_setup": "आपके ascent.toml सेटअप को वैसे जाँचता है जैसे रन उसे पढ़ता है, और हर त्रुटि और चेतावनी दिखाता है।",
   "agent.tools.tour.search_docs": "दस्तावेज़ों से आपके सवालों के जवाब देता है, पेजों के लिंक के साथ।",
   "agent.tools.tour.web_search": "वेब पर खोजता है और आपके भेजे लिंक पढ़ता है।",
   "agent.tools.tour.ask_user": "आपसे कुछ विकल्पों के साथ एक सवाल पूछता है।",

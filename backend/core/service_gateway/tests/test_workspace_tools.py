@@ -261,7 +261,7 @@ async def test_a_failed_workspace_write_or_edit_ends_as_an_error_step(monkeypatc
     assert [end["status"] for end in ends] == ["error", "error", "ok"]
     assert ends[0]["result"]["error"].startswith("run.py cannot be written")
     assert "error" in ends[1]["result"]
-    assert "ascent_toml_errors" in ends[2]["result"]
+    assert "ascent_toml_diagnostics" in ends[2]["result"]
     assert "error" not in ends[2]["result"]
 
 
@@ -627,7 +627,7 @@ async def test_write_reports_the_parser_error_of_ascent_toml(monkeypatch: pytest
     )
 
     assert result["wizard_state"] == {"workspace_base": _HEAD, "ascent_toml": toml_text}
-    [error] = result["ascent_toml_errors"]
+    [error] = result["ascent_toml_diagnostics"]
     assert (error["level"], error["line"], error["section"], error["key"]) == ("error", 2, "run", "entry")
     assert "[run] entry is missing" in error["message"]
     assert turn.wizard_patch["ascent_toml"] == toml_text
@@ -643,7 +643,7 @@ async def test_write_reports_every_mistake_of_ascent_toml(monkeypatch: pytest.Mo
         path="ascent.toml", text=toml_text
     )
 
-    assert [(e["level"], e["line"], e["section"], e["key"]) for e in result["ascent_toml_errors"]] == [
+    assert [(e["level"], e["line"], e["section"], e["key"]) for e in result["ascent_toml_diagnostics"]] == [
         ("error", 4, "run", "bogus"),
         ("error", 8, "paths", "editable"),
         ("error", 6, "metric", "entry"),

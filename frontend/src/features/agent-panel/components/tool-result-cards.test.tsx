@@ -281,7 +281,7 @@ void describe("tool result cards", () => {
     const text = "[run]\nname = 1\n";
     const result = {
       wizard_state: { ascent_toml: text },
-      ascent_toml_errors: [
+      ascent_toml_diagnostics: [
         { level: "error", line: 1, section: "run", key: "entry", message: "entry is missing" },
         { level: "error", line: 2, section: "run", key: "name", message: "name is wrong" },
       ],

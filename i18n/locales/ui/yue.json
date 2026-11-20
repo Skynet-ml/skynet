@@ -4428,7 +4428,7 @@
   "agent.tools.tour.read_repo_file": "讀取你儲存庫嘅檔案同資料夾，睇吓個項目點樣運行同點樣評分。",
   "agent.tools.tour.write_workspace_file": "將你嘅運行嘅 metric.py 同 ascent.toml 寫入編輯器。",
   "agent.tools.tour.edit_workspace_file": "只改 metric.py 或 ascent.toml 入面一個準確嘅部分，其餘保持不變。",
-  "agent.tools.tour.check_setup": "用運行讀取嘅方式檢查你嘅 ascent.toml 設定，並指出第一個錯誤。",
+  "agent.tools.tour.check_setup": "用運行讀取嘅方式檢查你嘅 ascent.toml 設定，並列出每個錯誤同警告。",
   "agent.tools.tour.search_docs": "根據文件解答你嘅問題，並附上頁面連結。",
   "agent.tools.tour.web_search": "喺網上搜尋，並閱讀你傳嚟嘅連結。",
   "agent.tools.tour.ask_user": "問你一條問題，附幾個選項俾你揀。",

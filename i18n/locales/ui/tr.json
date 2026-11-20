@@ -4428,7 +4428,7 @@
   "agent.tools.tour.read_repo_file": "Projenin nasıl çalıştığını ve nasıl değerlendirildiğini görmek için deponuzdaki dosya ve klasörleri okur.",
   "agent.tools.tour.write_workspace_file": "Çalıştırmanızın metric.py ve ascent.toml dosyalarını düzenleyiciye yazar.",
   "agent.tools.tour.edit_workspace_file": "metric.py veya ascent.toml dosyasının tam bir kısmını değiştirir, gerisini olduğu gibi bırakır.",
-  "agent.tools.tour.check_setup": "ascent.toml kurulumunuzu bir çalıştırmanın okuduğu gibi kontrol eder ve ilk hatayı söyler.",
+  "agent.tools.tour.check_setup": "ascent.toml kurulumunuzu bir çalıştırmanın okuduğu gibi kontrol eder ve her hatayı ve uyarıyı listeler.",
   "agent.tools.tour.search_docs": "Sorularınızı belgelerden, sayfalara bağlantılarla yanıtlar.",
   "agent.tools.tour.web_search": "Web'de arama yapar ve gönderdiğiniz bağlantıları okur.",
   "agent.tools.tour.ask_user": "Size seçebileceğiniz birkaç seçenekle bir soru sorar.",

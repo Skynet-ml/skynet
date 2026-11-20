@@ -4428,7 +4428,7 @@
   "agent.tools.tour.read_repo_file": "Читає файли й теки вашого репозиторію, щоб зрозуміти, як проєкт запускається і як його оцінюють.",
   "agent.tools.tour.write_workspace_file": "Записує в редактор файли metric.py і ascent.toml вашого запуску.",
   "agent.tools.tour.edit_workspace_file": "Змінює одну точну частину metric.py або ascent.toml і залишає решту як є.",
-  "agent.tools.tour.check_setup": "Перевіряє налаштування ascent.toml так, як його читає запуск, і називає першу помилку.",
+  "agent.tools.tour.check_setup": "Перевіряє налаштування ascent.toml так, як його читає запуск, і показує всі помилки та попередження.",
   "agent.tools.tour.search_docs": "Відповідає на ваші запитання за документацією, з посиланнями на сторінки.",
   "agent.tools.tour.web_search": "Шукає в інтернеті й читає посилання, які ви надсилаєте.",
   "agent.tools.tour.ask_user": "Ставить вам запитання з кількома варіантами на вибір.",

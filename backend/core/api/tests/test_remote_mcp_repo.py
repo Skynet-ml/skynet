@@ -315,7 +315,9 @@ def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) ->
     draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
     body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml="[run]\nentry = 'a.py:f'\n")
     assert body["saved"] == {"ascent_toml": "[run]\nentry = 'a.py:f'\n"}
-    assert body["issues"] == [m["message"] for m in remote_mcp_repo.ascent_toml_errors("[run]\nentry = 'a.py:f'\n")]
+    assert body["issues"] == [
+        m["message"] for m in remote_mcp_repo.ascent_toml_diagnostics("[run]\nentry = 'a.py:f'\n")
+    ]
     assert "version" in body["issues"][0]
     assert body["next_tool"] == "repo_draft_set_contract"
     assert "contract" not in body["remaining_steps"]
@@ -346,6 +348,21 @@ def test_contract_step_and_review_list_every_mistake_with_its_line(harness: Any)
 
     assert review["ready"] is False
     assert [issue for issue in review["issues"] if issue in expected] == expected
+
+
+def test_review_lists_a_contract_warning_as_a_note_that_blocks_nothing(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parser warning is a note in the review, as at the contract step, and is not an issue (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    warning = {"level": "warning", "line": 2, "section": "run", "key": "old", "message": "ascent.toml: old style."}
+    monkeypatch.setattr(remote_mcp_repo, "ascent_toml_diagnostics", lambda text: [warning])
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert "Warning: ascent.toml: old style. (line 2)" in review["notes"]
+    assert not any("old style" in issue for issue in review["issues"])
 
 
 def test_review_reports_a_contract_with_no_run_and_no_target(harness: Any) -> None:

@@ -238,7 +238,8 @@ function UnifiedWizardFrame() {
             if (screenRef.current !== screen) return;
             // The file changed while the check ran, so its answer is stale.
             if (setupTextRef.current !== text) return run(setupTextRef.current);
-            const lines = result.errors.map(ascentTomlDiagnosticText).join("\n");
+            // The lead sentence stands alone; each diagnostic starts its own line.
+            const lines = result.errors.map((d) => `\n${ascentTomlDiagnosticText(d)}`).join("");
             if (result.ok) {
               toast.dismiss(SETUP_CHECK_TOAST_ID);
               // A warning blocks nothing, so the wizard says it and moves on.

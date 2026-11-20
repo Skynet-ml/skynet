@@ -4475,7 +4475,7 @@
   "agent.tools.tour.read_repo_file": "קורא את הקבצים והתיקיות במאגר שלך, כדי לראות איך הפרויקט רץ ואיך הוא נבחן.",
   "agent.tools.tour.write_workspace_file": "כותב לעורך את הקבצים metric.py ו-ascent.toml של ההרצה שלך.",
   "agent.tools.tour.edit_workspace_file": "משנה חלק מדויק אחד ב-metric.py או ב-ascent.toml, ושומר על השאר.",
-  "agent.tools.tour.check_setup": "בודק את הגדרת ascent.toml שלך כמו שהרצה קוראת אותה, ומציין את השגיאה הראשונה.",
+  "agent.tools.tour.check_setup": "בודק את הגדרת ascent.toml שלך כמו שהרצה קוראת אותה, ומציג כל שגיאה וכל אזהרה.",
   "agent.tools.tour.search_docs": "עונה על השאלות שלך מתוך התיעוד, עם קישורים לעמודים.",
   "agent.tools.tour.web_search": "מחפש ברשת וקורא את הקישורים ששלחת.",
   "agent.tools.tour.ask_user": "שואל אותך שאלה עם כמה אפשרויות לבחירה.",

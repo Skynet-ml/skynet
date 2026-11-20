@@ -289,7 +289,7 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     return browser, ""
 
 
-def ascent_toml_errors(text: str) -> list[dict[str, Any]]:
+def ascent_toml_diagnostics(text: str) -> list[dict[str, Any]]:
     """Parse an ``ascent.toml`` text the way a run reads it, and return every diagnostic (SKY-763).
 
     Args:
@@ -313,7 +313,7 @@ def ascent_toml_errors(text: str) -> list[dict[str, Any]]:
 
 
 def diagnostic_text(item: dict[str, Any]) -> str:
-    """Write one diagnostic of :func:`ascent_toml_errors` as one line of text, for a list of plain strings.
+    """Write one diagnostic of :func:`ascent_toml_diagnostics` as one line of text, for a list of plain strings.
 
     The parser's message stays first and unchanged, so a file with one error
     on no line reads as before; the level shows only for a warning, because
@@ -330,7 +330,7 @@ def diagnostic_text(item: dict[str, Any]) -> str:
 
 
 def has_error(diagnostics: list[dict[str, Any]]) -> bool:
-    """Say whether a diagnostic list from :func:`ascent_toml_errors` holds an error, which blocks the run.
+    """Say whether a diagnostic list from :func:`ascent_toml_diagnostics` holds an error, which blocks the run.
 
     Args:
         diagnostics: The list.
@@ -611,8 +611,8 @@ def workspace_tools(
 
         Returns:
             ``{"wizard_state": {field: text}}`` or ``{"wizard_state": {"workspace_files":
-            {path: text}}}``, plus ``ascent_toml_errors`` (each diagnostic of
-            :func:`ascent_toml_errors`) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
+            {path: text}}}``, plus ``ascent_toml_diagnostics`` (each diagnostic of
+            :func:`ascent_toml_diagnostics`) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
             file that is too large, one file too many, or files too large together.
         """
         if len(text.encode("utf-8", "surrogatepass")) > DRAFT_FILE_BYTES:
@@ -645,8 +645,8 @@ def workspace_tools(
         turn.wizard_patch[field] = text
         result["wizard_state"][field] = text
         # The file still reaches the draft (last write wins); the agent fixes it or tells the user.
-        if field == "ascent_toml" and (diagnostics := ascent_toml_errors(text)):
-            result["ascent_toml_errors"] = diagnostics
+        if field == "ascent_toml" and (diagnostics := ascent_toml_diagnostics(text)):
+            result["ascent_toml_diagnostics"] = diagnostics
         return result
 
     async def write_workspace_file(path: str, text: str) -> dict[str, Any]:
@@ -819,7 +819,7 @@ def workspace_tools(
             desc=(
                 "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
                 "It goes into the editor at once, and the run uses it in place of the repository's file. For "
-                "ascent.toml the result has ascent_toml_errors: every error and warning of the parser, each with "
+                "ascent.toml the result has ascent_toml_diagnostics: every error and warning of the parser, each with "
                 "its level, line, section, key and message. Fix every error in one write; a warning blocks nothing."
             ),
             arg_desc={"path": file_arg, "text": "The whole file text."},
@@ -851,7 +851,7 @@ __all__ = [
     "UNWRITABLE_PATHS",
     "WORKSPACE_FILES",
     "WRITE_FILE_TOOL",
-    "ascent_toml_errors",
+    "ascent_toml_diagnostics",
     "diagnostic_text",
     "has_error",
     "open_repo",
