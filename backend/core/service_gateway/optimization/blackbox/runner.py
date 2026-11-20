@@ -189,7 +189,7 @@ COMMAND_LOG_CHARS = 800
 _COMMAND_LOG_BOUND = 4_000
 # OpenAscent's invalid-JSON cause can quote the output file: the first 40
 # characters of a number, or a key as a repr. The mask can miss both, so a
-# failed command gets this fixed cause instead (SKY-757).
+# failed command or command metric gets this fixed cause instead (SKY-757).
 INVALID_JSON_CAUSE = (
     "The output file is not valid JSON. Write one strict JSON value to ASCENT_OUTPUT: "
     "UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate escape."
@@ -1535,7 +1535,8 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
         score, side_info = normalize_score(call.result.to_dict())
         result.update(score=score, side_info=side_info)
     except BaseException as exc:  # the metric is arbitrary — any failure is reported, not raised
-        result["error"] = f"{type(exc).__name__}: {exc}"
+        invalid = ascent is not None and isinstance(exc, ascent.InvalidJsonError)
+        result["error"] = f"{type(exc).__name__}: {INVALID_JSON_CAUSE if invalid else exc}"
         if ascent is not None and isinstance(exc, ascent.AscentError):
             result["cause"] = exc.code
             if getattr(exc, "exit_code", None) is not None:

@@ -628,7 +628,9 @@ cause: the command could not start (for example a missing file), a time
 limit, a nonzero exit code (the message shows the code), no answer file, an
 answer file that is not a plain file, an answer that is not valid JSON, or
 an answer with no `score` or another wrong form. The stderr of the command
-stays in the server log.
+stays in the server log. For an answer that is not valid JSON, the server log
+gets the same fixed cause as a `[run]` command, which quotes no part of the
+answer file.
 
 The command has the same limits as a Python metric: the same box, network,
 services, vCPUs and time limit. The metric box holds no version code, so

@@ -5606,6 +5606,28 @@ def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
     assert "secret-stderr" not in str(caught.value)
 
 
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+    script: str,
+    pieces: tuple[str, ...],
+) -> None:
+    """A command metric whose answer is not valid JSON logs the fixed cause, which quotes no file (SKY-757)."""
+    scorer, _ = _command_scorer(tmp_path, script + "\n", monkeypatch)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="result file is not valid JSON"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert runner.INVALID_JSON_CAUSE in caplog.text
+    assert not [piece for piece in pieces if piece in caplog.text]
+
+
 def test_a_command_metric_is_refused_when_the_server_has_no_openascent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
