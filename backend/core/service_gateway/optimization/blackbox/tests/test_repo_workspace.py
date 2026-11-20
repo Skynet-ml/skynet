@@ -1837,7 +1837,12 @@ def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(
         space.prepare()
         boxes = [space.open_metric() for _ in range(2)]
         for metric in boxes:
+            # The saved state holds the build output but no metric source (SKY-398).
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") is None
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") is None
             metric.install_metric_files()
+            assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/source.txt") == "v1\n"
             assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/metric.txt") == "v1\n"
             assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/bin/key.txt") == "unset\n"
             assert metric.session.read_file(f"{METRIC_REPO_DIR}/eval/metric.sh") == "cat bin/metric.txt\n"

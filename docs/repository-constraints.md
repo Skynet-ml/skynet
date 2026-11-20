@@ -341,8 +341,9 @@ content and no metric code. It has these keys:
   List the files in byte order (`LC_ALL=C sort`). With no part, the hash is
   the SHA-256 of no bytes. With `[metric] setup`, the command is one more
   part. Its path is `/[metric] setup`, and its bytes are the command text in
-  UTF-8, with the spaces at the start and end removed. No file path starts
-  with `/`, so the part cannot clash with a file. Sort this part with the
+  UTF-8, with the whitespace (spaces, tabs, newlines) at the start and end
+  removed. No file path starts with `/`, so the part cannot clash with a
+  file. Sort this part with the
   file paths in byte order, like any other part.
 - `metric_setup`: the `[metric] setup` command. The record has this key only
   when the file sets `[metric] setup`. The pull request block shows it as
@@ -622,8 +623,15 @@ Each metric box opens from the state that the metric setup box saved. The
 saved state can be the box's working folder only. A file that the build
 writes outside the working folder, such as `~/.cargo` or the Go build cache,
 may not be kept. Build into the folder of the metric files, for example a
-`target/` or `bin/` folder next to the source. The metric box then puts the `[metric] files`
-in the folder again, and the built files stay next to them.
+`target/` or `bin/` folder next to the source.
+
+After the build, the metric setup box removes the `[metric] files` again.
+Only the build output stays in the saved state, so no metric box holds the
+metric source before the version's box ends. The metric box then puts the
+`[metric] files` in the folder again, and the built files stay next to them.
+Do not let the build write to the path of one of the `[metric] files`. The
+metric box puts the original file back at that path, so the built file is
+lost.
 
 A Rust metric:
 

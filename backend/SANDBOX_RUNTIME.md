@@ -61,9 +61,11 @@ When `optimize.toml` sets `[metric] setup` (SKY-740), it then installs the
 metric files into `.app-metric/repo` and runs the command there once, with
 the 30-minute setup time limit. A failed or timed-out build raises
 `RepoSetupError` with the redacted last lines of its output, before any
-candidate box opens. The parent saves the box state. The saved state can be
-the box working folder only, so files that the build writes outside it may
-not be kept; build into the metric files' folder. Each metric box then extracts the
+candidate box opens. After the build, the box removes the metric files
+again, so the saved state holds the build output but no metric source. The
+parent then saves the box state. The saved state can be the box working
+folder only, so files that the build writes outside it may not be kept;
+build into the metric files' folder. Each metric box then extracts the
 metric files over that folder again, so the built files stay next to them.
 The box has its own `metric-setup` operation key, so its time counts in the
 run's cost.

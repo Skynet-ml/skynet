@@ -13,9 +13,9 @@ versions. Each box holds only the code it needs (SKY-398):
 - The metric setup step runs once in its own box. It installs only the
   packages of ``METRIC_REQUIREMENTS``, then runs the ``[metric] setup``
   command in ``METRIC_REPO_DIR`` with the metric files there (SKY-740). It
-  saves a second state that holds no repository code; the files the build
-  writes in the box working directory stay in that state. Its network is
-  open only to the package registries, and it gets no secret.
+  removes the metric files again and saves a second state that holds no
+  repository code and no metric source; the build output stays in it. Its
+  network is open only to the package registries, and it gets no secret.
 - A candidate box C opens for each evaluation from the prepared state,
   checks the digest and lays out the version. The parent ends it after the
   ``[run]`` entry; closing the box is the only cleanup. No candidate box
@@ -471,6 +471,33 @@ def _install_metric_files(session: SandboxSession, files: str | None) -> None:
     )
     if not result.ok:
         raise RepoSetupError(f"The metric files could not be installed: {_tail(result)}")
+
+
+def _remove_metric_files(session: SandboxSession, files: str) -> None:
+    """Remove the packed metric files from ``METRIC_REPO_DIR`` and keep the build output.
+
+    The saved metric state must hold no metric source, so no metric box has it
+    before the candidate box ends (SKY-398); ``install_metric_files`` puts it
+    back later (SKY-740).
+
+    Args:
+        session: The metric setup box, after the build.
+        files: The base64 tar.gz from :func:`pack_metric_files`.
+
+    Raises:
+        RepoSetupError: When the files cannot be removed.
+    """
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(files)), mode="r:gz") as packed:
+        names = [member.name for member in packed.getmembers() if member.isreg()]
+    listing = f"{METRIC_DIR}/remove-{uuid.uuid4().hex}.txt"
+    session.write_files({listing: "".join(f"{name}\0" for name in names)})
+    result = session.run(
+        f"cd {METRIC_REPO_DIR} && xargs -0 rm -f -- < ../{posixpath.basename(listing)}"
+        f" && rm -f ../{posixpath.basename(listing)}",
+        timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+    )
+    if not result.ok:
+        raise RepoSetupError(f"The metric files could not be removed after the metric setup: {_tail(result)}")
 
 
 def _close_quietly(session: SandboxSession, what: str) -> None:
@@ -1056,7 +1083,7 @@ class RepoWorkspace:
             _close_quietly(session, "The metric setup box")
 
     def _build_metric(self, session: SandboxSession) -> None:
-        """Run the ``[metric] setup`` command once in the metric files' folder (SKY-740).
+        """Run the ``[metric] setup`` command once in the metric files' folder, then remove the metric files (SKY-740).
 
         Args:
             session: The metric setup box, after the package install.
@@ -1073,6 +1100,8 @@ class RepoWorkspace:
             raise RepoSetupError(f"The metric setup command ([metric] setup) ran out of time.\n{log}")
         if not build.ok:
             raise RepoSetupError(f"The metric setup command ([metric] setup) failed (exit {build.exit_code}).\n{log}")
+        if self.metric_files is not None:
+            _remove_metric_files(session, self.metric_files)
 
     def _save(self, session: SandboxSession, key: str, name: str) -> _State:
         """Save a box's state as a snapshot, or as a tar.gz in the parent when the runtime has none.
