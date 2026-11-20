@@ -81,7 +81,7 @@ import httpx
 
 try:
     import openascent
-except ImportError:  # the package needs Python 3.12; a 3.11 dev venv runs only Python metrics
+except ImportError:  # a server without the package runs only Python metrics
     openascent = None
 
 from ....billing.budgets import BudgetError, BudgetInsufficientError

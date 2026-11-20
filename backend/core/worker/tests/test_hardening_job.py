@@ -166,7 +166,7 @@ class Recorder:
         workdir.mkdir()
         full = _archive(workdir / "tree.tgz", self.files, self.links)
         require_version = not kwargs["started"]
-        constraints = read_constraints(full, require_version=require_version)
+        constraints = read_constraints(full, require_version=require_version, legacy_forms=not require_version)
         assert constraints is not None
         hidden = (*constraints.metric.files, constraints.metric.exploits)
         agent = strip_archive(full, hidden, workdir / "agent-tree.tgz")
@@ -885,6 +885,28 @@ def test_a_started_job_reads_an_ascent_toml_with_no_version_as_version_1(tmp_pat
     assert recorder.gate_require_version is False
     assert recorder.workspace is not None
     assert recorder.workspace.require_version is False
+
+
+def test_a_started_job_reads_an_older_form_and_a_new_job_refuses_it(tmp_path: Path) -> None:
+    """A job past its preflight passed the older reader, so its workspace reads ``"eval/exploits/"`` (SKY-760)."""
+    older = {**_FILES, CONSTRAINTS_FILE: _TOML.replace(b'"eval/exploits"', b'"eval/exploits/"')}
+    (tmp_path / "new").mkdir()
+    (tmp_path / "first").mkdir()
+    (tmp_path / "later").mkdir()
+
+    refused = _run(Recorder(tmp_path / "new", files=older), _cloud_job(), local_mode=False)
+    assert refused.status == "preflight_failed"
+    assert "must be written 'eval/exploits'" in refused.preflight_failures[0]
+
+    job = _run(Recorder(tmp_path / "first"), _cloud_job(), local_mode=False)
+    job = record_verdict(job, job.rounds_detail[0].exploits[0].id, confirmed=True)
+    recorder = Recorder(tmp_path / "later", files=older)
+
+    job = _run(recorder, job, local_mode=False)
+
+    assert job.status == "waiting_fix"
+    assert recorder.workspace is not None
+    assert recorder.workspace.exploits_path == recorder.workspace.trusted_root / "eval/exploits"
 
 
 def test_a_later_pass_restores_the_suite_and_fixes_of_earlier_rounds(tmp_path: Path) -> None:
