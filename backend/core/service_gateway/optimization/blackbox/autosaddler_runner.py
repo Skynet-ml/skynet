@@ -144,8 +144,8 @@ _RUN_FAILED_STATUS = "run_failed"
 # floor, in upstream's view only: it always loses, and the app never reports
 # it. It is not -sys.float_info.max because upstream sums the case scores
 # before it divides, and that sum must stay finite (up to 1.7e8 cases).
-# SKY-750 (metric direction): the floor assumes that a higher score is
-# better. A minimize run must flip it to +1e300.
+# SKY-750 (metric direction): the floor is on the engine scale. The EvalServer
+# negates a minimize run's scores, so higher is always better here.
 _NO_SCORE_FLOOR = -1e300
 # Upstream records means and per-case means that can hold the floor, and the
 # agent reads them. Such a mean is near _NO_SCORE_FLOOR / n with n below 1.7e8

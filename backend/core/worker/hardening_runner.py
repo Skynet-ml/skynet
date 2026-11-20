@@ -480,6 +480,7 @@ class RepoHardeningRunner(HardeningRunner):
                 files=_tree_files(self.workspace.agent_archive),
                 known=known,
                 metric=metric,
+                minimize=self.workspace.minimize,
             ),
             {"max_tokens": BRIEF_ANSWER_TOKENS},
         )
@@ -572,7 +573,12 @@ class RepoHardeningRunner(HardeningRunner):
             outcome = run_sessions(
                 briefs,
                 prompt_for=lambda brief: session_prompt(
-                    brief=brief, round_index=round_index, tree=tree, known=known, metric=metric
+                    brief=brief,
+                    round_index=round_index,
+                    tree=tree,
+                    known=known,
+                    metric=metric,
+                    minimize=self.workspace.minimize,
                 ),
                 ask=ask,
                 scorer_for=scorer_for,

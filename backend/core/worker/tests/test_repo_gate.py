@@ -164,6 +164,15 @@ def test_outcome_minimums_pass_because_the_run_end_judges_them(tmp_path: Path, r
     assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_metric_direction_passes_because_the_run_obeys_it(tmp_path: Path, place: str) -> None:
+    """The eval server, the run end and the pull request read [metric] direction, so the gate lets it through (SKY-750)."""
+    raw = b'version = 1\n[metric]\ndirection = "minimize"\n[run]\nentry = "run.py:main"\n'
+
+    assert "metric.direction" in repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "raw",
     [

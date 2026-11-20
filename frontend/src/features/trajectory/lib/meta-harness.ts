@@ -256,6 +256,8 @@ export function buildClimb(
   candidates: CandidateMetrics[],
   caseScores: CaseScore[],
   runs: AgentRunSummary[] = [],
+  // SKY-750: a minimize run improves when its score goes down.
+  minimize = false,
 ): ClimbModel {
   const sorted = [...candidates].sort((a, b) => compareIds(a.candidate_id, b.candidate_id));
   const versions: ClimbVersion[] = [];
@@ -266,7 +268,7 @@ export function buildClimb(
   for (const candidate of sorted) {
     const parsed = Number(candidate.candidate_id);
     const index = Number.isFinite(parsed) ? parsed : versions.length;
-    const improved = best === null || candidate.score > best;
+    const improved = best === null || (minimize ? candidate.score < best : candidate.score > best);
     versions.push({ candidate, index, score: candidate.score, bestBefore: best, improved });
     if (improved) {
       best = candidate.score;
@@ -419,9 +421,8 @@ export function layoutClimb(
   }));
   const byId = new Map(points.map((p) => [p.id, p]));
 
-  let best: number | null = null;
-  for (const point of points)
-    if (best === null || point.version.score > best) best = point.version.score;
+  // The best version follows the run's direction, which only the model knows.
+  const best = model.bestId !== null ? (byId.get(model.bestId)?.version.score ?? null) : null;
 
   const edges: ClimbLayout["edges"] = [];
   for (const point of points) {

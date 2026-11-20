@@ -22,7 +22,12 @@ from typing import Any, Protocol
 
 from ..models.hardening import HardeningJob
 from ..service_gateway.optimization.blackbox.hardening import HardeningRunner, run_until_wait
-from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, MetricSpec, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    MINIMIZE,
+    ConstraintsError,
+    MetricSpec,
+    read_constraints,
+)
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from .repo_gate import GateFailure, Place, RepoGateError, check_repository, sandbox_place
 from .repo_staging import StagedRepository, stage_repository
@@ -54,6 +59,8 @@ class HardeningWorkspace:
     secrets: dict[str, str] = field(repr=False)
     # The staging's rule for an optimize.toml with no version; the runner reads the tree with it too.
     require_version: bool = True
+    # ``[metric] direction = "minimize"``: the fix checks then treat a lower score as better (SKY-750).
+    minimize: bool = False
 
 
 RunnerFactory = Callable[[HardeningWorkspace, HardeningJob], AbstractContextManager[HardeningRunner]]
@@ -180,7 +187,11 @@ def run_hardening_job(
             workspace = _workspace(staged, staged_payload, job)
             with runner_factory(workspace, job) as runner:
                 result = run_until_wait(
-                    job, runner=runner, exploits_path=workspace.exploits_path, reference=workspace.reference
+                    job,
+                    runner=runner,
+                    exploits_path=workspace.exploits_path,
+                    reference=workspace.reference,
+                    minimize=workspace.minimize,
                 )
             return result
         except ConstraintsError as exc:
@@ -235,6 +246,7 @@ def _workspace(staged: StagedRepository, staged_payload: dict[str, Any], job: Ha
         applied_fixes=tuple(r.fix.diff for r in fixed if r.fix is not None),
         secrets=staged.secrets,
         require_version=staged.require_version,
+        minimize=metric.direction == MINIMIZE,
     )
 
 

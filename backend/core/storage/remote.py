@@ -507,6 +507,7 @@ def _result_summary_columns() -> tuple[Any, ...]:
         result["runtime_seconds"].as_string(),
         result["baseline_score"].as_string(),
         result["best_score"].as_string(),
+        result["direction"].as_string(),
     )
 
 
@@ -530,6 +531,7 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         r_runtime,
         r_baseline_score,
         r_best_score,
+        r_direction,
     ) = values
     if result_null:
         return None
@@ -539,6 +541,8 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         ("runtime_seconds", _json_float(r_runtime)),
         ("baseline_score", _json_float(r_baseline_score)),
         ("best_score", _json_float(r_best_score)),
+        # The readers recompute metric_improvement; a minimize run needs its direction (SKY-750).
+        ("direction", r_direction if r_direction in ("maximize", "minimize") else None),
     )
     return {key: value for key, value in result_pairs if value is not None}
 

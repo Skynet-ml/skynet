@@ -56,6 +56,8 @@ def test_adapted_prompts_replace_the_upstream_domains() -> None:
     assert "agents/<name>.txt" in skill
     assert "MemorySystem" not in skill
     assert "dataset" not in skill.lower()
+    # SKY-750: a minimize run's avg_val is negative, so the note sits beside the val.json description.
+    assert "`infos`). " + native_engines._SCALE_NOTE in skill
     brief = native_engines.AutoResearchEngine(_config("autoresearch"))
     brief.example_ids = ["a"]
     text = brief._brief()
@@ -160,6 +162,27 @@ def test_named_scores_become_pareto_columns_without_cases() -> None:
     assert columns_b == {"score:accuracy": 0.5, "score:style": 1.0}
     table = {"a": columns_a, "b": columns_b}
     assert native_engines.pareto_front(table, {"a": 0.5, "b": 0.75}) == ["b", "a"]
+
+
+def test_a_missing_column_never_beats_a_negative_engine_score() -> None:
+    """A minimize run gives negative engine scores; a missing column must not count as 0.0 and win (SKY-750)."""
+    table = {"a": {"e1": -0.5, "e2": -0.5}, "b": {"e1": -0.4}}
+
+    assert native_engines.pareto_front(table, {"a": -0.5, "b": -0.4}) == ["b", "a"]
+
+
+def test_a_missing_score_shows_as_n_a_in_the_agent_report() -> None:
+    """The report writes ``n/a`` for a missing column, not ``-inf`` (SKY-750)."""
+    assert native_engines._shown(native_engines._MISSING_SCORE) == "n/a"
+    assert native_engines._shown(-0.5) == "-0.500"
+
+
+def test_the_task_brief_says_scores_are_on_the_engine_scale() -> None:
+    """The agent learns that higher is always better and that a score may be negative (SKY-750)."""
+    task = Task(name="t", seed_candidate="seed", objective="be better")
+
+    for example_ids in ([], ["e1"]):
+        assert "higher is always better, and a score may be negative" in native_engines.task_brief(task, example_ids)
 
 
 def test_named_scores_average_over_cases_with_their_feedback() -> None:

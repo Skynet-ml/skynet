@@ -822,7 +822,11 @@ export function JobListCard({ call }: { call: AgentToolCall }) {
                 </Link>
                 {r.status && <StatusBadge status={r.status} compact />}
                 <span className="ms-auto shrink-0">
-                  <GainPill baseline={r.baseline} optimized={r.optimized} />
+                  <GainPill
+                    baseline={r.baseline}
+                    optimized={r.optimized}
+                    improvement={r.improvement}
+                  />
                 </span>
               </div>
               {(r.model || r.optimizer) && (

@@ -223,17 +223,18 @@ def parse_verdict(raw: Any) -> JudgeClassification:
     return parse_judge_reply(raw if isinstance(raw, str) else json.dumps(raw))
 
 
-def exploit_passes(exploit_score: float, base_score: float) -> bool:
-    """Apply the suite pass rule: a fixed metric scores an exploit no higher than the base.
+def exploit_passes(exploit_score: float, base_score: float, *, minimize: bool = False) -> bool:
+    """Apply the suite pass rule: a fixed metric scores an exploit no better than the base.
 
     Args:
         exploit_score: The exploit's score on the fixed metric.
         base_score: The base solution's score on the fixed metric.
+        minimize: Whether the repository's ``[metric] direction`` is minimize, so a lower score is better.
 
     Returns:
         True when the exploit no longer pays.
     """
-    return exploit_score <= base_score
+    return exploit_score >= base_score if minimize else exploit_score <= base_score
 
 
 def new_job(
@@ -286,6 +287,7 @@ def advance(
     runner: HardeningRunner,
     exploits_path: Path,
     reference: Path | None,
+    minimize: bool = False,
 ) -> HardeningJob:
     """Do one step of a job that is in preflight or running.
 
@@ -296,6 +298,7 @@ def advance(
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
         reference: The optional ``[metric] reference`` solution.
+        minimize: Whether the repository's ``[metric] direction`` is minimize.
 
     Returns:
         The job after the step.
@@ -310,7 +313,7 @@ def advance(
         if job.status == "preflight":
             _preflight(job, runner, exploits_path)
         else:
-            _step(job, runner, exploits_path, reference)
+            _step(job, runner, exploits_path, reference, minimize=minimize)
     except Exception as exc:
         job.status = "failed"
         job.error = str(exc) or type(exc).__name__
@@ -324,6 +327,7 @@ def run_until_wait(
     runner: HardeningRunner,
     exploits_path: Path,
     reference: Path | None,
+    minimize: bool = False,
 ) -> HardeningJob:
     """Advance a job until it waits for the user or ends.
 
@@ -332,12 +336,13 @@ def run_until_wait(
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
         reference: The optional ``[metric] reference`` solution.
+        minimize: Whether the repository's ``[metric] direction`` is minimize.
 
     Returns:
         The job in a waiting or final state.
     """
     while job.status in ("preflight", "running"):
-        job = advance(job, runner=runner, exploits_path=exploits_path, reference=reference)
+        job = advance(job, runner=runner, exploits_path=exploits_path, reference=reference, minimize=minimize)
     return job
 
 
@@ -501,7 +506,9 @@ def _preflight(job: HardeningJob, runner: HardeningRunner, exploits_path: Path) 
         job.status = "running"
 
 
-def _step(job: HardeningJob, runner: HardeningRunner, exploits_path: Path, reference: Path | None) -> None:
+def _step(
+    job: HardeningJob, runner: HardeningRunner, exploits_path: Path, reference: Path | None, *, minimize: bool = False
+) -> None:
     """Do the next step of a running job.
 
     Args:
@@ -509,6 +516,7 @@ def _step(job: HardeningJob, runner: HardeningRunner, exploits_path: Path, refer
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
         reference: The optional reference solution.
+        minimize: Whether the repository's ``[metric] direction`` is minimize.
     """
     current = job.rounds_detail[-1] if job.rounds_detail else None
     if current is not None and current.status == "approved":
@@ -519,7 +527,7 @@ def _step(job: HardeningJob, runner: HardeningRunner, exploits_path: Path, refer
         job.rounds_detail.pop()
         job.round = current.index - 1
     elif current is not None and current.status == "running":
-        _draft_fix(job, current, runner, exploits_path, reference)
+        _draft_fix(job, current, runner, exploits_path, reference, minimize=minimize)
     elif job.round >= job.rounds:
         _finish(job, runner)
     else:
@@ -614,6 +622,8 @@ def _draft_fix(
     runner: HardeningRunner,
     exploits_path: Path,
     reference: Path | None,
+    *,
+    minimize: bool = False,
 ) -> None:
     """Draft a fix for the round's confirmed exploits and run the three checks.
 
@@ -623,6 +633,7 @@ def _draft_fix(
         runner: The run/sandbox runner.
         exploits_path: The suite folder.
         reference: The optional reference solution.
+        minimize: Whether the repository's ``[metric] direction`` is minimize, so a lower score is better.
     """
     budget = _round_budget(job, current.index)
     if budget is not None and budget <= 0:
@@ -643,7 +654,9 @@ def _draft_fix(
     suite = {e.id: e for e in _saved_exploits(exploits_path)}
     for exploit in [e for r in job.rounds_detail if r.status == "fixed" for e in _confirmed(r)] + confirmed:
         suite[exploit.id] = exploit
-    suite_holds = all(exploit_passes(runner.score(fix_diff=diff, exploit=e), base_after) for e in suite.values())
+    suite_holds = all(
+        exploit_passes(runner.score(fix_diff=diff, exploit=e), base_after, minimize=minimize) for e in suite.values()
+    )
     checks = HardeningFixChecks(
         suite_replay=_result(suite_holds),
         base_score_unchanged=_result(math.isclose(base_before, base_after, rel_tol=1e-9, abs_tol=1e-9)),
@@ -651,9 +664,9 @@ def _draft_fix(
     if reference is not None:
         reference_before = runner.reference_score(fix_diff=None, reference=reference)
         reference_after = runner.reference_score(fix_diff=diff, reference=reference)
-        checks.reference_not_lower = _result(
-            reference_after >= reference_before or math.isclose(reference_after, reference_before, abs_tol=1e-9)
-        )
+        # The check name says "not lower" for the default direction; for a minimize metric it means "not worse".
+        not_worse = reference_after <= reference_before if minimize else reference_after >= reference_before
+        checks.reference_not_lower = _result(not_worse or math.isclose(reference_after, reference_before, abs_tol=1e-9))
     current.fix = HardeningFix(diff=diff, checks=checks)
     current.status = "waiting_fix"
     job.status = "waiting_fix"

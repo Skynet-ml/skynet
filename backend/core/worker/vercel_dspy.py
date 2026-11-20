@@ -25,6 +25,7 @@ from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
 from .sandbox_protocol import (
     COMMAND_METRIC_PROTOCOL,
+    DIRECTION_PROTOCOL,
     FILE_PROPOSER_PROTOCOL,
     OUTCOME_VERDICT_PROTOCOL,
     READABLE_PROTOCOLS,
@@ -48,6 +49,9 @@ FILE_PROPOSER_IMAGE_MESSAGE = (
 COMMAND_METRIC_IMAGE_MESSAGE = (
     "The sandbox image is older than command [metric] entry support in optimize.toml; rebuild and re-pin the"
     " sandbox image."
+)
+DIRECTION_IMAGE_MESSAGE = (
+    "The sandbox image is older than [metric] direction support in optimize.toml; rebuild and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
     'PYTHONPATH=/app python3 -c "from core.worker.sandbox_protocol import SANDBOX_PROTOCOL; print(SANDBOX_PROTOCOL)"'
@@ -233,6 +237,25 @@ def _require_command_metric_support(image_protocol: int, payload: dict[str, Any]
         raise RuntimeError(COMMAND_METRIC_IMAGE_MESSAGE)
 
 
+def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
+    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[metric] direction = "minimize"``.
+
+    An image before protocol 20 ignores the snapshot's ``outcome.direction``.
+    It would maximize the score of a minimize run and report no error (SKY-750).
+
+    Args:
+        image_protocol: The image's protocol, from :func:`_require_image_protocol`.
+        snapshot: The staged repository snapshot of the request, if any.
+
+    Raises:
+        RuntimeError: When the image is older and the snapshot's outcome minimizes.
+    """
+    if image_protocol >= DIRECTION_PROTOCOL or not isinstance(snapshot, dict):
+        return
+    if (snapshot.get("outcome") or {}).get("direction") == "minimize":
+        raise RuntimeError(DIRECTION_IMAGE_MESSAGE)
+
+
 def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any, _start_method: str) -> None:
     """Execute the full optimizer in the pinned backend image without provider credentials.
 
@@ -293,6 +316,7 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         _require_outcome_support(image_protocol, staged)
         _require_file_proposer_support(image_protocol, staged)
         _require_command_metric_support(image_protocol, guest_payload)
+        _require_direction_support(image_protocol, staged)
         # A Codex proposer runs as a contained subprocess of this box and
         # cannot run as root, so the parent writes and checks the root-owned
         # file here, before the optimizer starts (SKY-389). Other runs skip

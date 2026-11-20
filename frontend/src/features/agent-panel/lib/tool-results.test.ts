@@ -384,6 +384,21 @@ void test("job rows read the summary fields and the total", () => {
   assert.equal(out?.total, 9);
   assert.equal(out?.rows.length, 1);
   assert.equal(out?.rows[0].optimized, 55);
+  assert.equal(out?.rows[0].improvement, null);
+});
+
+void test("job rows keep the server improvement of a minimize run (SKY-750)", () => {
+  const out = jobRows({
+    items: [
+      {
+        optimization_id: "id-1",
+        baseline_test_metric: 10,
+        optimized_test_metric: 5,
+        metric_improvement: 5,
+      },
+    ],
+  });
+  assert.equal(out?.rows[0].improvement, 5);
 });
 
 void test("stat rows scale a 0..1 success rate to percent", () => {
