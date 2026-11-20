@@ -200,6 +200,28 @@ def main() -> int:
         thread.join(timeout=2)
 
 
+def model_matches(model: object, expected: str) -> bool:
+    """Return whether a request's model name names the run's model.
+
+    It mirrors ``runner.model_matches_bound``: this file runs in the box
+    without the backend's code, and the proxy must never refuse a name that
+    the gateway accepts for the bound model.
+
+    Args:
+        model: The model that the request names.
+        expected: The run's model, from ``ASCENT_MODEL``.
+
+    Returns:
+        Whether the names match without their transport prefixes.
+    """
+
+    def normalized(value: str) -> str:
+        """Remove transport prefixes without changing the provider model id."""
+        return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
+
+    return isinstance(model, str) and normalized(model) == normalized(expected)
+
+
 def _other_model_refusal(path: str, body: bytes) -> bytes | None:
     """Return the error body for a chat request that names another model than ``ASCENT_MODEL``.
 
@@ -220,7 +242,7 @@ def _other_model_refusal(path: str, body: bytes) -> bytes | None:
         model = json.loads(body).get("model")
     except (ValueError, AttributeError):
         return None
-    if model == expected:
+    if model_matches(model, expected):
         return None
     message = f"This box serves only the model that {MODEL_ENV} names ({expected}), not {model!r}."
     error = {"message": message, "type": "invalid_request_error", "param": "model", "code": "model_not_allowed"}

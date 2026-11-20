@@ -310,7 +310,7 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Write out.txt.\n")
     record = tmp_path / "record.json"
-    env = {k: v for k, v in launch.env.items() if not k.startswith("APP_")}
+    env = dict(launch.env)
     env.update(ASCENT_TASK=str(prompt), FAKE_HARBOR_RECORD=str(record), TMPDIR=str(tmp_path / "tmp"))
     (tmp_path / "tmp").mkdir()
 

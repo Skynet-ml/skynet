@@ -23,7 +23,7 @@ from core.billing import guest_model_proxy
 from core.billing.model_gateway import ROUTE_KEY
 from core.billing.usage_tags import LEGACY_USAGE_TAGS_HEADER, USAGE_TAGS_HEADER, with_tags_header
 from core.models.blackbox import BlackboxProposer
-from core.service_gateway.optimization.blackbox import loop_tools, repo_scorer
+from core.service_gateway.optimization.blackbox import loop_tools, repo_scorer, runner
 from core.service_gateway.optimization.blackbox.protocol import RepoSeed
 from core.service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway
 from core.worker import isolated_runner, vercel_dspy
@@ -204,3 +204,59 @@ def test_a_stock_openai_client_reaches_the_model_through_the_model_url(tmp_path:
     assert len(requests) == 3
     assert {request["path"] for request in requests} == {"/v1/chat/completions"}
     assert {request["headers"]["Authorization"] for request in requests} == {f"Bearer {box}-key"}
+
+
+@pytest.mark.parametrize(
+    "model", ["openai/run-model", "litellm_proxy/openai/run-model", "openrouter/openai/run-model", " openai/run-model/"]
+)
+def test_the_proxy_lets_through_every_name_of_the_run_model(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """A transport prefix names the same model, so the box does not refuse it (SKY-776).
+
+    Args:
+        monkeypatch: Sets ``ASCENT_MODEL`` for the proxy.
+        model: A name of the run's model.
+    """
+    monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "openai/run-model")
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", json.dumps({"model": model}).encode()) is None
+
+
+@pytest.mark.parametrize("model", ["other/model", "litellm_proxy/other/model", None])
+def test_the_proxy_refuses_another_model_and_names_the_model_variable(
+    monkeypatch: pytest.MonkeyPatch, model: str | None
+) -> None:
+    """A request for another model, with or without a prefix, gets the error that names ``ASCENT_MODEL``.
+
+    Args:
+        monkeypatch: Sets ``ASCENT_MODEL`` for the proxy.
+        model: A name of another model, or no model.
+    """
+    monkeypatch.setenv(guest_model_proxy.MODEL_ENV, "openai/run-model")
+
+    refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", json.dumps({"model": model}).encode())
+
+    assert refusal is not None
+    error = json.loads(refusal)["error"]
+    assert error["code"] == "model_not_allowed"
+    assert "ASCENT_MODEL" in error["message"]
+
+
+@pytest.mark.parametrize(
+    ("model", "bound"),
+    [
+        ("openai/m", "openai/m"),
+        ("litellm_proxy/openai/m", "openai/m"),
+        ("openrouter/openai/m", "litellm_proxy/openai/m"),
+        ("/openai/m/", "openai/m"),
+        ("openai/other", "openai/m"),
+        ("m", "openai/m"),
+    ],
+)
+def test_the_proxy_matches_model_names_by_the_gateway_rule(model: str, bound: str) -> None:
+    """The proxy's copy of the rule gives the same answer as ``runner.model_matches_bound``.
+
+    Args:
+        model: The name that a request gives.
+        bound: The run's model.
+    """
+    assert guest_model_proxy.model_matches(model, bound) == runner.model_matches_bound(model, bound)
