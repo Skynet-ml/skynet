@@ -76,9 +76,11 @@ from ..rule_judge import (
 )
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
+from ..sandbox_scorer import ScorerGateway
 from ..scorer import normalize_score
 from ..service import run_blackbox_optimization
 from ..tree_sandbox import BoxSession
+from .mocks import FakeGateway
 from .test_repo_workspace import _archive, _patch
 
 # The metric box holds no repository file, so the [run] entry's output is what
@@ -5678,17 +5680,24 @@ def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
     assert not [piece for piece in pieces if piece in caplog.text]
 
 
-# Calls the double stage with curl, checks each refused call, and scores the doubled value (SKY-767).
+# Calls the double stage with curl, checks each refused call and the error text of the
+# time-out and no-output stages, and scores the doubled value (SKY-767).
 _STAGE_BASH_METRIC = """set -euo pipefail
 post() { curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST -d "$2" "$1"; }
 doubled=$(curl -sf --noproxy '*' -X POST -d '{"input": {"v": 3}}' "$ASCENT_STAGE_DOUBLE_URL")
 unknown=$(post "${ASCENT_LOG_URL%/log}/stage/shout" '{"input": "hi"}')
 broken=$(post "$ASCENT_STAGE_BROKEN_URL" '{"input": 1}')
 slow=$(post "$ASCENT_STAGE_SLOW_URL" '{"input": 5}')
-python3 - "$doubled" "$unknown" "$broken" "$slow" "${ASCENT_STAGE_SHOUT_URL-unset}" <<'PY'
+slow_error=$(cat body.out)
+empty=$(post "$ASCENT_STAGE_EMPTY_URL" '{"input": 1}')
+empty_error=$(cat body.out)
+python3 - "$doubled" "$unknown" "$broken" "$slow" "$empty" "${ASCENT_STAGE_SHOUT_URL-unset}" \
+  "$slow_error" "$empty_error" <<'PY'
 import json, os, sys
-doubled, unknown, broken, slow, shout = sys.argv[1:]
-feedback = f"unknown={unknown} broken={broken} slow={slow} shout={shout}"
+doubled, unknown, broken, slow, empty, shout, slow_error, empty_error = sys.argv[1:]
+feedback = f"unknown={unknown} broken={broken} slow={slow} empty={empty} shout={shout}"
+for name, body in (("slow", slow_error), ("empty", empty_error)):
+    feedback += f"\\n{name}: {json.loads(body)['error']}"
 with open(os.environ["ASCENT_OUTPUT"], "w") as f:
     json.dump({"score": json.loads(doubled)["output"]["v"] / 10, "feedback": feedback}, f)
 PY
@@ -5703,6 +5712,8 @@ def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails
     """A real bash metric reaches ``[target.double]`` at its URL; other stages and failed stages answer an error."""
     monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
     stages = {name: STAGES[name] for name in ("double", "broken", "slow")}
+    # A command stage that writes no ASCENT_OUTPUT gives no valid output.
+    stages["empty"] = TargetStage(entry=("true",), timeout=30)
     archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.sh": _STAGE_BASH_METRIC})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -5732,8 +5743,69 @@ def test_a_bash_metric_calls_a_stage_with_curl_and_a_stage_outside_the_run_fails
         scorer.close()
 
     assert baseline["score"] == pytest.approx(0.6)
-    assert baseline["feedback"] == "unknown=404 broken=502 slow=502 shout=unset"
+    statuses, slow, empty = baseline["feedback"].split("\n")
+    assert statuses == "unknown=404 broken=502 slow=502 empty=502 shout=unset"
+    assert slow == "slow: Stage 'slow' passed its 1s timeout."
+    assert empty.startswith("empty: Stage 'empty' failed: The command wrote no output file.")
     assert version["score"] == pytest.approx(0.9)
+
+
+# Asks the judge model once and scores 1 when the model answered; its env must hold no key.
+_MODEL_BASH_METRIC = """set -euo pipefail
+keys=$(env | grep -c sk-metric-key || true)
+status=$(curl -s --noproxy '*' -o body.out -w '%{http_code}' -X POST \\
+  -d "{\\"model\\": \\"$ASCENT_MODEL\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"hi\\"}]}" \\
+  "$ASCENT_MODEL_URL/chat/completions")
+printf '{"score": 1, "feedback": "keys=%s status=%s"}' "$keys" "$status" > "$ASCENT_OUTPUT"
+"""
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the metric calls the model with curl")
+def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric box command env holds no key; the runner takes it from the call's key file (SKY-767)."""
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    commands: list[tuple[str, dict[str, str]]] = []
+    run = LocalSubprocessSession.run
+
+    def recorded(self: LocalSubprocessSession, command: str, **kwargs: Any) -> Any:
+        """Record each box command and its env, then run it."""
+        commands.append((command, dict(kwargs.get("env") or {})))
+        return run(self, command, **kwargs)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", recorded)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.sh": _MODEL_BASH_METRIC})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "",
+            timeout_seconds=60,
+            gateway=ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge"),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"'),
+            metric_entry=("bash", "eval/metric.sh"),
+        )
+        try:
+            result = scorer.score("")
+        finally:
+            scorer.close()
+    metric_envs = [env for command, env in commands if repo_scorer.METRIC_RUNNER_PATH in command]
+
+    assert result["feedback"] == "keys=0 status=200"
+    assert [request["authorization"] for request in fake.requests] == ["Bearer sk-metric-key"]
+    assert len(metric_envs) == 1
+    assert ENV_API_KEY not in metric_envs[0]
+    assert "sk-metric-key" not in json.dumps(metric_envs[0])
 
 
 def test_a_command_metric_is_refused_when_the_server_has_no_openascent(

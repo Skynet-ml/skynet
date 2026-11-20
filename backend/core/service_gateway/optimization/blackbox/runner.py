@@ -122,10 +122,14 @@ from typing import Any
 INPUT_FILE = "input.json"
 CODE_FILE = "app_scorer_code.txt"
 OUTPUT_FILE = "output.json"
+# A command metric's model key: the scorer writes it, and the runner reads and
+# deletes it before the command starts (SKY-767).
+MODEL_KEY_FILE = "model_key"
 SCORER_FILENAME = "<scorer_code>"
 # Names the scorer namespace binds the model helper and the image wrapper to.
 LLM_HELPER_NAME = "llm"
-# The gateway key rides in the environment so it never touches the box filesystem.
+# The gateway key rides in the environment so it never touches the box
+# filesystem, except for a command metric (``MODEL_KEY_FILE``).
 ENV_API_KEY = "APP_API_KEY"
 ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
 # The image's box PATH, with /app/.venv/bin first after the sudo guard folder.
@@ -1847,7 +1851,7 @@ class MetricHelpers:
         return {}
 
 
-def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
+def run_metric_command(payload: dict[str, Any], call_dir: Path | None = None) -> dict[str, Any]:
     """Call a command ``[metric] entry`` once, through OpenAscent's ``call_metric`` (SKY-738).
 
     The command gets ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and runs in this
@@ -1858,6 +1862,7 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         payload: The decoded ``input.json``, with ``metric_entry``.
+        call_dir: The call's folder, which can hold ``MODEL_KEY_FILE``.
 
     Returns:
         The ``output.json`` contents: score, side info and error, and
@@ -1865,14 +1870,18 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     stages = payload.get("stages")
-    # The command runs as this process's user, and this process's start
-    # environment holds the model key, so /proc/<pid>/environ must not be
+    # The command runs as this process's user, and this process holds the
+    # model key in memory, and on a contained session the relay addresses and
+    # token in its environment. So /proc/<pid>/mem and environ must not be
     # readable. The flag does not reach the command: execve resets it.
     _block_tracing()
+    key = _take_model_key(call_dir)
     relay = StageClient(stages) if isinstance(stages, dict) else None
     if relay is not None:
         os.environ.update(_relay_env(relay, stages))
     gateway = payload.get("gateway")
+    if key and isinstance(gateway, dict):
+        gateway = {**gateway, "api_key": key}
     llm = _gateway_client(gateway)
     names = [str(name) for name in stages.get("names") or ()] if isinstance(stages, dict) else []
     model = (gateway.get("declared_model") or gateway.get("model")) if isinstance(gateway, dict) else None
@@ -1916,6 +1925,34 @@ def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
     if control is not None:
         result = {"score": None, "side_info": {}, "error": None, "usage": result["usage"], "control": control}
     return result
+
+
+def _take_model_key(call_dir: Path | None) -> str | None:
+    """Read a command metric's model key file and delete it.
+
+    The command runs as this process's user, so the delete, not the file
+    mode, keeps the key from the command. The scorer starts no other process
+    in the metric box between its write and this delete.
+
+    Args:
+        call_dir: The call's folder, or ``None``.
+
+    Returns:
+        The key, or ``None`` when the call has no key file.
+
+    Raises:
+        OSError: When the file cannot be deleted, so the command never starts
+            while the key is on disk.
+    """
+    if call_dir is None:
+        return None
+    path = call_dir / MODEL_KEY_FILE
+    try:
+        key = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    path.unlink()
+    return key or None
 
 
 def _keep_user_site() -> None:
@@ -1991,7 +2028,7 @@ def main(argv: list[str] | None = None) -> int:
     command = payload.get(METRIC_ENTRY_PARAM)
     allowed = [str(part) for part in command] if isinstance(command, list) else None
     refused = refuse_processes(allow=allowed) if "output" in payload else None
-    result = run_metric_command(payload) if allowed is not None else run_call(payload)
+    result = run_metric_command(payload, call_dir) if allowed is not None else run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)

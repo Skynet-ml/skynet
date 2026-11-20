@@ -739,7 +739,12 @@ The command reaches the model and the stages only through these URLs. Its
 environment holds no model key, no model mailbox address
 (`APP_BUDGET_RELAY_URL`, `APP_GATEWAY_URL`, `OPENAI_BASE_URL`,
 `ANTHROPIC_BASE_URL`) and no tool relay token (`APP_TOOL_RELAY_TOKEN`), also
-not in the old `SKYNET_` spelling.
+not in the old `SKYNET_` spelling. The box command that starts the runner has
+no model key in its environment either. The scorer writes the key to a file
+in the call folder, and the runner reads and deletes the file before the
+command starts. The runner also blocks same-user reads of its memory and
+environment, so the command cannot read the key or the relay values from
+`/proc`.
 
 A Python metric gets none of these variables, because it imports the helpers.
 

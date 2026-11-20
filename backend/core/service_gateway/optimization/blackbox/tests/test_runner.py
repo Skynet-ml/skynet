@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -2159,7 +2161,12 @@ def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]
 
 
 def _command_metric_run(
-    tmp_path: Path, script: str, *, environ: dict[str, str] | None = None, **extra: Any
+    tmp_path: Path,
+    script: str,
+    *,
+    environ: dict[str, str] | None = None,
+    key: str | None = None,
+    **extra: Any,
 ) -> tuple[dict[str, Any], str]:
     """Run the runner on a command ``[metric] entry``, as ``_command_metric`` does, and keep its stderr.
 
@@ -2167,6 +2174,7 @@ def _command_metric_run(
         tmp_path: The test's folder, which stands for the metric box.
         script: The body of ``metric.sh``.
         environ: More variables for the runner's environment.
+        key: The model key, written to the call's key file as the scorer does.
         **extra: Input keys to add or replace; ``drop`` names keys to remove.
 
     Returns:
@@ -2192,6 +2200,8 @@ def _command_metric_run(
     for key in drop:
         payload.pop(key)
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    if key is not None:
+        (call_dir / runner.MODEL_KEY_FILE).write_text(key)
     completed = subprocess.run(
         [sys.executable, "-I", runner.__file__, str(call_dir)],
         capture_output=True,
@@ -2427,6 +2437,101 @@ def test_a_command_metric_cannot_read_the_runner_environment(tmp_path: Path) -> 
     assert output["score"] == 1.0
     assert Path(runner.__file__).name in (box / "parent").read_text()
     assert (box / "seen").read_text().strip() == "refused"
+
+
+@_needs_openascent
+@_needs_curl
+def test_the_model_key_file_reaches_the_gateway_and_is_gone_before_the_command(tmp_path: Path) -> None:
+    """The runner reads the scorer's key file and deletes it before the command starts; the model call uses the key."""
+    script = (
+        _CURL_POST
+        + 'if [ -e "$CALL_DIR/model_key" ]; then echo present > keyfile; else echo gone > keyfile; fi\n'
+        + 'env | grep -c "sk-file" > keys || true\n'
+        + 'post "$ASCENT_MODEL_URL/chat/completions" \'{"messages": [{"role": "user", "content": "x"}]}\' > answers\n'
+        + 'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+    )
+    call_dir = tmp_path / "calls" / "one"
+    with FakeGateway(reply="judged") as gateway:
+        payload = {"url": gateway.url, "model": "judge-model"}
+        output = _command_metric(tmp_path, script, environ={"CALL_DIR": str(call_dir)}, key="sk-file", gateway=payload)
+    box = tmp_path / "box"
+
+    assert output["score"] == 1.0
+    assert runner.MODEL_KEY_FILE == "model_key"
+    assert (box / "keyfile").read_text().strip() == "gone"
+    assert not (call_dir / runner.MODEL_KEY_FILE).exists()
+    assert (box / "keys").read_text().strip() == "0"
+    assert (box / "answers").read_text().split(" ", 1)[0] == "200"
+    assert [request["authorization"] for request in gateway.requests] == ["Bearer sk-file"]
+
+
+# Lists each process whose environ the command can read, and each secret it finds there.
+_PROC_SCAN = (
+    "for p in /proc/[0-9]*; do\n"
+    '  if text=$(tr "\\0" "\\n" < "$p/environ" 2>/dev/null); then\n'
+    '    echo "${p#/proc/}" >> readable\n'
+    '    for secret in "sk-scan" "http://relay.invalid/v1" "relay-token-scan"; do\n'
+    '      case "$text" in *"$secret"*) echo "${p#/proc/} $secret" >> found ;; esac\n'
+    "    done\n"
+    "  fi\n"
+    "done\n"
+    "touch found\n"
+    'echo \'{"score": 1}\' > "$ASCENT_OUTPUT"\n'
+)
+
+
+@_needs_openascent
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc and PR_SET_DUMPABLE are Linux only")
+@pytest.mark.parametrize("chain", ["vercel", "contained", "vercel_key_in_env"])
+def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path: Path, chain: str) -> None:
+    """A command metric scans every readable ``/proc/*/environ`` and finds no key, relay address or relay token.
+
+    ``vercel`` uses the provider's own wrapper: a wrapper shell and ``timeout``
+    stay alive above the runner with the command env, which holds no secret
+    now. ``contained`` copies a contained session: the shell ``exec``s the
+    runner, whose environment holds the relay address and token.
+    ``vercel_key_in_env`` is the old scorer, which put the key in the command
+    env: the scan must find it in the wrapper shell, so the scan works.
+    """
+    box = tmp_path / "box"
+    box.mkdir()
+    (box / "metric.sh").write_text(_PROC_SCAN)
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    payload = {
+        "candidate": str(box),
+        "case": {"input": "q"},
+        "output": "a",
+        "gateway": {"url": "http://127.0.0.1:9/v1", "model": "judge-model"},
+        runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
+        runner.METRIC_TIMEOUT_PARAM: 20,
+        runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
+    }
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
+    (call_dir / runner.MODEL_KEY_FILE).write_text("sk-scan")
+    start = f"cd {shlex.quote(str(box))} && exec {shlex.quote(sys.executable)} -I -B -u"
+    start += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
+    if chain == "vercel_key_in_env":
+        env["APP_API_KEY"] = "sk-scan"
+    if chain.startswith("vercel"):
+        inner = f"/usr/bin/timeout --signal=KILL 60s /bin/bash {' '.join(vercel.SHELL_FLAGS)} {shlex.quote(start)}"
+        script = vercel._wrapper(inner, uuid.uuid4().hex, sudo=False)[0]
+    else:
+        env.update({"APP_BUDGET_RELAY_URL": "http://relay.invalid/v1", "APP_TOOL_RELAY_TOKEN": "relay-token-scan"})
+        script = start
+    argv = ["/bin/bash", *vercel.SHELL_FLAGS, script]
+    process = subprocess.Popen(argv, env=env)
+    assert process.wait(timeout=60) == 0
+
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
+    found = (box / "found").read_text().splitlines()
+    if chain == "vercel_key_in_env":
+        assert f"{process.pid} sk-scan" in found
+    else:
+        assert found == []
+    if chain.startswith("vercel"):
+        assert str(process.pid) in (box / "readable").read_text().split()
 
 
 def test_the_metric_command_path_blocks_tracing_first(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -593,6 +593,13 @@ class RepoScorer:
             document[runner.METRIC_ENTRY_PARAM] = list(self._metric_entry)
             document[runner.METRIC_TIMEOUT_PARAM] = self._timeout_seconds * _COMMAND_TIME_SHARE
             document[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{METRIC_ASCENT_DIR}"
+            # A Vercel box runs the command under a wrapper shell and ``timeout``,
+            # which stay alive with the command env, and the metric command can
+            # read their /proc/<pid>/environ. So the key goes in a file that the
+            # runner deletes before the metric command starts (SKY-767).
+            if env.get(ENV_API_KEY):
+                session.write_files({f"{folder}/{runner.MODEL_KEY_FILE}": env[ENV_API_KEY]})
+            env = {name: value for name, value in env.items() if name != ENV_API_KEY}
         else:
             document["code"] = self._code
             document[runner.METRIC_FUNCTION_PARAM] = self._metric_entry.rsplit(":", 1)[1]
@@ -607,8 +614,8 @@ class RepoScorer:
             session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
-                # ``exec`` replaces the shell, so no process of the box's user
-                # other than the runner holds the model key in its environment.
+                # ``exec`` replaces this shell with the runner. A Python metric
+                # runs in the runner and reads the key there anyway.
                 result = metric.box.run(
                     f"cd {shlex.quote(metric.repo_path)} && exec python3 {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
