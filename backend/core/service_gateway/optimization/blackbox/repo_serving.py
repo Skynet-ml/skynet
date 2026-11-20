@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -133,7 +133,9 @@ def serve_payload(
 
 
 @contextmanager
-def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) -> Iterator[dict[str, Any]]:
+def staged_snapshot(
+    payload: dict[str, Any], *, engine: Any, owner: str | None, protected_paths: Sequence[str]
+) -> Iterator[dict[str, Any]]:
     """Fetch the pinned tree in the parent and attach it, without the scoring side, for the sandbox upload.
 
     The serving guest runs repository code, so it gets the same stripped tree
@@ -143,6 +145,7 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         payload: Resolved interaction payload from :func:`serve_payload`.
         engine: SQLAlchemy engine holding the owner's GitHub connection, or ``None``.
         owner: The run's owner, whose connection reads a private repository.
+        protected_paths: The protected paths the run recorded when it started.
 
     Yields:
         The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``,
@@ -151,10 +154,18 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
-        ConstraintsError: When the commit's ``ascent.toml`` is invalid, so the hidden list is unknown,
+        ConstraintsError: When the run recorded no ``ascent.toml``, so it started under the old file name,
+            or the commit's ``ascent.toml`` is invalid, so the hidden list is unknown,
             or a hidden path is, holds or lies inside a link, so the strip cannot remove it,
             or a draft file of the run cannot be written over the tree.
     """
+    # Every run start protects the contract file, so a run without ascent.toml started under optimize.toml
+    # (SKY-746). Its tree has no ascent.toml, so the hidden list would miss its scoring files.
+    if CONSTRAINTS_FILE not in protected_paths:
+        raise ConstraintsError(
+            f"This run started before the contract file was named {CONSTRAINTS_FILE}, so serving cannot tell"
+            " which scoring files to hide from the guest. Start a new run to serve it."
+        )
     repo = payload["repo"]
     provider = repo_hosts.provider_of(repo)
     token = None

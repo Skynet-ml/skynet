@@ -221,7 +221,15 @@ def _repo_job(
         "payload": {
             "username": "alice",
             "strategy": {"engine": "gepa"},
-            "target": {"kind": "repo", "repo": {"repository": "acme/app", "commit": commit, "ref": "main"}},
+            "target": {
+                "kind": "repo",
+                "repo": {
+                    "repository": "acme/app",
+                    "commit": commit,
+                    "ref": "main",
+                    "environment": {"protected_paths": ["ascent.toml"]},
+                },
+            },
             "scorer": {"model": {"name": "fixture/model"}},
             "token_source": "managed",
         },

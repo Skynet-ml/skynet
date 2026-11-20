@@ -25,7 +25,7 @@ from ...models.serve import ServingEnabledRequest, ServingEnabledResponse
 from ...service_gateway.optimization.blackbox.repo_serving import INTERACTION_KIND as REPO_SERVE_KIND
 from ...service_gateway.optimization.blackbox.repo_serving import SERVE_FILE, serve_payload, staged_snapshot
 from ...telemetry.server_events import record_server_event
-from ...worker.repo_staging import improved_patch, is_repo_payload
+from ...worker.repo_staging import ENVIRONMENT_KEY, improved_patch, is_repo_payload
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..converters import job_owner, parse_overview, status_to_job_status
 from ..errors import DomainError
@@ -301,6 +301,7 @@ def _repo_serve_call(
     stored = job_data["payload"]
     result_data = job_data.get("result")
     owner = job_owner(job_data)
+    environment = stored["target"]["repo"].get(ENVIRONMENT_KEY) or {}
     result = run_protected_interaction(
         serve_payload(
             job_data,
@@ -315,7 +316,12 @@ def _repo_serve_call(
         job_store=job_store,
         credential_owner=owner,
         credential_binding_id=job_data.get("execution_budget_id") or stored.get("execution_budget_id"),
-        stage_payload=partial(staged_snapshot, engine=getattr(job_store, "engine", None), owner=owner),
+        stage_payload=partial(
+            staged_snapshot,
+            engine=getattr(job_store, "engine", None),
+            owner=owner,
+            protected_paths=tuple(environment.get("protected_paths") or ()),
+        ),
     )
     if result.get("error"):
         raise DomainError("serve.protected_interaction_failed", status=502, error=result["error"])

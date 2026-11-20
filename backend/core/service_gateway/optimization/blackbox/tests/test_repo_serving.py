@@ -17,7 +17,7 @@ from core.billing.operation_pricing import json_fingerprint
 from core.worker import repo_staging
 
 from .. import repo_serving, repo_tree
-from ..repo_constraints import ConstraintsError
+from ..repo_constraints import CONSTRAINTS_FILE, ConstraintsError
 from ..repo_serving import (
     INTERACTION_KIND,
     check_serve_contract,
@@ -230,7 +230,7 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=object(), owner="alice") as staged:
+    with staged_snapshot(payload, engine=object(), owner="alice", protected_paths=(CONSTRAINTS_FILE,)) as staged:
         archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
         assert archive.is_file()
         assert REPO_SNAPSHOT_KEY not in payload
@@ -238,6 +238,27 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     assert calls["token"] == "token-for-alice"
     assert calls["commit"] == "a" * 40
     assert not calls["workdir"].exists()
+
+
+def test_serving_refuses_a_run_recorded_under_the_old_contract_file_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that did not protect ascent.toml started under optimize.toml, so its hidden list is unknown (SKY-746).
+
+    Args:
+        monkeypatch: Records any fetch of the repository.
+    """
+    fetches: list[str] = []
+    monkeypatch.setattr(
+        repo_serving, "fetch_snapshot", lambda repository, *_args, **_kwargs: fetches.append(repository)
+    )
+    payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
+
+    with (
+        pytest.raises(ConstraintsError, match=r"before the contract file was named ascent\.toml"),
+        staged_snapshot(payload, engine=None, owner=None, protected_paths=("optimize.toml", "eval")),
+    ):
+        pass
+
+    assert fetches == []
 
 
 _HIDDEN_TOML = """version = 1
@@ -300,7 +321,7 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=None, owner=None) as staged:
+    with staged_snapshot(payload, engine=None, owner=None, protected_paths=(CONSTRAINTS_FILE,)) as staged:
         served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
 
     assert served == set(_SERVING_SIDE)
@@ -324,7 +345,7 @@ def test_serving_writes_the_drafts_into_the_tree_and_never_lists_them(
     job["payload"]["target"]["repo"]["draft_files"] = {**_SCORING_SIDE, "src/app.py": "DRAFTED = 1\n"}
     payload = serve_payload(job, patch="", inputs={}, optimization_id="opt-1")
 
-    with staged_snapshot(payload, engine=None, owner=None) as staged:
+    with staged_snapshot(payload, engine=None, owner=None, protected_paths=(CONSTRAINTS_FILE,)) as staged:
         archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
         served = _members(archive)
         with tarfile.open(archive, "r:gz") as packed:
@@ -357,7 +378,10 @@ def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], patch: str = 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
     return staged_snapshot(
-        serve_payload(_job(), patch=patch, inputs={}, optimization_id="opt-1"), engine=None, owner=None
+        serve_payload(_job(), patch=patch, inputs={}, optimization_id="opt-1"),
+        engine=None,
+        owner=None,
+        protected_paths=(CONSTRAINTS_FILE,),
     )
 
 
@@ -658,7 +682,12 @@ def _stage_tree(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], links: d
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
-    return staged_snapshot(serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"), engine=None, owner=None)
+    return staged_snapshot(
+        serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"),
+        engine=None,
+        owner=None,
+        protected_paths=(CONSTRAINTS_FILE,),
+    )
 
 
 def test_a_hidden_path_with_a_trailing_slash_is_still_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
