@@ -690,18 +690,16 @@ def _stage_tree(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], links: d
     )
 
 
-def test_a_hidden_path_with_a_trailing_slash_is_still_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``scoring/`` names the same folder as ``scoring``."""
+def test_a_hidden_path_with_a_trailing_slash_refuses_to_serve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package parser refuses ``scoring/`` when the file is read, so no unmatched hidden path is served (SKY-760)."""
     files = {
         "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/"]\n',
         "scoring/score.py": f"# {_LEAK}\n",
         "serve.py": _SERVE,
     }
 
-    with _stage(monkeypatch, files) as staged:
-        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
-
-    assert served == {"serve.py"}
+    with pytest.raises(ConstraintsError, match="must be written 'scoring'"), _stage(monkeypatch, files):
+        pytest.fail("the snapshot must not be yielded")
 
 
 def test_a_hidden_path_with_a_dot_slash_prefix_refuses_to_serve(
