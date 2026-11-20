@@ -388,28 +388,34 @@ follows one rule, the same for the candidate and for each stage (SKY-757):
   has no cases.
 - It writes `{"output": <any JSON>}` to the path in `ASCENT_OUTPUT`. The
   `output` value is what the metric scores.
-- What it prints, on stdout or stderr, goes to the logs only. Its stdin is
+- What it prints, on stdout or stderr, goes to the logs only. Nothing goes
+  to the logs while the command runs. After the call ends, the logs get the
+  last 64 KiB of its stdout, then a line break when stdout does not end with
+  one, then the last 64 KiB of its stderr. Its stdin is
   empty.
 
 A nonzero exit code, a missing output file, an output that is not valid JSON
 or has another form, a time limit or an output file larger than the limit
 fails the call. For a `[run] entry`, the case then gets no score, and the
 metric does not run (SKY-751). For a stage, the metric's `openascent.call`
-gets the failure as an error. The error names the cause, then shows the last
-800 characters of the command's stderr and of its stdout, with the run's
-secrets masked. The box sends at most the last 4,000 characters of each log.
-That cut can split a secret, so Skynet drops the start of a log that the box
-cut. The drop is one character shorter than the longest secret, and it never
-stops inside a whole secret. Skynet then masks the secrets, and only then cuts
-each log to 800 characters. Thus no part of a masked secret (6 characters or
-more) shows across a cut. When the output file is not valid JSON, the cause is
+gets the failure as an error. The error shows at most the first 300
+characters of the cause (a longer cause ends with "…"), then the last 800
+characters of the command's stderr and of its stdout, with the run's secrets
+masked. The box sends at most the last 4,000 characters of each log. That cut
+can split a secret, so Skynet drops the start of a log that the box cut. The
+drop is one character shorter than the longest secret, and it never stops
+inside a whole secret. Skynet then masks the secrets, and only then cuts the
+cause and each log. Thus no part of a masked secret (6 characters or more)
+shows across a cut. When the output file is not valid JSON, the cause is
 always "The output file is not valid JSON. Write one strict JSON value to
 ASCENT_OUTPUT: UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate
 escape." This cause quotes no part of the file. The feedback of a failed
-`[run]` case shows all of this.
-The error of a failed stage keeps only its first 500 characters: the cause,
-then the start of the stderr part, or of the stdout part when stderr is
-empty. Each call gets a new output path, so a file
+`[run]` case keeps its last 1,988 characters after "Run failed: ". The cause
+and the two tails always fit in that limit, so the feedback always starts with
+the cause. The error of a failed stage keeps only its first 500 characters.
+Thus it can show less than the full tails: it shows the cause, then the start
+of the stderr part, or of the stdout part when stderr is empty. Each call gets
+a new output path, so a file
 from an earlier call is never read again. A function entry is not changed:
 it gets the input as its argument, and its return value is the output.
 

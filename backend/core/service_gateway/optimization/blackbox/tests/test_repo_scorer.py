@@ -5123,6 +5123,25 @@ def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
     assert not [piece for piece in pieces if piece in result["feedback"]]
 
 
+@_needs_openascent
+def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(tmp_path: Path) -> None:
+    """The cause keeps its head, so the feedback's tail cut never drops it (SKY-757)."""
+    keys = ", ".join(f'"unknown_key_{i:02d}": 1' for i in range(60))
+    script = (
+        'for i in $(seq 100); do echo "out line $i"; echo "err line $i" >&2; done\n'
+        f"printf '%s' '{{\"output\": 1, {keys}}}' > \"$ASCENT_OUTPUT\"\n"
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The run output is not in the valid form:")
+    assert "\nstderr: " in result["feedback"]
+    assert result["feedback"].endswith("out line 100")
+
+
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
     """A run without ``[run]`` passes no output to the metric (E38)."""
     metric = (

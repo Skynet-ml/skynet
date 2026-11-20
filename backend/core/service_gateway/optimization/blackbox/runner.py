@@ -179,9 +179,12 @@ _COMMAND_STOP_SECONDS = 10.0
 # session from making the supervisor read a huge file in its place (SKY-757).
 _COMMAND_ANSWER_BYTES = 4 * MAX_RUN_STDOUT_BYTES + 64 * 1024
 # The characters of a failed command's stderr and of its stdout that its error
-# shows. Two tails leave room for the cause in the [run] feedback, which keeps
-# only its last 1,988 characters (SKY-757).
+# shows (SKY-757).
 COMMAND_LOG_CHARS = 800
+# The characters of a failed command's cause that its error shows. The cause
+# and the two tails fit in the [run] feedback, which keeps only its last 1,988
+# characters, so the feedback always names the cause (SKY-757).
+COMMAND_CAUSE_CHARS = 300
 # The characters of each log that the box sends to the parent. The bound keeps
 # the answer file small. The box knows no secrets, so this cut can split one:
 # the box marks each log it cut, and the parent drops the cut edge before it
@@ -2005,9 +2008,12 @@ def command_error(document: dict[str, Any], mask: Callable[[str], str], secrets:
         secrets: The values that ``mask`` removes, to find the edge of a log the box cut.
 
     Returns:
-        The masked cause, then the last ``COMMAND_LOG_CHARS`` of each masked log.
+        The first ``COMMAND_CAUSE_CHARS`` of the masked cause, then the last
+        ``COMMAND_LOG_CHARS`` of each masked log.
     """
     error = mask(str(document["error"]))
+    if len(error) > COMMAND_CAUSE_CHARS:
+        error = error[: COMMAND_CAUSE_CHARS - 1] + "…"
     for stream in ("stderr", "stdout"):
         if document.get(stream):
             text = str(document[stream])
@@ -2160,13 +2166,13 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
             env=env,
             max_output_bytes=MAX_RUN_STDOUT_BYTES,
         )
-        sys.stderr.write(call.stdout + call.stderr)
+        sys.stderr.write(_join_logs(call.stdout, call.stderr))
         # Compact, so the supervisor's answer cap holds for any output under the package limit.
         text = json.dumps({"output": call.output}, allow_nan=False, separators=(",", ":"))
     except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
         if ascent is not None and isinstance(exc, ascent.AscentError):
             # The same logs as a passed call: stdout, then stderr (SKY-757).
-            sys.stderr.write(exc.stdout + exc.stderr)
+            sys.stderr.write(_join_logs(exc.stdout, exc.stderr))
             # The parent masks the secrets and only then cuts each log to
             # COMMAND_LOG_CHARS. It drops the edge of a log cut here (SKY-757).
             cause = INVALID_JSON_CAUSE if isinstance(exc, ascent.InvalidJsonError) else str(exc)
@@ -2181,6 +2187,21 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
         text = json.dumps(document)
     _write_output(call_dir, text)
     return 0
+
+
+def _join_logs(stdout: str, stderr: str) -> str:
+    """Join a command's stdout and stderr for the logs, with a line break between them.
+
+    Args:
+        stdout: The command's stdout.
+        stderr: The command's stderr.
+
+    Returns:
+        stdout, then a line break when stdout does not end with one, then stderr.
+    """
+    if stdout and not stdout.endswith("\n"):
+        stdout += "\n"
+    return stdout + stderr
 
 
 def _stage_relay_env(call_dir: Path) -> dict[str, str]:

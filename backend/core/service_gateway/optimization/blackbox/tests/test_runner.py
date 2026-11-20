@@ -1126,6 +1126,43 @@ def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
     assert "stdout_cut" not in document
 
 
+@_needs_openascent
+def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> None:
+    """The box writes a line break between a stdout without one and the stderr (SKY-757)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    script = "import sys; sys.stdout.write('out-text'); sys.stderr.write('err-text'); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "out-text\nerr-text" in completed.stderr
+
+
+def test_a_command_error_cuts_a_long_cause_so_both_tails_fit_the_run_feedback() -> None:
+    """A long cause keeps its first ``COMMAND_CAUSE_CHARS``, after the mask (SKY-757)."""
+    secret = "secret-value-9876"
+    cause = "x" * (runner.COMMAND_CAUSE_CHARS - 5) + secret + "y" * 1_000
+    document = {"error": cause, "stdout": "o" * 1_000, "stderr": "e" * 1_000}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret])
+    head, stderr, stdout = error.split("\n")
+    assert head == ("x" * (runner.COMMAND_CAUSE_CHARS - 5) + "[secret]")[: runner.COMMAND_CAUSE_CHARS - 1] + "…"
+    assert "secr" not in error
+    assert (stderr, stdout) == (
+        "stderr: " + "e" * runner.COMMAND_LOG_CHARS,
+        "stdout: " + "o" * runner.COMMAND_LOG_CHARS,
+    )
+    assert len(error) <= 2_000 - len("Run failed: ")
+
+
 def test_a_command_error_masks_each_log_before_it_cuts_it() -> None:
     """The cause comes first, then each masked log's last ``COMMAND_LOG_CHARS``, stderr first (SKY-757)."""
     secret = "secret-value-9876"
