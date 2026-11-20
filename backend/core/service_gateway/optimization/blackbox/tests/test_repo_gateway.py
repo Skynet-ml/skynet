@@ -268,7 +268,13 @@ def _score(
 def test_a_managed_call_from_the_box_is_metered(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path, root_commands_in_local_boxes: list[str]
 ) -> None:
-    """Version code and the scorer's llm() reach the managed route; the parent pays and meters both."""
+    """Version code and the scorer's llm() reach the managed route; the parent pays and meters both.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+        root_commands_in_local_boxes: The commands that dropped the scorer's root flag.
+    """
     model_gateway, sent = gateway
     result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY)
     # The [run] supervisor runs as root, and the mailbox still wraps it, so the entry keeps its model route.
@@ -294,7 +300,12 @@ def test_a_managed_call_from_the_box_is_metered(
 def test_a_byok_call_from_the_box_uses_the_users_key_in_the_parent(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """A BYOK route sends the user's key upstream from the parent; the box never holds it."""
+    """A BYOK route sends the user's key upstream from the parent; the box never holds it.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+    """
     model_gateway, sent = gateway
     model = {
         "name": "openrouter/fixture/text",
@@ -394,7 +405,11 @@ def score(repo_path, case, output):
 def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
     gateway: tuple[ModelGateway, list[httpx.Request]],
 ) -> None:
-    """Only a registered model route token on a model path passes the parent box's dispatch."""
+    """Only a registered model route token on a model path passes the parent box's dispatch.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+    """
     model_gateway, _ = gateway
     evaluator_token = model_gateway.bind_evaluator(_Evaluator())["token"]
     protected = model_gateway.protect_payload(
@@ -472,6 +487,10 @@ def test_the_setup_check_scores_the_checkout_the_run_scores(
 
     The metric box holds no repository file (SKY-398), so the ``[run]``
     entry reads the checkout and the metric scores its output.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
     """
     metric_code = (
         "def score(repo_path, case, output):\n"
@@ -487,7 +506,12 @@ def test_the_setup_check_scores_the_checkout_the_run_scores(
 def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644)."""
+    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644).
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
+    """
     metric_code = (
         "from pathlib import Path\n"
         "def score(repo_path, case):\n"
@@ -559,6 +583,10 @@ def test_a_wrong_answer_form_stops_a_repository_run_before_any_score(
 
     The relay turns the parent's refusal into a 422, so the stop works only
     when the parent's fixed text keeps the answer form.
+
+    Args:
+        gateway: The real parent gateway and the requests that reached the fake provider.
+        tmp_path: Scratch folder.
     """
     model_gateway, _ = gateway
     metric_code = "def score(repo_path, case=None):\n    return 0.8\n"
@@ -634,7 +662,11 @@ def _sha(text: str) -> str:
 
 
 def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path) -> None:
-    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398)."""
+    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     sent = "print('parent proxy')\n"
 
     result = _boot(tmp_path, "print('candidate code as root')\n", "{}", (_sha(sent), _sha("{}")))
@@ -645,7 +677,11 @@ def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path
 
 
 def test_the_root_proxy_runs_the_sent_bytes_with_a_private_config_copy(tmp_path: Path) -> None:
-    """With matching digests the boot runs the proxy on a config copy, not the box user's file."""
+    """With matching digests the boot runs the proxy on a config copy, not the box user's file.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     source = "import sys\nprint(open(sys.argv[1]).read(), sys.argv[1], *sys.argv[2:], sep='|')\n"
 
     result = _boot(tmp_path, source, '{"k": 1}', (_sha(source), _sha('{"k": 1}')))
@@ -680,7 +716,11 @@ class _RecordingSession:
 
 
 def test_only_the_root_supervisor_goes_through_the_model_mailbox(tmp_path: Path) -> None:
-    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route."""
+    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
     session = _RecordingSession()
 
     def mailbox(box: Any, command: str, *, sudo: bool = False, **_options: Any) -> str:

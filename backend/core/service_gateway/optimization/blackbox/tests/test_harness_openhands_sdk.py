@@ -295,7 +295,11 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
 
 @pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
 def test_supported_effort_passes_to_the_sdk_unchanged(effort: str) -> None:
-    """Each level the pinned SDK documents reaches the runner exactly as the user chose it."""
+    """Each level the pinned SDK documents reaches the runner exactly as the user chose it.
+
+    Args:
+        effort: An effort the SDK supports.
+    """
     assert effort in EFFORTS
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
@@ -351,14 +355,22 @@ def test_runner_sends_no_effort_without_a_choice(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", "High", " high", "off"])
 def test_unsupported_effort_is_refused(effort: str) -> None:
-    """A level the SDK does not support stops the launch instead of a silent drop or remap."""
+    """A level the SDK does not support stops the launch instead of a silent drop or remap.
+
+    Args:
+        effort: An effort the SDK does not support.
+    """
     with pytest.raises(ServiceError, match="does not support the effort level"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
-    """No effort sets nothing, so the SDK keeps its own default."""
+    """No effort sets nothing, so the SDK keeps its own default.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
@@ -379,7 +391,11 @@ def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
     ],
 )
 def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
-    """No gateway URL means no launch; the harness never falls back to a direct key."""
+    """No gateway URL means no launch; the harness never falls back to a direct key.
+
+    Args:
+        url: A gateway URL that is missing, relative or not clean.
+    """
     with pytest.raises(ServiceError, match="OpenHands SDK"):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 

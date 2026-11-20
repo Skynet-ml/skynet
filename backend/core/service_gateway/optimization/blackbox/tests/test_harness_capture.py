@@ -174,7 +174,12 @@ def _is_incomplete(trees: TreeStore, tree_id: str) -> bool:
 
 
 def test_each_tool_use_and_tool_result_pair_is_one_step_with_command_output_and_tree(step_log, tmp_path) -> None:
-    """A paired call commits one command step that names the command, the output and the tree after it."""
+    """A paired call commits one command step that names the command, the output and the tree after it.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     workspace.mkdir()
     session_dir.mkdir(parents=True)
@@ -201,7 +206,12 @@ def test_each_tool_use_and_tool_result_pair_is_one_step_with_command_output_and_
 
 
 def test_a_repeated_request_or_an_unanswered_call_commits_nothing_more(step_log, tmp_path) -> None:
-    """A retried request does not commit its pair twice, and a call with no result yet waits for it."""
+    """A retried request does not commit its pair twice, and a call with no result yet waits for it.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -252,7 +262,12 @@ def test_a_repeated_request_or_an_unanswered_call_commits_nothing_more(step_log,
 
 
 def test_exec_shim_records_become_steps_before_the_next_model_call(step_log, tmp_path) -> None:
-    """Commands the shim logged with no model call commit in order, and a line the agent broke is skipped."""
+    """Commands the shim logged with no model call commit in order, and a line the agent broke is skipped.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -328,7 +343,12 @@ def test_no_stored_object_holds_the_route_key(step_log, tmp_path) -> None:
 
 
 def test_a_listed_command_inside_a_model_tool_call_commits_once(step_log, tmp_path) -> None:
-    """When a request answers tool calls, the exec records of that interval belong to them and do not commit."""
+    """When a request answers tool calls, the exec records of that interval belong to them and do not commit.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -343,7 +363,12 @@ def test_a_listed_command_inside_a_model_tool_call_commits_once(step_log, tmp_pa
 
 
 def test_a_command_the_harness_ran_on_its_own_next_to_a_tool_call_is_dropped(step_log, tmp_path) -> None:
-    """The known gap, on purpose: a request with a new tool result drops every exec record of its interval."""
+    """The known gap, on purpose: a request with a new tool result drops every exec record of its interval.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -363,7 +388,12 @@ def test_a_command_the_harness_ran_on_its_own_next_to_a_tool_call_is_dropped(ste
 
 
 def test_a_failed_snapshot_keeps_the_exec_records_for_the_next_commit(step_log, tmp_path) -> None:
-    """The log position moves only after the commit, so a snapshot error loses no command."""
+    """The log position moves only after the commit, so a snapshot error loses no command.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -403,7 +433,12 @@ def test_a_failed_snapshot_keeps_the_exec_records_for_the_next_commit(step_log, 
 
 
 def test_a_restored_session_does_not_commit_old_exec_records_again(step_log, tmp_path) -> None:
-    """The exec log stays out of the tree, so a capture in the new box starts with nothing to commit."""
+    """The exec log stays out of the tree, so a capture in the new box starts with nothing to commit.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     workspace.mkdir()
     session_dir.mkdir(parents=True)
@@ -434,7 +469,12 @@ def _record(command: str) -> str:
 
 
 def test_a_capture_for_a_follow_up_turn_does_not_commit_the_earlier_turns_records(step_log, tmp_path) -> None:
-    """The exec log is per session; a new capture on the same session folder reads only the lines after its start."""
+    """The exec log is per session; a new capture on the same session folder reads only the lines after its start.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -453,7 +493,13 @@ def test_a_capture_for_a_follow_up_turn_does_not_commit_the_earlier_turns_record
 
 @pytest.mark.parametrize("to_device", [False, True])
 def test_an_exec_log_replaced_by_a_link_is_not_read(step_log, tmp_path, to_device) -> None:
-    """The agent can point the log at a host file or at ``/dev/zero``; the capture reads neither."""
+    """The agent can point the log at a host file or at ``/dev/zero``; the capture reads neither.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        to_device: Whether the link points at ``/dev/zero`` instead of a host file.
+    """
     workspace, session_dir, target = tmp_path / "work", tmp_path / "session", tmp_path / "host-log"
     workspace.mkdir()
     session_dir.mkdir()
@@ -467,7 +513,12 @@ def test_an_exec_log_replaced_by_a_link_is_not_read(step_log, tmp_path, to_devic
 
 
 def test_an_exec_log_replaced_by_a_folder_is_not_read(step_log, tmp_path) -> None:
-    """A log path that is not a regular file and not a link reads as empty and does not break the capture."""
+    """A log path that is not a regular file and not a link reads as empty and does not break the capture.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -480,7 +531,12 @@ def test_an_exec_log_replaced_by_a_folder_is_not_read(step_log, tmp_path) -> Non
 
 
 def test_an_exec_log_replaced_by_a_pipe_does_not_hang_the_capture(step_log, tmp_path) -> None:
-    """A FIFO log with no writer is opened without blocking and read as empty."""
+    """A FIFO log with no writer is opened without blocking and read as empty.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -503,7 +559,13 @@ def test_an_exec_log_replaced_by_a_pipe_does_not_hang_the_capture(step_log, tmp_
 
 
 def test_one_finish_reads_a_log_larger_than_the_read_limit(step_log, tmp_path, monkeypatch) -> None:
-    """One finish reads the log in limit-sized chunks to its end, and a line longer than the limit is skipped whole."""
+    """One finish reads the log in limit-sized chunks to its end, and a line longer than the limit is skipped whole.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -521,7 +583,13 @@ def test_one_finish_reads_a_log_larger_than_the_read_limit(step_log, tmp_path, m
 
 
 def test_a_drain_ends_while_a_writer_keeps_appending_to_the_exec_log(step_log, tmp_path, monkeypatch) -> None:
-    """One finish reads up to the log size at its start; lines a child adds during it wait for the next call."""
+    """One finish reads up to the log size at its start; lines a child adds during it wait for the next call.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -553,7 +621,13 @@ def test_a_drain_ends_while_a_writer_keeps_appending_to_the_exec_log(step_log, t
 def test_a_tool_round_skips_every_exec_record_of_a_log_larger_than_the_read_limit(
     step_log, tmp_path, monkeypatch
 ) -> None:
-    """A tool round moves the log position to the end, so the next model call commits none of those records."""
+    """A tool round moves the log position to the end, so the next model call commits none of those records.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -568,7 +642,12 @@ def test_a_tool_round_skips_every_exec_record_of_a_log_larger_than_the_read_limi
 
 
 def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_pairs_again(step_log, tmp_path) -> None:
-    """Each pair is recorded right after its commit, so a retry commits only the pairs that did not commit."""
+    """Each pair is recorded right after its commit, so a retry commits only the pairs that did not commit.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -607,7 +686,12 @@ def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_pairs_again(s
 
 
 def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_exec_records_again(step_log, tmp_path) -> None:
-    """Each exec record moves the log position right after its commit, so a retry starts at the failed one."""
+    """Each exec record moves the log position right after its commit, so a retry starts at the failed one.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -651,7 +735,13 @@ def test_a_retry_after_a_failed_commit_does_not_commit_the_earlier_exec_records_
     ],
 )
 def test_a_tool_call_with_a_bad_id_is_skipped(step_log, tmp_path, use) -> None:
-    """A list, dict, empty or missing id does not break the capture; only the well-formed pair commits."""
+    """A list, dict, empty or missing id does not break the capture; only the well-formed pair commits.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        use: A tool call with a bad id.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -666,7 +756,12 @@ def test_a_tool_call_with_a_bad_id_is_skipped(step_log, tmp_path, use) -> None:
 
 
 def test_a_tool_call_with_an_input_too_deep_to_redact_commits_with_no_input(step_log, tmp_path) -> None:
-    """The call still ran, so it commits a step with its id and tool and no input, and the capture goes on."""
+    """The call still ran, so it commits a step with its id and tool and no input, and the capture goes on.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -697,7 +792,12 @@ def test_a_tool_call_with_an_input_too_deep_to_redact_commits_with_no_input(step
 def test_an_exec_record_with_a_lone_surrogate_commits_as_escaped_text_and_the_next_one_commits(
     step_log, tmp_path
 ) -> None:
-    """The shim logs a non-UTF-8 argv byte as a lone surrogate; it commits as ``\\udcff`` text and blocks nothing."""
+    """The shim logs a non-UTF-8 argv byte as a lone surrogate; it commits as ``\\udcff`` text and blocks nothing.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -715,7 +815,12 @@ def test_an_exec_record_with_a_lone_surrogate_commits_as_escaped_text_and_the_ne
 
 
 def test_a_tool_call_with_a_lone_surrogate_commits_as_escaped_text_and_the_next_one_commits(step_log, tmp_path) -> None:
-    """A ``\\ud800`` in a model request commits as text, and the next tool call still commits."""
+    """A ``\\ud800`` in a model request commits as text, and the next tool call still commits.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -730,7 +835,12 @@ def test_a_tool_call_with_a_lone_surrogate_commits_as_escaped_text_and_the_next_
 
 
 def test_two_results_with_one_tool_use_id_in_one_request_commit_one_step(step_log, tmp_path) -> None:
-    """The agent writes the request, so a repeated result id commits only its first result."""
+    """The agent writes the request, so a repeated result id commits only its first result.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -744,7 +854,12 @@ def test_two_results_with_one_tool_use_id_in_one_request_commit_one_step(step_lo
 
 
 def test_a_route_key_cut_at_the_start_of_an_output_tail_is_not_stored(step_log, tmp_path) -> None:
-    """The shim keeps the last bytes of a stream; a key part at the start of a full tail is dropped."""
+    """The shim keeps the last bytes of a stream; a key part at the start of a full tail is dropped.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -762,7 +877,12 @@ def test_a_route_key_cut_at_the_start_of_an_output_tail_is_not_stored(step_log, 
 
 
 def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> None:
-    """A tree deeper than the recursion limit does not break the snapshot; the folder at the limit is recorded."""
+    """A tree deeper than the recursion limit does not break the snapshot; the folder at the limit is recorded.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -789,7 +909,13 @@ def test_a_deep_folder_tree_is_cut_at_the_depth_limit(step_log, tmp_path) -> Non
 
 
 def test_a_file_over_the_size_cap_is_left_out_and_named_also_when_sparse(step_log, tmp_path, monkeypatch) -> None:
-    """The size check comes before the read: a huge sparse file costs no memory, and the result names each one."""
+    """The size check comes before the read: a huge sparse file costs no memory, and the result names each one.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_FILE_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     workspace.mkdir()
@@ -830,7 +956,13 @@ def test_a_file_over_the_size_cap_is_left_out_and_named_also_when_sparse(step_lo
 
 
 def test_a_file_that_grows_past_the_size_cap_during_the_read_is_left_out(step_log, tmp_path, monkeypatch) -> None:
-    """The read stops one byte past the cap, so a file that keeps growing is cut off and named."""
+    """The read stops one byte past the cap, so a file that keeps growing is cut off and named.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_FILE_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
@@ -862,7 +994,13 @@ def test_a_file_that_grows_past_the_size_cap_during_the_read_is_left_out(step_lo
 
 
 def test_files_past_the_total_size_cap_are_left_out_and_smaller_ones_still_fit(step_log, tmp_path, monkeypatch) -> None:
-    """The snapshot stops at the total cap: a file that does not fit in what is left is named, a smaller one is kept."""
+    """The snapshot stops at the total cap: a file that does not fit in what is left is named, a smaller one is kept.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_TOTAL_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
@@ -881,7 +1019,13 @@ def test_files_past_the_total_size_cap_are_left_out_and_smaller_ones_still_fit(s
 def test_entries_past_the_count_cap_are_left_out_and_the_rest_of_the_folder_is_not_read(
     step_log, tmp_path, monkeypatch
 ) -> None:
-    """Files, links and folders all count; past the cap a folder stops at one recorded name, with no lstat."""
+    """Files, links and folders all count; past the cap a folder stops at one recorded name, with no lstat.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 5)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     for index in range(10):
@@ -953,7 +1097,13 @@ def test_entries_past_the_count_cap_are_left_out_and_the_rest_of_the_folder_is_n
 
 
 def test_each_step_names_the_files_the_snapshot_caps_left_out(step_log, tmp_path, monkeypatch) -> None:
-    """A step whose tree misses a capped file says so in its body, so a reader knows the tree is not whole."""
+    """A step whose tree misses a capped file says so in its body, so a reader knows the tree is not whole.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_FILE_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
@@ -969,7 +1119,12 @@ def test_each_step_names_the_files_the_snapshot_caps_left_out(step_log, tmp_path
 
 
 def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log, tmp_path) -> None:
-    """A file or folder the agent made unreadable does not stop the snapshot, and each one is recorded."""
+    """A file or folder the agent made unreadable does not stop the snapshot, and each one is recorded.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     (workspace / "locked-dir").mkdir(parents=True)
     session_dir.mkdir()
@@ -988,7 +1143,13 @@ def test_unreadable_files_are_left_out_and_the_snapshot_still_succeeds(step_log,
 
 
 def test_a_full_workspace_does_not_push_the_session_folder_out_of_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
-    """The session folder is walked first, so the caps leave out workspace files, not the harness's own state."""
+    """The session folder is walked first, so the caps leave out workspace files, not the harness's own state.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_ENTRY_COUNT_LIMIT", 3)
     monkeypatch.setattr(harness_capture, "_TOTAL_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
@@ -1010,7 +1171,12 @@ def test_a_full_workspace_does_not_push_the_session_folder_out_of_the_snapshot(s
 
 
 def test_a_missing_session_folder_is_an_empty_one(step_log, tmp_path) -> None:
-    """A session folder that is not there yet does not make the snapshot, or the steps after it, fail."""
+    """A session folder that is not there yet does not make the snapshot, or the steps after it, fail.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     workspace.mkdir()
     (workspace / "main.py").write_text("x = 1\n")
@@ -1026,7 +1192,12 @@ def test_a_missing_session_folder_is_an_empty_one(step_log, tmp_path) -> None:
 
 
 def test_a_linked_session_folder_is_recorded_and_not_followed(step_log, tmp_path) -> None:
-    """The agent can swap the session folder for a link to a host folder; the walk records it and reads nothing."""
+    """The agent can swap the session folder for a link to a host folder; the walk records it and reads nothing.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir, host = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1", tmp_path / "host"
     workspace.mkdir()
     host.mkdir()
@@ -1047,7 +1218,13 @@ def test_a_linked_session_folder_is_recorded_and_not_followed(step_log, tmp_path
 def test_a_restore_of_an_incomplete_snapshot_deletes_no_file_the_snapshot_left_out(
     step_log, tmp_path, monkeypatch
 ) -> None:
-    """A capped snapshot cannot say which left-out files still exist, so its restore writes the tree and deletes nothing."""
+    """A capped snapshot cannot say which left-out files still exist, so its restore writes the tree and deletes nothing.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     monkeypatch.setattr(harness_capture, "_FILE_SIZE_LIMIT", 10)
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     (workspace / "src").mkdir(parents=True)
@@ -1077,7 +1254,12 @@ def test_a_restore_of_an_incomplete_snapshot_deletes_no_file_the_snapshot_left_o
 
 
 def test_a_tool_name_or_result_text_that_is_not_a_string_commits_as_empty_text(step_log, tmp_path) -> None:
-    """``str()`` of a deeply nested list raises RecursionError; only a string is kept, so ``observe`` goes on."""
+    """``str()`` of a deeply nested list raises RecursionError; only a string is kept, so ``observe`` goes on.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -1098,7 +1280,12 @@ def test_a_tool_name_or_result_text_that_is_not_a_string_commits_as_empty_text(s
 
 
 def test_a_route_key_cut_at_the_end_of_a_cut_command_line_is_not_stored(step_log, tmp_path) -> None:
-    """The shim keeps the head of a long command line; a key part right before the cut marker is dropped."""
+    """The shim keeps the head of a long command line; a key part right before the cut marker is dropped.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -1161,7 +1348,13 @@ def _as_regular_file(info: os.stat_result) -> os.stat_result:
 
 
 def test_a_file_swapped_for_a_link_after_lstat_is_not_read(step_log, tmp_path, monkeypatch) -> None:
-    """The walk never reads a host file through a link that replaced a workspace file after its lstat."""
+    """The walk never reads a host file through a link that replaced a workspace file after its lstat.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir, secret = tmp_path / "work", tmp_path / "session", tmp_path / "host-secret"
     workspace.mkdir()
     session_dir.mkdir()
@@ -1175,7 +1368,13 @@ def test_a_file_swapped_for_a_link_after_lstat_is_not_read(step_log, tmp_path, m
 
 
 def test_a_name_that_is_not_utf8_is_left_out(step_log, tmp_path, monkeypatch) -> None:
-    """``os.scandir`` gives such a name with surrogate escapes; the tree cannot encode it, so the walk records it."""
+    """``os.scandir`` gives such a name with surrogate escapes; the tree cannot encode it, so the walk records it.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -1214,7 +1413,13 @@ def test_a_name_that_is_not_utf8_is_left_out(step_log, tmp_path, monkeypatch) ->
 
 
 def test_a_pipe_that_looks_like_a_file_does_not_hang_the_snapshot(step_log, tmp_path, monkeypatch) -> None:
-    """A FIFO in place of a file is opened without blocking and left out."""
+    """A FIFO in place of a file is opened without blocking and left out.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "session"
     workspace.mkdir()
     session_dir.mkdir()
@@ -1238,7 +1443,12 @@ def test_a_pipe_that_looks_like_a_file_does_not_hang_the_snapshot(step_log, tmp_
 
 
 def test_restore_writes_the_workspace_and_session_folder_without_following_links(step_log, tmp_path) -> None:
-    """A restore rebuilds files, modes and links, and replaces a link in the way instead of writing through it."""
+    """A restore rebuilds files, modes and links, and replaces a link in the way instead of writing through it.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     (workspace / "src").mkdir(parents=True)
     session_dir.mkdir(parents=True)
@@ -1270,7 +1480,12 @@ def test_restore_writes_the_workspace_and_session_folder_without_following_links
 
 
 def test_restore_deletes_what_the_tree_does_not_name_without_following_links(step_log, tmp_path) -> None:
-    """Files the agent deleted do not come back, and a link in the way is removed, not followed."""
+    """Files the agent deleted do not come back, and a link in the way is removed, not followed.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     (workspace / "src").mkdir(parents=True)
     session_dir.mkdir(parents=True)
@@ -1293,7 +1508,12 @@ def test_restore_deletes_what_the_tree_does_not_name_without_following_links(ste
 
 
 def test_a_snapshot_leaves_out_git_folders_in_any_letter_case(step_log, tmp_path) -> None:
-    """A workspace with ``git init`` or a checkout snapshots, with no ``.git`` part in the tree (SKY-810)."""
+    """A workspace with ``git init`` or a checkout snapshots, with no ``.git`` part in the tree (SKY-810).
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     workspace, session_dir = tmp_path / "work", tmp_path / "home" / SESSIONS_DIR / "s1"
     (workspace / ".git").mkdir(parents=True)
     (workspace / "sub" / ".GIT").mkdir(parents=True)
@@ -1328,7 +1548,12 @@ def _put_raw_tree(step_log: StepLogStore, rows: list[list[str]]) -> str:
 
 
 def test_a_restore_of_an_old_tree_writes_and_deletes_no_git_part(step_log, tmp_path) -> None:
-    """A stored ``.git`` entry is not written out, and the box's own ``.git`` is not pruned (SKY-810)."""
+    """A stored ``.git`` entry is not written out, and the box's own ``.git`` is not pruned (SKY-810).
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+    """
     trees = TreeStore(step_log)
     blob = trees.put_blob(RUN, b"x\n")
     git = _put_raw_tree(step_log, [["config", "file", blob]])
@@ -1352,7 +1577,13 @@ def test_a_restore_of_an_old_tree_writes_and_deletes_no_git_part(step_log, tmp_p
 
 @pytest.mark.parametrize("inside", [False, True])
 def test_a_workspace_entry_named_like_the_session_folder_is_left_out(step_log, tmp_path, inside) -> None:
-    """The workspace's own session-folder entry does not break the snapshot; the real session folder fills the slot."""
+    """The workspace's own session-folder entry does not break the snapshot; the real session folder fills the slot.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        inside: Whether the real session folder is inside the workspace.
+    """
     workspace = tmp_path / "work"
     session_dir = workspace / SESSIONS_DIR / "s1" if inside else tmp_path / "session"
     (workspace / SESSIONS_DIR / "x").mkdir(parents=True)
@@ -1425,7 +1656,14 @@ _FALLBACK = {"run_command": 'cat "$ASCENT_TASK"', "output_format": "plain", "fil
 def test_a_resume_in_a_new_box_restores_the_session_folder_before_the_harness_starts(
     step_log, tmp_path, proposer, native
 ) -> None:
-    """The committed tree carries the session folder: a native harness continues it, a fallback one gets the note."""
+    """The committed tree carries the session folder: a native harness continues it, a fallback one gets the note.
+
+    Args:
+        step_log: The test step log.
+        tmp_path: Pytest's temporary folder.
+        proposer: The proposer of the run.
+        native: Whether the harness continues its own session.
+    """
     home, workspace = tmp_path / "home", tmp_path / "work"
     workspace.mkdir()
     _claude(_bridge_env(tmp_path, home, proposer), workspace, "first task", "--session-id", "s1")

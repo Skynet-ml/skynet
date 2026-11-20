@@ -63,6 +63,7 @@ def _env(name: str, default: str = "") -> str:
 
     Args:
         name: Variable name with the ``APP_`` prefix.
+        default: The value when neither spelling is set.
 
     Returns:
         The value, or ``default`` when neither spelling is set.

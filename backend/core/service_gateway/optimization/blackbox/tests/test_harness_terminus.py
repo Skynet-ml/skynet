@@ -272,19 +272,31 @@ def test_install_checks_the_pin_then_installs_uv_and_warms_the_cache() -> None:
 
 @pytest.mark.parametrize("effort", _EFFORTS)
 def test_every_supported_effort_passes_unchanged(effort: str) -> None:
-    """Each Skynet effort reaches the runner as the same string, with no remap."""
+    """Each Skynet effort reaches the runner as the same string, with no remap.
+
+    Args:
+        effort: A Skynet effort.
+    """
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_is_left_to_the_model_default(effort: str | None) -> None:
-    """Without an effort, the runner gets none and the model default applies."""
+    """Without an effort, the runner gets none and the model default applies.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
 @pytest.mark.parametrize("effort", ["default", "HIGH", "turbo"])
 def test_unsupported_effort_stops_the_launch(effort: str) -> None:
-    """An effort Terminus 2 does not accept is refused, not dropped or remapped."""
+    """An effort Terminus 2 does not accept is refused, not dropped or remapped.
+
+    Args:
+        effort: An effort Terminus 2 does not accept.
+    """
     with pytest.raises(ServiceError, match="reasoning effort"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
@@ -299,7 +311,11 @@ def test_spec_declares_every_skynet_effort_for_the_submit_check() -> None:
     ["", "gw.example/v1", "ftp://gw.example", "https://user:pw@gw.example", "https://gw.example/v1'", "https://gw ex"],
 )
 def test_launch_refuses_a_bad_gateway_url(url: str) -> None:
-    """Without a clean absolute http(s) URL there is no launch, so no direct provider route."""
+    """Without a clean absolute http(s) URL there is no launch, so no direct provider route.
+
+    Args:
+        url: A gateway URL that is not a clean absolute http(s) URL.
+    """
     with pytest.raises(ServiceError):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 

@@ -260,7 +260,12 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
     [("minimal", "MINIMAL"), ("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH"), ("xhigh", "EXTRA_HIGH")],
 )
 def test_supported_effort_maps_to_its_own_gemini_thinking_level(effort: str, level: str) -> None:
-    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20."""
+    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20.
+
+    Args:
+        effort: The Skynet effort.
+        level: The name of the ``ThinkingLevel`` member it must map to.
+    """
     assert effort in SPEC.supported_efforts
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_THINKING_LEVEL] == level
 
@@ -272,14 +277,22 @@ def test_spec_declares_one_level_per_gemini_thinking_level() -> None:
 
 @pytest.mark.parametrize("effort", ["none", "max", "HIGH", "turbo"])
 def test_unsupported_effort_is_refused_at_launch(effort: str) -> None:
-    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop."""
+    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop.
+
+    Args:
+        effort: An effort with no Gemini thinking level.
+    """
     with pytest.raises(ServiceError, match="does not support the effort level"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
-    """No effort sets no thinking level, so the SDK keeps its own default."""
+    """No effort sets no thinking level, so the SDK keeps its own default.
+
+    Args:
+        effort: An empty effort.
+    """
     assert ENV_THINKING_LEVEL not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
@@ -300,7 +313,11 @@ def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
     ],
 )
 def test_launch_refuses_without_an_absolute_gateway_url(url: str) -> None:
-    """No gateway URL means no launch; the harness never falls back to a direct key."""
+    """No gateway URL means no launch; the harness never falls back to a direct key.
+
+    Args:
+        url: A gateway URL that is missing, relative or not clean.
+    """
     with pytest.raises(ServiceError, match="Antigravity SDK"):
         SPEC.launch("m", GatewayConfig(url=url, api_key="secret-key"))
 

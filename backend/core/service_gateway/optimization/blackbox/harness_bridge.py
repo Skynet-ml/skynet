@@ -2212,13 +2212,21 @@ def reaper_main(command: list[str]) -> int:
 
 
 def _arm_stop_grace(*_: Any) -> None:
-    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends.
+
+    Args:
+        _: The signal number and frame, which the handler ignores.
+    """
     if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
         signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
 
 
 def _kill_descendants(*_: Any) -> None:
-    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    """Kill every descendant of this process, so the reaper's wait for the shell ends.
+
+    Args:
+        _: The timer or signal values, which the handler ignores.
+    """
     for pid in _descendants(_proc_stats() or {}, os.getpid()):
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)

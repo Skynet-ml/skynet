@@ -70,7 +70,12 @@ def main() -> int:
         """Forward model protocol bytes through the trusted supervisor's mailbox."""
 
         def log_message(self, format: str, *args: object) -> None:
-            """Keep scoped tokens and model input out of the command's ordinary logs."""
+            """Keep scoped tokens and model input out of the command's ordinary logs.
+
+            Args:
+                format: The log format string.
+                args: The values for the format string.
+            """
 
         def do_POST(self) -> None:
             """Relay an inference request through the trusted supervisor."""
@@ -221,6 +226,9 @@ def model_matches(model: object, expected: str) -> bool:
 
         Args:
             value: A model name.
+
+        Returns:
+            The model name without its transport prefixes.
         """
         return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
 

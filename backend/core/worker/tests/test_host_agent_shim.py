@@ -54,7 +54,13 @@ def _run_turn(
 def test_reply_refusals_reach_the_result_line_and_the_parser(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A reply with refusals gives a result line that carries them, and the bridge reads them back."""
+    """A reply with refusals gives a result line that carries them, and the bridge reads them back.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+        capsys: Pytest output capture fixture.
+    """
     stdout = _run_turn(monkeypatch, tmp_path, capsys, _REFUSALS)
 
     (line,) = [json.loads(row) for row in stdout.splitlines() if row.strip()]
@@ -70,7 +76,13 @@ def test_reply_refusals_reach_the_result_line_and_the_parser(
 def test_result_line_keeps_only_the_tool_and_the_path_kind(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Extra fields such as a path or content never leave the shim, and malformed entries drop."""
+    """Extra fields such as a path or content never leave the shim, and malformed entries drop.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+        capsys: Pytest output capture fixture.
+    """
     reply_refusals = [
         {"tool": "Read", "kind": "scoring", "path": "metric.py", "content": "secret"},
         {"tool": "Read"},
@@ -86,7 +98,13 @@ def test_result_line_keeps_only_the_tool_and_the_path_kind(
 def test_reply_without_refusals_reports_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A parent reply with no refusal list gives an empty list."""
+    """A parent reply with no refusal list gives an empty list.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest's temporary folder.
+        capsys: Pytest output capture fixture.
+    """
     stdout = _run_turn(monkeypatch, tmp_path, capsys, None)
 
     assert harness_bridge.parse_host_agent_refusals(stdout) == []

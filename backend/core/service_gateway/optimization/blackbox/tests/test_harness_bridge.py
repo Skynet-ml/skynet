@@ -98,7 +98,11 @@ def test_run_session_writes_files_restores_the_key_and_parses_the_answer(tmp_pat
 
 
 def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> None:
-    """Kill a harness that outlives its timeout and stop one whose priced usage exceeds the budget."""
+    """Kill a harness that outlives its timeout and stop one whose priced usage exceeds the budget.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     slow = {**_PLAIN, "run_command": "sleep 5"}
     outcome = run_session(
         slow, workspace=tmp_path / "w1", prompt="x", model="m", session_dir=tmp_path / "s1", timeout_seconds=0.2
@@ -143,7 +147,11 @@ def _record_signals(
 
 
 def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Signal the shell's group once, then only the descendants that left it, never a group member twice."""
+    """Signal the shell's group once, then only the descendants that left it, never a group member twice.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(
         monkeypatch,
         {
@@ -163,7 +171,11 @@ def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypa
 
 
 def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Send nothing when the reaped shell's pid now belongs to a process with another start time."""
+    """Send nothing when the reaped shell's pid now belongs to a process with another start time.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(monkeypatch, {100: (1, 100, 50), 101: (100, 101, 51)})
 
     harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
@@ -172,7 +184,11 @@ def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch
 
 
 def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe."""
+    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
     sent = _record_signals(monkeypatch, {101: (1, 100, 8)})
 
     harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
@@ -182,7 +198,11 @@ def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: p
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the descendant sweep reads /proc")
 def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> None:
-    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command."""
+    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     detached = f"import os, time; os.setsid(); open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
     process = subprocess.Popen(
@@ -216,7 +236,11 @@ def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> Non
 # orphan in the harness tree; the bridge starts the shell plainly there.
 @pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
 def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_path: Path) -> None:
-    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does."""
+    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     tool = (
         "import os, subprocess; os.setsid(); "
@@ -248,7 +272,11 @@ def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_pa
 
 @pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
 def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp_path: Path) -> None:
-    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop."""
+    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     tool = (
         "import os, subprocess; os.setsid(); "
@@ -280,7 +308,11 @@ def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the normal-end group kill needs /proc")
 def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: Path) -> None:
-    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own."""
+    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     pid_file = tmp_path / "job.pid"
     outcome = run_session(
         {
@@ -307,7 +339,11 @@ def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: P
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -> None:
-    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once."""
+    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     outcome = run_session(
         {
             "run_command": "while true; do echo x; done | head -1; yes | head -1; echo status=$?",
@@ -329,7 +365,11 @@ def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Path) -> None:
-    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone."""
+    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     scratch = tmp_path / "scratch"
     for index in range(20):
         part = scratch / str(index)
@@ -352,7 +392,11 @@ def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Pa
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
 def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path: Path) -> None:
-    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout."""
+    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     events = _tool_events_command(3).replace("sleep 5", "sleep 120")
     outcome = run_session(
         {**_PLAIN, "output_format": "pi", "run_command": f"trap '' TERM; {events}", "max_tool_calls": 1},
@@ -371,7 +415,12 @@ def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path:
 def test_normal_end_sends_no_group_kill_when_the_reaped_pid_cannot_be_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process."""
+    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     stops: list[int] = []
     monkeypatch.setattr(harness_bridge, "_start_time", lambda pid: None)
     monkeypatch.setattr(harness_bridge, "_stop_group", lambda process, signum, root_start: stops.append(signum))
@@ -417,7 +466,11 @@ def _alive(pid: int) -> bool:
 
 
 def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path) -> None:
-    """Emit a Claude-shaped result and a per-project transcript that ``collect_usage`` can price."""
+    """Emit a Claude-shaped result and a per-project transcript that ``collect_usage`` can price.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     outcome = SessionOutcome(
         text="answer",
         stdout="",
@@ -450,7 +503,11 @@ def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path
 
 
 def test_shim_resumes_by_restating_the_opening_prompt(tmp_path: Path) -> None:
-    """Replay the first task before the follow-up nudge because other harnesses cannot resume a session id."""
+    """Replay the first task before the follow-up nudge because other harnesses cannot resume a session id.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     home = tmp_path / "home"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -538,7 +595,11 @@ def test_failed_result_falls_back_to_plain_stdout_lines() -> None:
 
 
 def test_harness_gets_an_empty_stdin(tmp_path: Path) -> None:
-    """Give the harness a closed stdin so a CLI that reads it never waits on the bridge's own input."""
+    """Give the harness a closed stdin so a CLI that reads it never waits on the bridge's own input.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'if read -r line; then echo "got:$line"; else echo eof; fi'}
     workspace = tmp_path / "w"
     workspace.mkdir()
@@ -549,7 +610,11 @@ def test_harness_gets_an_empty_stdin(tmp_path: Path) -> None:
 
 
 def test_shim_reports_why_the_harness_failed_on_stderr(tmp_path: Path) -> None:
-    """Surface the harness's own error even when its stdout ends with an ordinary chat message."""
+    """Surface the harness's own error even when its stdout ends with an ordinary chat message.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     home = tmp_path / "home"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -592,7 +657,11 @@ def _tool_events_command(count: int) -> str:
 
 
 def test_tool_call_cap_stops_the_harness_and_keeps_its_edits(tmp_path: Path) -> None:
-    """Stop a harness once it starts more tool calls than the cap, without calling the session failed."""
+    """Stop a harness once it starts more tool calls than the cap, without calling the session failed.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "output_format": "pi", "run_command": _tool_events_command(5), "max_tool_calls": 3}
     workspace = tmp_path / "work"
     outcome = run_session(proposer, workspace=workspace, prompt="x", model="m", session_dir=tmp_path / "session")
@@ -609,7 +678,11 @@ def test_tool_call_cap_stops_the_harness_and_keeps_its_edits(tmp_path: Path) -> 
 
 
 def test_tool_calls_are_counted_but_not_capped_without_a_cap(tmp_path: Path) -> None:
-    """Let a harness run to its end when the launch names no cap."""
+    """Let a harness run to its end when the launch names no cap.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = _tool_events_command(5).replace("sleep 5; ", "")
     proposer = {**_PLAIN, "output_format": "pi", "run_command": command}
     outcome = run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s")
@@ -632,7 +705,11 @@ def test_tool_call_ids_read_every_streaming_format() -> None:
 
 
 def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path) -> None:
-    """Count a Codex item announced on start and settled on completion as one call."""
+    """Count a Codex item announced on start and settled on completion as one call.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     item = {"id": "i1", "type": "command_execution"}
     events = [{"type": "item.started", "item": item}, {"type": "item.completed", "item": item}]
     command = "; ".join(f"echo '{json.dumps(event)}'" for event in events)
@@ -673,7 +750,14 @@ _TOOL_CALLS = [
 
 
 def _policy(tmp_path: Path) -> dict:
-    """Build a guard policy over the fixed hidden list."""
+    """Build a guard policy over the fixed hidden list.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+
+    Returns:
+        The guard policy.
+    """
     workspace = tmp_path / "work"
     workspace.mkdir(exist_ok=True)
     return harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "refusals.jsonl")
@@ -682,7 +766,14 @@ def _policy(tmp_path: Path) -> dict:
 @pytest.mark.parametrize("path", _HIDDEN_FILES)
 @pytest.mark.parametrize(("tool", "shape"), _TOOL_CALLS, ids=[tool for tool, _ in _TOOL_CALLS])
 def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: Path, tool, shape, path) -> None:
-    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind."""
+    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        shape: Builds the tool input for a path.
+        path: The hidden path.
+    """
     policy = _policy(tmp_path)
     expected = "config" if path == "ascent.toml" else "scoring"
     assert harness_bridge.guard_check(policy, tool, shape(path)) == expected
@@ -702,12 +793,22 @@ def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: P
     ],
 )
 def test_guard_lets_other_paths_and_broad_patterns_run(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Match exact hidden names only, so broad globs and look-alike names still work."""
+    """Match exact hidden names only, so broad globs and look-alike names still work.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names no hidden path.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), tool, tool_input) is None
 
 
 def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
-    """Keep the hidden names out of the policy file the agent's workspace can read."""
+    """Keep the hidden names out of the policy file the agent's workspace can read.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     text = json.dumps(_policy(tmp_path))
     for path in _HIDDEN:
         assert path not in text
@@ -737,14 +838,24 @@ def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
     ],
 )
 def test_guard_resolves_aliases_working_directories_and_pwd(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names."""
+    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names a hidden path through a link, a cd, a workdir or a pwd.
+    """
     policy = _policy(tmp_path)
     (Path(policy["workspace"]) / "alias").symlink_to(".")
     assert harness_bridge.guard_check(policy, tool, tool_input) is not None
 
 
 def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
-    """Refuse ASCENT.TOML on a case-folding policy, and only there."""
+    """Refuse ASCENT.TOML on a case-folding policy, and only there.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "work"
     call = {"file_path": "ASCENT.TOML"}
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
@@ -768,7 +879,13 @@ def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
     ids=["tilde", "home", "brace-home", "cd-tilde", "cd-bare-tilde", "read-tilde", "codex-workdir-tilde"],
 )
 def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_input: dict) -> None:
-    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session."""
+    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        tool: The tool name.
+        tool_input: A tool input that names a hidden path through a home folder form.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -782,7 +899,12 @@ def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_inp
     ["cat x~/shinka-run/repo/ascent.toml", "cat ~/ascent.toml"],
 )
 def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
-    """Leave a tilde inside a word, and a home path outside the workspace, alone."""
+    """Leave a tilde inside a word, and a home path outside the workspace, alone.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command whose tilde must stay as it is.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -808,7 +930,12 @@ def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, comma
     ],
 )
 def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder."""
+    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with a hidden name after an expansion the guard cannot resolve.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -825,7 +952,12 @@ def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Pat
     ],
 )
 def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, command: str) -> None:
-    """Let a normal command run when no hidden name follows its shell expansions."""
+    """Let a normal command run when no hidden name follows its shell expansions.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with expansions and no hidden name.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -834,13 +966,22 @@ def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, comma
 
 
 def test_guard_policy_home_defaults_to_this_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Record this process's home folder when the caller names none, so the digest covers it."""
+    """Record this process's home folder when the caller names none, so the digest covers it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setenv("HOME", str(tmp_path / "agent-home"))
     assert _policy(tmp_path)["home"] == str(tmp_path / "agent-home")
 
 
 def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
-    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy."""
+    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     workspace = tmp_path / "work"
     workspace.mkdir()
     folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
@@ -851,12 +992,28 @@ def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
 
 
 def _digest(policy_file: Path) -> str:
-    """Hash the policy file as the guard checks it."""
+    """Hash the policy file as the guard checks it.
+
+    Args:
+        policy_file: The guard policy file.
+
+    Returns:
+        The SHA-256 hex digest of the file.
+    """
     return hashlib.sha256(policy_file.read_bytes()).hexdigest()
 
 
 def _guard(mode: str, policy_file: Path, request: dict) -> dict:
-    """Run the guard CLI once and parse its answer."""
+    """Run the guard CLI once and parse its answer.
+
+    Args:
+        mode: The guard CLI mode, ``hook`` or ``check``.
+        policy_file: The guard policy file.
+        request: The tool call to send to the guard.
+
+    Returns:
+        The guard's parsed answer.
+    """
     completed = subprocess.run(
         harness_bridge.guard_command(mode, policy_file, _digest(policy_file)),
         input=json.dumps(request),
@@ -868,7 +1025,11 @@ def _guard(mode: str, policy_file: Path, request: dict) -> dict:
 
 
 def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind(tmp_path: Path) -> None:
-    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content."""
+    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -891,7 +1052,11 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
 
 
 def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
-    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind."""
+    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     log = tmp_path / harness_bridge.GUARD_DIR / "refusals.jsonl"
     log.parent.mkdir()
     lines = [
@@ -922,7 +1087,12 @@ def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
     ids=["five-cd", "absolute-cd", "pushd"],
 )
 def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path, command: str) -> None:
-    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI."""
+    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with more folder changes than the guard follows.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -947,7 +1117,12 @@ def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path,
     ],
 )
 def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``."""
+    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command that reaches a hidden name through a folder option.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
 
 
@@ -963,13 +1138,23 @@ def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
     ],
 )
 def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> None:
-    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder."""
+    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with ordinary option forms.
+    """
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
 
 
 @pytest.mark.parametrize("command", ["cd; cat shinka-run/repo/ascent.toml", "cd && cat shinka-run/repo/ascent.toml"])
 def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str) -> None:
-    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder."""
+    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command with a bare ``cd`` before a hidden path.
+    """
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -979,7 +1164,11 @@ def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str
 
 
 def test_guard_checks_a_call_in_the_folder_the_hook_event_names(tmp_path: Path) -> None:
-    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call."""
+    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1009,7 +1198,15 @@ def _link_tree(workspace: Path, max_target: int) -> list[str]:
     """
 
     def filler(tag: str, budget: int) -> str:
-        """Return a target of ``budget`` characters that ends where it starts."""
+        """Return a target of ``budget`` characters that ends where it starts.
+
+        Args:
+            tag: The first part of the target.
+            budget: The length of the target.
+
+        Returns:
+            The link target.
+        """
         count = max(0, (budget - len(tag) - 4) // 5)
         return tag + "/" + "a/" * count + "../" * (count + 1)
 
@@ -1029,7 +1226,11 @@ def _link_tree(workspace: Path, max_target: int) -> list[str]:
 
 
 def test_guard_denies_a_link_tree_of_long_targets_inside_the_hook_timeout(tmp_path: Path) -> None:
-    """Deny a call whose links point at long paths, well before the 10 s hook timeout."""
+    """Deny a call whose links point at long paths, well before the 10 s hook timeout.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -1049,6 +1250,9 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
 
     ``os.path.realpath`` follows the whole chain for each candidate, so this
     call kept the guard busy for more than 15 s before the link cap.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
     """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
@@ -1069,7 +1273,11 @@ def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
 
 
 def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
-    """Refuse a path behind a link loop, which the system cannot open either."""
+    """Refuse a path behind a link loop, which the system cannot open either.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     policy = _policy(tmp_path)
     workspace = tmp_path / "work"
     (workspace / "loop1").symlink_to("loop2")
@@ -1079,7 +1287,11 @@ def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
 
 
 def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> None:
-    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does."""
+    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     policy = _policy(tmp_path)
     workspace = tmp_path / "work"
     (workspace / "link2").symlink_to("ascent.toml")
@@ -1090,7 +1302,11 @@ def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> No
 
 
 def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
-    """Resolve a hidden path behind the largest number of cd steps the guard follows."""
+    """Resolve a hidden path behind the largest number of cd steps the guard follows.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = "cd . && cd . && cd . && cd data && cat cases.jsonl"
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
 
@@ -1105,7 +1321,12 @@ def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
     ids=["too-long", "too-many-checks", "too-deep-after-expansion"],
 )
 def test_guard_refuses_a_call_above_its_cost_caps_fast(tmp_path: Path, command: str) -> None:
-    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast."""
+    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        command: A shell command above one of the guard's cost caps.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1123,7 +1344,11 @@ _NODE = shutil.which("node")
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
-    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run."""
+    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     pi_module = tmp_path / "pi-guard.mjs"
@@ -1160,7 +1385,13 @@ console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefu
 @pytest.mark.parametrize("mode", ["hook", "check"])
 @pytest.mark.parametrize("broken", ["missing", "corrupt", "no-hashes", "emptied", "signed-empty", "surrogate"])
 def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, broken: str) -> None:
-    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed."""
+    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        mode: The guard CLI mode.
+        broken: How the test breaks the policy or the input.
+    """
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -1200,7 +1431,11 @@ def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, brok
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_refuses_when_the_guard_cannot_run(tmp_path: Path) -> None:
-    """Block every call when the guard process fails, instead of letting it run."""
+    """Block every call when the guard process fails, instead of letting it run.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", harness_bridge.hidden_hashes(_HIDDEN))
     (session / harness_bridge.GUARD_DIR / "policy.json").unlink()
@@ -1220,7 +1455,11 @@ console.log(JSON.stringify(await handler({{ toolName: "read", input: {{ path: "s
 
 
 def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
-    """Install the guard for a session with hidden paths, report each refusal, and finish the session."""
+    """Install the guard for a session with hidden paths, report each refusal, and finish the session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = (
         'printf \'{"tool":"read","input":{"path":".optimize/exploits"}}\' | '
         '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY" "$APP_GUARD_DIGEST"; echo done'
@@ -1253,7 +1492,11 @@ def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
 
 
 def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
-    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell."""
+    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     agent_home = tmp_path / "agent-home"
     session = tmp_path / "session"
     proposer = {
@@ -1268,7 +1511,11 @@ def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
 
 
 def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
-    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session."""
+    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     line = json.dumps(
         {"type": "host_agent.result", "text": "ok", "usage": {}, "refusals": [{"tool": "Read", "kind": "config"}]}
     )
@@ -1280,7 +1527,11 @@ def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
 
 
 def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> None:
-    """Leave sessions with no hidden list unchanged."""
+    """Leave sessions with no hidden list unchanged.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     session = tmp_path / "session"
     outcome = run_session(_PLAIN, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
     assert outcome.refusals == []
@@ -1288,7 +1539,11 @@ def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> N
 
 
 def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) -> None:
-    """Copy the guard hooks into the session's Codex home only when the guard is set."""
+    """Copy the guard hooks into the session's Codex home only when the guard is set.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     command = harness._codex_launch("m1", harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
     assert command.startswith(harness._GUARD_CODEX_COPY)
     (tmp_path / ".app" / "codex").mkdir(parents=True)
@@ -1306,7 +1561,11 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
     tool_outputs: list[str] = []
 
     def log_message(self, *args: object) -> None:
-        """Keep the test output quiet."""
+        """Keep the test output quiet.
+
+        Args:
+            args: The log values, which the server ignores.
+        """
 
     def do_POST(self) -> None:
         """Stream one model turn as server-sent events."""
@@ -1349,7 +1608,11 @@ class _FakeChat(http.server.BaseHTTPRequestHandler):
     tool_outputs: list[str] = []
 
     def log_message(self, *args: object) -> None:
-        """Keep the test output quiet."""
+        """Keep the test output quiet.
+
+        Args:
+            args: The log values, which the server ignores.
+        """
 
     def do_POST(self) -> None:
         """Stream one model turn as server-sent events."""
@@ -1408,7 +1671,11 @@ def _fake_tool(bin_dir: Path, name: str, script: str) -> None:
 
 
 def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_through(tmp_path: Path) -> None:
-    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior."""
+    """The shim logs command line, exit code and output of a listed command, also nested, and keeps its behavior.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     bin_dir = tmp_path / "bin"
     _fake_tool(bin_dir, "probe", 'echo "out $*"; echo err >&2; exit 3')
     _fake_tool(bin_dir, "outer", "probe inner; exit 0")
@@ -1435,7 +1702,11 @@ def test_exec_shim_records_each_listed_command_once_and_passes_its_streams_throu
 
 
 def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> None:
-    """A listed command that is not installed fails with 127 and is still logged."""
+    """A listed command that is not installed fails with 127 and is still logged.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'no-such-tool-xyz; echo "rc=$?"', "exec_commands": ["no-such-tool-xyz"]}
     session = tmp_path / "session"
 
@@ -1449,7 +1720,11 @@ def test_exec_shim_reports_a_missing_command_like_the_shell(tmp_path: Path) -> N
 
 
 def test_run_session_without_exec_commands_installs_no_exec_shim(tmp_path: Path) -> None:
-    """A launch that lists no command gets no shim folder and no log, and sees its session folder."""
+    """A launch that lists no command gets no shim folder and no log, and sees its session folder.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     proposer = {**_PLAIN, "run_command": 'echo "$APP_SESSION_DIR"; echo "$PATH"'}
     session = tmp_path / "session"
 
@@ -1481,7 +1756,11 @@ def _shim_env(tmp_path: Path, names: list[str], log: Path | None) -> dict[str, s
 
 
 def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_path: Path) -> None:
-    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself."""
+    """A child env with no ``APP_*`` vars still skips the shim folder on PATH, so the shim does not run itself.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo real; exit 5")
     env = {key: value for key, value in _shim_env(tmp_path, ["probe"], None).items() if not key.startswith("APP_")}
 
@@ -1494,7 +1773,12 @@ def test_exec_shim_finds_the_real_command_when_the_env_drops_the_app_vars(tmp_pa
 def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_entry(
     tmp_path: Path, logged: bool
 ) -> None:
-    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once."""
+    """A shell and ``which`` read an empty PATH entry as the current folder, so the shim must too, and run it once.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+    """
     _fake_tool(tmp_path / "here", "probe", "echo real; exit 5")
     shim_dir = harness_bridge.install_exec_shim(tmp_path / "shim", ["probe"], sys.executable)
     # The wrapper counts its runs: a bare-name match would make Popen find the wrapper on PATH again.
@@ -1519,7 +1803,12 @@ def test_exec_shim_finds_a_command_in_the_current_folder_through_an_empty_path_e
 def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_outside(
     tmp_path: Path, name: str
 ) -> None:
-    """A command name with a path part, or a NUL, raises ValueError before any file is written."""
+    """A command name with a path part, or a NUL, raises ValueError before any file is written.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        name: A command name that is not plain.
+    """
     shim_dir = tmp_path / "shim"
 
     with pytest.raises(ValueError, match="plain name"):
@@ -1529,7 +1818,12 @@ def test_install_exec_shim_rejects_a_name_that_is_not_plain_and_writes_nothing_o
 
 
 def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, monkeypatch) -> None:
-    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper."""
+    """With no ``exec_shim.py`` next to the bridge, the install raises FileNotFoundError and writes no wrapper.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
     monkeypatch.setattr(harness_bridge, "__file__", str(tmp_path / "bridge" / "harness_bridge.py"))
 
     with pytest.raises(FileNotFoundError, match="exec shim not found"):
@@ -1539,7 +1833,11 @@ def test_install_exec_shim_fails_when_exec_shim_py_is_missing(tmp_path: Path, mo
 
 
 def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> None:
-    """The caller gets the full output; the log keeps its tail."""
+    """The caller gets the full output; the log keeps its tail.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "big", "head -c 70000 /dev/zero | tr '\\0' a; printf END")
     log = tmp_path / "exec.jsonl"
 
@@ -1551,7 +1849,11 @@ def test_exec_shim_logs_only_the_last_64_kib_of_each_stream(tmp_path: Path) -> N
 
 
 def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path) -> None:
-    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing."""
+    """With no exec log set, the shim runs the real command with its streams and exit code, and writes nothing.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
 
     env = _shim_env(tmp_path, ["probe"], None)
@@ -1562,7 +1864,11 @@ def test_exec_shim_without_a_log_only_passes_the_command_through(tmp_path: Path)
 
 
 def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> None:
-    """A line the command prints reaches the caller while the command still runs."""
+    """A line the command prints reaches the caller while the command still runs.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     flag = tmp_path / "flag"
     _fake_tool(tmp_path / "bin", "slow", f'echo first; while [ ! -f "{flag}" ]; do sleep 0.05; done; echo second')
     process = subprocess.Popen(
@@ -1588,7 +1894,11 @@ def test_exec_shim_streams_output_before_the_command_ends(tmp_path: Path) -> Non
 
 
 def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path) -> None:
-    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it."""
+    """A SIGTERM to the shim ends the real command; the shim logs 128 plus the signal and dies from it.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "hang", "echo ready; exec sleep 30")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(["hang"], env=_shim_env(tmp_path, ["hang"], log), stdout=subprocess.PIPE)
@@ -1609,7 +1919,12 @@ def test_exec_shim_forwards_sigterm_and_logs_128_plus_the_signal(tmp_path: Path)
 
 @pytest.mark.parametrize("logged", [True, False])
 def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, logged: bool) -> None:
-    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log."""
+    """The shell runs a script with no shebang line with sh; the shim does too, with and without a log.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+    """
     bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
     bin_dir.mkdir()
     (bin_dir / "plain").write_text('echo "plain $1"\nexit 3\n')
@@ -1625,7 +1940,11 @@ def test_exec_shim_runs_a_script_with_no_shebang_line_with_sh(tmp_path: Path, lo
 
 
 def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> None:
-    """A command whose interpreter is missing exits 126, and its record is still written."""
+    """A command whose interpreter is missing exits 126, and its record is still written.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     bin_dir, log = tmp_path / "bin", tmp_path / "exec.jsonl"
     bin_dir.mkdir()
     (bin_dir / "broken").write_text("#!/no/such/interpreter\n")
@@ -1641,7 +1960,11 @@ def test_exec_shim_logs_126_for_a_command_that_cannot_run(tmp_path: Path) -> Non
 
 
 def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_written(tmp_path: Path) -> None:
-    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback."""
+    """An exec log path that is a folder loses the record, but the caller gets the real output and code, and no traceback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
     log = tmp_path / "log-folder"
     log.mkdir()
@@ -1654,7 +1977,11 @@ def test_exec_shim_passes_output_and_exit_code_through_when_the_log_cannot_be_wr
 
 
 def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Path) -> None:
-    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore."""
+    """A shim started with SIGINT ignored (``cmd &`` under ``sh``) does not catch it, so the command inherits the ignore.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     probe = "import signal; print(signal.getsignal(signal.SIGINT) is signal.SIG_IGN)"
     _fake_tool(tmp_path / "bin", "probe", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(probe)}")
     log = tmp_path / "exec.jsonl"
@@ -1670,7 +1997,11 @@ def test_exec_shim_keeps_an_ignored_sigint_ignored_for_the_command(tmp_path: Pat
 
 
 def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp_path: Path) -> None:
-    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141."""
+    """``cmd | head`` ends: the shim closes the child's pipe, so the child gets SIGPIPE and the log has 141.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "inf", "exec yes")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(
@@ -1695,7 +2026,11 @@ def test_exec_shim_ends_a_command_that_writes_forever_when_its_reader_closes(tmp
 def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_line_into_a_closed_reader(
     tmp_path: Path,
 ) -> None:
-    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr."""
+    """A command that writes line by line into a closed reader ends with 141; the shim exits 141 and prints nothing to stderr.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "lines", "while true; do echo hi; sleep 0.01; done")
     log = tmp_path / "exec.jsonl"
     process = subprocess.Popen(
@@ -1718,7 +2053,11 @@ def test_exec_shim_exits_141_with_no_stderr_for_a_command_that_writes_line_by_li
 
 
 def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(tmp_path: Path) -> None:
-    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut."""
+    """Each non-UTF-8 argv byte is six bytes in the JSON line, so the log keeps a bounded head and marks the cut.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", 'echo "$#"')
     log = tmp_path / "exec.jsonl"
     args = [b"\xff" * 60000] * 3
@@ -1737,7 +2076,11 @@ def test_exec_shim_logs_only_the_head_of_a_long_command_line_with_a_cut_marker(t
 
 
 def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(tmp_path: Path) -> None:
-    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's."""
+    """``cmd 3>&1`` works through the shim as without it, and the command gets no fd of the shim's.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     probe = (
         "import os\n"
         "os.write(3, b'sub\\n')\n"
@@ -1762,7 +2105,11 @@ def test_exec_shim_passes_an_inherited_fd_3_to_the_command_and_none_of_its_own(t
 
 
 def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_the_record(tmp_path: Path) -> None:
-    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback."""
+    """``cmd >&-`` leaves ``sys.stdout`` None; the shim still returns the command's code, with no traceback.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo err >&2; exit 4")
     log = tmp_path / "exec.jsonl"
 
@@ -1781,7 +2128,15 @@ def test_exec_shim_with_its_stdout_closed_returns_the_command_code_and_writes_th
 def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_command_code(
     tmp_path: Path, mode: str, command: str, code: int, stdout: bytes
 ) -> None:
-    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's."""
+    """``cmd 2>&-`` leaves ``sys.stderr`` None; no shim message goes to stdout, and the code is the command's.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        mode: How the shim runs: logged, nested or with no log.
+        command: The command the shim runs.
+        code: The exit code the shim must return.
+        stdout: The output the shim must write.
+    """
     _fake_tool(tmp_path / "bin", "probe", "echo out; echo err >&2; exit 4")
     (tmp_path / "bin" / "broken").write_text("#!/no/such/interpreter\n")
     (tmp_path / "bin" / "broken").chmod(0o755)
@@ -1805,7 +2160,14 @@ def test_exec_shim_with_its_stderr_closed_keeps_stdout_clean_and_returns_the_com
 def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_go_on(
     tmp_path: Path, logged: bool, closed: str, kept: str
 ) -> None:
-    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE."""
+    """With no shim, writes to a closed stream fail and the command goes on; the shim must not end it with SIGPIPE.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        logged: Whether the shim writes an exec log.
+        closed: The shell form that closes a stream.
+        kept: The stream that stays open.
+    """
     lost = "1" if kept == "stderr" else "2"
     shown = "2" if kept == "stderr" else "1"
     _fake_tool(tmp_path / "bin", "tw", f"echo a >&{lost}; sleep 0.2; echo b >&{lost}; echo kept >&{shown}; exit 0")
@@ -1824,7 +2186,12 @@ def test_exec_shim_with_a_stream_closed_lets_the_command_write_to_it_again_and_g
 
 @pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGKILL])
 def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, number: signal.Signals) -> None:
-    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal."""
+    """A command that a signal ends makes the shim die from that signal, so a caller such as bash sees the signal.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        number: The signal that ends the command.
+    """
     _fake_tool(tmp_path / "bin", "zz", f"echo out; kill -{number.name[3:]} $$")
     log = tmp_path / "exec.jsonl"
 
@@ -1836,7 +2203,11 @@ def test_exec_shim_dies_from_the_signal_that_ended_the_command(tmp_path: Path, n
 
 
 def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tmp_path: Path) -> None:
-    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own."""
+    """A core-dump signal that ends the command gives exit 128 plus it, so the shim writes no core of its own.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     # SIGXFSZ writes a core on Linux, but makes no crash report on macOS, so the test leaves nothing behind.
     _fake_tool(tmp_path / "bin", "zz", "echo out; kill -XFSZ $$")
     log = tmp_path / "exec.jsonl"
@@ -1849,7 +2220,11 @@ def test_exec_shim_exits_128_plus_a_core_dump_signal_and_does_not_die_from_it(tm
 
 
 def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_path: Path) -> None:
-    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141."""
+    """Python ignores SIGPIPE, and an exec keeps that; the shim resets it, so ``yes | head -1`` ends ``yes`` with 141.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "pp").write_text('#!/bin/bash\nyes | head -1 >/dev/null; echo "status ${PIPESTATUS[*]}"\n')
     (tmp_path / "bin" / "pp").chmod(0o755)
@@ -1861,7 +2236,11 @@ def test_exec_shim_with_no_log_runs_the_command_with_sigpipe_at_its_default(tmp_
 
 
 def test_a_name_that_starts_with_two_dots_can_be_hidden(tmp_path: Path) -> None:
-    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots."""
+    """Hide ``..data``: only a ``..`` part leaves the repository, not a name that starts with two dots.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
     hashes = harness_bridge.hidden_hashes(["..data"])
 
     assert harness_bridge.hashed_kind(hashes, "..data/answers.csv") is not None

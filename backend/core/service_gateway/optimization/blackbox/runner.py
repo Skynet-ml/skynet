@@ -511,7 +511,14 @@ def stage_env_name(name: str) -> str:
 
 
 def _env_part(name: str) -> str:
-    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``."""
+    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``.
+
+    Args:
+        name: The name to convert.
+
+    Returns:
+        The name in upper case, with ``_`` for each other character.
+    """
     return "".join(char if char.isalnum() else "_" for char in name.upper())
 
 
@@ -624,7 +631,12 @@ def start_service_proxy(
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = relay  # noqa: N815
 
         def log_message(self, format: str, *args: Any) -> None:
-            """Keep the access log out of the scorer's stderr, where log() events travel."""
+            """Keep the access log out of the scorer's stderr, where log() events travel.
+
+            Args:
+                format: The log format string.
+                args: The values for the format string.
+            """
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
@@ -672,6 +684,10 @@ def _relay_env(client: StageClient, stages: dict[str, Any], own_mcp_file: Path |
 
 def missing_stage(name: Any = None, input: Any = None) -> Any:
     """Refuse a stage call in a run that has no ``[target.<name>]`` stages.
+
+    Args:
+        name: The stage name of the call.
+        input: The stage input of the call.
 
     Raises:
         StageError: Always.
@@ -1293,7 +1309,14 @@ def model_matches_bound(model: str, bound: str, declared: str | None = None) -> 
     """
 
     def normalized(value: str) -> str:
-        """Remove transport prefixes without changing the provider model id."""
+        """Remove transport prefixes without changing the provider model id.
+
+        Args:
+            value: A model name.
+
+        Returns:
+            The model name without its transport prefixes.
+        """
         return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
 
     return normalized(model) == normalized(bound) or bool(declared and normalized(model) == normalized(declared))
@@ -1755,7 +1778,12 @@ class MetricHelpers:
                     raise _HelperError(400, "The request body is not JSON.") from None
 
             def log_message(self, format: str, *args: Any) -> None:
-                """Keep the access log out of the scorer's stderr, where log() events travel."""
+                """Keep the access log out of the scorer's stderr, where log() events travel.
+
+                Args:
+                    format: The log format string.
+                    args: The values for the format string.
+                """
 
         self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self._server.serve_forever, name="metric-helpers", daemon=True).start()

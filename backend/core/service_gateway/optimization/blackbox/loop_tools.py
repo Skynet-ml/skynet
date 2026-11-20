@@ -110,12 +110,20 @@ class Budget:
 
     @property
     def remaining(self) -> int:
-        """Return the scorer calls left."""
+        """Return the scorer calls left.
+
+        Returns:
+            The number of scorer calls left.
+        """
         return self._server.remaining
 
     @property
     def used(self) -> int:
-        """Return the scorer calls spent."""
+        """Return the scorer calls spent.
+
+        Returns:
+            The number of scorer calls spent.
+        """
         return self._server.used
 
 

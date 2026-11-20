@@ -285,7 +285,11 @@ def _monitor_runner(tmp_path: Path, scenario: str, env: dict[str, str] | None = 
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_runner_streams_events_so_the_caps_stop_a_running_session(tmp_path: Path) -> None:
-    """Stream v27 calls and usage, fail a failed turn, and let both caps stop a turn that never ends."""
+    """Stream v27 calls and usage, fail a failed turn, and let both caps stop a turn that never ends.
+
+    Args:
+        tmp_path: Test folder.
+    """
     runs: dict[str, _Monitor] = {}
     # Two runners at once each pick their own free port.
     threads = [
@@ -327,7 +331,11 @@ def test_runner_streams_events_so_the_caps_stop_a_running_session(tmp_path: Path
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_runner_stops_when_the_server_on_its_port_refuses_the_token(tmp_path: Path) -> None:
-    """Stop before the prompt when the server that answers health does not accept the runner token."""
+    """Stop before the prompt when the server that answers health does not accept the runner token.
+
+    Args:
+        tmp_path: Test folder.
+    """
     refused = _monitor_runner(tmp_path, "done", {"FAKE_EVE_REFUSE": "1"})
     assert refused.process.returncode != 0
     assert "refused the runner token (401)" in refused.stderr  # type: ignore[attr-defined]
@@ -510,7 +518,11 @@ def _running(pid: int) -> bool:
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_sandbox_kill_and_abort_stop_the_processes_a_command_started(tmp_path: Path) -> None:
-    """Kill the whole process group of a tool command, so a child it started dies with it."""
+    """Kill the whole process group of a tool command, so a child it started dies with it.
+
+    Args:
+        tmp_path: Test folder.
+    """
     project = tmp_path / "eve"
     stubs = project / "node_modules/eve"
     stubs.mkdir(parents=True)
