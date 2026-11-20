@@ -4430,15 +4430,101 @@ def test_box_proxy_lets_other_routes_and_methods_go_on(
     assert guest_model_proxy._other_model_refusal("/v1/messages?beta=true", body, "route-key") is not None
 
 
-def test_a_second_session_with_the_same_key_replaces_the_bound_model(bindings: Path) -> None:
-    """A key names only its latest session's model, so the error lists no stale model.
+def test_two_live_sessions_on_one_key_both_pass(bindings: Path) -> None:
+    """Concurrent sessions that share a key with different models both reach the gateway.
 
     Args:
         bindings: The model bindings folder.
     """
-    harness_bridge.bind_model(bindings, "route-key", "old-model")
-    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with (
+        harness_bridge.model_binding(env, "route-key", "model-a"),
+        harness_bridge.model_binding(env, "route-key", "model-b"),
+    ):
+        for model in ("model-a", "openai/model-b"):
+            body = json.dumps({"model": model}).encode()
+            assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+        assert sorted(guest_model_proxy._bound_models("route-key")) == ["model-a", "model-b"]
 
-    assert guest_model_proxy._bound_models("route-key") == ["run-model"]
-    assert len(list((bindings / guest_model_proxy.key_digest("route-key")).iterdir())) == 1
-    assert "old-model" not in _refusal_message()
+
+def test_an_ended_session_model_no_longer_passes_or_shows_in_the_error(bindings: Path) -> None:
+    """After a session ends, its model is refused and the error names only the live session's model.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with harness_bridge.model_binding(env, "route-key", "run-model"):
+        with harness_bridge.model_binding(env, "route-key", "old-model"):
+            pass
+        body = json.dumps({"model": "old-model"}).encode()
+        refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key")
+        assert refusal is not None
+        message = json.loads(refusal)["error"]["message"]
+        assert "(run-model)" in message
+        assert "old-model" not in message.split(", not ")[0]
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []
+
+
+def test_run_session_binds_its_model_only_while_it_runs(bindings: Path, tmp_path: Path) -> None:
+    """A session names its model while its command runs and removes the name when it ends.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session and the command's record.
+    """
+    record = tmp_path / "record.txt"
+    command = {**_PLAIN, "run_command": f'cat "{bindings}"/*/* > {shlex.quote(str(record))}'}
+    run_session(
+        command,
+        workspace=tmp_path / "w",
+        prompt="x",
+        model="run-model",
+        session_dir=tmp_path / "s",
+        extra_env={harness_bridge.MODEL_BINDINGS_ENV: str(bindings)},
+        api_key="route-key",
+    )
+
+    assert record.read_text() == "run-model"
+    assert guest_model_proxy._bound_models("route-key") == []
+
+
+def test_a_session_that_raises_still_removes_its_binding(
+    bindings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session whose start fails removes its binding, so its model does not stay allowed.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session.
+        monkeypatch: Makes the harness start fail.
+    """
+    seen: list[list[str]] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Record the live bindings, then fail as a harness that cannot start.
+
+        Args:
+            args: The command.
+            kwargs: The start options.
+
+        Raises:
+            OSError: Always.
+        """
+        seen.append(guest_model_proxy._bound_models("route-key"))
+        raise OSError("no harness")
+
+    monkeypatch.setattr(harness_bridge.subprocess, "Popen", fail)
+    with pytest.raises(OSError, match="no harness"):
+        run_session(
+            _PLAIN,
+            workspace=tmp_path / "w",
+            prompt="x",
+            model="run-model",
+            session_dir=tmp_path / "s",
+            extra_env={harness_bridge.MODEL_BINDINGS_ENV: str(bindings)},
+            api_key="route-key",
+        )
+
+    assert seen == [["run-model"]]
+    assert guest_model_proxy._bound_models("route-key") == []

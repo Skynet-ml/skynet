@@ -2245,30 +2245,57 @@ def _reap_children() -> None:
             return
 
 
-def bind_model(folder: Path, api_key: str, model: str) -> None:
+def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
     """Name a session's model for its route key in the box proxy's model bindings folder.
-
-    The key's binding then names only this model.
 
     The layout mirrors ``guest_model_proxy._bound_models``: this file runs in
     the box without the backend's code. The proxy then refuses a request for
-    another model with an error that names ``ASCENT_MODEL`` (SKY-884).
+    a model that no live session of the key names, with an error that names
+    ``ASCENT_MODEL`` (SKY-884).
 
     Args:
         folder: The proxy's model bindings folder.
         api_key: The session's route key.
         model: The session's model.
+
+    Returns:
+        The session's own binding file, or ``None`` when the folder cannot be written.
     """
     target = folder / hashlib.sha256(api_key.encode()).hexdigest()
+    # One file for each session: concurrent sessions of one key with different models must all pass.
+    name = uuid.uuid4().hex
     # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
     with contextlib.suppress(OSError):
         target.mkdir(parents=True, exist_ok=True)
-        # One file for each key: a later session with the same key replaces the earlier model, so the error
-        # never lists a model of a finished session. The proxy must never read a partial name, so the name
-        # is renamed into place.
-        partial = target / f".model.{uuid.uuid4().hex}"
+        # The proxy must never read a partial name, so the name is renamed into place.
+        partial = target / f".{name}"
         partial.write_text(model, encoding="utf-8")
-        partial.replace(target / "model")
+        partial.replace(target / name)
+        return target / name
+    return None
+
+
+@contextlib.contextmanager
+def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> Iterator[None]:
+    """Name a session's model for the box proxy while the session runs, then remove the name.
+
+    Args:
+        env: The session's environment, which names the bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+
+    Yields:
+        Nothing; the name stays while the block runs.
+    """
+    folder = env.get(MODEL_BINDINGS_ENV)
+    binding = bind_model(Path(folder), api_key, model) if folder and api_key and model else None
+    try:
+        yield
+    finally:
+        # A finished session's model must not pass the box check or stay in its error.
+        if binding is not None:
+            with contextlib.suppress(OSError):
+                binding.unlink()
 
 
 def run_session(
@@ -2383,9 +2410,6 @@ def run_session(
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
     env["ASCENT_MODEL"] = model
-    # The box proxy above this process cannot see this ASCENT_MODEL, so the session names it there (SKY-884).
-    if env.get(MODEL_BINDINGS_ENV) and api_key and model:
-        bind_model(Path(env[MODEL_BINDINGS_ENV]), api_key, model)
     for name, value in (
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
         # A harness with native resume keeps its own session state here, so the committed tree carries it.
@@ -2401,7 +2425,8 @@ def run_session(
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
-    with stderr_file.open("w", encoding="utf-8") as stderr:
+    # The box proxy above this process cannot see this ASCENT_MODEL, so the session names it there (SKY-884).
+    with stderr_file.open("w", encoding="utf-8") as stderr, model_binding(env, api_key, model):
         with _defer_stop():
             process = subprocess.Popen(
                 command,
