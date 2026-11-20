@@ -257,7 +257,7 @@ class SkynetCi:
     @function
     @check
     async def backend_gates(self) -> None:
-        """Run ruff, the terraform script tests, requirements sync, Postgres and SLO gates."""
+        """Run ruff, the terraform script tests, requirements sync, Postgres, SLO and user namespace gates."""
         postgres = (
             core()
             .container()
@@ -307,6 +307,43 @@ class SkynetCi:
             )
             .with_exec(
                 ["uv", "run", "pytest", "tests/unit/test_load_test_slo.py", "-q"]
+            )
+            .sync()
+        )
+        # The core shards run under the default seccomp profile, which blocks
+        # unprivileged user namespaces, so the contained metric's PID namespace
+        # tests skip there. Here the exec gets full root capabilities: no
+        # seccomp filter and an unmasked /proc, so unshare can mount a fresh
+        # /proc. That exec also gives the ci user every capability as an
+        # ambient capability, and CAP_SYS_PTRACE lets the /proc isolation tests
+        # read other processes. setpriv clears the ambient and inheritable
+        # sets, so pytest runs as a plain unprivileged user, as in a sandbox.
+        # SKY_REQUIRE_USERNS=1 turns a refused namespace into a failure
+        # instead of a skip (SKY-885, SKY-886). No -n: the /proc scan tests
+        # read every process, so they must not run beside each other.
+        await (
+            self._backend()
+            .with_exec(["useradd", "--create-home", "--uid", "1001", "ci"])
+            .with_exec(["chown", "-R", "ci:ci", "/src"])
+            .with_user("ci")
+            .with_env_variable("HOME", "/home/ci")
+            .with_env_variable("UV_NO_SYNC", "1")
+            .with_env_variable("SKY_REQUIRE_USERNS", "1")
+            .with_exec(
+                [
+                    "setpriv",
+                    "--inh-caps=-all",
+                    "--ambient-caps=-all",
+                    "--",
+                    "uv",
+                    "run",
+                    "pytest",
+                    "core/service_gateway/optimization/blackbox/tests/test_sandbox_runtime.py",
+                    "core/service_gateway/optimization/blackbox/tests/test_runner.py",
+                    "-q",
+                    "-rs",
+                ],
+                insecure_root_capabilities=True,
             )
             .sync()
         )
