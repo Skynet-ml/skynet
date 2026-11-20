@@ -145,8 +145,8 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
         """Fail if the host-style service runner handles setup.
 
         Args:
-            _args: The call's positional values, which the fake ignores.
-            _kwargs: The call's named values, which the fake ignores.
+            *_args: The call's positional values, which the fake ignores.
+            **_kwargs: The call's named values, which the fake ignores.
         """
         raise AssertionError("Anything preflight reached the host-style service runner")
 

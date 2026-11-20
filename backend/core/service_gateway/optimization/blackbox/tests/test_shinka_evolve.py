@@ -2727,7 +2727,7 @@ def _box_context(options: SimpleNamespace, tmp_path: Path, **fields: object) -> 
     Args:
         options: The run's native options.
         tmp_path: Pytest's temporary folder.
-        fields: Context fields that replace the fakes.
+        **fields: Context fields that replace the fakes.
 
     Returns:
         The context.
@@ -2794,7 +2794,7 @@ def test_a_proposal_whose_grants_do_not_resolve_stops_the_run(
         """Refuse the grants as a run command that resolves them itself does.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
 
         Raises:
             UnknownCapabilityError: Always.
@@ -2818,7 +2818,7 @@ def test_a_proposal_checks_the_budget_before_the_command_runs(tmp_path: Path) ->
         """Record a command that must not run.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
         """
         commands.append(args)
 
@@ -3683,7 +3683,7 @@ def test_an_agent_run_call_whose_grants_do_not_resolve_stops_the_run(tmp_path: P
         """Refuse the grants as the loop does.
 
         Args:
-            args: The command's tree, script and grants.
+            *args: The command's tree, script and grants.
 
         Raises:
             UnknownCapabilityError: Always.

@@ -60,7 +60,7 @@ class FakeSession:
 
         Args:
             command: The command the box runs.
-            kwargs: The run options, which the fake ignores.
+            **kwargs: The run options, which the fake ignores.
 
         Returns:
             The probe answer, or a successful result.
@@ -642,7 +642,7 @@ class CrashingSession(FakeSession):
 
         Args:
             command: The command the box runs.
-            kwargs: The run options, which the fake ignores.
+            **kwargs: The run options, which the fake ignores.
 
         Returns:
             The probe answer, or a failed result with the stderr.
@@ -799,7 +799,7 @@ class ProbedSession(FakeSession):
 
         Args:
             command: The command the box runs.
-            kwargs: The run options, which the fake ignores.
+            **kwargs: The run options, which the fake ignores.
 
         Returns:
             The probe answer.
@@ -1026,7 +1026,7 @@ def test_a_real_broker_opens_the_setup_check_box_offline_and_the_run_box_with_it
             _self: The runtime, which the fake ignores.
             action: The control action.
             payload: The control payload.
-            _kwargs: The other options, which the fake ignores.
+            **_kwargs: The other options, which the fake ignores.
 
         Returns:
             The broker's answer.

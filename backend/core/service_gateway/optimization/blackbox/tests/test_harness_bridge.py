@@ -1564,7 +1564,7 @@ class _FakeResponses(http.server.BaseHTTPRequestHandler):
         """Keep the test output quiet.
 
         Args:
-            args: The log values, which the server ignores.
+            *args: The log values, which the server ignores.
         """
 
     def do_POST(self) -> None:
@@ -1611,7 +1611,7 @@ class _FakeChat(http.server.BaseHTTPRequestHandler):
         """Keep the test output quiet.
 
         Args:
-            args: The log values, which the server ignores.
+            *args: The log values, which the server ignores.
         """
 
     def do_POST(self) -> None:

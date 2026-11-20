@@ -74,7 +74,7 @@ def main() -> int:
 
             Args:
                 format: The log format string.
-                args: The values for the format string.
+                *args: The values for the format string.
             """
 
         def do_POST(self) -> None:

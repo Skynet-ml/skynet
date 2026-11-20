@@ -417,7 +417,7 @@ def test_staging_refuses_a_file_that_asks_for_more(
         """Remember the scratch folder staging makes.
 
         Args:
-            options: The scratch folder options.
+            **options: The scratch folder options.
 
         Returns:
             The path of the last scratch folder.
@@ -1331,7 +1331,7 @@ def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypat
             pinned: The pinned commit.
             token: The clone token.
             workdir: The scratch folder.
-            _: The other fetch options, which the fake ignores.
+            **_: The other fetch options, which the fake ignores.
 
         Returns:
             A snapshot of an empty tree at the pinned commit.
@@ -1588,7 +1588,7 @@ class _Box:
 
         Args:
             command: The command the box runs.
-            options: The run options.
+            **options: The run options.
 
         Returns:
             A successful result, with the output the box would give.
@@ -2408,7 +2408,7 @@ def _catalog(*models: CatalogModel) -> ModelCatalogResponse:
     """Build a catalog snapshot holding the given models.
 
     Args:
-        models: Catalog rows.
+        *models: Catalog rows.
 
     Returns:
         The snapshot.
@@ -2421,7 +2421,7 @@ def _row(value: str, **reasoning: Any) -> CatalogModel:
 
     Args:
         value: Model id.
-        reasoning: Reasoning fields of the row.
+        **reasoning: Reasoning fields of the row.
 
     Returns:
         The row.
@@ -2963,7 +2963,7 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.
@@ -3068,7 +3068,7 @@ def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPat
         """Fail the push the way GitHub does.
 
         Args:
-            _args: The push arguments, ignored.
+            *_args: The push arguments, ignored.
 
         Raises:
             RepoPublishError: Always.
@@ -3342,7 +3342,7 @@ def test_staging_stops_when_a_metric_file_stays_visible(monkeypatch: pytest.Monk
         """Remember the scratch folder staging makes.
 
         Args:
-            options: The scratch folder options.
+            **options: The scratch folder options.
 
         Returns:
             The path of the last scratch folder.
@@ -3771,7 +3771,7 @@ def _publish_hardened(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.
@@ -5136,7 +5136,7 @@ def test_the_published_pull_request_carries_the_record_and_adds_no_record_file(
         Args:
             token: The GitHub token.
             repository: The target repository.
-            fields: The pull request fields.
+            **fields: The pull request fields.
 
         Returns:
             A fixed draft pull request.

@@ -1265,8 +1265,8 @@ def test_the_loop_job_closes_its_model_client(monkeypatch: pytest.MonkeyPatch, f
             """Take the real client's arguments.
 
             Args:
-                args: The real client's positional values.
-                kwargs: The real client's named values.
+                *args: The real client's positional values.
+                **kwargs: The real client's named values.
             """
 
         def close(self) -> None:

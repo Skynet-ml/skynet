@@ -635,7 +635,7 @@ def start_service_proxy(
 
             Args:
                 format: The log format string.
-                args: The values for the format string.
+                *args: The values for the format string.
             """
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -1782,7 +1782,7 @@ class MetricHelpers:
 
                 Args:
                     format: The log format string.
-                    args: The values for the format string.
+                    *args: The values for the format string.
                 """
 
         self._server = _QuietHTTPServer(("127.0.0.1", 0), Handler)

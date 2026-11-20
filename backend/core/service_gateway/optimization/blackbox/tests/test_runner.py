@@ -2303,7 +2303,7 @@ def _root_supervisor(
         tmp_path: The candidate tree, owned by the test user.
         capabilities: ``caps`` when the fake root holds capabilities.
         prctl: ``fails`` when every prctl call fails.
-        call_dir: The call folder, to run the whole candidate path.
+        *call_dir: The call folder, to run the whole candidate path.
         entry_path: The image's ``APP_ENTRY_PATH``, or ``None`` for an image without it.
 
     Returns:
