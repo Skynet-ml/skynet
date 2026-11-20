@@ -53,7 +53,7 @@ entry = ["bash", "eval/metric.sh"]
 direction = "maximize"
 # Optional. One shell command that builds the metric one time, before the
 # first metric call. See "Build the metric: [metric] setup" below.
-# setup = "cargo build --release"
+# setup = "cd eval && cargo build --release"
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
@@ -614,18 +614,30 @@ for a metric in a compiled language. It is text of 1 to 300 characters, the
 same limit as `[setup] command`. Another type fails the setup check.
 
 The command runs one time for each run, in the metric setup box, before the
-first metric call. It runs in the folder that holds the `[metric] files`,
-the same folder where the `[metric] entry` command runs. The box reaches
+first metric call. It runs in the folder that holds the `[metric] files`
+paths, with the repository root layout, the same folder where the
+`[metric] entry` command runs. It does not run inside one of those paths.
+With `files = ["eval"]`, start the command with `cd eval`. The box reaches
 only the package registries. It gets no secret, no service and no version
 file. The time limit is 30 minutes, and the box time counts in the run's
 cost. A command that fails or runs out of time stops the run before the
 first version. The error shows the last lines of the build output.
 
 Each metric box opens from the state that the metric setup box saved. The
-saved state can be the box's working folder only. A file that the build
-writes outside the working folder, such as `~/.cargo` or the Go build cache,
-may not be kept. Build into the folder of the metric files, for example a
-`target/` or `bin/` folder next to the source.
+saved state can be the box's working folder only, so a file that the build
+writes outside the working folder may not be kept. Build into the folder of
+the metric files, for example a `target/` or `bin/` folder next to the
+source.
+
+A file that the build writes inside the working folder is kept, and it
+enters every metric box. In local Docker boxes and the local runtime, `HOME`
+is the working folder. The sandbox image sets `CARGO_HOME=/tmp/cargo`,
+`GOPATH=/tmp/go` and `GOCACHE=/tmp/go-build`, so in a sandbox image box the
+Rust and Go caches go to `/tmp`. The local runtime does not set them, so
+there `~/.cargo` and `~/go` (with `~/go/pkg/mod`) are in the working folder
+and stay in the saved state. Keep the caches small: set `CARGO_HOME` or
+`GOMODCACHE` to a folder under `/tmp` in the command, or remove the caches at
+the end of the command.
 
 After the build, the metric setup box removes the `[metric] files` again.
 Only the build output stays in the saved state, so no metric box holds the
@@ -655,8 +667,9 @@ entry = ["eval/metric"]
 
 The compilers must be in the sandbox image. The package registry hosts
 include `crates.io` and `proxy.golang.org`, so the build can fetch its
-crates and modules. Those downloads go to caches outside the working
-folder, which the metric box does not need after the build.
+crates and modules. The metric box does not need those downloads after the
+build. See above for where the caches go and how to keep them out of the
+saved state.
 
 Metric hardening needs a Python metric. A hardening job for a command
 metric stops with the message "needs a Python metric".

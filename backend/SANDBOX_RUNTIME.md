@@ -65,8 +65,13 @@ candidate box opens. After the build, the box removes the metric files
 again, so the saved state holds the build output but no metric source. The
 parent then saves the box state. The saved state can be the box working
 folder only, so files that the build writes outside it may not be kept;
-build into the metric files' folder. Each metric box then extracts the
-metric files over that folder again, so the built files stay next to them.
+build into the metric files' folder. Files inside the working folder are
+kept and enter every metric box. Local Docker boxes and the local runtime
+set `HOME` to the working folder. The image sends the Go and Rust caches to
+`/tmp` (see the table below), but the local runtime does not, so there
+`~/.cargo` and `~/go` stay in the saved state. A metric setup should keep
+its caches small, for example with `CARGO_HOME` or `GOMODCACHE` under
+`/tmp`. Each metric box then extracts the metric files over that folder again, so the built files stay next to them.
 The box has its own `metric-setup` operation key, so its time counts in the
 run's cost.
 
