@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | A dict. `case["input"]` holds the input fields. `case["expected"]` holds the expected value, or `None` |
 | `output`    | What the `[run]` entry returned for the case, or `None` when the file has no `[run]` |
 
-The `optimize.toml` file of the repository must have a `[run]` section or a `[target.<name>]` stage. The `[run]` `entry` runs one version on one case, in its own sandbox box. Skynet refuses a file with neither, because every version would get the same score.
+The `ascent.toml` file of the repository must have a `[run]` section or a `[target.<name>]` stage. The `[run]` `entry` runs one version on one case, in its own sandbox box. Skynet refuses a file with neither, because every version would get the same score.
 
 - A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
 - A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
@@ -69,7 +69,7 @@ GEPA and Auto read the feedback text to write the next version. Say what is wron
 
 ### Exact match
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 The `[run]` entry runs the tests. The scorer reads the exit code and the test output.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ When the `[run]` entry fails on a case, that case has no score. If the entry can
 
 The scorer can call a model. Import `llm` from the `openascent` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

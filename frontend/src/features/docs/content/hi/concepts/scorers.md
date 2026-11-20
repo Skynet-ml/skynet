@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | एक dict। `case["input"]` में इनपुट फ़ील्ड होते हैं। `case["expected"]` में अपेक्षित मान होता है, या `None` |
 | `output`    | केस के लिए `[run]` की `entry` ने जो लौटाया, या `None` जब फ़ाइल में `[run]` नहीं होता |
 
-रिपॉज़िटरी की `optimize.toml` फ़ाइल में एक `[run]` सेक्शन या एक `[target.<name>]` स्टेज होना चाहिए। `[run]` की `entry` एक संस्करण को एक केस पर, अपने अलग सैंडबॉक्स बॉक्स में चलाती है। जिस फ़ाइल में इनमें से कोई नहीं है, उसे Skynet अस्वीकार करता है, क्योंकि हर संस्करण को एक ही स्कोर मिलता।
+रिपॉज़िटरी की `ascent.toml` फ़ाइल में एक `[run]` सेक्शन या एक `[target.<name>]` स्टेज होना चाहिए। `[run]` की `entry` एक संस्करण को एक केस पर, अपने अलग सैंडबॉक्स बॉक्स में चलाती है। जिस फ़ाइल में इनमें से कोई नहीं है, उसे Skynet अस्वीकार करता है, क्योंकि हर संस्करण को एक ही स्कोर मिलता।
 
 - फ़ंक्शन entry, जैसे `entry = "serve.py:serve"`, को `case["input"]` आर्गुमेंट के रूप में मिलता है। `output` उसका रिटर्न मान है।
 - कमांड entry, जैसे `entry = ["python", "-m", "pytest", "-q"]`, को इनपुट stdin पर JSON के रूप में मिलता है। `output` का रूप `{"exit_code": ..., "stdout": "..."}` है।
@@ -69,7 +69,7 @@ GEPA और Auto अगला संस्करण लिखने के ल�
 
 ### सटीक मिलान
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 `[run]` की `entry` टेस्ट चलाती है। स्कोरर exit code और टेस्ट का आउटपुट पढ़ता है।
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 स्कोरर किसी मॉडल को कॉल कर सकता है। `openascent` हेल्पर मॉड्यूल से `llm` इम्पोर्ट करें। कॉल Skynet के मॉडल गेटवे से होकर रन के स्कोरर मॉडल तक जाती है।
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

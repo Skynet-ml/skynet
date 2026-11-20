@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ Campi importanti:
 - `target.repo.editable_paths` elenca i file e le cartelle che l'ottimizzatore può modificare. `"."` indica l'intero repository.
 - `target.repo.commit` è facoltativo. È uno SHA di 40 caratteri. Senza di esso, Skynet usa l'ultimo commit del branch.
 - `target.repo.secrets` è facoltativo. Ogni segreto ha un `name` e un `value`. Arriva al tuo codice o al tuo scorer solo tramite un header di `[services.<name>]` o un server del file `mcp` del ruolo, mai come variabile d'ambiente.
-- `scorer.metric_code` definisce `score(repo_path, case, output=None)`. `output` è ciò che l'entry `[run]` ha restituito per il caso. La scheda `optimize.toml` mostra l'entry `[run]` del repository di esempio. `scorer.model` è il modello che il tuo codice e il tuo scorer possono chiamare tramite il gateway dei modelli.
+- `scorer.metric_code` definisce `score(repo_path, case, output=None)`. `output` è ciò che l'entry `[run]` ha restituito per il caso. La scheda `ascent.toml` mostra l'entry `[run]` del repository di esempio. `scorer.model` è il modello che il tuo codice e il tuo scorer possono chiamare tramite il gateway dei modelli.
 - `strategy.mode` è `auto` (il valore predefinito) o `single`. Con `single`, imposta `strategy.engine` sul nome di un motore restituito da `GET /blackbox/engines`.
 - `max_cost_cents` è il limite di spesa per questa esecuzione, in centesimi di dollaro USA.
 - `is_private` è `false` per impostazione predefinita. Impostalo su `true` per mantenere privata l'esecuzione.

@@ -714,7 +714,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
         assert events == [
             {
                 "kind": EVENT_BLOCK,
-                "rule": "optimize.toml [paths]",
+                "rule": "ascent.toml [paths]",
                 "reason": "'eval/labels.csv' is protected by the repository rules ([paths] protected).",
             }
         ]
@@ -2891,7 +2891,7 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
 @pytest.mark.parametrize(
     ("name", "status", "message"),
     [
-        ("nope", 404, "Service 'nope' is not in optimize.toml. Add a [services.nope] table."),
+        ("nope", 404, "Service 'nope' is not in ascent.toml. Add a [services.nope] table."),
         ("github", 403, "only services with a url go through the relay"),
     ],
 )
@@ -2910,11 +2910,11 @@ def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: 
     ("name", "status", "message"),
     [
         ("judge", 403, "Service 'judge' is not listed for the [metric] role."),
-        ("Judge", 404, "Service 'Judge' is not in optimize.toml. Add a [services.Judge] table."),
-        ("JUDGE", 404, "Service 'JUDGE' is not in optimize.toml."),
-        ("judge/x", 404, "Service 'judge/x' is not in optimize.toml."),
-        ("../judge", 404, "Service '../judge' is not in optimize.toml."),
-        ("", 404, "is not in optimize.toml."),
+        ("Judge", 404, "Service 'Judge' is not in ascent.toml. Add a [services.Judge] table."),
+        ("JUDGE", 404, "Service 'JUDGE' is not in ascent.toml."),
+        ("judge/x", 404, "Service 'judge/x' is not in ascent.toml."),
+        ("../judge", 404, "Service '../judge' is not in ascent.toml."),
+        ("", 404, "is not in ascent.toml."),
     ],
 )
 def test_a_name_that_only_looks_like_a_declared_service_is_unknown(
@@ -4073,7 +4073,7 @@ def test_an_mcp_name_and_a_service_name_never_cross(echo: _Echo) -> None:
     assert mcp["error"].endswith("MCP server 'judge' is not in .mcp.json, the [run] MCP file. Add it there.")
     assert service == {
         "status": 404,
-        "error": "Service 'search' is not in optimize.toml. Add a [services.search] table.",
+        "error": "Service 'search' is not in ascent.toml. Add a [services.search] table.",
     }
     assert echo.paths == []
 

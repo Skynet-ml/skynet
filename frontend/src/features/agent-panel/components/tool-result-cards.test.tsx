@@ -262,7 +262,7 @@ void describe("tool result cards", () => {
   });
 
   void it("a write the tool refuses shows its refusal as a failure", () => {
-    const error = "Not a file you can write: 'run.py'. Write one of metric.py, optimize.toml.";
+    const error = "Not a file you can write: 'run.py'. Write one of metric.py, ascent.toml.";
     const html = renderOpen(
       <WorkspaceWriteCard call={call("write_workspace_file", { error }, { path: "run.py" })} />,
     );
@@ -270,15 +270,15 @@ void describe("tool result cards", () => {
     assert.match(html, /Not a file you can write/);
   });
 
-  void it("a saved optimize.toml with a parser error shows the error, yet the write succeeds", () => {
+  void it("a saved ascent.toml with a parser error shows the error, yet the write succeeds", () => {
     const text = "[run]\nname = 1\n";
     const result = {
-      wizard_state: { optimize_toml: text },
-      optimize_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
+      wizard_state: { ascent_toml: text },
+      ascent_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
     };
     const html = renderOpen(
       <WorkspaceWriteCard
-        call={call("write_workspace_file", result, { path: "optimize.toml", text })}
+        call={call("write_workspace_file", result, { path: "ascent.toml", text })}
       />,
     );
     assert.match(

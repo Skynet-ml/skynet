@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ entry = "serve.py:serve"
 - `target.repo.editable_paths`, optimize edicinin değiştirebileceği dosya ve klasörleri listeler. `"."` deponun tamamı demektir.
 - `target.repo.commit` isteğe bağlıdır. 40 karakterlik bir SHA'dır. Verilmezse Skynet daldaki en son commit'i kullanır.
 - `target.repo.secrets` isteğe bağlıdır. Her gizli değerin bir `name` ve bir `value` alanı vardır. Kodunuza veya puanlayıcınıza yalnızca bir `[services.<name>]` başlığı veya rolün `mcp` dosyasındaki bir sunucu üzerinden ulaşır, asla ortam değişkeni olarak ulaşmaz.
-- `scorer.metric_code`, `score(repo_path, case, output=None)` fonksiyonunu tanımlar. `output`, `[run]` giriş noktasının vaka için döndürdüğü değerdir. `optimize.toml` sekmesi örnek deponun `[run]` giriş noktasını gösterir. `scorer.model`, kodunuzun ve puanlayıcınızın model ağ geçidi üzerinden çağırabileceği modeldir.
+- `scorer.metric_code`, `score(repo_path, case, output=None)` fonksiyonunu tanımlar. `output`, `[run]` giriş noktasının vaka için döndürdüğü değerdir. `ascent.toml` sekmesi örnek deponun `[run]` giriş noktasını gösterir. `scorer.model`, kodunuzun ve puanlayıcınızın model ağ geçidi üzerinden çağırabileceği modeldir.
 - `strategy.mode` değeri `auto` (varsayılan) veya `single`'dır. `single` ile `strategy.engine` alanını `GET /blackbox/engines` tarafından döndürülen bir motor adına ayarlayın.
 - `max_cost_cents`, bu çalıştırmanın ABD senti cinsinden harcama limitidir.
 - `is_private` varsayılan olarak `false`'tur. Çalıştırmayı özel tutmak için `true` olarak ayarlayın.

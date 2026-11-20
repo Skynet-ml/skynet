@@ -343,14 +343,14 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
         WizardPreflightCheck(
             key="setup",
             status="failed",
-            message="The service jira in optimize.toml is not a connector.",
+            message="The service jira in ascent.toml is not a connector.",
             message_code="repo_gate.unknown_connector",
             message_params={"service": "jira", "known": "github, linear"},
         ),
         WizardPreflightCheck(
             key="setup",
             status="failed",
-            message="optimize.toml sets proposer.network.",
+            message="ascent.toml sets proposer.network.",
             message_code="repo_gate.unenforced_local",
             message_params={"key": "proposer.network"},
         ),

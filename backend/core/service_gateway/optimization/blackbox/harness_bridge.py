@@ -400,7 +400,7 @@ def run_setup(
     """Run the contract file's ``[proposer] setup`` in the folder its command runs in.
 
     Args:
-        command: The exact argument list from ``optimize.toml``.
+        command: The exact argument list from ``ascent.toml``.
         checkout: The repository checkout or worktree of the next session.
         timeout_seconds: Stop the setup, and every process it started, after this long.
         env: The setup's environment; the default is this process's environment.
@@ -409,7 +409,7 @@ def run_setup(
         RuntimeError: When the command cannot start, runs out of time or
             exits with an error, so no session starts without its setup.
     """
-    label = f"The [proposer] setup command in optimize.toml ({shlex.join(command)})"
+    label = f"The [proposer] setup command in ascent.toml ({shlex.join(command)})"
     reaped = sys.platform == "linux" and bool(sys.executable)
     if reaped:
         # The same subreaper as a session, so a setsid or double-forked child cannot escape the group kill.
@@ -959,7 +959,7 @@ def _excludable(paths: Iterable[str], command: list[str]) -> list[str]:
     unsafe = sorted(path for path in paths if _unsafe(path))
     if unsafe:
         raise RuntimeError(
-            f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) wrote files whose names are"
+            f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) wrote files whose names are"
             " not UTF-8, hold a control character or end in whitespace:"
             f" {', '.join(repr(path) for path in unsafe)}. The run cannot keep such a file out of the versions."
             " Rename it in the setup."
@@ -995,7 +995,7 @@ def ensure_setup(
     only the branch refs, ``HEAD`` and ``info/exclude``.
 
     Args:
-        command: The exact argument list from ``optimize.toml``.
+        command: The exact argument list from ``ascent.toml``.
         checkout: The repository checkout or worktree the proposer command runs in.
         timeout_seconds: Stop the setup, and every process it started, after this long.
             The wait for another session's setup counts inside it.
@@ -1023,7 +1023,7 @@ def ensure_setup(
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish"
+                        f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish"
                         f" in another session within {timeout_seconds:g} seconds."
                     ) from None
                 time.sleep(0.1)
@@ -1035,7 +1035,7 @@ def ensure_setup(
                 kept = json.loads(record.read_text(encoding="utf-8"))["output"]
             except (ValueError, KeyError, TypeError) as error:
                 raise RuntimeError(
-                    f"The record of the [proposer] setup command in optimize.toml ({shlex.join(command)}) at"
+                    f"The record of the [proposer] setup command in ascent.toml ({shlex.join(command)}) at"
                     f" {record} is unreadable: {error!r}. The run cannot tell which files the setup wrote."
                 ) from error
             # A session killed after done.json but before its clean-up left these behind.
@@ -1055,7 +1055,7 @@ def ensure_setup(
                 _undo_setup(checkout, common, saved, json.loads(started.read_text(encoding="utf-8")), later=True)
             except Exception as error:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) stopped in an earlier"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) stopped in an earlier"
                     f" session before it finished, and its changes could not be undone: {error!r}."
                 ) from error
         # A copy with no started record is from a session killed before its setup ran, so nothing needs it.
@@ -1079,7 +1079,7 @@ def ensure_setup(
         if remaining <= 0:
             _forget_setup(started, saved)
             raise RuntimeError(
-                f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) did not finish in another"
+                f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) did not finish in another"
                 f" session, and no time was left within {timeout_seconds:g} seconds to run it in this one."
             )
         start = {
@@ -1103,14 +1103,14 @@ def ensure_setup(
             if moved != head:
                 # A commit would hide its changes from the diff below, and enter every version.
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) moved HEAD from"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) moved HEAD from"
                     f" {head} to {moved}. Those changes would enter every version. Make the setup leave the git"
                     " history alone."
                 )
             changed = _setup_changes(checkout, tracked)
             if changed:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed tracked files:"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed tracked files:"
                     f" {', '.join(changed)}. Those changes would enter every version. Make the setup write only"
                     " files that git does not track."
                 )
@@ -1121,7 +1121,7 @@ def ensure_setup(
             )
             if rewritten:
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(command)}) changed or removed"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(command)}) changed or removed"
                     f" files of the version: {', '.join(rewritten)}. Those changes would enter every version."
                     " Make the setup write only new files that git does not track."
                 )
@@ -1300,9 +1300,9 @@ def hidden_kind(path: str) -> str:
         path: Repository-relative hidden path.
 
     Returns:
-        ``"config"`` for an ``optimize.toml`` file, else ``"scoring"``.
+        ``"config"`` for an ``ascent.toml`` file, else ``"scoring"``.
     """
-    return "config" if PurePosixPath(path).name.casefold() == "optimize.toml" else "scoring"
+    return "config" if PurePosixPath(path).name.casefold() == "ascent.toml" else "scoring"
 
 
 def _path_hash(path: str) -> str:
@@ -1324,7 +1324,7 @@ def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[
     Args:
         hidden_paths: Repository-relative hidden files and directories.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
 
     Returns:
         Path hashes mapped to their kind.
@@ -1374,7 +1374,7 @@ def guard_policy(
         hidden_paths: Repository-relative hidden files and directories.
         log: File each refusal is appended to.
         fold_case: Whether the workspace's file system ignores case, so that
-            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+            ``ASCENT.TOML`` names the same file as ``ascent.toml``.
         home: The agent's home folder, for ``~`` and ``$HOME``. The default
             is this process's home folder.
 
@@ -2262,7 +2262,7 @@ def run_session(
         fallback = proposer.get("outside_checkout")
         if not fallback:
             raise RuntimeError(
-                f"The [proposer] entry command in optimize.toml runs only in a repository checkout, not in {workspace}."
+                f"The [proposer] entry command in ascent.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
     if api_key is None:
@@ -2293,7 +2293,7 @@ def run_session(
             if timeout_seconds <= 0:
                 # A harness with no time left would be killed at once, so the setup's overrun stops the session.
                 raise RuntimeError(
-                    f"The [proposer] setup command in optimize.toml ({shlex.join(proposer['setup'])}) used up"
+                    f"The [proposer] setup command in ascent.toml ({shlex.join(proposer['setup'])}) used up"
                     f" the session's time limit of {limit:g} seconds."
                 )
     for relative_path, content in (proposer.get("files") or {}).items():

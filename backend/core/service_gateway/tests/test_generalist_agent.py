@@ -2525,17 +2525,17 @@ def test_chat_replay_drops_turn_checks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_edit_puts_the_changed_optimize_toml_into_the_draft() -> None:
-    """An edit starts from the draft's optimize.toml and puts the changed file into the turn's patch (SKY-184)."""
-    state = cast(WizardState, {"wizard_screen": "metric", "optimize_toml": "version = 1\n"})
+async def test_workspace_edit_puts_the_changed_ascent_toml_into_the_draft() -> None:
+    """An edit starts from the draft's ascent.toml and puts the changed file into the turn's patch (SKY-184)."""
+    state = cast(WizardState, {"wizard_screen": "metric", "ascent_toml": "version = 1\n"})
     turn = _TurnAuthoringFlag()
     tools = {tool.name: tool for tool in generalist_module.workspace_tools(state, turn, github_token=None)}
 
     await tools["edit_workspace_file"].acall(
-        path="optimize.toml", old_text="version = 1\n", new_text="version = 1\n\n[run]\nentry = 'a.py:run'\n"
+        path="ascent.toml", old_text="version = 1\n", new_text="version = 1\n\n[run]\nentry = 'a.py:run'\n"
     )
 
-    assert turn.wizard_patch == {"optimize_toml": "version = 1\n\n[run]\nentry = 'a.py:run'\n"}
+    assert turn.wizard_patch == {"ascent_toml": "version = 1\n\n[run]\nentry = 'a.py:run'\n"}
 
 
 @pytest.mark.asyncio
@@ -2549,9 +2549,9 @@ async def test_list_repo_folder_without_a_path_lists_the_root() -> None:
     assert await tools["list_repo_folder"].acall() == {"error": "No repository is chosen yet."}
 
 
-def test_metric_focus_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
-    """The setup agent shows the optimize.toml it wrote in full, so the user sees the file (SKY-184)."""
-    assert "When you write optimize.toml, show the user the file in full." in SCREEN_FOCUS["metric"]
+def test_metric_focus_tells_the_setup_agent_to_show_the_ascent_toml() -> None:
+    """The setup agent shows the ascent.toml it wrote in full, so the user sees the file (SKY-184)."""
+    assert "When you write ascent.toml, show the user the file in full." in SCREEN_FOCUS["metric"]
 
 
 def test_dataset_prompt_says_the_card_is_a_preview_and_the_run_uses_every_row() -> None:

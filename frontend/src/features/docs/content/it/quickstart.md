@@ -55,9 +55,9 @@ Leggi [Motori](/docs/concepts/engines) per scegliere un motore specifico.
 
 ## 5. Metrica ed esecuzione
 
-L'ultimo passaggio è **Metrica ed esecuzione**. L'assistente scrive lo scorer e il file `optimize.toml` per te. Puoi modificarli. La voce `[run]` esegue una versione del repository su un caso. Lo scorer riceve l'output della voce e il caso:
+L'ultimo passaggio è **Metrica ed esecuzione**. L'assistente scrive lo scorer e il file `ascent.toml` per te. Puoi modificarli. La voce `[run]` esegue una versione del repository su un caso. Lo scorer riceve l'output della voce e il caso:
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

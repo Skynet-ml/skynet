@@ -104,5 +104,5 @@ def mcp_unsupported(name: str) -> str:
     return (
         f"The {name} proposer harness cannot load the [proposer] mcp servers yet. "
         f"Use one of these harnesses: {', '.join(MCP_HARNESSES)}, "
-        "or remove [proposer] mcp from optimize.toml."
+        "or remove [proposer] mcp from ascent.toml."
     )

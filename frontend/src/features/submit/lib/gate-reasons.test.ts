@@ -11,7 +11,7 @@ import {
 const CATALOG: Record<string, string> = {
   "repo_gate.unknown_connector":
     "The service {service} is not a connector. Use one of these names: {known}.",
-  "repo_gate.unenforced_cloud": "optimize.toml sets {key}. Remove it to run.",
+  "repo_gate.unenforced_cloud": "ascent.toml sets {key}. Remove it to run.",
   "repo_gate.secret_host_unlisted": "{secret} has no allowed hosts but goes to {host}.",
   "repo_gate.secret_host_not_allowed": "{secret} may go only to {allowed} but goes to {host}.",
 };
@@ -35,7 +35,7 @@ test("each gate failure is worded from its catalog key and parameters", () => {
   );
   assert.deepEqual(reasons, [
     "The service jira is not a connector. Use one of these names: github, linear.",
-    "optimize.toml sets proposer.network. Remove it to run.",
+    "ascent.toml sets proposer.network. Remove it to run.",
   ]);
 });
 
@@ -50,7 +50,7 @@ test("a failure with no catalog copy or a bad shape is left out", () => {
     ]),
     translate,
   );
-  assert.deepEqual(reasons, ["optimize.toml sets metric.files. Remove it to run."]);
+  assert.deepEqual(reasons, ["ascent.toml sets metric.files. Remove it to run."]);
 });
 
 test("other errors and a refusal from an older server give no reasons", () => {

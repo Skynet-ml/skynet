@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | 一个 dict。`case["input"]` 包含输入字段。`case["expected"]` 包含期望值，或为 `None` |
 | `output`    | `[run]` 入口为该用例返回的内容；如果文件没有 `[run]`，则为 `None` |
 
-仓库的 `optimize.toml` 文件必须有一个 `[run]` 部分或一个 `[target.<name>]` 阶段。`[run]` 的 `entry` 在自己的沙箱中，对一个用例运行一个版本。如果两者都没有，Skynet 会拒绝该文件，因为每个版本都会得到相同的分数。
+仓库的 `ascent.toml` 文件必须有一个 `[run]` 部分或一个 `[target.<name>]` 阶段。`[run]` 的 `entry` 在自己的沙箱中，对一个用例运行一个版本。如果两者都没有，Skynet 会拒绝该文件，因为每个版本都会得到相同的分数。
 
 - 函数入口，例如 `entry = "serve.py:serve"`，以 `case["input"]` 作为参数。`output` 是它的返回值。
 - 命令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，从 stdin 以 JSON 形式接收输入。`output` 是 `{"exit_code": ..., "stdout": "..."}`。
@@ -69,7 +69,7 @@ GEPA 和 Auto 会读取反馈文本来编写下一个版本。请说明哪里错
 
 ### 精确匹配
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 `[run]` 入口运行测试。评分器读取退出码和测试输出。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 评分器可以调用模型。从 `openascent` 辅助模块导入 `llm`。调用会通过 Skynet 的模型网关，发送到本次运行的评分器模型。
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

@@ -2,7 +2,7 @@
  * The files one agent turn edited, read from the turn's tool calls, so the
  * chat can show an "Edited N files" card. A call edits a file when its
  * result's ``wizard_state`` sets a code field (the metric, run code or
- * optimize.toml that a workspace tool wrote) or a ``workspace_files`` entry
+ * ascent.toml that a workspace tool wrote) or a ``workspace_files`` entry
  * (any other repository file).
  */
 
@@ -38,7 +38,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *     by tool call id. A call with no entry is left out: its before-state is
  *     unknown, as in a chat reopened after a reload.
  *   base: The repository's text of each file, the before-state of a file
- *     the draft did not hold yet (the repository's own optimize.toml).
+ *     the draft did not hold yet (the repository's own ascent.toml).
  *
  * Returns:
  *   One edit per file whose text changed, in the order the turn first wrote them.

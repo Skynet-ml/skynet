@@ -351,7 +351,7 @@ test("withRepository picks a repository from its default branch", () => {
 test("withTaskPatch drops the draft files when the repository, branch or commit moves", () => {
   const start = initialWizardV2State();
   const repo = { ...emptyRepoDraft(), repository: "acme/bot", branch: "main" };
-  const files = { "optimize.toml": "version = 1\n", "src/app.py": "x = 2\n" };
+  const files = { "ascent.toml": "version = 1\n", "src/app.py": "x = 2\n" };
   const filesBase = "c".repeat(40);
   const state = {
     ...start,

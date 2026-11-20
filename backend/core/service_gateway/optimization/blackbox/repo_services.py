@@ -1,4 +1,4 @@
-"""Plan each role's box from ``optimize.toml``: hosts, MCP servers, service secrets and stage boxes.
+"""Plan each role's box from ``ascent.toml``: hosts, MCP servers, service secrets and stage boxes.
 
 ``[proposer]`` and each ``[target.<name>]`` get their own box (E1, E2). This
 module turns a role's parsed environment into what its box gets, and opens a
@@ -71,7 +71,7 @@ def plan_roles(constraints: RepoConstraints, *, proposer_hosts: tuple[str, ...])
     says, so its plan records no allowed host, the same as :func:`stage_spec`.
 
     Args:
-        constraints: The repository's parsed ``optimize.toml``.
+        constraints: The repository's parsed ``ascent.toml``.
         proposer_hosts: The hosts the proposer's box reaches besides the
             relay, after the registry default applies (E57).
 
@@ -228,7 +228,7 @@ def service_endpoint(
     """
     spec = services.get(name)
     if spec is None:
-        raise RoleRelayError(f"Service {name!r} is not in optimize.toml. Add a [services.{name}] table.")
+        raise RoleRelayError(f"Service {name!r} is not in ascent.toml. Add a [services.{name}] table.")
     if name not in role.services:
         raise RoleRelayError(
             f"Service {name!r} is not listed for the {label} role."

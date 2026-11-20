@@ -1014,7 +1014,7 @@ def test_validate_payload_checks_the_function_the_draft_metric_entry_names(
 
     Args:
         monkeypatch: Pytest fixture that records the scorer check.
-        metric: The draft's ``[metric]`` table body, or ``None`` for no draft optimize.toml.
+        metric: The draft's ``[metric]`` table body, or ``None`` for no draft ascent.toml.
         checked: The expected ``(code, entrypoint, entry_known)`` calls of the scorer check.
     """
     calls: list[tuple[str, str | None, bool]] = []
@@ -1026,7 +1026,7 @@ def test_validate_payload_checks_the_function_the_draft_metric_entry_names(
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
     repo: dict[str, Any] = {"repository": "octo/hello", "branch": "main", "editable_paths": ["src/"]}
     if metric is not None:
-        repo["draft_files"] = {"optimize.toml": f'version = 1\n\n[run]\nentry = ["pytest"]\n\n[metric]\n{metric}\n'}
+        repo["draft_files"] = {"ascent.toml": f'version = 1\n\n[run]\nentry = ["pytest"]\n\n[metric]\n{metric}\n'}
     payload = BlackboxRunRequest.model_validate(
         _repo_request(
             scorer={"kind": "python", "metric_code": "grade"},
@@ -1044,11 +1044,11 @@ def test_validate_payload_checks_the_function_the_draft_metric_entry_names(
 def test_validate_payload_leaves_the_repository_metric_entry_to_the_setup_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a draft optimize.toml, a missing ``score`` does not block, but a syntax error does (SKY-738)."""
+    """Without a draft ascent.toml, a missing ``score`` does not block, but a syntax error does (SKY-738)."""
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
     def payload(code: str) -> BlackboxRunRequest:
-        """Build a repository request with no draft optimize.toml.
+        """Build a repository request with no draft ascent.toml.
 
         Args:
             code: The metric code.
@@ -2471,7 +2471,7 @@ def test_a_repository_run_keeps_the_contract_source_out_of_its_metadata(
     monkeypatch.setattr(service_mod, "gateway_from_settings", lambda settings: _TEST_GATEWAY)
     payload = _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)})
     # The parent strips the drafts before the guest gets them, so the guest's
-    # validator sees no optimize.toml and resets the source to "repository".
+    # validator sees no ascent.toml and resets the source to "repository".
     repo = BlackboxRepoSource(repository="o/r", editable_paths=["src"])
     assert repo.contract_source == "repository"
     target = BlackboxTarget(kind="repo", repo=repo)

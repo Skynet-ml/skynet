@@ -97,7 +97,7 @@ def test_a_new_request_with_the_retired_stop_score_names_the_outcome_target(valu
     """A new request that still sends ``budget.stop_at_score``, even as null, gets an error naming the file key."""
     payload = _payload(budget={"max_scorer_runs": 20, "stop_at_score": value})
 
-    with pytest.raises(ValidationError, match=r"\[outcome\] target in optimize\.toml"):
+    with pytest.raises(ValidationError, match=r"\[outcome\] target in ascent\.toml"):
         BlackboxRunRequest.model_validate(payload)
 
 
@@ -218,10 +218,10 @@ def test_a_draft_file_under_another_draft_file_is_refused(drafts: dict[str, str]
 
 
 @pytest.mark.parametrize("text", ["", "  \n\t"])
-def test_an_empty_optimize_toml_draft_is_refused(text: str) -> None:
-    """An empty optimize.toml draft would replace the repository's file with one that names no run."""
-    with pytest.raises(ValidationError, match=r"optimize\.toml is empty"):
-        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files={"optimize.toml": text})
+def test_an_empty_ascent_toml_draft_is_refused(text: str) -> None:
+    """An empty ascent.toml draft would replace the repository's file with one that names no run."""
+    with pytest.raises(ValidationError, match=r"ascent\.toml is empty"):
+        BlackboxRepoSource(repository="octo/hello", editable_paths=["src"], draft_files={"ascent.toml": text})
     assert BlackboxRepoSource(
         repository="octo/hello", editable_paths=["src"], draft_files={"README.md": ""}
     ).draft_files == {"README.md": ""}
@@ -230,9 +230,9 @@ def test_an_empty_optimize_toml_draft_is_refused(text: str) -> None:
 @pytest.mark.parametrize(
     ("drafts", "sent", "stored"),
     [
-        ({"optimize.toml": "version = 1\n"}, None, "setup_screen"),
-        ({"optimize.toml": "version = 1\n"}, "repository", "setup_screen"),
-        ({"optimize.toml": "version = 1\n"}, "mcp", "mcp"),
+        ({"ascent.toml": "version = 1\n"}, None, "setup_screen"),
+        ({"ascent.toml": "version = 1\n"}, "repository", "setup_screen"),
+        ({"ascent.toml": "version = 1\n"}, "mcp", "mcp"),
         ({}, None, "repository"),
         ({"README.md": "x"}, None, "repository"),
         ({}, "setup_screen", "repository"),
@@ -245,6 +245,21 @@ def test_the_run_records_where_its_contract_comes_from(drafts: dict[str, str], s
         repository="octo/hello", editable_paths=["src"], draft_files=drafts, contract_source=sent
     )
     assert source.contract_source == stored
+
+
+def test_a_stored_run_with_the_retired_draft_file_loads_as_one_with_no_draft_contract() -> None:
+    """A run stored before SKY-746 can hold its draft under the old file name; it loads as a plain draft file."""
+    retired = "optimize" + ".toml"  # Built from parts so the tree holds no retired name.
+    source = BlackboxRepoSource.model_validate(
+        {
+            "repository": "octo/hello",
+            "editable_paths": ["src"],
+            "draft_files": {retired: "version = 1\n"},
+            "contract_source": "setup_screen",
+        }
+    )
+    assert source.contract_source == "repository"
+    assert source.draft_files == {retired: "version = 1\n"}
 
 
 def test_a_stored_record_with_no_contract_source_loads_as_repository() -> None:

@@ -143,7 +143,7 @@ BlackboxCandidate = str | dict[str, str]
 # ``install_command`` runs inside the offline managed sandbox. It may use
 # dependencies already in the immutable image or deployment-owned package
 # artifacts; it cannot reach a public package registry at run time.
-# ``command_metric`` says the repository's ``optimize.toml`` names a command
+# ``command_metric`` says the repository's ``ascent.toml`` names a command
 # ``[metric] entry``: the metric box runs that command, so the request needs no
 # ``metric_code``, and the run fails at staging if the entry is Python (SKY-738).
 class BlackboxScorer(BaseModel):
@@ -176,7 +176,7 @@ class BlackboxScorer(BaseModel):
 
 
 STOP_AT_SCORE_RETIRED = (
-    "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in optimize.toml."
+    "budget.stop_at_score is no longer accepted. Set the stop score as [outcome] target in ascent.toml."
 )
 # A stored run's payload passes this context to ``model_validate``: it may
 # still hold the retired ``budget.stop_at_score``. The value leaves the public
@@ -191,7 +191,7 @@ STORED_PAYLOAD_CONTEXT = {STORED_PAYLOAD_KEY: True}
 # outside the cap);
 # ``max_iterations`` caps proposer rounds for the engines that iterate
 # (Meta-Harness, AutoSaddler, ShinkaEvolve generations). The stop score is
-# ``[outcome] target`` in the repository's optimize.toml (SKY-691).
+# ``[outcome] target`` in the repository's ascent.toml (SKY-691).
 class BlackboxBudget(BaseModel):
     max_scorer_runs: int = Field(default=200, ge=1, le=100_000)
     max_iterations: int | None = Field(default=None, ge=1, le=1_000)
@@ -375,13 +375,13 @@ class BlackboxRepoSource(BaseModel):
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
     secrets: list[BlackboxRepoSecret] = Field(default_factory=list, max_length=100)
-    # How each ``${NAME}`` in optimize.toml and the role MCP files is filled
+    # How each ``${NAME}`` in ascent.toml and the role MCP files is filled
     # (SKY-381 E50): ``user`` from the run's secrets (BYOK, no Skynet fee), or
     # ``managed`` with Skynet's key for a catalog host, metered per call. A
     # name this map does not hold binds to ``user``.
     secret_bindings: dict[str, Literal["user", "managed"]] = Field(default_factory=dict, max_length=100)
     created_by_skynet: bool = False
-    # The setup draft's files (``optimize.toml`` and any file the setup agent
+    # The setup draft's files (``ascent.toml`` and any file the setup agent
     # wrote or edited), keyed by repository path. The trusted parent writes
     # them over the fetched checkout before the run starts; the user's
     # repository stays unchanged. ``metric.py`` travels as the scorer instead.
@@ -390,7 +390,7 @@ class BlackboxRepoSource(BaseModel):
     # drafts are whole-file copies of that tree, so a run that would start from
     # another commit is refused. ``None`` (older drafts) skips the check.
     draft_base: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
-    # Where the run's optimize.toml comes from (SKY-693): the setup screen's
+    # Where the run's ascent.toml comes from (SKY-693): the setup screen's
     # draft, the MCP contract step's draft, or the repository. The server
     # decides: the validator reads it from the drafts, and keeps ``mcp`` only
     # with a draft. ``/blackbox/run`` turns a client's ``mcp`` into
@@ -455,11 +455,11 @@ class BlackboxRepoSource(BaseModel):
             # A file cannot also be a folder of another draft; the trusted parent would fail to write both.
             if path_inside(path, [other for other in drafts if other != path]):
                 raise ValueError(f"The draft file {path!r} lies under another draft file.")
-        # An empty optimize.toml would replace the repository's file with one that names no run entry.
-        if not drafts.get("optimize.toml", "x").strip():
-            raise ValueError("The draft optimize.toml is empty. Remove it or write its settings.")
+        # An empty ascent.toml would replace the repository's file with one that names no run entry.
+        if not drafts.get("ascent.toml", "x").strip():
+            raise ValueError("The draft ascent.toml is empty. Remove it or write its settings.")
         self.draft_files = drafts
-        if "optimize.toml" not in drafts:
+        if "ascent.toml" not in drafts:
             self.contract_source = "repository"
         elif self.contract_source != "mcp":
             self.contract_source = "setup_screen"

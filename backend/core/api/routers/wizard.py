@@ -7,8 +7,8 @@ validated against a narrow whitelist and echoed back in a
 wizard. The keys follow the wizard's four steps: task and artifact,
 inputs, optimizer (with models and budget), and the metric/code workspace.
 
-``POST /wizard/optimize-toml/check`` runs the repository parser on the text
-of an ``optimize.toml`` from the setup draft and returns each error with the
+``POST /wizard/ascent-toml/check`` runs the repository parser on the text
+of an ``ascent.toml`` from the setup draft and returns each error with the
 section and key that caused it, so the editor can show it there. It also
 returns the command that ``[metric] entry`` names, so the wizard asks for no
 ``metric.py`` without a TOML parser of its own (SKY-770), and the command that
@@ -135,13 +135,13 @@ class WizardUpdateResponse(BaseModel):
     wizard_state: dict[str, Any]
 
 
-# The text of an optimize.toml to check. No class docstring: it would enter the OpenAPI contract.
-class OptimizeTomlCheckRequest(BaseModel):
-    text: str = Field(description="The whole optimize.toml file as text.")
+# The text of an ascent.toml to check. No class docstring: it would enter the OpenAPI contract.
+class AscentTomlCheckRequest(BaseModel):
+    text: str = Field(description="The whole ascent.toml file as text.")
 
 
 # One parser error and the place in the file that caused it.
-class OptimizeTomlError(BaseModel):
+class AscentTomlError(BaseModel):
     section: str | None = Field(
         default=None,
         description="The table, such as 'paths' or 'target.planner'. Null for a top-level key or the whole file.",
@@ -153,9 +153,9 @@ class OptimizeTomlError(BaseModel):
 
 
 # The parser stops at the first error, so ``errors`` holds at most one item.
-class OptimizeTomlCheckResponse(BaseModel):
+class AscentTomlCheckResponse(BaseModel):
     ok: bool
-    errors: list[OptimizeTomlError]
+    errors: list[AscentTomlError]
     metric_command: list[str] | None = Field(
         default=None,
         description="The command that [metric] entry names. Null for a Python entry, no entry, or a file with an error.",
@@ -303,7 +303,7 @@ def create_wizard_router() -> APIRouter:
     """Build the wizard-state router.
 
     Returns:
-        A FastAPI ``APIRouter`` exposing ``POST /wizard/update`` and ``POST /wizard/optimize-toml/check``.
+        A FastAPI ``APIRouter`` exposing ``POST /wizard/update`` and ``POST /wizard/ascent-toml/check``.
     """
     router = APIRouter()
 
@@ -432,14 +432,14 @@ def create_wizard_router() -> APIRouter:
         return WizardUpdateResponse(wizard_state=patch)
 
     @router.post(
-        "/wizard/optimize-toml/check",
-        response_model=OptimizeTomlCheckResponse,
+        "/wizard/ascent-toml/check",
+        response_model=AscentTomlCheckResponse,
         status_code=200,
-        operation_id="check_optimize_toml",
-        summary="Check the text of an optimize.toml with the repository parser",
+        operation_id="check_ascent_toml",
+        summary="Check the text of an ascent.toml with the repository parser",
     )
-    def check_optimize_toml(req: OptimizeTomlCheckRequest) -> OptimizeTomlCheckResponse:
-        """Parse an ``optimize.toml`` text the way a run reads it, and return the first error.
+    def check_ascent_toml(req: AscentTomlCheckRequest) -> AscentTomlCheckResponse:
+        """Parse an ``ascent.toml`` text the way a run reads it, and return the first error.
 
         It checks only the text. It does not read the files the text names
         (rule, instructions, ``.mcp.json``, cases or compose files), and it
@@ -457,14 +457,14 @@ def create_wizard_router() -> APIRouter:
             # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
             constraints = parse_constraints(req.text.encode("utf-8", "surrogatepass"))
         except ConstraintsError as error:
-            return OptimizeTomlCheckResponse(
+            return AscentTomlCheckResponse(
                 ok=False,
-                errors=[OptimizeTomlError(section=error.section, key=error.key, message=str(error))],
+                errors=[AscentTomlError(section=error.section, key=error.key, message=str(error))],
             )
         # A command entry needs no metric.py; a Python entry still runs the wizard's metric code (SKY-770).
         entry = constraints.metric.entry
         proposer = constraints.proposer_entry
-        return OptimizeTomlCheckResponse(
+        return AscentTomlCheckResponse(
             ok=True,
             errors=[],
             metric_command=list(entry) if isinstance(entry, tuple) else None,

@@ -316,14 +316,14 @@ def test_protected_paths_win_over_editable_ones_before_the_box_opens(tmp_path: P
     """Lay out an allowed edit, but refuse one to a protected judge file inside an editable folder."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/judge.py": "ok = True\n"})
     runtime = _Runtime()
-    space = _space(archive, runtime, setup=None, protected_paths=["optimize.toml", "src/judge.py"])
+    space = _space(archive, runtime, setup=None, protected_paths=["ascent.toml", "src/judge.py"])
     try:
         rigged = space.open_candidate(_patch(tmp_path / "rigged", archive, {"src/judge.py": "ok = 'always'\n"}))
         assert not isinstance(rigged, CandidateBox)
         assert rigged.problems == ("'src/judge.py' is protected by the repository rules ([paths] protected).",)
         assert runtime.boxes == []
         rules = space.open_candidate(
-            _patch(tmp_path / "rules", archive, {"optimize.toml": "[paths]\neditable = ['.']\n"})
+            _patch(tmp_path / "rules", archive, {"ascent.toml": "[paths]\neditable = ['.']\n"})
         )
         assert not isinstance(rules, CandidateBox)
         allowed = _open(space, _patch(tmp_path / "allowed", archive, {"src/app.py": "x = 2\n"}))
@@ -343,7 +343,7 @@ def _guarded(tmp_path: Path) -> tuple[RepoWorkspace, Path]:
         The workspace and its archive.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n", "eval/judge.py": "ok = True\n"})
-    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "optimize.toml"])
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval", "ascent.toml"])
     return space, archive
 
 
@@ -1389,7 +1389,7 @@ _SCORING_TOML = (
     '[data]\ncases = "data/cases.jsonl"\n'
 )
 _SCORING_SIDE = {
-    "optimize.toml": _SCORING_TOML,
+    "ascent.toml": _SCORING_TOML,
     "eval/scorer.py": "def score(): return 0.1\n",
     "eval/reference.json": "{}\n",
     "docs/metric_rules.md": "- No cheating.\n",
@@ -1418,7 +1418,7 @@ def _scoring_space(tmp_path: Path, runtime: _Runtime, **options: Any) -> tuple[R
 def test_the_candidate_box_never_holds_the_scoring_side_files(tmp_path: Path) -> None:
     """The setup box and the candidate box get the tree without the metric files (E61, SKY-398)."""
     assert scorer_only_paths(parse_constraints(_SCORING_TOML.encode())) == (
-        "optimize.toml",
+        "ascent.toml",
         "eval/scorer.py",
         ".optimize/exploits",
         "eval/reference.json",

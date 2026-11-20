@@ -19,21 +19,21 @@ export interface RepoRunOptions {
   maxCostCents: number | null;
   /** The secrets saved on the account of the run's server, with their approved hosts; never values. */
   savedSecrets?: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>;
-  /** The command the run's optimize.toml names in `[metric] entry`, from the contract check; null for none. */
+  /** The command the run's ascent.toml names in `[metric] entry`, from the contract check; null for none. */
   metricCommand?: readonly string[] | null;
 }
 
-const OPTIMIZE_TOML = "optimize.toml";
+const ASCENT_TOML = "ascent.toml";
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
 /**
- * Whether a repository run has no optimize.toml contract, so its Metric
+ * Whether a repository run has no ascent.toml contract, so its Metric
  * screen holds (SKY-693). Every new run needs one, in the draft or in the
  * repository.
  *
  * Args:
- *   draft: The draft's optimize.toml text, if any.
- *   repoFile: The repository's optimize.toml text ("" when it has none), or
+ *   draft: The draft's ascent.toml text, if any.
+ *   repoFile: The repository's ascent.toml text ("" when it has none), or
  *     undefined while the read loads or no pane reads it.
  *
  * Returns:
@@ -45,12 +45,12 @@ export function contractMissing(draft: string | undefined, repoFile: string | un
 }
 
 /**
- * The optimize.toml text the run uses. The draft file replaces the
+ * The ascent.toml text the run uses. The draft file replaces the
  * repository's whole file, so a draft with text is the only one read.
  *
  * Args:
- *   draft: The draft's optimize.toml text, if any.
- *   repoFile: The repository's optimize.toml text, or undefined while unknown.
+ *   draft: The draft's ascent.toml text, if any.
+ *   repoFile: The repository's ascent.toml text, or undefined while unknown.
  *
  * Returns:
  *   The text, or "" when neither file has text yet.
@@ -80,7 +80,7 @@ export function metricCommandText(command: readonly string[]): string {
  *   result: The read's result, or null when the read failed.
  *
  * Returns:
- *   The file's text. With no text, "" for most files; for optimize.toml, ""
+ *   The file's text. With no text, "" for most files; for ascent.toml, ""
  *   only when the read found no file, else undefined, so an unreadable or
  *   failed read leaves the contract decision to the server.
  */
@@ -89,17 +89,17 @@ export function repoBaseText(
   result: { text: string } | { issue: string } | null,
 ): string | undefined {
   if (result && "text" in result) return result.text;
-  if (path !== OPTIMIZE_TOML) return "";
+  if (path !== ASCENT_TOML) return "";
   return result?.issue === "missing" ? "" : undefined;
 }
 
 /**
- * The `${NAME}` secrets that optimize.toml's `[services.<name>]` entries send,
+ * The `${NAME}` secrets that ascent.toml's `[services.<name>]` entries send,
  * each with the one host it goes to (E52, E53). A secret that two services use
  * goes to the last one's host, as on the server.
  *
  * Args:
- *   toml: The optimize.toml text.
+ *   toml: The ascent.toml text.
  *
  * Returns:
  *   Each secret name mapped to its host; a service with no valid url adds none.
@@ -142,16 +142,16 @@ function serviceSecretHosts(toml: string): Map<string, string> {
 
 /**
  * The saved secrets a run sends by id, so a secret saved once (in the chat
- * card or in Settings) serves every run whose optimize.toml names it (SKY-641).
+ * card or in Settings) serves every run whose ascent.toml names it (SKY-641).
  * A secret the user typed for this run wins over a saved one.
  *
- * An agent can edit optimize.toml, so its host is only a request. A saved
+ * An agent can edit ascent.toml, so its host is only a request. A saved
  * secret goes only when a host the user approved for it covers that host, and
  * the server checks the same list again. A secret with no approved host (saved
  * before SKY-641) is never sent.
  *
  * Args:
- *   toml: The optimize.toml text.
+ *   toml: The ascent.toml text.
  *   saved: The account's saved secrets; names, ids and approved hosts only.
  *   typed: The names of the secrets typed for this run.
  *
@@ -312,12 +312,12 @@ export function repoRunRequest(
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
   const secrets = repo.secrets ?? [];
-  // An empty optimize.toml would replace the repository's own file, so it is not sent.
+  // An empty ascent.toml would replace the repository's own file, so it is not sent.
   const draftFiles = Object.fromEntries(
-    Object.entries(workspace.files).filter(([path, text]) => path !== OPTIMIZE_TOML || text.trim()),
+    Object.entries(workspace.files).filter(([path, text]) => path !== ASCENT_TOML || text.trim()),
   );
   const fromAccount = savedServiceSecrets(
-    workspace.files[OPTIMIZE_TOML] ?? "",
+    workspace.files[ASCENT_TOML] ?? "",
     savedSecrets,
     new Set(secrets.map((secret) => secret.name.trim())),
   );
@@ -359,7 +359,7 @@ export function repoRunRequest(
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
         ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
-        // optimize.toml and every repository file the setup changed; metric.py goes as the scorer.
+        // ascent.toml and every repository file the setup changed; metric.py goes as the scorer.
         ...(Object.keys(draftFiles).length > 0 && { draft_files: draftFiles }),
         // The run refuses drafts read at another commit than the one it starts from.
         ...(Object.keys(draftFiles).length > 0 &&

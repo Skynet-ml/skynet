@@ -4,7 +4,7 @@ The SKY-355 core holds the state logic. This module gives it a real
 repository. It stages the tree the same way a run does, runs the full
 preflight gate (SKY-352) before any sandbox opens, and gives the attacker only
 the stripped tree (SKY-353). It reads ``[metric] exploits`` and ``[metric]
-reference`` from the base commit's ``optimize.toml`` (SKY-351). A cloud job
+reference`` from the base commit's ``ascent.toml`` (SKY-351). A cloud job
 holds rounds × cap before paid work (D46); a local job holds nothing. Every
 sandbox closes before the job returns at a wait state, so a job that waits for
 the user holds no sandbox.
@@ -57,7 +57,7 @@ class HardeningWorkspace:
     commit: str | None
     applied_fixes: tuple[str, ...]
     secrets: dict[str, str] = field(repr=False)
-    # The staging's rule for an optimize.toml with no version; the runner reads the tree with it too.
+    # The staging's rule for an ascent.toml with no version; the runner reads the tree with it too.
     require_version: bool = True
     # ``[metric] direction = "minimize"``: the fix checks then treat a lower score as better (SKY-750).
     minimize: bool = False
@@ -100,7 +100,7 @@ class Gate(Protocol):
             archive: The full base-commit tree.
             secret_names: The run's secret names; never values.
             place: Where the sandboxes run.
-            require_version: Whether an ``optimize.toml`` with no version fails.
+            require_version: Whether an ``ascent.toml`` with no version fails.
 
         Returns:
             One failure for each failed check.

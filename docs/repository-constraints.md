@@ -1,6 +1,6 @@
-# Repository constraints: `optimize.toml`
+# Repository constraints: `ascent.toml`
 
-A repository run reads an `optimize.toml` file at the root of the repository,
+A repository run reads an `ascent.toml` file at the root of the repository,
 at the pinned commit. The file can only narrow the settings that the run's
 owner approved. It cannot widen them. Each secret that a service needs comes
 from the run, never from the file.
@@ -89,7 +89,7 @@ owner = "search team"
 - Do not call an outside geocoding service.
 ```
 
-The rule text lives in these files, not in `optimize.toml`. The old
+The rule text lives in these files, not in `ascent.toml`. The old
 `[instructions]` and `[rules]` sections, and an `illegal` list written in
 the file, fail the setup check with a message that says to move the text
 into a file.
@@ -218,7 +218,7 @@ U+2066 to U+2069), because they can hide what a command does.
   and the message names `[proposer] entry`.
 - Every repository file or folder that `entry` or `setup` names by its
   exact path, such as `agent/my-agent.js`, `scripts/setup.sh` or `agent` in
-  `["npm", "ci", "--prefix", "agent"]`, is protected, like `optimize.toml`.
+  `["npm", "ci", "--prefix", "agent"]`, is protected, like `ascent.toml`.
   The run reads each argument as a path relative to the checkout root, after
   it removes `./` and a final `/`. An absolute path, the root itself (`.`)
   and a path outside the checkout are never protected. A protected folder
@@ -244,7 +244,7 @@ U+2066 to U+2069), because they can hide what a command does.
 default: a higher score is better) or `"minimize"` (a lower score is
 better, for example a latency or an error count). Another value fails the
 setup check, and the message names both values. The key is protected like
-the rest of `optimize.toml`.
+the rest of `ascent.toml`.
 
 With `"minimize"`, the engines get the negated score, so each engine still
 climbs. Every score that a person or an API client sees stays raw: the run
@@ -354,7 +354,7 @@ The search stops when its score reaches `target` (at or below it with
 
 ## Run record: `details.record`
 
-A run with an `optimize.toml` stores a record that lets another person
+A run with an `ascent.toml` stores a record that lets another person
 check its score. The record is `details.record` in the run result, and
 `get_run` returns it. A pull request from the run shows the same record in
 a short block. The first line of the block says if the run met the
@@ -387,7 +387,7 @@ content and no metric code. It has these keys:
 - `final_score`: the score that the `[outcome]` verdict judges
   (`best_score` of the run result), at full precision. It is null when the
   run has no such score. The run scores the final version one time.
-- `contract_sha256`: the SHA-256 of the `optimize.toml` bytes the run read,
+- `contract_sha256`: the SHA-256 of the `ascent.toml` bytes the run read,
   after the draft files apply.
 - `metric_sha256`: one SHA-256 over framed parts, one part for each file
   that the metric box gets from `[metric] files`, in sorted path order. The
@@ -525,7 +525,7 @@ holds one case on each line, as a JSON object:
   train, validation and test. The same file and seed give the same split.
   `[data] split` is not supported.
 - A run that uploads its own cases for a repository with `[data]` fails:
-  "This repo defines its cases in optimize.toml. Remove the uploaded cases."
+  "This repo defines its cases in ascent.toml. Remove the uploaded cases."
 - Without `[data]`, the run uses its uploaded cases, if any. With no cases at
   all, the candidate runs once with no input (`None`, or `{"input": null}`
   in the `ASCENT_INPUT` file),
@@ -537,7 +537,7 @@ Only the parent's scorer reads the scoring side of the repository. Staging
 takes these paths out of the optimization agent's tree, and the candidate's
 box holds none of them while version code runs:
 
-- `optimize.toml` itself.
+- `ascent.toml` itself.
 - Every `[metric] files` path.
 - The `[metric] exploits` folder (default `.optimize/exploits`).
 - The `[metric] reference` file.
@@ -551,19 +551,19 @@ visible role also names stays visible. For example, one `.mcp.json` for
 it. The `instructions` file, the `[proposer] illegal` file and the
 `[run] illegal` file always stay visible.
 
-`optimize.toml` is always hidden, also when a visible setting names it. The
+`ascent.toml` is always hidden, also when a visible setting names it. The
 file is refused in these cases:
 
 - A visible setting names a hidden path or a path inside one. The visible
   settings are the `instructions` file, an `illegal` file of `[proposer]`,
   `[run]` or a `[target.<name>]`, and the `mcp` file of one of those roles.
-  The hidden paths here are `optimize.toml`, a `[metric] files` path, the
+  The hidden paths here are `ascent.toml`, a `[metric] files` path, the
   exploits folder, the reference and the cases file.
 - The `[run] entry` names a file that is in the hidden list or inside one
-  of its paths. This includes `optimize.toml`, the `[metric] illegal` file
+  of its paths. This includes `ascent.toml`, the `[metric] illegal` file
   and the `[metric] mcp` file.
 - An editable path is in the hidden list or inside one of its paths. This
-  also includes `optimize.toml`, the `[metric] illegal` file and the
+  also includes `ascent.toml`, the `[metric] illegal` file and the
   `[metric] mcp` file.
 
 An `mcp` file that a visible role also names is not hidden, so the
@@ -578,10 +578,10 @@ The strip matches names, so a link would leave its target in the agent's
 tree.
 
 The run stops before any model is called when the agent's tree still holds
-a hidden file. A version's edit to a hidden path, `optimize.toml` included,
+a hidden file. A version's edit to a hidden path, `ascent.toml` included,
 is dropped from the result.
 
-The optimization agent never reads `optimize.toml`. It reads its brief,
+The optimization agent never reads `ascent.toml`. It reads its brief,
 which holds:
 
 - The editable paths.
@@ -969,7 +969,7 @@ catch the failure in the program, as above, and let the metric score it.
 | Setting | Enforcement |
 | --- | --- |
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
-| `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
+| `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `ascent.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
 | `[proposer] entry`, `[proposer] setup` | The command runs as the run's proposer, in the proposer's box, in the repository checkout, under the `[proposer]` rules. The repository files that `entry` and `setup` name by exact path are protected. Put the proposer's folder in `[paths] protected` to protect the files that it imports. A proposer that the run names replaces it. Only a single AutoResearch or Meta-Harness run can use it today; every other run refuses it. |
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
@@ -1030,9 +1030,9 @@ catch the failure in the program, as above, and let the metric score it.
   so name the files or folders.
 - An empty `[paths] editable` list, or protected paths that cover every
   editable path. Such a run could not change anything. This includes a run
-  without the file whose only approved editable path is `optimize.toml`,
-  because `optimize.toml` is always protected.
-- An `optimize.toml` that is a link or a folder, or a file larger than 64 KiB.
+  without the file whose only approved editable path is `ascent.toml`,
+  because `ascent.toml` is always protected.
+- An `ascent.toml` that is a link or a folder, or a file larger than 64 KiB.
 - An `instructions` or `illegal` path that is absolute, leaves the
   repository, or names no file. A rule file that is a link or a folder, is
   larger than 32 KiB, or is not UTF-8 text. An empty instructions file, or
@@ -1091,7 +1091,7 @@ mcp = "eval/.mcp.json"
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
-  servers. Skynet reads the files from the same commit as `optimize.toml`,
+  servers. Skynet reads the files from the same commit as `ascent.toml`,
   checks them with the same secret rules, lists their servers in the
   environment record, and protects them like rule files.
 - A `[target.<name>]` stage reaches the servers of its own `mcp` file

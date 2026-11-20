@@ -130,7 +130,7 @@ CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
 # so a created repository does not fill with branches nobody reads.
 MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
-UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove the uploaded cases."
+UPLOADED_CASES_REFUSED = "This repo defines its cases in ascent.toml. Remove the uploaded cases."
 # Rules the run is held to; a resumed run must arrive at exactly these again.
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules", "outcome")
 # Environments recorded before a field existed hold its empty value.
@@ -208,7 +208,7 @@ class StagedRepository:
     # The setup draft's files, kept in the parent only: the guest gets them
     # inside the packed tree, never as a list, as a draft can be a hidden path.
     drafts: Mapping[str, str] = field(default_factory=dict)
-    # Whether staging refused an optimize.toml with no version. Every later read
+    # Whether staging refused an ascent.toml with no version. Every later read
     # of this tree uses the same rule, so one pass never reads the file two ways.
     require_version: bool = True
     # The run record's hashes and metric source, taken from the staged tree the
@@ -275,7 +275,7 @@ def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
 
 
 def hidden_path_labels(constraints: RepoConstraints | None) -> dict[str, str]:
-    """Name the ``optimize.toml`` setting that hides each scoring-side path (SKY-446).
+    """Name the ``ascent.toml`` setting that hides each scoring-side path (SKY-446).
 
     A leak report then names the setting a user must fix, not always
     ``[metric] files``. A path that two settings name keeps the first label.
@@ -358,7 +358,7 @@ def stage_repository(
 
     A run with a recorded environment, or a ``started`` job, already passed
     its first staging, maybe before ``version`` was required (SKY-690). Its
-    commit's ``optimize.toml`` then reads a missing ``version`` as 1.
+    commit's ``ascent.toml`` then reads a missing ``version`` as 1.
 
     Args:
         payload: Parent payload whose secrets are still vault references.
@@ -366,7 +366,7 @@ def stage_repository(
         binding_id: Execution budget the vaulted secrets are bound to.
         engine: SQLAlchemy engine for the vaults.
         require_constraints: Refuse a new run whose tree and drafts have no
-            ``optimize.toml``. A run that recorded its environment before keeps going.
+            ``ascent.toml``. A run that recorded its environment before keeps going.
         started: Whether the caller's job already started; a hardening job
             records no environment.
 
@@ -377,7 +377,7 @@ def stage_repository(
         ``target.repo.environment``, plus the staged tree and secrets for the parent.
 
     Raises:
-        ConstraintsError: When the repository's ``optimize.toml`` is invalid or
+        ConstraintsError: When the repository's ``ascent.toml`` is invalid or
             missing for a new run that requires it, asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
             uploads cases and the repository defines its own in ``[data] cases``,
@@ -391,7 +391,7 @@ def stage_repository(
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
     require_version = not started and not isinstance(repo.get(ENVIRONMENT_KEY), dict)
-    # The guest receives this payload, and a draft (often optimize.toml) can be
+    # The guest receives this payload, and a draft (often ascent.toml) can be
     # a hidden scoring path, so only the parent keeps the drafts.
     drafts = dict(repo.pop("draft_files", None) or {})
     draft_base = repo.pop("draft_base", None)
@@ -430,7 +430,7 @@ def stage_repository(
                 raise
             raise _anonymous_fetch_error(error, provider) from error
         # The setup draft's files replace the commit's, so every box and the
-        # draft's optimize.toml see the tree the user set up.
+        # draft's ascent.toml see the tree the user set up.
         try:
             apply_to_archive(snapshot.archive, drafts, snapshot.readonly_paths)
         except DraftFileError as error:
@@ -1050,7 +1050,7 @@ def _rule_judge(
         managed_key: The platform's OpenRouter key, or ``""`` when not configured.
 
     Returns:
-        The enforcement, or ``None`` when the repository has no ``optimize.toml``.
+        The enforcement, or ``None`` when the repository has no ``ascent.toml``.
 
     Raises:
         ConstraintsError: When the watch hook setting is invalid, or the hook
@@ -1404,7 +1404,7 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
     """Replace every version a finished result records with the change the scorer scored.
 
     Serving, download and publishing all read these fields, so a version's
-    edit to a hidden path, ``optimize.toml`` included, never leaves the run
+    edit to a hidden path, ``ascent.toml`` included, never leaves the run
     (SKY-353, E62).
 
     Args:
@@ -1560,7 +1560,7 @@ def _record_facts(
 
     Args:
         archive: The staged tree, after the draft files apply.
-        contract_sha256: SHA-256 of the ``optimize.toml`` bytes the run read.
+        contract_sha256: SHA-256 of the ``ascent.toml`` bytes the run read.
         metric_files: The ``[metric] files`` paths, files or folders.
         metric_entry: The ``[metric] entry``: ``"path.py:function"`` or a command list.
         metric_code: The request's metric code; a command entry does not use it.
@@ -1692,7 +1692,7 @@ def add_run_record(
     sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
     is true when no rule failed, also when the file sets no target and no
-    limit. A run with no ``optimize.toml``, a result with no ``details``, a
+    limit. A run with no ``ascent.toml``, a result with no ``details``, a
     run with cases whose guest wrote no split positions (an older image), or a
     guest split or verdict of another shape gets no record. A verdict whose
     keys do not match the file's own rules in the staged snapshot also gets

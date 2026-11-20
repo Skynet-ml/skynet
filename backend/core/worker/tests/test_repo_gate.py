@@ -1,4 +1,4 @@
-"""Tests for the preflight gate that refuses optimize.toml settings a run's sandbox cannot give."""
+"""Tests for the preflight gate that refuses ascent.toml settings a run's sandbox cannot give."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def test_a_file_with_no_version_fails_unless_the_run_started(tmp_path: Path) -> 
 
 
 def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
-    """No optimize.toml asks for nothing."""
+    """No ascent.toml asks for nothing."""
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []
 
 
@@ -117,7 +117,7 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             key="[services.maps] secrets",
             place="cloud",
             reason=(
-                "The service maps in optimize.toml needs the secret GOOGLE_MAPS_API_KEY, but this run has "
+                "The service maps in ascent.toml needs the secret GOOGLE_MAPS_API_KEY, but this run has "
                 "no secret with that name. Add the secret to the run or remove the name from the file."
             ),
             code=I18nKey.REPO_GATE_MISSING_SECRET,
@@ -661,7 +661,7 @@ def test_a_metric_path_that_matches_no_file_fails(tmp_path: Path) -> None:
 
 
 def test_each_leak_names_the_setting_of_its_hidden_path(tmp_path: Path) -> None:
-    """A leaked ``optimize.toml`` or cases file names its own setting, not ``[metric] files`` (SKY-446)."""
+    """A leaked ``ascent.toml`` or cases file names its own setting, not ``[metric] files`` (SKY-446)."""
     files = {CONSTRAINTS_FILE: b"v\n", "data/cases.jsonl": b"{}\n", "eval/metric.py": b"m\n", "src/app.py": b"x\n"}
     original = _archive(tmp_path, files)
     (tmp_path / "agent").mkdir()
@@ -711,7 +711,7 @@ cases = "data/cases.jsonl"
 
 
 def test_hidden_path_labels_names_the_setting_of_every_hidden_path() -> None:
-    """Each scoring-side path maps to the ``optimize.toml`` setting that hides it (SKY-446)."""
+    """Each scoring-side path maps to the ``ascent.toml`` setting that hides it (SKY-446)."""
     constraints = parse_constraints(_LABELLED_TOML)
 
     assert hidden_path_labels(constraints) == {
@@ -764,8 +764,8 @@ def test_a_staged_leak_carries_the_label_from_hidden_path_labels(tmp_path: Path)
 @pytest.mark.parametrize(
     ("visible", "hidden"),
     [
-        (".mcp.json", ("optimize.toml", ".optimize/exploits")),
-        (".MCP.json", ("optimize.toml", ".optimize/exploits", ".mcp.json")),
+        (".mcp.json", ("ascent.toml", ".optimize/exploits")),
+        (".MCP.json", ("ascent.toml", ".optimize/exploits", ".mcp.json")),
     ],
     ids=["exact-case", "case-variant"],
 )

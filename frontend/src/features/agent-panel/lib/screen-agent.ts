@@ -122,11 +122,11 @@ export type ScreenNav =
 export interface ScreenNavigator {
   /** The screen on view. */
   screen: string;
-  /** The Continue button's handler, without its optimize.toml check: the server holds the agent's moves on that check. */
+  /** The Continue button's handler, without its ascent.toml check: the server holds the agent's moves on that check. */
   forward: () => void;
   /** Jump back to an earlier screen. */
   goToScreen: (screen: string) => void;
-  /** Jump forward to a later screen; the Continue button's checks, except the optimize.toml check, still apply. */
+  /** Jump forward to a later screen; the Continue button's checks, except the ascent.toml check, still apply. */
   goForwardTo: (screen: string) => void;
 }
 

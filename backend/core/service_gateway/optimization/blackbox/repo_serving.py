@@ -151,7 +151,7 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
-        ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown,
+        ConstraintsError: When the commit's ``ascent.toml`` is invalid, so the hidden list is unknown,
             or a hidden path is, holds or lies inside a link, so the strip cannot remove it,
             or a draft file of the run cannot be written over the tree.
     """

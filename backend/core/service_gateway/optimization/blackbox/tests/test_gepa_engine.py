@@ -910,7 +910,7 @@ def test_the_proposer_writes_a_path_that_only_starts_like_the_exploits_folder(tm
 def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
     monkeypatch: pytest.MonkeyPatch, stores: _Stores, tmp_path: Path
 ) -> None:
-    """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``optimize.toml`` to the engine.
+    """On the loop, no ``ls``, ``read``, shell ``cat`` or write shows ``eval/`` or ``ascent.toml`` to the engine.
 
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
@@ -932,13 +932,13 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
         "```ls\n```",
         "```ls\neval\n```",
         "```read\neval/metric.py\n```",
-        "```read\noptimize.toml\n```",
-        "```sh\ncat eval/metric.py optimize.toml\n```",
-        _file("optimize.toml"),
+        "```read\nascent.toml\n```",
+        "```sh\ncat eval/metric.py ascent.toml\n```",
+        _file("ascent.toml"),
         "no block",
     ]
     calls = _FakeCalls(replies)
-    hidden = hidden_hashes(["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval", "ascent.toml"])
     loop = EngineLoop(
         run,
         engine=stores.engine,
@@ -951,7 +951,7 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
         hidden_hashes=hidden,
     )
     raw_tree = _store(
-        stores.trees, {"answer.txt": b"a\n", "eval/metric.py": metric.encode(), "optimize.toml": config.encode()}
+        stores.trees, {"answer.txt": b"a\n", "eval/metric.py": metric.encode(), "ascent.toml": config.encode()}
     )
     ctx = loop.context(repo_seed=RepoSeed(raw_tree, editable_paths=("answer.txt",), hidden_hashes=hidden))
     assert ctx.repo_seed is not None
@@ -966,10 +966,10 @@ def test_a_hidden_file_reaches_the_proposer_through_no_tool_on_a_real_loop(
     assert notes[0] == "Files (1):\nanswer.txt"
     assert notes[1] == "'eval' is not a folder of the current version."
     assert notes[2] == "'eval/metric.py' is not a file of the current version."
-    assert notes[3] == "'optimize.toml' is not a file of the current version."
+    assert notes[3] == "'ascent.toml' is not a file of the current version."
     assert notes[4].startswith("Exit code ")
     assert not notes[4].startswith("Exit code 0.")
-    assert notes[5] == "The files break the editing rules: 'optimize.toml' is outside the editable paths."
+    assert notes[5] == "The files break the editing rules: 'ascent.toml' is outside the editable paths."
     assert all(metric not in note and config not in note for note in calls.prompts)
     assert counter["opened"] == 1
 
@@ -1051,9 +1051,9 @@ def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -
     seed = RepoSeed(
         "tree-seed",
         editable_paths=("answer.txt", "eval/cases"),
-        constrained_paths=("optimize.toml", "src/rules.toml"),
+        constrained_paths=("ascent.toml", "src/rules.toml"),
         readonly_paths=("eval/data", "vendor"),
-        hidden_hashes=hidden_hashes(["optimize.toml", "eval"]),
+        hidden_hashes=hidden_hashes(["ascent.toml", "eval"]),
     )
     proposer = gepa_mod._LoopRepoProposer.bind(calls.ctx(tmp_path, repo_seed=seed), Task(""))
     assert proposer is not None
@@ -1062,7 +1062,7 @@ def test_the_brief_names_no_hidden_protected_or_read_only_path(tmp_path: Path) -
     assert "You may change: `answer.txt`. Leave everything else as it is." in calls.prompts[0]
     assert "The repository rules protect: src/rules.toml." in calls.prompts[0]
     assert "Submodules and Git LFS files stay as fetched: vendor." in calls.prompts[0]
-    assert "optimize.toml" not in calls.prompts[0]
+    assert "ascent.toml" not in calls.prompts[0]
     assert "eval/" not in calls.prompts[0]
 
 

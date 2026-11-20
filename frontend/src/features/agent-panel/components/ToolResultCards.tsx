@@ -462,7 +462,7 @@ export function RepoFolderCard({ call }: { call: AgentToolCall }) {
 
 /**
  * ``write_workspace_file`` and ``edit_workspace_file``: the file and the
- * lines the call added and removed. Opens to the ``optimize.toml`` error when
+ * lines the call added and removed. Opens to the ``ascent.toml`` error when
  * the parser found one, then the lines the call wrote.
  */
 export function WorkspaceWriteCard({ call }: { call: AgentToolCall }) {
@@ -1238,7 +1238,7 @@ export function TaggingGuideCard({ call }: { call: AgentToolCall }) {
   );
 }
 
-/** ``check_setup``: whether ``optimize.toml`` is valid. Opens to each error and its place. */
+/** ``check_setup``: whether ``ascent.toml`` is valid. Opens to each error and its place. */
 export function SetupCheckCard({ call }: { call: AgentToolCall }) {
   const check = useResult(call, setupCheck);
   return (

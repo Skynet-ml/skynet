@@ -242,7 +242,7 @@ test("a CLI picked on a clone goes out as a pick, without the server's filled-in
 });
 
 test("a repository run clone keeps the setup draft's files", () => {
-  const drafts = { "optimize.toml": "version = 1\n", "src/app.py": "x = 2\n" };
+  const drafts = { "ascent.toml": "version = 1\n", "src/app.py": "x = 2\n" };
   const target = {
     ...LEGACY_REPO_RUN.target,
     repo: { ...LEGACY_REPO_RUN.target.repo, draft_files: drafts },

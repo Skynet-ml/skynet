@@ -24,7 +24,7 @@ function catalogOption(state: WizardV2State, catalog: OptimizerCatalogResponse |
 
 /**
  * The message key (or exact text) of what blocks one step; null when it is complete.
- * `metricCommand` is the command that the run's optimize.toml names in
+ * `metricCommand` is the command that the run's ascent.toml names in
  * `[metric] entry`, from the contract check; null for a Python entry or none.
  */
 export function computeStepIssue(

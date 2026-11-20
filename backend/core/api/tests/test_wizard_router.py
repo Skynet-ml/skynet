@@ -264,9 +264,9 @@ entry = "src/run.py:main"
 """
 
 
-def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
+def test_a_valid_ascent_toml_checks_ok(wizard_client: TestClient) -> None:
     """A file the parser accepts comes back ok with no errors."""
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML})
 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "errors": [], "metric_command": None, "proposer_command": None}
@@ -287,7 +287,7 @@ def test_the_check_names_the_metric_command_only_for_a_command_entry(
     wizard_client: TestClient, metric: str, command: list[str] | None
 ) -> None:
     """A command ``[metric] entry`` comes back as its argv; a Python entry or none gives null (SKY-770)."""
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML + metric})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _VALID_TOML + metric})
 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "errors": [], "metric_command": command, "proposer_command": None}
@@ -296,7 +296,7 @@ def test_the_check_names_the_metric_command_only_for_a_command_entry(
 def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
     """A file the parser refuses names no command, so the wizard still asks for metric.py (SKY-770)."""
     text = _VALID_TOML + '[metric]\nentry = ["bash", "metric.sh"]\n'
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is False
@@ -306,7 +306,7 @@ def test_a_bad_file_names_no_metric_command(wizard_client: TestClient) -> None:
 def test_the_check_names_the_proposer_command_of_the_file(wizard_client: TestClient) -> None:
     """A ``[proposer] entry`` comes back as its argv, so the picker offers it first (SKY-771)."""
     text = _VALID_TOML + '[proposer]\nentry = ["python", "agent/propose.py"]\n'
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     assert resp.json() == {
@@ -320,7 +320,7 @@ def test_the_check_names_the_proposer_command_of_the_file(wizard_client: TestCli
 def test_a_bad_file_names_no_proposer_command(wizard_client: TestClient) -> None:
     """A file the parser refuses names no proposer, so the picker stays as it is (SKY-771)."""
     text = 'version = 1\n[proposer]\nentry = ["python", "agent/propose.py"]\n'
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is False
@@ -342,11 +342,11 @@ def test_a_bad_file_names_no_proposer_command(wizard_client: TestClient) -> None
         ("[paths\n", None, None, "is not valid TOML"),
     ],
 )
-def test_a_bad_optimize_toml_returns_the_error_and_its_place(
+def test_a_bad_ascent_toml_returns_the_error_and_its_place(
     wizard_client: TestClient, text: str, section: str | None, key: str | None, message: str
 ) -> None:
     """A parser error comes back with the section and key the editor shows it next to."""
-    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -359,7 +359,7 @@ def test_a_bad_optimize_toml_returns_the_error_and_its_place(
 def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:
     """JSON can carry a lone surrogate that UTF-8 cannot encode; the parser refuses it as bad text."""
     body = '{"text": "instructions = \\"\\ud800\\"\\n"}'
-    resp = wizard_client.post("/wizard/optimize-toml/check", content=body, headers={"content-type": "application/json"})
+    resp = wizard_client.post("/wizard/ascent-toml/check", content=body, headers={"content-type": "application/json"})
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is False

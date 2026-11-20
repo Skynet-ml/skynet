@@ -15,7 +15,7 @@ import { toast } from "react-toastify";
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
-import { checkOptimizeToml } from "@/shared/lib/api";
+import { checkAscentToml } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -66,7 +66,7 @@ const SHORTFALL_TOAST_ID = "submit-budget-shortfall";
 // A stalled check must not hold Continue silently; the timeout shows a toast.
 const SETUP_CHECK_TIMEOUT_MS = 15_000;
 const SETUP_CHECK_TOAST_ID = "submit-setup-check";
-const OPTIMIZE_TOML = "optimize.toml";
+const ASCENT_TOML = "ascent.toml";
 
 // A second failed press shows its own error, not the first one's.
 function setupToast(text: string) {
@@ -191,11 +191,11 @@ function UnifiedWizardFrame() {
     (beforeMetric || (LIMIT_SCREENS as readonly string[]).includes(visibleScreen));
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   if (waitingOn !== null && waitingOn !== visibleScreen) setWaitingOn(null);
-  // A repository run's optimize.toml must parse before the user leaves the
+  // A repository run's ascent.toml must parse before the user leaves the
   // code screen. The server holds the agent's own moves on the same check.
   const setupText =
     visibleScreen === "metric" && w.state.task.repo
-      ? (w.state.workspace.files[OPTIMIZE_TOML] ?? "")
+      ? (w.state.workspace.files[ASCENT_TOML] ?? "")
       : "";
   // Every new run needs a contract (SKY-693). Only a repository read that found
   // no file holds here. With no Changes pane, a read still loading, or a read
@@ -204,7 +204,7 @@ function UnifiedWizardFrame() {
   const noContract =
     visibleScreen === "metric" &&
     !!w.state.task.repo &&
-    contractMissing(setupText, repoBase?.get(OPTIMIZE_TOML));
+    contractMissing(setupText, repoBase?.get(ASCENT_TOML));
   const screenRef = useRef(visibleScreen);
   const setupTextRef = useRef(setupText);
   useLayoutEffect(() => {
@@ -231,7 +231,7 @@ function UnifiedWizardFrame() {
           withoutFile();
           return Promise.resolve();
         }
-        return checkOptimizeToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
+        return checkAscentToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
           (result) => {
             if (screenRef.current !== screen) return;
             // The file changed while the check ran, so its answer is stale.

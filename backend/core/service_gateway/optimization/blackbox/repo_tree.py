@@ -45,7 +45,7 @@ ILLEGAL_ACTION_MESSAGE = (
     " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
-PATH_RULE = "optimize.toml [paths]"
+PATH_RULE = "ascent.toml [paths]"
 
 
 def rule_block_record(reason: str) -> dict[str, Any]:

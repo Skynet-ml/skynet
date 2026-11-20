@@ -323,7 +323,7 @@ def test_the_setup_check_gates_secret_bindings_and_allowed_hosts(
     """The setup check reads bindings and allowed hosts before staging empties the secret list (E50, E52)."""
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(_MAPS_TOML)
         packed.addfile(info, io.BytesIO(_MAPS_TOML))
 

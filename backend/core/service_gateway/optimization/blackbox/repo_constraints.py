@@ -1,4 +1,4 @@
-"""Read a repository's ``optimize.toml`` and work out the environment its run gets.
+"""Read a repository's ``ascent.toml`` and work out the environment its run gets.
 
 The file travels with the repository, so anyone who can push to it wrote it.
 It may only narrow what the customer approved: it can shrink the editable
@@ -13,7 +13,7 @@ plain-language rules that judge models check during the run and on every
 version before it is scored. Not enforced: the top-level ``instructions``
 path, a text file the agent reads as guidance only. Rule text lives in those
 files, not in the toml (E48), and every file they name is protected like
-``optimize.toml`` itself, so no version can rewrite its own rules.
+``ascent.toml`` itself, so no version can rewrite its own rules.
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (mcp, network, services, and for a target its entry,
@@ -74,10 +74,10 @@ from urllib.parse import urlsplit
 
 from ....sandbox.services import ComposeError, ComposeService, parse_compose
 
-CONSTRAINTS_FILE = "optimize.toml"
+CONSTRAINTS_FILE = "ascent.toml"
 # Every new run needs a contract (SKY-693); the setup screen, the MCP contract step and staging all say this.
 CONSTRAINTS_REQUIRED = (
-    "The run needs an optimize.toml contract. Add optimize.toml to the repository,"
+    "The run needs an ascent.toml contract. Add ascent.toml to the repository,"
     " or write it on the Metric screen or with repo_draft_set_contract."
 )
 _MAX_FILE_BYTES = 64 * 1024
@@ -1516,7 +1516,7 @@ def _refuse_hidden_visible_files(
     rule file would be stripped and the brief would name a hidden path.
 
     Args:
-        scoring: ``optimize.toml`` and the paths from ``_scoring_paths``.
+        scoring: ``ascent.toml`` and the paths from ``_scoring_paths``.
         visible: Each visible file setting and its path, or ``None`` when unset.
         run_entry: The ``[run]`` entry, or ``None``.
         metric_only: The ``[metric] illegal`` and ``mcp`` files that no visible setting names.
@@ -2300,13 +2300,13 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
 
     A path that a visible role also names, such as one ``.mcp.json`` for
     ``[run]`` and ``[metric]``, stays visible, because hiding it would break
-    that role. ``optimize.toml`` is always hidden: it names every hidden path.
+    that role. ``ascent.toml`` is always hidden: it names every hidden path.
 
     Args:
         constraints: The repository's validated constraints.
 
     Returns:
-        ``optimize.toml``, the ``[metric]`` files, exploit folder, reference,
+        ``ascent.toml``, the ``[metric]`` files, exploit folder, reference,
         rule file and ``mcp`` file, and the ``[data] cases`` file, without
         the keys the file does not set.
     """
@@ -2451,7 +2451,7 @@ def effective_environment(
 def instructions_brief(environment: RepoEnvironment, hidden_paths: Collection[str]) -> str:
     """Write the repository's rules as text the optimization agent reads.
 
-    The agent never sees ``optimize.toml`` or the scorer's files, so this
+    The agent never sees ``ascent.toml`` or the scorer's files, so this
     brief is its only copy of the rules, and it names no hidden path (E61).
 
     Args:

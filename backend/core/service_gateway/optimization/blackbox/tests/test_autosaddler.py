@@ -471,14 +471,14 @@ def test_a_hidden_path_is_not_visible_to_the_engine(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    hidden = hidden_hashes(["eval", "optimize.toml"])
+    hidden = hidden_hashes(["eval", "ascent.toml"])
     loop, _ = _loop(owner, engine, step_log, trees, tmp_path, generation=1, hidden=hidden)
     # put_files refuses a hidden path, so the test stores the seed straight in the tree store, as the run does.
     tree = trees.put_tree(
         RUN_ID,
         [
             TreeEntry("eval", "tree", _tree(trees, "metric.py", "secret")),
-            TreeEntry("optimize.toml", "file", trees.put_blob(RUN_ID, b"secret")),
+            TreeEntry("ascent.toml", "file", trees.put_blob(RUN_ID, b"secret")),
             TreeEntry("src", "tree", _tree(trees, "a.py", "a")),
         ],
     )

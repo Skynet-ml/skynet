@@ -100,7 +100,7 @@ curl https://api.skynetml.com/blackbox/run \
 }
 ```
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -113,7 +113,7 @@ entry = "serve.py:serve"
 - ‏`target.repo.editable_paths` מפרט את הקבצים והתיקיות שהאופטימייזר רשאי לשנות. ‏`"."` פירושו כל המאגר.
 - ‏`target.repo.commit` הוא אופציונלי. זה SHA באורך 40 תווים. בלעדיו, Skynet משתמש בקומיט האחרון בענף.
 - ‏`target.repo.secrets` הוא אופציונלי. לכל סוד יש `name` ו-`value`. הסוד מגיע לקוד שלך או לפונקציית הניקוד שלך רק דרך כותרת של `[services.<name>]` או דרך שרת בקובץ ה-`mcp` של התפקיד, אף פעם לא כמשתנה סביבה.
-- ‏`scorer.metric_code` מגדיר `score(repo_path, case, output=None)`. ‏`output` הוא מה שה-`entry` של `[run]` החזיר עבור המקרה. הלשונית `optimize.toml` מציגה את ה-`entry` של `[run]` במאגר של הדוגמה. ‏`scorer.model` הוא המודל שהקוד שלך ופונקציית הניקוד שלך יכולים לקרוא לו דרך שער המודלים.
+- ‏`scorer.metric_code` מגדיר `score(repo_path, case, output=None)`. ‏`output` הוא מה שה-`entry` של `[run]` החזיר עבור המקרה. הלשונית `ascent.toml` מציגה את ה-`entry` של `[run]` במאגר של הדוגמה. ‏`scorer.model` הוא המודל שהקוד שלך ופונקציית הניקוד שלך יכולים לקרוא לו דרך שער המודלים.
 - ‏`strategy.mode` הוא `auto` (ברירת המחדל) או `single`. עם `single`, הגדר/י את `strategy.engine` לשם של מנוע אחד מ-`GET /blackbox/engines`.
 - `max_cost_cents` היא תקרת ההוצאה של הריצה הזו, בסנטים אמריקאיים.
 - `is_private` הוא `false` כברירת מחדל. הגדר/י אותו ל-`true` כדי לשמור על הריצה פרטית.

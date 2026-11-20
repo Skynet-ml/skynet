@@ -1,4 +1,4 @@
-"""Refuse a repository run whose ``optimize.toml`` asks for what its sandbox cannot give.
+"""Refuse a repository run whose ``ascent.toml`` asks for what its sandbox cannot give.
 
 A setting the run ignores would look like protection the user does not get,
 for example an offline proposer that still has open egress. The gate runs in
@@ -105,7 +105,7 @@ _UNENFORCED_CODE: dict[Place, I18nKey] = {
 
 @dataclass(frozen=True)
 class GateFailure:
-    """One reason the run cannot start: the ``optimize.toml`` key, the place, and why."""
+    """One reason the run cannot start: the ``ascent.toml`` key, the place, and why."""
 
     key: str
     place: Place
@@ -149,7 +149,7 @@ def check_repository(
     allowed_hosts: Mapping[str, Collection[str]] | None = None,
     require_version: bool = True,
 ) -> list[GateFailure]:
-    """List every reason the repository's ``optimize.toml`` stops this run.
+    """List every reason the repository's ``ascent.toml`` stops this run.
 
     The role MCP files are read from the same snapshot as the toml (E49).
 
@@ -268,7 +268,7 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
         name: The secret's name.
         host: The one host that receives the secret.
         allowed: The secret's allowed hosts.
-        setting: The ``optimize.toml`` setting that uses the secret.
+        setting: The ``ascent.toml`` setting that uses the secret.
         place: Where the run's sandbox runs.
 
     Returns:
@@ -335,7 +335,7 @@ def check_hidden(
         place: Where the run's sandbox runs.
         optional_paths: Hidden paths that may match no file, such as the
             exploit folder.
-        labels: The ``optimize.toml`` setting that names each hidden path;
+        labels: The ``ascent.toml`` setting that names each hidden path;
             a path it does not hold is labelled ``[metric] files``.
 
     Returns:
@@ -532,7 +532,7 @@ def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFa
     """Build one failure with its English reason and catalog code.
 
     Args:
-        setting: The ``optimize.toml`` setting that fails.
+        setting: The ``ascent.toml`` setting that fails.
         place: Where the run's sandbox runs.
         code: Catalog key of the message.
         **params: The message's placeholder values.

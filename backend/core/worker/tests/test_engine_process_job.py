@@ -1215,7 +1215,7 @@ def test_the_run_gate_reads_secret_bindings_and_allowed_hosts_before_staging(
     """The run gate gets the bindings and allowed hosts that staging removes from the payload (E50, E52)."""
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(_MAPS_TOML)
         packed.addfile(info, io.BytesIO(_MAPS_TOML))
     request = BlackboxRunRequest(
@@ -1293,7 +1293,7 @@ def test_the_run_gate_reads_a_started_run_file_with_no_version(
     raw = b"[paths]\neditable = ['src']\n[run]\nentry = 'run.py:main'\n"
     archive = tmp_path / "tree.tgz"
     with tarfile.open(archive, "w:gz") as packed:
-        info = tarfile.TarInfo("optimize.toml")
+        info = tarfile.TarInfo("ascent.toml")
         info.size = len(raw)
         packed.addfile(info, io.BytesIO(raw))
     request = BlackboxRunRequest(

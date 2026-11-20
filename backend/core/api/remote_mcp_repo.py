@@ -58,7 +58,7 @@ from ..models.blackbox import (
     BlackboxRepoSource,
     BlackboxRunRequest,
 )
-from ..service_gateway.agents.workspace_tools import METRIC_GUIDE, OPTIMIZE_TOML_EXAMPLE, optimize_toml_error
+from ..service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE, ascent_toml_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
@@ -215,7 +215,7 @@ def _remaining(spec: dict[str, Any]) -> list[str]:
     """List the required steps the draft does not have yet.
 
     The contract step is required until the repository step finds an
-    ``optimize.toml`` in the repository, so a draft with no repository step
+    ``ascent.toml`` in the repository, so a draft with no repository step
     needs it. ``None`` means unknown: the tree was too large to list whole, or
     the draft is older than the field. Then the step is not required here, and
     the review reads the tree for the file.
@@ -226,7 +226,7 @@ def _remaining(spec: dict[str, Any]) -> list[str]:
     Returns:
         The missing required steps, in step order.
     """
-    repo_file = spec["repository"].get("has_optimize_toml") if spec.get("repository") else False
+    repo_file = spec["repository"].get("has_ascent_toml") if spec.get("repository") else False
     return [
         step for step in _REQUIRED_STEPS if step not in spec and not (step == "contract" and repo_file is not False)
     ]
@@ -296,7 +296,7 @@ def repository_issues(
 
     Returns:
         The issues, the notes, a sample of the repository's top-level paths, and
-        whether the repository has an ``optimize.toml`` (``None`` when unknown).
+        whether the repository has an ``ascent.toml`` (``None`` when unknown).
     """
     provider = repo_hosts.provider_of(repo)
     host = label(provider)
@@ -350,7 +350,7 @@ def case_shape_issues(cases: list[dict[str, Any]]) -> list[str]:
 
 
 def draft_metric_entry(spec: dict[str, Any]) -> str | tuple[str, ...] | None:
-    """Read the ``[metric] entry`` of the draft's own ``optimize.toml``.
+    """Read the ``[metric] entry`` of the draft's own ``ascent.toml``.
 
     Args:
         spec: The whole draft.
@@ -359,11 +359,11 @@ def draft_metric_entry(spec: dict[str, Any]) -> str | tuple[str, ...] | None:
         The entry, or ``None`` when the draft has no valid contract, as the
         repository's own file is not read here.
     """
-    contract = spec.get("contract")
-    if not contract:
+    text = (spec.get("contract") or {}).get("ascent_toml")
+    if not text:
         return None
     try:
-        return parse_constraints(str(contract["optimize_toml"]).encode("utf-8", "surrogatepass")).metric.entry
+        return parse_constraints(str(text).encode("utf-8", "surrogatepass")).metric.entry
     except ConstraintsError:
         return None
 
@@ -411,7 +411,7 @@ def scorer_issues(
         has_cases: Whether the draft has data, so the scorer can get a case.
         function: The function that ``[metric] entry`` names. ``None`` and
             ``score``, the default entry's function, keep the default lookup.
-        entry_known: ``False`` when the draft has no ``optimize.toml`` of its
+        entry_known: ``False`` when the draft has no ``ascent.toml`` of its
             own. The repository's file can then name another function, so a
             missing default function is a note, not an issue.
 
@@ -718,7 +718,8 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
     data = spec.get("data") or {}
     models = spec["models"]
     scorer = spec["scorer"]
-    contract = spec.get("contract")
+    # A draft stored before SKY-746 keeps its text under the old key; it reads as no draft contract.
+    contract = (spec.get("contract") or {}).get("ascent_toml")
     entries = _model_entries(models)
     extra_count = len(models.get("extra_models", []))
     body: dict[str, Any] = {
@@ -750,7 +751,7 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
                 # commit is the tree the agent wrote it for, a branch has none.
                 **(
                     {
-                        "draft_files": {CONSTRAINTS_FILE: contract["optimize_toml"]},
+                        "draft_files": {CONSTRAINTS_FILE: contract},
                         "draft_base": spec["repository"].get("commit"),
                         "contract_source": "mcp",
                     }
@@ -819,7 +820,7 @@ def _missing_step_issue(step: str) -> str:
 
 
 def contract_issues(text: str) -> tuple[list[str], list[str]]:
-    """Parse the contract step's ``optimize.toml`` the way a run reads it.
+    """Parse the contract step's ``ascent.toml`` the way a run reads it.
 
     Args:
         text: The file text.
@@ -827,7 +828,7 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
     Returns:
         The parser's first error as an issue, and the notes.
     """
-    error = optimize_toml_error(text)
+    error = ascent_toml_error(text)
     if error is not None:
         return [error["message"]], []
     return [], [f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged."]
@@ -852,8 +853,8 @@ def review_draft(
         return [_missing_step_issue(step) for step in missing], [], {}
     repo_problems, notes, _top, has_contract = repository_issues(job_store, user.username, spec["repository"])
     issues = list(repo_problems)
-    if spec.get("contract"):
-        issues += contract_issues(spec["contract"]["optimize_toml"])[0]
+    if contract := (spec.get("contract") or {}).get("ascent_toml"):
+        issues += contract_issues(contract)[0]
     elif has_contract is False:
         issues.append(_missing_step_issue("contract"))
     data = spec.get("data") or {}
@@ -1348,7 +1349,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Start a repository run draft. This is the first step of a repository optimization.
 
         The steps follow the run wizard: repository, data (optional), scorer,
-        contract (unless the repository has an optimize.toml), models, engine,
+        contract (unless the repository has an ascent.toml), models, engine,
         budget (optional), then review and submit. Every step
         answers with the issues it found and the next tool to call.
         """
@@ -1417,7 +1418,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         # The contract step is required only without a repository file, so the
         # draft keeps what the host showed; a review reads the tree again.
         try:
-            issues, notes, top_level, part["has_optimize_toml"] = repository_issues(
+            issues, notes, top_level, part["has_ascent_toml"] = repository_issues(
                 job_store, _user(SCOPE_WRITE).username, part
             )
         except DomainError as error:
@@ -1491,10 +1492,10 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             str,
             Field(
                 max_length=200_000,
-                description="Leave empty when the optimize.toml [metric] entry is a command, such as "
+                description="Leave empty when the ascent.toml [metric] entry is a command, such as "
                 'entry = ["./metric.sh"]: the metric box runs that command. Otherwise Python that defines '
                 "score(repo_path), score(repo_path, case) or "
-                "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
+                "score(repo_path, case, output=None), where output is what the ascent.toml [run] entry "
                 "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
                 "entry's run time in seconds, which Skynet measures outside the version's code. It returns one "
                 "object: {'score': float, 'feedback': str, 'scores': {name: {'score': float, 'feedback': str}}}. "
@@ -1518,46 +1519,46 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
 
     @mcp.tool(name="repo_draft_contract_guide", annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     def repo_draft_contract_guide() -> dict[str, Any]:
-        """Return the guide to the optimize.toml contract and a valid example file. It changes nothing.
+        """Return the guide to the ascent.toml contract and a valid example file. It changes nothing.
 
         Read it before repo_draft_set_contract.
         """
         _user(SCOPE_READ)
         return {
             "note": "This is the guide of the app's setup agent. Read the repository with your own tools, and send "
-            "the whole optimize.toml text to repo_draft_set_contract instead of the guide's write tools.",
+            "the whole ascent.toml text to repo_draft_set_contract instead of the guide's write tools.",
             "guide": METRIC_GUIDE,
-            "example": OPTIMIZE_TOML_EXAMPLE,
+            "example": ASCENT_TOML_EXAMPLE,
             "next_tool": "repo_draft_set_contract",
         }
 
     @mcp.tool(name="repo_draft_set_contract", annotations=writes)
     def repo_draft_set_contract(
         draft_id: Annotated[str, Field(max_length=64)],
-        optimize_toml: Annotated[
+        ascent_toml: Annotated[
             str,
             Field(
                 min_length=1,
                 max_length=DRAFT_FILE_BYTES,
-                description="The whole optimize.toml text, starting with version = 1. "
+                description="The whole ascent.toml text, starting with version = 1. "
                 "repo_draft_contract_guide gives the format.",
             ),
         ],
     ) -> dict[str, Any]:
-        """Set the run's optimize.toml contract. Every run needs one, in the draft or in the repository.
+        """Set the run's ascent.toml contract. Every run needs one, in the draft or in the repository.
 
         Skynet parses the file the way a run reads it. The run writes it over
         the repository's own file; the repository stays unchanged.
         """
-        if not optimize_toml.strip():
+        if not ascent_toml.strip():
             raise ToolError(CONSTRAINTS_REQUIRED)
 
         def check(_spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
             """Parse the file the way a run reads it."""
-            issues, notes = contract_issues(optimize_toml)
+            issues, notes = contract_issues(ascent_toml)
             return issues, notes, {}
 
-        return save_step(draft_id, "contract", {"optimize_toml": optimize_toml}, check)
+        return save_step(draft_id, "contract", {"ascent_toml": ascent_toml}, check)
 
     @mcp.tool(name="repo_draft_set_models", annotations=writes)
     def repo_draft_set_models(
@@ -1616,7 +1617,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """Set how long the run searches. Optional: the default is 200 scorer runs.
 
         The money limit is not set here. repo_draft_submit takes it. The run
-        stops early at the ``[outcome] target`` score in optimize.toml.
+        stops early at the ``[outcome] target`` score in ascent.toml.
         """
         try:
             budget = BlackboxBudget(max_scorer_runs=max_scorer_runs, max_iterations=max_iterations)
@@ -1769,7 +1770,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         call opens a judge session with one budget of max_cost_cents, at
         least two times the draft's minimum (one call and the final score);
         later calls with the same draft_id and max_cost_cents score in it. Skynet
-        reads optimize.toml at the base commit and refuses a version that
+        reads ascent.toml at the base commit and refuses a version that
         changes it or a protected path. The answer has the score, the named
         scores and the feedback on the search cases only. A retry with the
         same arguments does not pay twice. An answer with status in_progress

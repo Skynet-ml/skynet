@@ -55,9 +55,9 @@ Belirli bir motor seçmek için [Motorlar](/docs/concepts/engines) sayfasını o
 
 ## 5. Metrik ve çalıştırma
 
-Son adım **Metrik ve çalıştırma**'dır. Asistan puanlayıcıyı ve `optimize.toml` dosyasını sizin için yazar. Onları düzenleyebilirsiniz. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı, giriş noktasının çıktısını ve vakayı alır:
+Son adım **Metrik ve çalıştırma**'dır. Asistan puanlayıcıyı ve `ascent.toml` dosyasını sizin için yazar. Onları düzenleyebilirsiniz. `[run]` giriş noktası, deponun bir sürümünü bir vaka üzerinde çalıştırır. Puanlayıcı, giriş noktasının çıktısını ve vakayı alır:
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

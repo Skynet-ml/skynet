@@ -219,7 +219,7 @@ def _seed_drafted_run(store: FakeJobStore) -> None:
                     "repository": "acme/app",
                     "commit": COMMIT,
                     "editable_paths": ["."],
-                    "draft_files": {"src/main.py": "drafted\n", "cfg/optimize.toml": "[run]\n"},
+                    "draft_files": {"src/main.py": "drafted\n", "cfg/ascent.toml": "[run]\n"},
                 },
             },
         },
@@ -237,7 +237,7 @@ def test_tree_shows_the_run_draft_files_and_keeps_the_cache_clean(store: FakeJob
     assert drafted["entries"] == [
         {"path": "README.md", "type": "file", "size": 5},
         {"path": "cfg", "type": "dir", "size": None},
-        {"path": "cfg/optimize.toml", "type": "file", "size": 6},
+        {"path": "cfg/ascent.toml", "type": "file", "size": 6},
         {"path": "src", "type": "dir", "size": None},
         {"path": "src/main.py", "type": "file", "size": 8},
     ]
@@ -457,7 +457,7 @@ def test_archive_zips_only_a_recorded_version(store: FakeJobStore) -> None:
                 "repo": {
                     "repository": "acme/app",
                     "commit": COMMIT,
-                    "draft_files": {"optimize.toml": "[run]\n"},
+                    "draft_files": {"ascent.toml": "[run]\n"},
                     "environment": {"readonly_paths": ["vendor/lib"]},
                 },
             },
@@ -498,7 +498,7 @@ def test_archive_zips_only_a_recorded_version(store: FakeJobStore) -> None:
     assert refused.status_code == 404
     assert refused.json()["code"] == "optimization.repo_version_unknown"
     assert seen == ["PATCH-A"]
-    assert drafts == [({"optimize.toml": "[run]\n"}, ["vendor/lib"])]
+    assert drafts == [({"ascent.toml": "[run]\n"}, ["vendor/lib"])]
 
 
 def test_archive_reports_a_failed_clone(store: FakeJobStore) -> None:

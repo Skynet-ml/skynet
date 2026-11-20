@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | Un dict. `case["input"]` contient les champs d'entrée. `case["expected"]` contient la valeur attendue, ou `None` |
 | `output`    | Ce que l'entrée `[run]` a renvoyé pour le cas, ou `None` si le fichier n'a pas de `[run]` |
 
-Le fichier `optimize.toml` du dépôt doit avoir une section `[run]` ou une étape `[target.<name>]`. L'`entry` de `[run]` exécute une version sur un cas, dans sa propre boîte de sandbox. Skynet refuse un fichier qui n'a ni l'une ni l'autre, car chaque version recevrait le même score.
+Le fichier `ascent.toml` du dépôt doit avoir une section `[run]` ou une étape `[target.<name>]`. L'`entry` de `[run]` exécute une version sur un cas, dans sa propre boîte de sandbox. Skynet refuse un fichier qui n'a ni l'une ni l'autre, car chaque version recevrait le même score.
 
 - Une entrée de fonction, par exemple `entry = "serve.py:serve"`, reçoit `case["input"]` comme argument. `output` est sa valeur de retour.
 - Une entrée de commande, par exemple `entry = ["python", "-m", "pytest", "-q"]`, reçoit l'entrée en JSON sur stdin. `output` est `{"exit_code": ..., "stdout": "..."}`.
@@ -69,7 +69,7 @@ GEPA et Auto lisent le texte de retour pour écrire la version suivante. Dites c
 
 ### Correspondance exacte
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 L'entrée `[run]` lance les tests. L'évaluateur lit le code de sortie et la sortie des tests.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entré
 
 L'évaluateur peut appeler un modèle. Importez `llm` depuis le module d'aide `openascent`. L'appel passe par la passerelle de modèles de Skynet vers le modèle de l'évaluateur de l'exécution.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

@@ -41,7 +41,7 @@ def secret_request_problem(arguments: dict[str, Any]) -> str | None:
     if not _NAME.fullmatch(name):
         return (
             "Not shown: name must be an environment variable name (letters, digits and _, not starting "
-            "with a digit), the same as the ${NAME} placeholder in optimize.toml."
+            "with a digit), the same as the ${NAME} placeholder in ascent.toml."
         )
     if not purpose or len(purpose) > _MAX_PURPOSE_CHARS:
         return f"Not shown: purpose must say in one short line (at most {_MAX_PURPOSE_CHARS} characters) what the secret is for."
@@ -82,7 +82,7 @@ def secret_request_tool() -> dspy.Tool:
         name=SECRET_REQUEST_TOOL,
         desc=(
             "Show the user a secure card to save one secret on their account, such as an API key that a "
-            "[services.<name>] entry in optimize.toml sends as ${NAME}. The user types the value in the card; "
+            "[services.<name>] entry in ascent.toml sends as ${NAME}. The user types the value in the card; "
             "you never see it. Returns {name, status}: status is 'saved' or 'skipped'. Use it for each secret "
             "the run needs that is not saved yet, one call at a time. Never ask for a secret value in the chat, "
             "and never repeat one the user pasted."

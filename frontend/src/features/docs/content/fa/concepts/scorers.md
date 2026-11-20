@@ -14,7 +14,7 @@ def score(repo_path, case, output=None):
 | `case`      | یک dict. `case["input"]` فیلدهای ورودی را نگه می‌دارد. `case["expected"]` مقدار مورد انتظار را نگه می‌دارد، یا `None` است |
 | `output`    | آنچه `entry` بخش `[run]` برای این مورد برگرداند، یا `None` وقتی فایل `[run]` ندارد |
 
-فایل `optimize.toml` مخزن باید یک بخش `[run]` یا یک مرحلهٔ `[target.<name>]` داشته باشد. `entry` بخش `[run]` یک نسخه را روی یک مورد، در جعبهٔ ایزولهٔ خودش اجرا می‌کند. Skynet فایلی را که هیچ‌کدام را ندارد رد می‌کند، چون هر نسخه همان امتیاز را می‌گرفت.
+فایل `ascent.toml` مخزن باید یک بخش `[run]` یا یک مرحلهٔ `[target.<name>]` داشته باشد. `entry` بخش `[run]` یک نسخه را روی یک مورد، در جعبهٔ ایزولهٔ خودش اجرا می‌کند. Skynet فایلی را که هیچ‌کدام را ندارد رد می‌کند، چون هر نسخه همان امتیاز را می‌گرفت.
 
 - یک entry تابعی، مثلاً `entry = "serve.py:serve"`، مقدار `case["input"]` را به‌عنوان آرگومان می‌گیرد. `output` مقدار بازگشتی آن است.
 - یک entry دستوری، مثلاً `entry = ["python", "-m", "pytest", "-q"]`، ورودی را به‌صورت JSON روی stdin می‌گیرد. `output` برابر `{"exit_code": ..., "stdout": "..."}` است.
@@ -69,7 +69,7 @@ GEPA و Auto متن بازخورد را می‌خوانند تا نسخهٔ بع
 
 ### تطابق دقیق
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -90,7 +90,7 @@ def score(repo_path, case, output=None):
 
 `entry` بخش `[run]` آزمون‌ها را اجرا می‌کند. امتیازدهنده کد خروج و خروجی آزمون‌ها را می‌خواند.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]
@@ -111,7 +111,7 @@ def score(repo_path, case, output=None):
 
 امتیازدهنده می‌تواند یک مدل را فراخوانی کند. `llm` را از ماژول کمکی `openascent` وارد کنید. فراخوانی از طریق دروازهٔ مدل Skynet به مدل امتیازدهندهٔ اجرا می‌رود.
 
-```toml tab="optimize.toml"
+```toml tab="ascent.toml"
 version = 1
 
 [run]

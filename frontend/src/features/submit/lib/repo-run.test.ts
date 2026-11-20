@@ -416,7 +416,7 @@ const SERVICES_TOML = [
 
 test("a repository run sends the saved secrets its services name, by id, to their host only", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [{ name: "SEARCH_KEY", value: "typed", allowedHosts: "api.search.example" }] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["maps.googleapis.com"] },
@@ -435,7 +435,7 @@ test("a repository run sends the saved secrets its services name, by id, to thei
 
 test("a saved secret goes only to a host its owner approved, never to the host an edited toml names", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     // Approved for another host: an agent pointed the toml elsewhere.
@@ -453,7 +453,7 @@ test("a saved secret goes only to a host its owner approved, never to the host a
 
 test("a saved secret approved for a *.suffix goes to a host under it with that approved entry", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const savedSecrets = [
     { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["*.googleapis.com"] },
@@ -469,7 +469,7 @@ test("a saved secret approved for a *.suffix goes to a host under it with that a
 
 test("a repository run with no saved secret for its services sends only the typed ones", () => {
   const state = repoState();
-  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.workspace.files = { ...state.workspace.files, "ascent.toml": SERVICES_TOML };
   state.task.repo = { ...state.task.repo!, secrets: [] };
   const request = repoRunRequest(state, { ...options, savedSecrets: [{ id: "x", name: "UNUSED_KEY" }] });
   assert.ok(request);
@@ -546,10 +546,10 @@ test("a repository run sends the draft's repository files and omits them when th
   assert.equal("draft_files" in none.target.repo, false);
 
   const state = repoState();
-  state.workspace.files = { "src/app.py": "x = 2\n", "optimize.toml": "version = 1\n" };
+  state.workspace.files = { "src/app.py": "x = 2\n", "ascent.toml": "version = 1\n" };
   assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, {
     "src/app.py": "x = 2\n",
-    "optimize.toml": "version = 1\n",
+    "ascent.toml": "version = 1\n",
   });
 });
 
@@ -567,16 +567,16 @@ test("a repository run sends the drafts' base commit only with the drafts", () =
   assert.equal("draft_base" in repoRunRequest(state, options)!.target.repo, false);
 });
 
-test("a repository run never sends an empty optimize.toml draft", () => {
+test("a repository run never sends an empty ascent.toml draft", () => {
   const state = repoState();
-  state.workspace.files = { "optimize.toml": " \n", "src/app.py": "x = 2\n" };
+  state.workspace.files = { "ascent.toml": " \n", "src/app.py": "x = 2\n" };
   assert.deepEqual(repoRunRequest(state, options)?.target.repo.draft_files, { "src/app.py": "x = 2\n" });
 
-  state.workspace.files = { "optimize.toml": "" };
+  state.workspace.files = { "ascent.toml": "" };
   assert.equal("draft_files" in repoRunRequest(state, options)!.target.repo, false);
 });
 
-test("the Metric screen holds only when neither the draft nor the repository has optimize.toml", () => {
+test("the Metric screen holds only when neither the draft nor the repository has ascent.toml", () => {
   assert.equal(contractMissing("", ""), true);
   assert.equal(contractMissing(undefined, "  \n"), true);
   assert.equal(contractMissing("version = 1\n", ""), false);
@@ -585,9 +585,9 @@ test("the Metric screen holds only when neither the draft nor the repository has
   assert.equal(contractMissing("", undefined), false);
 });
 
-test("only a repository read that found no optimize.toml holds the Metric screen", () => {
+test("only a repository read that found no ascent.toml holds the Metric screen", () => {
   const holds = (result: { text: string } | { issue: string } | null) =>
-    contractMissing("", repoBaseText("optimize.toml", result));
+    contractMissing("", repoBaseText("ascent.toml", result));
   assert.equal(holds({ issue: "missing" }), true);
   assert.equal(holds({ issue: "binary" }), false);
   assert.equal(holds({ issue: "too_large" }), false);
@@ -597,7 +597,7 @@ test("only a repository read that found no optimize.toml holds the Metric screen
   assert.equal(repoBaseText("src/a.py", null), "");
 });
 
-test("the contract text is the draft optimize.toml, else the repository's file (SKY-770)", () => {
+test("the contract text is the draft ascent.toml, else the repository's file (SKY-770)", () => {
   const repo = 'version = 1\n[metric]\nentry = ["node", "eval/score.js"]\n';
   assert.equal(contractText("version = 1\n", repo), "version = 1\n");
   assert.equal(contractText("  \n", repo), repo);

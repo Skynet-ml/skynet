@@ -2254,7 +2254,7 @@ def test_the_runs_stop_kills_a_setup_that_an_in_process_session_runs(
 
         assert not worker.is_alive()
         assert len(errors) == 1
-        assert "[proposer] setup command in optimize.toml" in str(errors[0])
+        assert "[proposer] setup command in ascent.toml" in str(errors[0])
         with pytest.raises(ProcessLookupError):
             os.kill(setup_pid, 0)
     finally:

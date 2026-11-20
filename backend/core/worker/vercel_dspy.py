@@ -42,20 +42,20 @@ OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
 )
 OUTCOME_IMAGE_MESSAGE = (
-    "The sandbox image is older than [outcome] support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [outcome] support in ascent.toml; rebuild and re-pin the sandbox image."
 )
 FILE_PROPOSER_IMAGE_MESSAGE = (
-    "The sandbox image is older than [proposer] entry support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [proposer] entry support in ascent.toml; rebuild and re-pin the sandbox image."
 )
 COMMAND_METRIC_IMAGE_MESSAGE = (
-    "The sandbox image is older than command [metric] entry support in optimize.toml; rebuild and re-pin the"
+    "The sandbox image is older than command [metric] entry support in ascent.toml; rebuild and re-pin the"
     " sandbox image."
 )
 DIRECTION_IMAGE_MESSAGE = (
-    "The sandbox image is older than [metric] direction support in optimize.toml; rebuild and re-pin the sandbox image."
+    "The sandbox image is older than [metric] direction support in ascent.toml; rebuild and re-pin the sandbox image."
 )
 SCORE_DIRECTION_IMAGE_MESSAGE = (
-    "The sandbox image is older than [outcome.require] limits and [metric.scores] support in optimize.toml; rebuild"
+    "The sandbox image is older than [outcome.require] limits and [metric.scores] support in ascent.toml; rebuild"
     " and re-pin the sandbox image."
 )
 PROTOCOL_PROBE = (
@@ -181,7 +181,7 @@ def _require_image_protocol(session: Any, lifetime: float) -> int:
 
 
 def _require_outcome_support(image_protocol: int, snapshot: Any) -> None:
-    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[outcome]`` values.
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets ``[outcome]`` values.
 
     An image before protocol 15 reads the stop score only from
     ``budget.stop_at_score``, so it would run without the file's target or
@@ -243,7 +243,7 @@ def _require_command_metric_support(image_protocol: int, payload: dict[str, Any]
 
 
 def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
-    """Refuse an older image for a run whose staged ``optimize.toml`` sets ``[metric] direction = "minimize"``.
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets ``[metric] direction = "minimize"``.
 
     An image before protocol 20 ignores the snapshot's ``outcome.direction``.
     It would maximize the score of a minimize run and report no error (SKY-750).
@@ -262,7 +262,7 @@ def _require_direction_support(image_protocol: int, snapshot: Any) -> None:
 
 
 def _require_score_direction_support(image_protocol: int, snapshot: Any) -> None:
-    """Refuse an older image for a run whose staged ``optimize.toml`` sets limits or minimizes a named score.
+    """Refuse an older image for a run whose staged ``ascent.toml`` sets limits or minimizes a named score.
 
     An image before protocol 21 ignores the snapshot's ``outcome.scores``. It
     would judge a minimize score's ``[outcome.require]`` limit as a minimum and

@@ -170,7 +170,7 @@ def _stage_with(
         monkeypatch: Pytest monkeypatch.
         payload: Payload to stage; the fixture payload pinned to ``c * 40`` when omitted.
         links: Links in the fetched tree, as ``_tree`` takes them.
-        require_constraints: Stage as a new run that needs an ``optimize.toml``.
+        require_constraints: Stage as a new run that needs an ``ascent.toml``.
         started: Whether the caller's job already started, as ``stage_repository`` takes it.
 
     Returns:
@@ -206,7 +206,7 @@ protected = ["src/geocode/eval"]
 """
 # The metric scores only what a [run] or a target stage gives it, so a contract needs one (SKY-761).
 _RUN = '\n[run]\nentry = "run.py:main"\n'
-_FILES = {"optimize.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place the sender means.\n"}
+_FILES = {"ascent.toml": _CONSTRAINTS + _RUN, "docs/intent.md": "Pick the place the sender means.\n"}
 
 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
@@ -217,12 +217,12 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
 
     repo = staged_payload["target"]["repo"]
     assert repo["editable_paths"] == ["src/geocode"]
-    assert staged.protected_paths == ("optimize.toml", "docs/intent.md", "src/geocode/eval")
+    assert staged.protected_paths == ("ascent.toml", "docs/intent.md", "src/geocode/eval")
     assert staged.intent == "Pick the place the sender means."
     environment = repo["environment"]
     assert environment["commit"] == "c" * 40
     assert environment["editable_paths"] == ["src/geocode"]
-    assert environment["protected_paths"] == ["optimize.toml", "docs/intent.md", "src/geocode/eval"]
+    assert environment["protected_paths"] == ["ascent.toml", "docs/intent.md", "src/geocode/eval"]
     assert environment["secret_names"] == ["API_KEY"]
     assert environment["services"] == []
     assert environment["roles"] == {
@@ -230,7 +230,7 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
         "targets": {},
     }
     assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["proposer_hosts"] == list(PROPOSER_REGISTRY_HOSTS)
-    assert environment["constraints_file"]["path"] == "optimize.toml"
+    assert environment["constraints_file"]["path"] == "ascent.toml"
     assert "secret-value" not in repr(staged_payload)
     assert "Pick the place the sender means." in staged_payload["background"]
     assert "`src/geocode/eval`" in staged_payload["background"]
@@ -240,7 +240,7 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
 def test_staging_writes_the_draft_files_over_the_tree_before_it_reads_the_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A draft optimize.toml takes effect, and every box starts from the drafted tree."""
+    """A draft ascent.toml takes effect, and every box starts from the drafted tree."""
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
 
@@ -254,7 +254,7 @@ def test_staging_writes_the_draft_files_over_the_tree_before_it_reads_the_rules(
 
 
 def test_staging_keeps_the_draft_files_off_the_guest_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guest gets the drafts only inside the tree, as a draft optimize.toml names the hidden paths."""
+    """The guest gets the drafts only inside the tree, as a draft ascent.toml names the hidden paths."""
     payload = _payload("c" * 40)
     payload["target"]["repo"]["draft_files"] = {**_FILES, "src/geocode/app.py": "drafted = True\n"}
 
@@ -334,7 +334,7 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
     proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
-    files = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + proposer}
+    files = {**_FILES, "ascent.toml": _CONSTRAINTS + _RUN + proposer}
     monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
@@ -359,11 +359,11 @@ def test_staging_records_the_hosts_the_proposer_box_reaches(
     ("files", "message"),
     [
         (
-            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["tests"]\n'},
+            {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[paths]\neditable = ["tests"]\n'},
             "outside the approved editable paths",
         ),
         (
-            {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n'},
+            {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[services]\ngeocoder = ["search"]\n'},
             "cannot grant services",
         ),
     ],
@@ -395,7 +395,7 @@ def test_the_runs_own_proposer_replaces_the_files_command(monkeypatch: pytest.Mo
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
     payload = {**_payload("c" * 40), "proposer": {"harness": "codex"}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -415,7 +415,7 @@ def test_a_request_without_a_harness_and_a_file_without_a_proposer_runs_the_defa
     Args:
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
+    files = {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     payload = {**_payload("c" * 40), "proposer": {"max_tool_calls": 100}}
 
     staged_payload, staged = _stage_with(files, monkeypatch, payload=payload)
@@ -435,7 +435,7 @@ def test_a_run_command_or_install_command_fails_the_setup_check(
         proposer: The request's proposer, without a harness.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+    files = {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
     with pytest.raises(ConstraintsError, match="built-in proposer") as caught:
         _stage_with(files, monkeypatch, payload={**_payload("c" * 40), "proposer": proposer})
@@ -446,7 +446,7 @@ def test_a_run_command_or_install_command_fails_the_setup_check(
 # The one engine-loop proposer that reads [proposer] mcp (SKY-728).
 _SHINKA_AGENT = {"strategy": {"mode": "single", "engine": BLACKBOX_ENGINE_SHINKA_EVOLVE}, "shinka": {"editor": "agent"}}
 
-_ENTRY_ONLY = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
+_ENTRY_ONLY = {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\n'}
 
 
 @pytest.mark.parametrize(
@@ -539,12 +539,11 @@ def test_a_host_cli_the_client_picked_fails_the_setup_check(monkeypatch: pytest.
 
 _RUN_ONLY = 'version = 1\n[run]\nentry = "run.py:main"\n'
 _PROPOSER_MCP = {
-    "optimize.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
+    "ascent.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
     "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
 }
 _PROPOSER_SERVICES = {
-    "optimize.toml": _RUN_ONLY
-    + '[proposer]\nservices = ["maps"]\n[services.maps]\nurl = "https://api.example.com/v1"\n'
+    "ascent.toml": _RUN_ONLY + '[proposer]\nservices = ["maps"]\n[services.maps]\nurl = "https://api.example.com/v1"\n'
 }
 _MODEL_ONLY_REFUSALS = [
     ({"harness": "pi"}, {}, "harness"),
@@ -573,7 +572,7 @@ def test_an_engine_with_a_model_only_proposer_refuses_each_tool_setting_at_stagi
     payload = {**_payload("c" * 40), "strategy": {"mode": "single", "engine": engine}, "proposer": proposer}
 
     with pytest.raises(ConstraintsError, match=f"{ENGINES[engine].label} runs only its built-in proposer") as caught:
-        _stage_with(files or {"optimize.toml": _RUN_ONLY}, monkeypatch, payload=payload)
+        _stage_with(files or {"ascent.toml": _RUN_ONLY}, monkeypatch, payload=payload)
 
     assert (caught.value.section, caught.value.key) == ("proposer", setting)
 
@@ -595,7 +594,7 @@ def test_an_engine_with_a_model_only_proposer_applies_the_reasoning_effort(
         "reflection_model_config": {"name": "vendor/m", "extra": {"reasoning_effort": "high"}},
     }
 
-    _, staged = _stage_with({"optimize.toml": _RUN_ONLY}, monkeypatch, payload=payload)
+    _, staged = _stage_with({"ascent.toml": _RUN_ONLY}, monkeypatch, payload=payload)
     staged.cleanup()
 
 
@@ -615,7 +614,7 @@ def test_the_shinka_agent_editor_refuses_services_but_runs_mcp(monkeypatch: pyte
 
 
 _PROPOSER_HEADED_MCP = {
-    "optimize.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
+    "ascent.toml": _RUN_ONLY + '[proposer]\nmcp = "agent.mcp.json"\n',
     "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
     ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}',
 }
@@ -675,7 +674,7 @@ _TOOL_LOOP_RUNS = [
 @pytest.mark.parametrize(("strategy", "label"), _TOOL_LOOP_RUNS)
 @pytest.mark.parametrize(
     ("files", "extra", "setting"),
-    [(_PROPOSER_MCP, {}, "mcp"), ({"optimize.toml": _RUN_ONLY}, {"reasoning_effort": "high"}, "reasoning_effort")],
+    [(_PROPOSER_MCP, {}, "mcp"), ({"ascent.toml": _RUN_ONLY}, {"reasoning_effort": "high"}, "reasoning_effort")],
 )
 def test_a_tool_loop_proposer_refuses_mcp_and_a_reasoning_effort_at_staging(
     strategy: dict[str, str],
@@ -728,7 +727,7 @@ def test_an_engine_refuses_a_loop_setting_that_only_another_engine_reads(
         drops_it: A single engine that does not read it.
         monkeypatch: Pytest fixture for the fake fetch.
     """
-    files = {"optimize.toml": _RUN_ONLY}
+    files = {"ascent.toml": _RUN_ONLY}
 
     def payload(engine: str | None, value: Any) -> dict[str, Any]:
         """Build a run request with the setting.
@@ -781,7 +780,7 @@ def test_a_files_proposer_command_with_mcp_servers_fails_the_setup_check(monkeyp
         monkeypatch: Pytest fixture for the fake fetch.
     """
     files = {
-        "optimize.toml": (
+        "ascent.toml": (
             'version = 1\n[run]\nentry = "run.py:main"\n'
             '[proposer]\nentry = ["node", "agent.js"]\nmcp = "agent.mcp.json"\n'
         ),
@@ -803,7 +802,7 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
     again, staged = _stage_with(_FILES, monkeypatch, resumed)
     staged.cleanup()
     assert again["target"]["repo"]["environment"]["protected_paths"] == [
-        "optimize.toml",
+        "ascent.toml",
         "docs/intent.md",
         "src/geocode/eval",
     ]
@@ -813,7 +812,7 @@ def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.Monke
         _stage_with({}, monkeypatch, resumed)
 
 
-_TARGETED = {**_FILES, "optimize.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget = 0.9\n"}
+_TARGETED = {**_FILES, "ascent.toml": _CONSTRAINTS + _RUN + "\n[outcome]\ntarget = 0.9\n"}
 
 
 def test_staging_hands_the_outcome_target_to_the_run_and_a_resume_must_keep_it(
@@ -855,7 +854,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
     first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     assert staged.require_version is True
-    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
+    unversioned = {**_FILES, "ascent.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
 
@@ -870,7 +869,7 @@ def test_a_started_run_reads_a_file_with_no_version_as_version_1(monkeypatch: py
 
 def test_a_started_job_reads_a_file_with_no_version_as_version_1(monkeypatch: pytest.MonkeyPatch) -> None:
     """A job that already started stays lenient on ``version`` with no recorded environment (SKY-690)."""
-    unversioned = {**_FILES, "optimize.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
+    unversioned = {**_FILES, "ascent.toml": (_CONSTRAINTS + _RUN).replace("version = 1\n", "")}
 
     staged_payload, staged = _stage_with(unversioned, monkeypatch, started=True)
     staged.cleanup()
@@ -885,7 +884,7 @@ def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monk
     staged.cleanup()
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
-    no_run = {**_FILES, "optimize.toml": _CONSTRAINTS.replace("version = 1\n", "")}
+    no_run = {**_FILES, "ascent.toml": _CONSTRAINTS.replace("version = 1\n", "")}
 
     with pytest.raises(ConstraintsError, match=r"Add a \[run\] section or a \[target\.<name>\] stage"):
         _stage_with(no_run, monkeypatch, resumed)
@@ -893,7 +892,7 @@ def test_a_resumed_run_with_a_contract_with_no_run_and_no_target_is_refused(monk
 
 _RULED = {
     **_FILES,
-    "optimize.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',
+    "ascent.toml": _CONSTRAINTS + _RUN + '\n[proposer]\nillegal = "docs/rules.md"\n',
     "docs/rules.md": "- Do not hardcode answers for dataset cases.\n- Do not call an outside geocoding service.\n",
 }
 
@@ -935,7 +934,7 @@ def test_a_run_recorded_before_rules_existed_resumes_without_rules(monkeypatch: 
 
 
 def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without optimize.toml the run keeps its old behavior: no judge and no fixed block message."""
+    """Without ascent.toml the run keeps its old behavior: no judge and no fixed block message."""
     _, staged = _stage_with({}, monkeypatch)
     staged.cleanup()
 
@@ -944,7 +943,7 @@ def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytes
 
 
 def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A new run needs optimize.toml in the tree or the drafts (SKY-693)."""
+    """A new run needs ascent.toml in the tree or the drafts (SKY-693)."""
     with pytest.raises(ConstraintsError) as error:
         _stage_with({}, monkeypatch, require_constraints=True)
     assert str(error.value) == CONSTRAINTS_REQUIRED
@@ -953,11 +952,11 @@ def test_a_new_run_without_a_constraints_file_does_not_start(monkeypatch: pytest
 def test_a_new_run_with_a_draft_or_repository_contract_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     """The contract can come from the repository tree or from the draft files."""
     _, staged = _stage_with(
-        {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
+        {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}, monkeypatch, require_constraints=True
     )
     staged.cleanup()
     drafted = _payload("c" * 40)
-    drafted["target"]["repo"]["draft_files"] = {"optimize.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
+    drafted["target"]["repo"]["draft_files"] = {"ascent.toml": 'version = 1\n[run]\nentry = "run.py:main"\n'}
     _, staged = _stage_with({}, monkeypatch, drafted, require_constraints=True)
     staged.cleanup()
     assert staged.constrained is True
@@ -1170,7 +1169,7 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
         '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
     )
 
-    _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
+    _, staged = _stage_with({"ascent.toml": toml}, monkeypatch, payload)
 
     assert staged.secret_bindings == {"API_KEY": "user"}
     assert staged.secret_hosts == {"API_KEY": "api.example.com"}
@@ -1181,7 +1180,7 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
 def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
     """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55)."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
     }
 
@@ -1195,7 +1194,7 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
 def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """The snapshot gives each [proposer] mcp server's name, address and has-headers flag, no header (SKY-830)."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[proposer]\nmcp = "agent.mcp.json"\n',
         "agent.mcp.json": (
             '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"},'
             ' "team": {"url": "https://team.example.com/mcp", "headers": {"X-Team": "header-value-123"}}}}'
@@ -1218,7 +1217,7 @@ def test_the_snapshot_names_the_proposer_mcp_servers_with_their_addresses_only(m
 def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
     files = {
-        "optimize.toml": (
+        "ascent.toml": (
             'version = 1\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
             '[target.planner]\nentry = "a.py:f"\nmcp = "agents/planner.mcp.json"\n'
         ),
@@ -1258,7 +1257,7 @@ def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
 ) -> None:
     """The scorer box unpacks a tree whose every MCP file points at the runner's relay (E49, E53)."""
     files = {
-        "optimize.toml": (
+        "ascent.toml": (
             'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
             '[metric]\nmcp = "tools/metric.mcp.json"\n'
         ),
@@ -1590,7 +1589,7 @@ def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None
 def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """The proposer's .mcp.json lists only the [proposer] servers at relay urls: no real url, header or key (SKY-610)."""
     files = {
-        "optimize.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        "ascent.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
         "agent.mcp.json": (
             '{"mcpServers": {"web": {"url": "https://web.example.com/mcp",'
             ' "headers": {"Authorization": "Bearer ${API_KEY}"}}}}'
@@ -1625,7 +1624,7 @@ def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: 
 def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both trees get the same rewrite, so the protected check passes and the rewrite never enters a patch."""
     files = {
-        "optimize.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
+        "ascent.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
         "tools/run.mcp.json": '{"mcpServers": {"docs": {"url": "https://docs.example.com/mcp"}}}',
         "a.py": "def f(x):\n    return x\n",
@@ -1852,7 +1851,7 @@ def test_binding_refuses_a_scorer_model_without_a_scoped_route(tmp_path: Path) -
 def _ruled_binding(
     tmp_path: Path, rules: tuple[str, ...], *, intent: str | None = None, watch: bool = False
 ) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
-    """Build a staged repository whose optimize.toml has the given plain-language rules.
+    """Build a staged repository whose ascent.toml has the given plain-language rules.
 
     Args:
         tmp_path: Scratch folder.
@@ -2165,7 +2164,7 @@ def test_a_constraints_file_without_rules_blocks_without_judge_models(tmp_path: 
 
 
 def test_a_run_without_a_constraints_file_has_no_rule_judge(tmp_path: Path) -> None:
-    """Without optimize.toml the scorer keeps its earlier refusals and no judge exists."""
+    """Without ascent.toml the scorer keeps its earlier refusals and no judge exists."""
     payload, staged = _binding(tmp_path, None)
     gateway = _Gateway()
 
@@ -2566,12 +2565,12 @@ def test_publishing_pushes_the_drafts_the_staged_tree_keeps(monkeypatch: pytest.
         snapshot=_staged(tmp_path, readonly=("vendor/lib",)).snapshot,
         secrets={},
         workdir=tmp_path,
-        drafts={"optimize.toml": "x = 1\n"},
+        drafts={"ascent.toml": "x = 1\n"},
     )
 
     _publish(_result(0.5, 0.8), staged)
 
-    assert pushed == [{"drafts": {"optimize.toml": "x = 1\n"}, "readonly_paths": ("vendor/lib",)}]
+    assert pushed == [{"drafts": {"ascent.toml": "x = 1\n"}, "readonly_paths": ("vendor/lib",)}]
 
 
 def test_publishing_rechecks_the_editing_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2789,7 +2788,7 @@ def _names(archive: Path) -> set[str]:
 
 
 _METRIC_TREE = {
-    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
     "src/app.py": "x = 1\n",
     "eval/scorer.py": "def score(): ...\n",
     "eval/data.csv": "1\n",
@@ -2804,8 +2803,8 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
         agent = Path(staged_payload["_repo_snapshot"]["archive"])
         assert agent != staged.snapshot.archive
         assert _names(agent) == {"src/app.py", "eval/data.csv"}
-        assert {"optimize.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
-        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits")
+        assert {"ascent.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
+        assert staged.hidden_paths == ("ascent.toml", "eval/scorer.py", ".optimize/exploits")
         # The proposer's tool guard refuses the same paths (E62, SKY-395), from hashes only:
         # the snapshot reaches the Vercel DSPy guest, so it must name no hidden path (E61).
         snapshot = staged_payload["_repo_snapshot"]
@@ -2878,7 +2877,7 @@ def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pyte
     """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer."""
     files = {
         **_FILES,
-        "optimize.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n',
+        "ascent.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:
@@ -2916,7 +2915,7 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
     """The run's services and each role's list reach the parent, so the relay can check the caller."""
     files = {
         **_FILES,
-        "optimize.toml": _CONSTRAINTS
+        "ascent.toml": _CONSTRAINTS
         + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
         + '\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["judge"]\n',
     }
@@ -2932,7 +2931,7 @@ def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.Monkey
     """The [run] entry, its timeout and the services it lists reach the staged run (E38)."""
     files = {
         **_FILES,
-        "optimize.toml": _CONSTRAINTS
+        "ascent.toml": _CONSTRAINTS
         + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
         + '\n[run]\nentry = "src/geocode/app.py:main"\ntimeout = 12\nservices = ["judge"]\n',
     }
@@ -2974,7 +2973,7 @@ def test_staging_keeps_each_roles_network_and_vcpus(monkeypatch: pytest.MonkeyPa
     """The [run] and [metric] network and vcpus keys reach the staged run (SKY-398)."""
     files = {
         **_FILES,
-        "optimize.toml": _CONSTRAINTS
+        "ascent.toml": _CONSTRAINTS
         + '\n[run]\nentry = "src/geocode/app.py:main"\nnetwork = ["api.example.com"]\nvcpus = 4\n'
         + '\n[metric]\nnetwork = ["judge.example.com"]\nvcpus = 2\n',
     }
@@ -2989,7 +2988,7 @@ def test_staging_keeps_each_roles_network_and_vcpus(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(("section", "table"), [("run", 'entry = "src/geocode/app.py:main"\n'), ("metric", "")])
 def test_staging_refuses_a_bad_role_vcpus(monkeypatch: pytest.MonkeyPatch, section: str, table: str) -> None:
     """A role vcpus value the provider cannot give fails setup before any box opens (SKY-398)."""
-    files = {**_FILES, "optimize.toml": _CONSTRAINTS + f"\n[{section}]\n{table}vcpus = 3\n"}
+    files = {**_FILES, "ascent.toml": _CONSTRAINTS + f"\n[{section}]\n{table}vcpus = 3\n"}
     with pytest.raises(ConstraintsError, match=rf"\[{section}\] vcpus must be 1 or an even number"):
         _stage_with(files, monkeypatch)
 
@@ -3328,7 +3327,7 @@ def test_publishing_refuses_a_version_that_changes_the_configured_suite(
 _CASES_JSONL = "".join(json.dumps({"input": f"place {n}", "expected": n}) + "\n" for n in range(20))
 _CASES_TREE = {
     **_METRIC_TREE,
-    "optimize.toml": _METRIC_TREE["optimize.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
+    "ascent.toml": _METRIC_TREE["ascent.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
     "data/cases.jsonl": _CASES_JSONL,
 }
 
@@ -3340,13 +3339,13 @@ def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: 
         assert "data/cases.jsonl" not in _names(Path(staged_payload["_repo_snapshot"]["archive"]))
         assert "data/cases.jsonl" in _names(staged.snapshot.archive)
         # hidden_paths is also the list the candidate box drops (SKY-375), so the candidate never sees it.
-        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
+        assert staged.hidden_paths == ("ascent.toml", "eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
     finally:
         staged.cleanup()
 
 
 _EVERY_HIDDEN_KEY = {
-    "optimize.toml": """version = 1
+    "ascent.toml": """version = 1
 instructions = "docs/intent.md"
 
 [paths]
@@ -3384,7 +3383,7 @@ cases = "data/cases.jsonl"
     "data/cases.jsonl": _CASES_JSONL,
 }
 _EVERY_HIDDEN_PATH = (
-    "optimize.toml",
+    "ascent.toml",
     "eval/scorer.py",
     "eval/attacks",
     "eval/reference.json",
@@ -3406,7 +3405,7 @@ def test_every_scoring_side_path_is_hidden_and_the_rule_files_stay_visible(monke
 
 
 def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent reads its rules in the brief, never in optimize.toml, and learns no hidden name (E62)."""
+    """The agent reads its rules in the brief, never in ascent.toml, and learns no hidden name (E62)."""
     staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
     staged.cleanup()
     brief = staged_payload["background"]
@@ -3430,7 +3429,7 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) 
         _tree(
             tmp_path,
             {
-                "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
+                "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
                 '\n\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
@@ -3438,7 +3437,7 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) 
         )
     )
 
-    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+    assert repo_staging.hidden_repo_paths(constraints) == ("ascent.toml", ".optimize/exploits")
 
 
 def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path) -> None:
@@ -3447,7 +3446,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
         _tree(
             tmp_path,
             {
-                "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
+                "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
                 '\n\n[run]\nentry = "a.py:f"\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
@@ -3455,7 +3454,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
         )
     )
 
-    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+    assert repo_staging.hidden_repo_paths(constraints) == ("ascent.toml", ".optimize/exploits")
 
 
 @pytest.mark.parametrize(
@@ -3478,7 +3477,7 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
 ) -> None:
     """A protected file under a hidden folder is hidden too, so the brief must not name it (E62)."""
     files = {
-        "optimize.toml": toml,
+        "ascent.toml": toml,
         "src/app.py": "def main(case):\n    return case\n",
         "eval/labels.json": "{}\n",
         ".optimize/exploits/cheat.py": "cheat\n",
@@ -3513,7 +3512,7 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
 ) -> None:
     """The run stops before it starts when the brief would name a hidden path or a rule file would be stripped."""
     files = {
-        "optimize.toml": toml,
+        "ascent.toml": toml,
         "src/app.py": "def main(case):\n    return case\n",
         "eval/rules.md": "- No cheating.\n",
         "eval/run.py": "def main(case):\n    return case\n",
@@ -3570,7 +3569,7 @@ def test_staging_refuses_a_hidden_path_with_a_link(
     monkeypatch: pytest.MonkeyPatch, toml: str, links: dict[str, tuple[bytes, str]], linked: str
 ) -> None:
     """The strip drops names, so a link would leave the scoring files in the agent's and candidate's trees."""
-    files = {"optimize.toml": toml, "real/score.py": "SECRET-METRIC\n", "src/app.py": "x = 1\n"}
+    files = {"ascent.toml": toml, "real/score.py": "SECRET-METRIC\n", "src/app.py": "x = 1\n"}
     if linked == "eval":
         files["eval/score.py"] = "def metric(case, output):\n    return 1.0\n"
 
@@ -3583,7 +3582,7 @@ def test_staging_refuses_a_hidden_path_with_a_link(
 def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
     files = {
-        "optimize.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+        "ascent.toml": 'version = 1\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/score.py": "def metric(case, output):\n    return 1.0\n",
         "src/app.py": "x = 1\n",
     }
@@ -3612,10 +3611,10 @@ def test_check_hidden_reports_a_leak_of_each_scoring_side_path(tmp_path: Path, p
     assert [failure.params["key"] for failure in failures] == [f"[metric] files: {next(iter(leaked))}"]
 
 
-def test_a_version_edit_to_optimize_toml_is_dropped_before_it_leaves_the_run() -> None:
+def test_a_version_edit_to_ascent_toml_is_dropped_before_it_leaves_the_run() -> None:
     """A version that rewrites its own rules keeps only the scored change (E62)."""
     toml_edit = (
-        "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n"
+        "diff --git a/ascent.toml b/ascent.toml\n--- a/ascent.toml\n+++ b/ascent.toml\n"
         "@@ -1 +1 @@\n-version = 1\n+version = 2\n"
     )
     result = {"best_candidate": toml_edit + _EDIT, "versions": [{"candidate": toml_edit + _EDIT}]}
@@ -3719,7 +3718,7 @@ def _local_scorer(files: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> tup
 
 
 _RUN_TREE = {
-    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n',
+    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n',
     "src/app.py": _SEEING_CANDIDATE,
 }
 
@@ -3728,7 +3727,7 @@ def test_the_candidate_gets_only_the_input_and_never_the_cases_file(monkeypatch:
     """The candidate box drops the cases file, the entry gets the input, and the metric gets the whole case (E61)."""
     files = {
         **_RUN_TREE,
-        "optimize.toml": _RUN_TREE["optimize.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
+        "ascent.toml": _RUN_TREE["ascent.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
         "data/cases.jsonl": _CASES_JSONL,
     }
     scorer, staged_payload, staged = _local_scorer(files, monkeypatch)
@@ -3800,7 +3799,7 @@ def _record_payload(**extra: Any) -> dict[str, Any]:
 
 
 def _ruled_cases_tree(*, target: bool = False, minimums: bool = False) -> dict[str, str]:
-    """Build the cases tree whose ``optimize.toml`` sets a target, a ``recall`` minimum, both or neither.
+    """Build the cases tree whose ``ascent.toml`` sets a target, a ``recall`` minimum, both or neither.
 
     Args:
         target: Whether the file sets ``[outcome] target = 0.9``.
@@ -3812,7 +3811,7 @@ def _ruled_cases_tree(*, target: bool = False, minimums: bool = False) -> dict[s
     rules = ("\n[outcome]\ntarget = 0.9\n" if target else "") + (
         "\n[outcome.require]\nrecall = 0.8\n" if minimums else ""
     )
-    return {**_CASES_TREE, "optimize.toml": _CASES_TREE["optimize.toml"] + rules}
+    return {**_CASES_TREE, "ascent.toml": _CASES_TREE["ascent.toml"] + rules}
 
 
 def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3831,7 +3830,7 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
     metric = hashlib.sha256(
         _framed("eval/scorer.py", b"def score(): ...\n") + _framed("metric.py", _RECORD_METRIC.encode())
     )
-    assert record["contract_sha256"] == hashlib.sha256(tree["optimize.toml"].encode()).hexdigest()
+    assert record["contract_sha256"] == hashlib.sha256(tree["ascent.toml"].encode()).hexdigest()
     assert record["metric_sha256"] == metric.hexdigest()
     assert record["metric_source"] == "repository"
     assert record["cases_sha256"] == hashlib.sha256(_CASES_JSONL.encode()).hexdigest()
@@ -4215,7 +4214,7 @@ def test_the_pull_request_names_a_missing_change_and_missing_scores() -> None:
             },
             "This run did not meet the contract. 'cost_usd' scored 0.06, above its maximum 0.05.",
         ),
-        ({"contract_met": True}, "The optimize.toml file sets no target and no limit."),
+        ({"contract_met": True}, "The ascent.toml file sets no target and no limit."),
     ],
 )
 def test_the_pull_request_line_names_the_failed_rule_or_no_rule(verdict: dict[str, Any], line: str) -> None:
@@ -4253,7 +4252,7 @@ _FORGED_RECORD = {"contract_sha256": "f" * 64, "target_reached": True, "contract
         (_CASES_TREE, True, {CASE_SPLIT_KEY: {"rule": "pairs", "search": 5, "validation": [], "held_out": []}}),
         (_CASES_TREE, True, {"outcome": {"target": 10**400, "target_reached": False}}),
     ],
-    ids=["no-optimize-toml", "older-guest-no-split", "refused-split", "huge-target"],
+    ids=["no-ascent-toml", "older-guest-no-split", "refused-split", "huge-target"],
 )
 def test_a_record_the_guest_wrote_is_removed_when_the_worker_makes_none(
     monkeypatch: pytest.MonkeyPatch, files: dict[str, str], split: bool, details: dict[str, Any]
@@ -4293,7 +4292,7 @@ def test_the_worker_record_replaces_the_one_the_guest_wrote(monkeypatch: pytest.
 
     record = result["details"]["record"]
     assert "forged" not in record
-    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["optimize.toml"].encode()).hexdigest()
+    assert record["contract_sha256"] == hashlib.sha256(_CASES_TREE["ascent.toml"].encode()).hexdigest()
 
 
 def test_the_record_names_the_start_commit_the_change_hash_and_both_scores(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4690,7 +4689,7 @@ def test_suite_scratch_git_refuses_a_bare_repository_layout(tmp_path: Path, monk
 
 
 _ENTRY_WITH_SERVICES = {
-    "optimize.toml": (
+    "ascent.toml": (
         'version = 1\n[services.judge]\nurl = "https://judge.example.com/v1"\n'
         '[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "agent.js"]\nservices = ["judge"]\n'
     )
@@ -4732,7 +4731,7 @@ def test_a_setting_the_engine_loop_cannot_give_the_files_proposer_fails_the_setu
 
 
 _COMMAND_TREE = {
-    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n'
+    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n'
     '[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n',
     "src/app.py": "def run(case):\n    return case\n",
     "eval/metric.sh": '#!/usr/bin/env bash\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n',
@@ -4851,7 +4850,7 @@ def test_a_metric_setup_stages_into_the_workspace_and_the_record(monkeypatch: py
     """Staging keeps the ``[metric] setup`` command for the workspace and the run record (SKY-740)."""
     tree = {
         **_COMMAND_TREE,
-        "optimize.toml": _COMMAND_TREE["optimize.toml"] + 'setup = "cp eval/words.txt eval/built.txt"\n',
+        "ascent.toml": _COMMAND_TREE["ascent.toml"] + 'setup = "cp eval/words.txt eval/built.txt"\n',
     }
     _, staged = _stage_with(tree, monkeypatch, _record_payload())
     staged.cleanup()

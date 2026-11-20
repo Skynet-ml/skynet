@@ -16,7 +16,7 @@ Phased exposure (the gate):
   ``profile_datasets``. A repository run gets ``validate_code`` without one.
 * On the Metric screen: the workspace tools (:mod:`.workspace_tools`), which
   read a repository run's checkout and write its ``metric.py`` and any file
-  of the repository, ``optimize.toml`` included.
+  of the repository, ``ascent.toml`` included.
 * No submit tool: every run optimizes a repository, and the wizard's
   own Run button submits it.
 * Always available post-submit: ``cancel_job``, rename/pin.
@@ -93,7 +93,7 @@ from .workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
-    optimize_toml_error,
+    ascent_toml_error,
     workspace_tools,
 )
 
@@ -1081,8 +1081,8 @@ class WizardState(TypedDict, total=False):
     spending_floor_cents: int | None
     run_code: str
     metric_code: str
-    # The repository's optimize.toml in the setup draft; only the Metric screen's workspace tools write it (SKY-184).
-    optimize_toml: str
+    # The repository's ascent.toml in the setup draft; only the Metric screen's workspace tools write it (SKY-184).
+    ascent_toml: str
     # The other repository files in the setup draft, path to text. The run writes them over its checkout.
     workspace_files: dict[str, str]
     # The commit the workspace tools read the draft files at; the run refuses them on any other commit.
@@ -1480,7 +1480,7 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "task_background",
             "data_mode",
             "dataset_columns",
-            "optimize_toml",
+            "ascent_toml",
             "repo_provider",
             "github_connected",
             "run_code",
@@ -1712,16 +1712,16 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "metric" and not str(state.get("metric_code") or "").strip():
         return ["metric_code must be written"]
     if screen == "metric" and (error := _setup_error(state)):
-        return [f"optimize.toml is not valid: {error['message']}"]
+        return [f"ascent.toml is not valid: {error['message']}"]
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
 
 
 def _setup_error(state: WizardState) -> dict[str, Any] | None:
-    """Check the setup draft's ``optimize.toml`` with the parser a run uses.
+    """Check the setup draft's ``ascent.toml`` with the parser a run uses.
 
-    A draft with no ``optimize.toml`` passes: the run then reads the
+    A draft with no ``ascent.toml`` passes: the run then reads the
     repository's own file, if it has one.
 
     Args:
@@ -1730,8 +1730,8 @@ def _setup_error(state: WizardState) -> dict[str, Any] | None:
     Returns:
         The parser's first error, or ``None`` when the file is valid or absent.
     """
-    text = str(state.get("optimize_toml") or "")
-    return optimize_toml_error(text) if text.strip() else None
+    text = str(state.get("ascent_toml") or "")
+    return ascent_toml_error(text) if text.strip() else None
 
 
 def _limit_below_floor(state: WizardState) -> str | None:
@@ -2079,7 +2079,7 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         }
 
     async def check_setup() -> Any:
-        """Check the setup draft's optimize.toml the way a run reads it."""
+        """Check the setup draft's ascent.toml the way a run reads it."""
         error = _setup_error(cast(WizardState, {**state, **turn.wizard_patch}))
         return {"ok": error is None, "errors": [error] if error else []}
 
@@ -2088,7 +2088,7 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             check_setup,
             name=SETUP_CHECK_TOOL,
             desc=(
-                "Check the setup draft's optimize.toml with the parser a run uses. Returns ok, or the first "
+                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, or the first "
                 "error with its section and key. continue_to_next_screen runs the same check and refuses "
                 "while it fails, so fix the error first."
             ),
@@ -2493,7 +2493,7 @@ Capabilities worth knowing about:
   call ``open_page`` with only the area's ``tab`` (no ``path``) and tell
   the user what to do there. Use ``open_page`` too when the user asks to
   see a settings tab.
-* Saved secrets: when a run's optimize.toml sends a secret as ``${NAME}``
+* Saved secrets: when a run's ascent.toml sends a secret as ``${NAME}``
   in a ``[services.<name>]`` entry, call ``request_secret`` with that name,
   what it is for and its host, one secret per call. The user types the value
   in a secure card and you get back only ``saved`` or ``skipped``. Never ask
@@ -2788,14 +2788,14 @@ SCREEN_FOCUS: dict[str, str] = {
     "budget": ("Budget: " + _ASK_FOR_BUDGET),
     "metric": (
         "Metric: you write the run's code yourself. Read the repository, then write ``metric.py`` and, when "
-        "the run needs one, the repository's ``optimize.toml`` with ``write_workspace_file`` or "
+        "the run needs one, the repository's ``ascent.toml`` with ``write_workspace_file`` or "
         "``edit_workspace_file`` (a repository run has no ``run_code``). The same tools change any other "
         "repository file; ``changed_repository_files`` lists the ones the draft already changes. When you "
-        "write optimize.toml, show "
+        "write ascent.toml, show "
         "the user the file in full. Then say in one sentence what the metric measures and which files you "
-        "read. Check ``metric_code`` with ``validate_code`` and optimize.toml with ``check_setup`` "
+        "read. Check ``metric_code`` with ``validate_code`` and ascent.toml with ``check_setup`` "
         "before you continue; for a "
-        "repository run the wizard fills its ``column_mapping``. When optimize.toml sends a secret as "
+        "repository run the wizard fills its ``column_mapping``. When ascent.toml sends a secret as "
         "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
         "host, one secret per call: the user types the value in a secure card, and you get back only "
         "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted.\n"
