@@ -42,7 +42,7 @@ def test_named_scores_render_one_line_each_with_their_feedback() -> None:
 
 
 def test_a_minimize_named_score_says_lower_is_better_and_reaches_gepa_negated() -> None:
-    """The text shows the raw value with its direction; GEPA's frontier gets it negated, and the name listed (SKY-775)."""
+    """The text shows the raw value and direction; GEPA's frontier gets it negated, and the name listed (SKY-775)."""
     side_info = {
         "scores": {
             "cost_usd": {"score": 0.06, "feedback": "pricey", "direction": "minimize"},
