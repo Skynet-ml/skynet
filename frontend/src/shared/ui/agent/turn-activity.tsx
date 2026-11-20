@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion } from "motion/react";
 
 import { CaretRight } from "@/shared/ui/icons";
 
@@ -15,9 +15,8 @@ import {
   mergeAdjacentThinking,
 } from "@/shared/lib/thinking-segments";
 
-
 import { ActivityGroup } from "./activity-steps";
-import { Reveal } from "./reveal";
+import { CLOSE_S, Reveal } from "./reveal";
 import { RevealText } from "./reveal-text";
 import { formatSpan, ThinkingSection } from "./thinking-section";
 import { deniedCount } from "./denied-count";
@@ -88,8 +87,6 @@ interface TurnActivityProps {
 // stretch still open shows only as that line (SKY-773). Once the answer
 // starts, the history folds behind one "Worked for 39s" row with a chevron
 // and a full-width rule; cards and failed steps stay out.
-// Matches the fold's close time in reveal.tsx.
-const FOLD_CLOSE_S = 0.14;
 
 export function TurnActivity({
   thinking,
@@ -221,7 +218,7 @@ export function TurnActivity({
       renderRow(piece.segment, turn, joined)
     ) : piece.kind === "card" ? (
       // A card whose component renders nothing when it mounts leaves no padded gap.
-      <div key={`card-${piece.step.call.id}`} className="py-1.5 empty:hidden">
+      <div key={`card-${piece.step.call.id}`} className="py-3.5 empty:hidden">
         {renderStep(piece.step.call, { isRetry: piece.step.isRetry })}
       </div>
     ) : piece.kind === "steps" ? (
@@ -234,20 +231,22 @@ export function TurnActivity({
         key={key}
         text={text}
         animate={false}
-        className="block py-1 text-sm leading-relaxed text-foreground"
+        className="block py-3.5 text-sm leading-relaxed text-foreground"
       />
     ) : null;
   const planLine = renderPlan(plan, "plan");
+  // Codex puts 16px between the "Worked for" row and the history, inside the
+  // fold so it closes with it; a plan's own padding already holds most of it.
+  const planFirst = Boolean(earlier.length ? earlier[0]?.plan : plan);
 
   // The fold hides only what sits between the cards. A card waits on the
   // user, so it keeps one place in the tree and never remounts when the turn
   // folds; a failed step must not hide behind a fold either.
   const fold = (key: string, node: React.ReactNode) => (
-    <Reveal key={`fold-${key}`} open={historyOpen}>
+    <Reveal key={`fold-${key}`} open={historyOpen} history>
       {node}
     </Reveal>
   );
-  const reduceMotion = Boolean(useReducedMotion());
   const renderFolded = (turn: number, { joined }: Laid) => (piece: Piece) =>
     piece.kind === "thinking" ? (
       fold(`thinking-${piece.segment.order}`, renderPiece(piece, turn, joined))
@@ -265,7 +264,7 @@ export function TurnActivity({
                 key={call.id}
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
-                transition={{ duration: 0, delay: reduceMotion ? 0 : FOLD_CLOSE_S }}
+                transition={{ duration: 0, delay: CLOSE_S }}
               >
                 {renderStep(call, { isRetry })}
               </motion.div>
@@ -277,7 +276,7 @@ export function TurnActivity({
     <React.Fragment key={`earlier-${i}`}>
       {turn.plan && fold(`plan-${i}`, renderPlan(turn.plan, `plan-${i}`))}
       {(earlierLaidOut[i]?.pieces ?? []).map(renderFolded(i, earlierLaidOut[i]!))}
-      {turn.answer && fold(`answer-${i}`, <div className="py-1">{turn.answer}</div>)}
+      {turn.answer && fold(`answer-${i}`, <div className="py-3.5">{turn.answer}</div>)}
     </React.Fragment>
   ));
 
@@ -314,12 +313,13 @@ export function TurnActivity({
         open={foldable ? historyOpen : undefined}
         onToggle={foldable ? () => setOpenChoice(!historyOpen) : undefined}
       />
-      <div className="flex flex-col pt-1.5 empty:hidden">
+      <div className="flex flex-col empty:hidden">
+        {fold("gap", <div aria-hidden className={planFirst ? "h-0.5" : "h-3.5"} />)}
         {earlierNodes}
         {plan && fold("plan", planLine)}
         {current.pieces.map(renderFolded(earlier.length, current))}
       </div>
-      {thinkingLine && <div className="pt-1">{thinkingLine}</div>}
+      {thinkingLine}
     </div>
   );
 }
@@ -388,7 +388,7 @@ function ThinkingLine({ label }: { label: string }) {
     <div
       role="status"
       aria-live="polite"
-      className="flex min-w-0 max-w-full items-center py-1 text-[0.8125rem] leading-5 text-muted-foreground"
+      className="flex min-w-0 max-w-full items-center py-0.5 text-[0.8125rem] leading-5 text-muted-foreground"
     >
       <span className="min-w-0 flex-1 truncate select-none agent-shimmer-text">{label}</span>
     </div>
@@ -410,7 +410,8 @@ function Header({
   open?: boolean;
   onToggle?: () => void;
 }) {
-  const rule = "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted-foreground";
+  const rule =
+    "flex w-full min-w-0 items-center gap-1.5 text-[0.8125rem] leading-5 tabular-nums text-muted-foreground";
   return (
     <div className="flex w-full min-w-0 items-center gap-2 border-b border-border/60 pb-2">
       {onToggle ? (
@@ -423,7 +424,7 @@ function Header({
           <span className="truncate">{label}</span>
           <CaretRight
             className={cn(
-              "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+              "size-3 shrink-0 transition-transform duration-150",
               open ? "rotate-90" : "rtl:-scale-x-100",
             )}
             aria-hidden

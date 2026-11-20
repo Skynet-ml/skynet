@@ -13,6 +13,9 @@ import { saveSuggestion, suggestSignature } from "./next-prompt";
 import { midTurnOf, SteerQueue } from "./steer-queue";
 import { labelsOnlyValue, type SlashCommand, type SlashOption } from "./slash-commands";
 import { attachedFile, joinPastes, splitPastes } from "./pasted-text";
+import type { EditorView } from "prosemirror-view";
+import { TextSelection } from "prosemirror-state";
+import { parseMarkdown, serializeMarkdown } from "./rich-markdown/markdown";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://example.test/",
@@ -48,6 +51,11 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
 dom.window.matchMedia = (query: string) =>
   ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as never;
 dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+// ProseMirror measures the caret; jsdom has no layout, so every box is empty.
+const emptyRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 });
+for (const proto of [dom.window.Range.prototype, dom.window.Element.prototype] as never[]) {
+  Object.assign(proto, { getClientRects: () => [], getBoundingClientRect: emptyRect });
+}
 dom.window.__APP_MESSAGES__ = buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
@@ -80,8 +88,11 @@ let liveCommands = commands;
 // What a command does to the draft when it runs, as /fork does; a test can set it.
 let onRun: ((setDraft: (text: string) => void) => void) | null = null;
 
+type EditorElement = HTMLElement & { pmView: EditorView };
+
 interface Mounted {
-  textarea: HTMLTextAreaElement;
+  editor: EditorElement;
+  value: () => string;
   ran: string[];
   sent: string[];
   drafts: string[];
@@ -162,27 +173,35 @@ async function mount(
       </LocaleProvider>,
     );
   });
-  const textarea = container.querySelector("textarea")!;
+  const editor = container.querySelector(".ProseMirror") as EditorElement;
   return {
-    textarea,
+    editor,
     ran,
     sent,
     drafts,
+    value: () => serializeMarkdown(editor.pmView.state.doc),
     press: async (key, init) => {
       await React.act(async () => {
-        textarea.dispatchEvent(
-          new dom.window.KeyboardEvent("keydown", { key, bubbles: true, ...init }),
+        editor.dispatchEvent(
+          new dom.window.KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+            ...init,
+          }),
         );
       });
     },
+    // Replaces the draft as one typed edit and puts the caret at its end.
     type: async (text) => {
       await React.act(async () => {
-        const setter = Object.getOwnPropertyDescriptor(
-          dom.window.HTMLTextAreaElement.prototype,
-          "value",
-        )!.set!;
-        setter.call(textarea, text);
-        textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+        const view = editor.pmView;
+        const tr = view.state.tr.replaceWith(
+          0,
+          view.state.doc.content.size,
+          parseMarkdown(text).content,
+        );
+        view.dispatch(tr.setSelection(TextSelection.atEnd(tr.doc)));
       });
     },
     unmount: async () => {
@@ -249,10 +268,10 @@ void test("a hidden command neither runs nor goes to the agent as text", async (
   assert.deepEqual(await pressDuringReply("/thinking high", "Enter"), { ran: [], sent: [] });
 });
 
-void test("the menu shows only while the textarea has focus", async () => {
+void test("the menu shows only while the editor has focus", async () => {
   const composer = await mount("/", false);
   assert.equal(listbox(), null);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   assert.ok(listbox());
   // A hidden command stays out of the list.
   assert.deepEqual(
@@ -265,14 +284,14 @@ void test("the menu shows only while the textarea has focus", async () => {
     ["option", "option", "option"],
   );
   assert.equal(listbox()?.getAttribute("aria-label"), "Commands");
-  await React.act(async () => composer.textarea.blur());
+  await React.act(async () => composer.editor.blur());
   assert.equal(listbox(), null);
   await composer.unmount();
 });
 
 void test("Enter on a partial command name runs the highlighted command", async () => {
   const partial = await mount("/ne", false);
-  await React.act(async () => partial.textarea.focus());
+  await React.act(async () => partial.editor.focus());
   await partial.press("Enter");
   await partial.unmount();
   assert.deepEqual(partial.ran, ["new:"]);
@@ -280,7 +299,7 @@ void test("Enter on a partial command name runs the highlighted command", async 
 
 void test("Enter on a command that needs an argument fills the draft and runs nothing", async () => {
   const composer = await mount("/na", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   await composer.unmount();
   assert.deepEqual({ ran: composer.ran, drafts: composer.drafts }, { ran: [], drafts: ["/name "] });
@@ -288,7 +307,7 @@ void test("Enter on a command that needs an argument fills the draft and runs no
 
 void test("Enter on a command with options opens its picker, and Enter there runs the option", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   assert.deepEqual(composer.ran, []);
   const rows = [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent ?? "");
@@ -302,13 +321,13 @@ void test("Enter on a command with options opens its picker, and Enter there run
 
 void test("a blur closes the picker and clears its filter text from the draft", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   await composer.type("tw");
-  await React.act(async () => composer.textarea.blur());
-  assert.equal(composer.textarea.value, "");
+  await React.act(async () => composer.editor.blur());
+  assert.equal(composer.value(), "");
   assert.equal(composer.drafts.at(-1), "");
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   await composer.unmount();
   assert.deepEqual({ ran: composer.ran, sent: composer.sent }, { ran: [], sent: [] });
@@ -323,9 +342,9 @@ void test("the toast for a hidden command isolates the command name", async () =
   await composer.unmount();
 });
 
-void test("a click inside the menu does not blur the textarea", async () => {
+void test("a click inside the menu does not blur the editor", async () => {
   const composer = await mount("/", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   const down = new dom.window.MouseEvent("mousedown", { bubbles: true, cancelable: true });
   listbox()!.firstElementChild!.dispatchEvent(down);
   assert.equal(down.defaultPrevented, true);
@@ -334,7 +353,7 @@ void test("a click inside the menu does not blur the textarea", async () => {
 
 void test("Shift+Tab leaves the menu and does not complete the command", async () => {
   const composer = await mount("/ne", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Tab", { shiftKey: true });
   assert.deepEqual(composer.drafts, []);
   await composer.press("Tab");
@@ -344,7 +363,7 @@ void test("Shift+Tab leaves the menu and does not complete the command", async (
 
 void test("a slash typed again after Escape shows the menu again", async () => {
   const composer = await mount("/", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Escape");
   assert.equal(listbox(), null);
   await composer.type("");
@@ -355,7 +374,7 @@ void test("a slash typed again after Escape shows the menu again", async () => {
 
 void test("a slash typed after a command runs shows the menu again", async () => {
   const composer = await mount("/new", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Escape");
   assert.equal(listbox(), null);
   await composer.press("Enter");
@@ -367,19 +386,16 @@ void test("a slash typed after a command runs shows the menu again", async () =>
 
 void test("a completed command shows as a token, and plain text shows no token", async () => {
   const composer = await mount("", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.type("/na");
   assert.equal(document.querySelector(".text-primary"), null);
   await composer.press("Tab");
   const token = document.querySelector(".text-primary");
   assert.equal(token?.textContent, "/name");
-  assert.equal(token?.closest("[aria-hidden]") !== null, true);
   // Only the letters change color: no tint, ring or rounded box.
   assert.doesNotMatch(token?.className ?? "", /bg-|shadow|rounded/);
-  assert.match(composer.textarea.className, /text-transparent/);
   await composer.type("/usr/bin is a path");
-  assert.equal(document.querySelector(".text-primary"), null);
-  assert.doesNotMatch(composer.textarea.className, /text-transparent/);
+
   await composer.unmount();
 });
 
@@ -388,7 +404,6 @@ void test("an @word shows as a token only in a chat with file mentions", async (
   const plain = await mount("", false);
   await plain.type("ask @alice");
   assert.equal(document.querySelector(".text-primary"), null);
-  assert.doesNotMatch(plain.textarea.className, /text-transparent/);
   // A slash token paints the draft, and the @word after it stays plain.
   await plain.type("/name @alice");
   assert.deepEqual(
@@ -401,7 +416,7 @@ void test("an @word shows as a token only in a chat with file mentions", async (
   await files.type("ask @src/a.py");
   assert.deepEqual(
     [...document.querySelectorAll(".text-primary")].map((el) => el.textContent),
-    ["", "@src/a.py"],
+    ["@src/a.py"],
   );
   await files.unmount();
 });
@@ -409,7 +424,7 @@ void test("an @word shows as a token only in a chat with file mentions", async (
 void test("the @file menu picks a file with Enter and with Tab", async () => {
   const files = ["src/app.py", "src/lib/util.py", "README.md"];
   const composer = await mount("", false, undefined, files);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.type("see @ut");
   assert.equal(listbox()?.getAttribute("aria-label"), "Files");
   assert.deepEqual(
@@ -417,13 +432,13 @@ void test("the @file menu picks a file with Enter and with Tab", async () => {
     ["util.pysrc/lib"],
   );
   await composer.press("Enter");
-  assert.equal(composer.textarea.value, "see @src/lib/util.py ");
+  assert.equal(composer.value(), "see @src/lib/util.py ");
   assert.equal(listbox(), null, "the pick closes the menu");
   assert.deepEqual(composer.sent, [], "Enter picks the file and does not send");
 
   await composer.type("see @src/lib/util.py and @app");
   await composer.press("Tab");
-  assert.equal(composer.textarea.value, "see @src/lib/util.py and @src/app.py ");
+  assert.equal(composer.value(), "see @src/lib/util.py and @src/app.py ");
   assert.deepEqual(composer.sent, []);
   await composer.unmount();
 });
@@ -449,51 +464,14 @@ void test("a reply without mid-turn input locks the draft, so the token does not
     );
   });
   const shown = document.querySelector(".text-primary");
-  const textarea = container.querySelector("textarea")!;
   await React.act(async () => root.unmount());
   container.remove();
   assert.equal(shown, null);
-  assert.doesNotMatch(textarea.className, /text-transparent/);
-});
-
-void test("an IME composition shows the real text, and the token comes back after it", async () => {
-  const composer = await mount("/new", false);
-  assert.match(composer.textarea.className, /text-transparent/);
-  await React.act(async () => {
-    composer.textarea.dispatchEvent(new dom.window.Event("compositionstart", { bubbles: true }));
-  });
-  assert.doesNotMatch(composer.textarea.className, /text-transparent/);
-  assert.equal(document.querySelector(".text-primary"), null);
-  await React.act(async () => {
-    composer.textarea.dispatchEvent(new dom.window.Event("compositionend", { bubbles: true }));
-  });
-  assert.match(composer.textarea.className, /text-transparent/);
-  await composer.unmount();
-});
-
-void test("the token layer scrolls with the textarea", async () => {
-  const composer = await mount("/new", false);
-  const layer = document.querySelector(".text-primary")!.closest("[aria-hidden]") as HTMLDivElement;
-  composer.textarea.scrollTop = 40;
-  await React.act(async () => {
-    composer.textarea.dispatchEvent(new dom.window.Event("scroll"));
-  });
-  assert.equal(layer.scrollTop, composer.textarea.scrollTop);
-  await composer.unmount();
-});
-
-void test("the token layer keeps each line's own direction, as the textarea does", async () => {
-  const composer = await mount("/new", false);
-  const layer = document.querySelector(".text-primary")!.closest("[aria-hidden]") as HTMLDivElement;
-  const cls = layer.className;
-  await composer.unmount();
-  assert.match(cls, /\[unicode-bidi:plaintext\]/);
-  assert.match(cls, /text-start/);
 });
 
 void test("the no-match status sits outside the listbox and is always mounted", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   const before = document.querySelector('p[role="status"]');
   const beforeText = before?.textContent ?? null;
@@ -511,7 +489,7 @@ void test("the no-match status sits outside the listbox and is always mounted", 
 
 void test("an open picker closes and clears its text when its command loses its options", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   liveCommands = commands.map((c) => (c.name === "model" ? { ...c, options: undefined } : c));
   try {
@@ -519,7 +497,7 @@ void test("an open picker closes and clears its text when its command loses its 
   } finally {
     liveCommands = commands;
   }
-  const value = composer.textarea.value;
+  const value = composer.value();
   const last = composer.drafts.at(-1);
   const options = document.querySelectorAll('[role="option"]').length;
   await composer.unmount();
@@ -530,7 +508,7 @@ void test("an open picker closes and clears its text when its command loses its 
 
 void test("an open picker closes and clears its text when its command goes hidden", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   liveCommands = commands.map((c) => (c.name === "model" ? { ...c, hidden: true } : c));
   try {
@@ -538,7 +516,7 @@ void test("an open picker closes and clears its text when its command goes hidde
   } finally {
     liveCommands = commands;
   }
-  const value = composer.textarea.value;
+  const value = composer.value();
   const options = document.querySelectorAll('[role="option"]').length;
   await composer.unmount();
   assert.equal(value, "");
@@ -547,14 +525,12 @@ void test("an open picker closes and clears its text when its command goes hidde
 
 void test("a command typed as a picker's filter gets no token", async () => {
   const composer = await mount("/mo", false);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   await composer.type("/new");
   const token = !!document.querySelector(".text-primary");
-  const transparent = composer.textarea.className.includes("text-transparent");
   await composer.unmount();
   assert.equal(token, false);
-  assert.equal(transparent, false);
 });
 
 void test("a command that sets the draft as it runs keeps that draft", async () => {
@@ -564,34 +540,12 @@ void test("a command that sets the draft as it runs keeps that draft", async () 
   await composer.press("Enter");
   onRun = null;
   assert.deepEqual(composer.ran, ["name:Release notes"]);
-  assert.equal(composer.textarea.value, "the restored message");
+  assert.equal(composer.value(), "the restored message");
   await composer.unmount();
 });
 
-void test("a draft set from outside grows the textarea to fit it", async () => {
-  // A fork can put a long message back later, with no input event to resize on.
-  let setDraft: ((text: string) => void) | null = null;
-  onRun = (set) => {
-    setDraft = set;
-  };
-  const composer = await mount("/name Release notes", false);
-  await composer.press("Enter");
-  onRun = null;
-  await React.act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  });
-  Object.defineProperty(composer.textarea, "scrollHeight", { configurable: true, value: 90 });
-  composer.textarea.style.height = "";
-  await React.act(async () => {
-    setDraft?.("line one\nline two\nline three");
-  });
-  const height = composer.textarea.style.height;
-  await composer.unmount();
-  assert.equal(height, "90px");
-});
-
-void test("a draft cleared from outside shrinks the textarea back (SKY-780)", async () => {
-  // A reply-time send that the panel takes over clears the draft with no input event.
+void test("a draft set from outside shows in the editor", async () => {
+  // A fork can put a long message back later, with no input event.
   let setDraft: ((text: string) => void) | null = null;
   onRun = (set) => {
     setDraft = set;
@@ -602,25 +556,33 @@ void test("a draft cleared from outside shrinks the textarea back (SKY-780)", as
   await React.act(async () => {
     setDraft?.("line one\nline two\nline three");
   });
-  composer.textarea.style.height = "90px";
+  const value = composer.value();
   await React.act(async () => {
     setDraft?.("");
   });
-  const height = composer.textarea.style.height;
+  const cleared = composer.value();
   await composer.unmount();
-  assert.equal(height, "", "the CSS height applies again");
+  assert.equal(value, "line one\nline two\nline three");
+  assert.equal(cleared, "");
 });
 
-void test("a Send the host refuses keeps the textarea height (SKY-780)", async () => {
+void test("a long draft scrolls inside the editor, not the page", async () => {
+  const composer = await mount("", false);
+  const cls = composer.editor.className;
+  await composer.unmount();
+  assert.match(cls, /\bmax-h-\[calc\(max\(1lh,round\(down,25dvh,1lh\)\)_\+_22px\)\]/);
+  assert.match(cls, /\boverflow-y-auto\b/);
+});
+
+void test("a Send the host refuses keeps the draft (SKY-780)", async () => {
   // The panel refuses a Send while a dataset stages, and keeps the draft.
   const composer = await mount("line one\nline two\nline three", false);
-  composer.textarea.style.height = "90px";
   await composer.press("Enter");
-  const height = composer.textarea.style.height;
+  const value = composer.value();
   const sent = [...composer.sent];
   await composer.unmount();
   assert.deepEqual(sent, ["submit"]);
-  assert.equal(height, "90px", "the multi-line draft stays visible");
+  assert.equal(value, "line one\nline two\nline three");
 });
 
 // Opens the /model picker and types a filter into it.
@@ -629,7 +591,7 @@ async function openPicker(
   suggest?: React.ComponentProps<typeof Composer>["suggest"],
 ) {
   const composer = await mount("/mo", false, suggest);
-  await React.act(async () => composer.textarea.focus());
+  await React.act(async () => composer.editor.focus());
   await composer.press("Enter");
   if (filter) await composer.type(filter);
   return composer;
@@ -643,7 +605,7 @@ void test("a long paste in a picker closes it and drops the filter text", async 
     value: { getData: () => pasted, files: [] },
   });
   await React.act(async () => {
-    composer.textarea.dispatchEvent(paste);
+    composer.editor.dispatchEvent(paste);
   });
   const last = composer.drafts.at(-1) ?? "";
   const options = document.querySelectorAll('[role="option"]').length;
@@ -662,9 +624,9 @@ void test("a file paste in a picker closes it and drops the filter text", async 
     value: { getData: () => "", files: [file] },
   });
   await React.act(async () => {
-    composer.textarea.dispatchEvent(paste);
+    composer.editor.dispatchEvent(paste);
   });
-  const value = composer.textarea.value;
+  const value = composer.value();
   const last = composer.drafts.at(-1) ?? "";
   const options = document.querySelectorAll('[role="option"]').length;
   await composer.unmount();
@@ -687,12 +649,12 @@ void test("a picker's empty filter shows no next-message suggestion", async () =
   });
   const suggest = { messages, chatId: "chat-1", fetcher: () => new Promise<string>(() => {}) };
   const empty = await mount("", false, suggest);
-  const shown = empty.textarea.hasAttribute("aria-describedby");
+  const shown = empty.editor.hasAttribute("aria-describedby");
   await empty.unmount();
   assert.ok(shown, "the saved suggestion shows in an empty composer");
 
   const composer = await openPicker("", suggest);
-  const ghost = composer.textarea.hasAttribute("aria-describedby");
+  const ghost = composer.editor.hasAttribute("aria-describedby");
   await composer.unmount();
   localStorage.clear();
   assert.equal(ghost, false);
@@ -701,7 +663,7 @@ void test("a picker's empty filter shows no next-message suggestion", async () =
 void test("Escape in a picker closes it and clears the filter", async () => {
   const composer = await openPicker("tw");
   await composer.press("Escape");
-  const value = composer.textarea.value;
+  const value = composer.value();
   const options = document.querySelectorAll('[role="option"]').length;
   await composer.unmount();
   assert.equal(value, "");
@@ -751,7 +713,7 @@ void test("Tab in a labels-only menu runs the row and never writes its hidden va
   ];
   try {
     const composer = await mount("/fork fix", false);
-    await React.act(async () => composer.textarea.focus());
+    await React.act(async () => composer.editor.focus());
     const rows = document.querySelectorAll('[role="option"]').length;
     await composer.press("Tab");
     await composer.unmount();
@@ -775,7 +737,7 @@ async function typedFork(options: SlashOption[], steps: (composer: Mounted) => P
   liveCommands = [...commands, forkWith(options)];
   try {
     const composer = await mount("/fork 2", false);
-    await React.act(async () => composer.textarea.focus());
+    await React.act(async () => composer.editor.focus());
     await steps(composer);
     await composer.unmount();
     return composer.ran;
@@ -787,7 +749,7 @@ async function typedFork(options: SlashOption[], steps: (composer: Mounted) => P
 const clickSend = async (composer: Mounted) => {
   const send = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
   await React.act(async () => {
-    composer.textarea.blur();
+    composer.editor.blur();
     send.click();
   });
 };
@@ -820,7 +782,7 @@ void test("a /fork row is not a checkbox, and a /model row says which model is c
   liveCommands = commands.map((c) => (c.name === "model" ? { ...c, current: "a/one" } : c));
   try {
     const composer = await mount("/model ", false);
-    await React.act(async () => composer.textarea.focus());
+    await React.act(async () => composer.editor.focus());
     const model = checks();
     await composer.unmount();
     assert.deepEqual(fork, [null]);
@@ -851,7 +813,7 @@ void test("a pick in a labels-only menu forks at its own row when two rows share
   ];
   try {
     const composer = await mount("/fork hi", false);
-    await React.act(async () => composer.textarea.focus());
+    await React.act(async () => composer.editor.focus());
     await composer.press("ArrowDown");
     await composer.press("Enter");
     await composer.unmount();
@@ -875,7 +837,7 @@ void test("Enter on a labels-only command with no matching label runs nothing", 
   try {
     // "2" is a hidden value but no label, so it must not fork at message 2.
     const composer = await mount("/fork 2", false);
-    await React.act(async () => composer.textarea.focus());
+    await React.act(async () => composer.editor.focus());
     const rows = document.querySelectorAll('[role="option"]').length;
     await composer.press("Enter");
     await composer.unmount();
@@ -933,7 +895,7 @@ void test("each attached file's original gets the id of its own draft card (SKY-
     const paste = new dom.window.Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(paste, "clipboardData", { value: { getData: () => "", files } });
     await React.act(async () => {
-      composer.textarea.dispatchEvent(paste);
+      composer.editor.dispatchEvent(paste);
     });
     const cards = splitPastes(composer.drafts.at(-1) ?? "").files;
     assert.deepEqual(

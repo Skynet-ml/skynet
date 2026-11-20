@@ -50,12 +50,12 @@ function filledState() {
   };
 }
 
-test("a new wizard starts at Guided on Auto, with the Settings scorer runs or 200", () => {
+test("a new wizard starts at Expert on Auto, with the Settings scorer runs or 200", () => {
   const state = initialWizardV2State();
-  assert.equal(state.level, "guided");
+  assert.equal(state.level, "expert");
   assert.equal(state.optimizer.choice, "auto");
   assert.equal(state.optimizer.budget.max_scorer_runs, 200);
-  assert.equal(initialWizardV2State("expert").level, "expert");
+  assert.equal(initialWizardV2State("guided").level, "guided");
   assert.equal(initialWizardV2State("standard", 50).optimizer.budget.max_scorer_runs, 50);
 });
 

@@ -37,7 +37,7 @@ after(() => dom.window.close());
 const { createRoot } = await import("react-dom/client");
 const { MessageTime } = await import("./message-actions");
 const { TooltipProvider } = await import("@/shared/ui/primitives/tooltip");
-const { formatMessageDate } = await import("./message-time");
+const { messageTimeText } = await import("./message-time");
 const { getActiveIntlLocale } = await import("@/shared/lib/runtime-locale");
 const { msg } = await import("@/shared/lib/messages");
 
@@ -50,8 +50,8 @@ void it("lets the keyboard and screen readers reach the full date", () => {
   );
   const time = /<time [^>]*>/.exec(html)?.[0] ?? "";
   assert.match(time, /tabindex="0"/);
-  const fullDate = formatMessageDate(createdAt, getActiveIntlLocale());
-  assert.ok(html.includes(`<span class="sr-only">, ${fullDate}</span>`), html);
+  const { spoken } = messageTimeText(createdAt, Date.now(), getActiveIntlLocale())!;
+  assert.ok(html.includes(`<span class="sr-only">, ${spoken}</span>`), html);
 });
 
 void it("reads the full date once while the focused tooltip is open", async () => {

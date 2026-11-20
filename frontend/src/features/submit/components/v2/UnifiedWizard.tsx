@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import { toast } from "react-toastify";
 
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";

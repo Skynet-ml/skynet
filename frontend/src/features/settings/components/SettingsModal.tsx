@@ -10,7 +10,7 @@ import { useTableSort } from "@/shared/hooks/use-table-sort";
 import { createPortal } from "react-dom";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
 import {
   BookOpen,
   Columns,

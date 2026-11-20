@@ -3,7 +3,7 @@
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { EmptyState } from "@/shared/ui/empty-state";
 import * as React from "react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import {
   ArrowSquareOut,
   CircleNotch,
@@ -862,7 +862,7 @@ export function WalletTab() {
           }
         />
       )}
-      <section className="flex flex-col gap-5">
+      <section data-setup="wallet" className="flex flex-col gap-5">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="flex flex-col gap-1">
             <span className="flex items-center gap-1.5 text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">

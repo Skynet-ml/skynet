@@ -12,7 +12,6 @@ export function parseMessageTime(value: string | null | undefined): number | und
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
-const WEEK = 7 * DAY;
 
 // A long chat formats every message time on each minute tick; building an
 // Intl formatter is slow, so each locale and option set builds one, once.
@@ -29,53 +28,108 @@ function dateFormat(locale: string, options: Intl.DateTimeFormatOptions): Intl.D
   return format;
 }
 
-/** The shared relative-time formatter for this locale and numeric style. */
+/** The shared relative-time formatter for this locale and these options. */
 function relativeFormat(
   locale: string,
-  numeric: Intl.RelativeTimeFormatNumeric,
+  options: Intl.RelativeTimeFormatOptions,
 ): Intl.RelativeTimeFormat {
-  const key = `relative|${locale}|${numeric}`;
+  const key = `relative|${locale}|${JSON.stringify(options)}`;
   let format = formatters.get(key) as Intl.RelativeTimeFormat | undefined;
   if (!format) {
-    format = new Intl.RelativeTimeFormat(locale, { numeric });
+    format = new Intl.RelativeTimeFormat(locale, options);
     formatters.set(key, format);
   }
   return format;
 }
 
+// The units of a recent message's age, largest first, in seconds (the Claude app's table).
+const AGE_UNITS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
+  ["year", 31_536_000],
+  ["month", 2_592_000],
+  ["week", 604_800],
+  ["day", 86_400],
+  ["hour", 3_600],
+  ["minute", 60],
+];
+
+const ageStyles = new Map<string, Intl.RelativeTimeFormatStyle>();
+
 /**
- * How long ago a message was sent: "now", "5 minutes ago", "3 days ago".
- * From a week on it is the day and month ("Nov 7"), with the year only
- * when it is not this year.
+ * The narrow style, or the short one where the narrow style writes a past
+ * time with a leading sign ("-5 min"), as the Claude app does.
  */
-export function formatMessageAge(
+function ageStyle(locale: string): Intl.RelativeTimeFormatStyle {
+  let style = ageStyles.get(locale);
+  if (!style) {
+    const narrow = relativeFormat(locale, { numeric: "always", style: "narrow" });
+    const signed = AGE_UNITS.some(([unit]) =>
+      /^[+\u2212\p{Pd}]/u.test(narrow.format(-5, unit).trim()),
+    );
+    style = signed ? "short" : "narrow";
+    ageStyles.set(locale, style);
+  }
+  return style;
+}
+
+/** A recent message's age: "now", "5m ago", "1h ago". */
+function formatAge(ms: number, now: number, locale: string): string {
+  const style = ageStyle(locale);
+  const seconds = Math.round((ms - now) / 1000);
+  const size = Math.abs(seconds);
+  const format = relativeFormat(locale, { numeric: "auto", style });
+  if (size < 60) return format.format(0, "second");
+  const [unit, unitSeconds] = AGE_UNITS.find(([, s]) => size >= s) ?? ["minute", 60];
+  return format.format(Math.round(seconds / unitSeconds), unit);
+}
+
+// The Claude app shows the age only up to 58.5 minutes, and from one minute in the future.
+const RECENT_MS = 3_510_000;
+
+/** The visible label, tooltip and screen-reader date of a message time. */
+export interface MessageTimeText {
+  label: string;
+  tooltip: string;
+  spoken: string;
+}
+
+/**
+ * The texts of a message time, by the Claude app's rule. A recent message
+ * shows its age ("5m ago") with the date and time as the tooltip. An older
+ * one shows its time ("3:04 PM") with the full date and time as the tooltip.
+ *
+ * Args:
+ *   ms: When the message was sent, in epoch ms.
+ *   now: The current time, in epoch ms.
+ *   locale: The Intl locale.
+ *
+ * Returns:
+ *   The texts, or null when the time is unknown.
+ */
+export function messageTimeText(
   ms: number | null | undefined,
   now: number,
   locale: string,
-): string {
-  if (ms == null || !Number.isFinite(ms)) return "";
-  const age = Math.max(0, now - ms);
-  if (age >= WEEK) {
-    const sameYear = new Date(ms).getFullYear() === new Date(now).getFullYear();
-    return dateFormat(locale, {
-      month: "short",
-      day: "numeric",
-      ...(sameYear ? {} : { year: "numeric" }),
-    }).format(ms);
+): MessageTimeText | null {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  const age = now - ms;
+  if (age > -MINUTE && age < RECENT_MS) {
+    return {
+      label: formatAge(ms, now, locale),
+      tooltip: dateFormat(locale, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(ms),
+      spoken: dateFormat(locale, { dateStyle: "full", timeStyle: "short" }).format(ms),
+    };
   }
-  const relative = relativeFormat(locale, "auto");
-  if (age < MINUTE) return relative.format(0, "second");
-  if (age < HOUR) return relative.format(-Math.floor(age / MINUTE), "minute");
-  if (age < DAY) return relative.format(-Math.floor(age / HOUR), "hour");
-  return relativeFormat(locale, "always").format(
-    -Math.floor(age / DAY),
-    "day",
-  );
-}
-
-/** The date and time a message was sent, for its tooltip: "Nov 12, 2026, 3:04 PM". */
-export function formatMessageDate(ms: number, locale: string): string {
-  return dateFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(ms);
+  return {
+    label: dateFormat(locale, { hour: "numeric", minute: "numeric" }).format(ms),
+    tooltip: dateFormat(locale, { dateStyle: "full", timeStyle: "medium" }).format(ms),
+    spoken: dateFormat(locale, { dateStyle: "full" }).format(ms),
+  };
 }
 
 // One shared minute clock for every message time on the page, so a long chat
@@ -172,8 +226,12 @@ export function separatorParts(
   const days = Math.max(calendarDays(ms, now), 0);
   let date: string;
   if (days <= 1) {
-    date = relativeFormat(locale, "auto").format(-days, "day");
-    date = date.charAt(0).toLocaleUpperCase(locale) + date.slice(1);
+    const format = relativeFormat(locale, { numeric: "auto" });
+    date = format.format(-days, "day");
+    // Codex capitalizes "today" and "yesterday" in English only.
+    if (locale.startsWith("en")) {
+      date = date.charAt(0).toUpperCase() + date.slice(1);
+    }
   } else if (days <= 7) {
     date = dateFormat(locale, { weekday: "long" }).format(ms);
   } else if (days <= 365) {

@@ -8,7 +8,9 @@ still be billed from the sink.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +22,7 @@ from sqlalchemy.pool import StaticPool
 from ...config import settings
 from ...storage.models import Base, BillingCustomerModel, WalletLedgerModel
 from ..errors import DomainError
+from ..routers import _helpers
 from ..routers._helpers import enforce_llm_balance, stream_with_llm_metering
 
 
@@ -211,6 +214,36 @@ async def test_stream_with_llm_metering_adds_stats_to_done(engine: Engine) -> No
     stats = done["stats"]
     assert (stats["input_tokens"], stats["output_tokens"]) == (1_200, 300)
     assert stats["duration_ms"] >= stats["ttft_ms"] >= 0
+
+
+async def test_stream_with_llm_metering_marks_the_final_answer_start(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``final_answer_at`` is the wall-clock time of the first reply token after the last tool call."""
+    _fund(engine, "alice@x.io")
+    clock = iter([1.0, 2.0, 3.0])
+    monkeypatch.setattr(_helpers, "time", SimpleNamespace(monotonic=time.monotonic, time=lambda: next(clock)))
+
+    async def source() -> AsyncIterator[dict[str, Any]]:
+        """Yield text, a tool call, the final answer in two tokens, and done."""
+        yield {"event": "message_patch", "data": {"chunk": "Let me look."}}
+        yield {"event": "tool_start", "data": {}}
+        yield {"event": "tool_end", "data": {}}
+        yield {"event": "message_patch", "data": {"chunk": "Found"}}
+        yield {"event": "message_patch", "data": {"chunk": " it."}}
+        yield {"event": "done", "data": {}}
+
+    events = [
+        event
+        async for event in stream_with_llm_metering(
+            source(),
+            job_store=_StubStore(engine),
+            username="alice@x.io",
+            description="Agent chat",
+            usage_sink=[_FakeLm([{"usage": {"prompt_tokens": 10, "completion_tokens": 5}}])],
+        )
+    ]
+    assert events[-1]["data"]["stats"]["final_answer_at"] == 2000
 
 
 async def test_stream_with_llm_metering_sends_stats_for_calls_after_done(engine: Engine) -> None:

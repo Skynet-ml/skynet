@@ -2,7 +2,7 @@
 
 import { MicroPill } from "@/shared/ui/model-chip";
 import * as React from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
 import {
   Check,
   CaretDown,

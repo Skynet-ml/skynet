@@ -13,7 +13,7 @@ import {
   Books,
   Sparkle,
 } from "@/shared/ui/icons";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "motion/react";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   Card,

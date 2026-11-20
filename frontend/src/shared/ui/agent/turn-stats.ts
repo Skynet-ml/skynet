@@ -9,6 +9,7 @@ export function parseTurnStats(raw: unknown): TurnStats | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const compactionCents = num(r.compaction_cents);
+  const finalAnswerAt = num(r.final_answer_at);
   return {
     inputTokens: num(r.input_tokens),
     outputTokens: num(r.output_tokens),
@@ -17,6 +18,7 @@ export function parseTurnStats(raw: unknown): TurnStats | null {
     durationMs: num(r.duration_ms),
     ttftMs: num(r.ttft_ms),
     ...(compactionCents !== null ? { compactionCents } : {}),
+    ...(finalAnswerAt !== null ? { finalAnswerAt } : {}),
   };
 }
 

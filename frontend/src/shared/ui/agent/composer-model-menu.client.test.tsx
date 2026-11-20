@@ -311,6 +311,46 @@ for (const local of [false, true]) {
   });
 }
 
+void test("the Suggested and All tabs switch the list, and a search selects All", async () => {
+  const m = await mount(null, null);
+  try {
+    await click(byLabel("Choose a model: GPT-5.5")!);
+    const radio = (name: RegExp) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => name.test(b.getAttribute("aria-label") ?? ""))!;
+    assert.equal(radio(/Suggested/).getAttribute("aria-checked"), "true");
+    assert.equal(radio(/All/).getAttribute("aria-label"), "All (3)");
+    assert.equal(radio(/All/).textContent, "");
+    assert.deepEqual(menuRows(), ["GPT-5.5", "GPT-5.4 mini"]);
+    await click(radio(/All/));
+    assert.equal(document.querySelectorAll('[role="menuitem"]').length, 3);
+    // The list slides in from the side of the tab it belongs to; a fresh open does not slide.
+    assert.equal(document.querySelector(".model-view")?.getAttribute("data-slide"), "all");
+    await click(radio(/Suggested/));
+    assert.deepEqual(menuRows(), ["GPT-5.5", "GPT-5.4 mini"]);
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Search models…"]')!;
+    await React.act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, "candidate");
+      input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+    assert.equal(radio(/All/).getAttribute("aria-checked"), "true");
+    await click(radio(/Suggested/));
+    assert.equal(input.value, "");
+    assert.deepEqual(menuRows(), ["GPT-5.5", "GPT-5.4 mini"]);
+  } finally {
+    await m.unmount();
+  }
+});
+
+void test("a list with no models outside the shortlist shows no tabs", async () => {
+  const m = await mount();
+  try {
+    await click(byLabel("Choose a model: GPT-5.5")!);
+    assert.equal(document.querySelector('[role="radiogroup"]'), null);
+  } finally {
+    await m.unmount();
+  }
+});
+
 const TWO_LABS_LOCAL: CatalogModel[] = [
   ...CLI,
   {

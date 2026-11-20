@@ -11,6 +11,8 @@ from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.generalist import WizardState, _turn_error_payload
 from core.service_gateway.agents.pi_bridge import PiBridgeError
 
+NO_FUNDS = "billing.insufficient_funds"
+
 
 def _rate_limit(message: str = "Rate limit reached for requests") -> litellm.RateLimitError:
     """Build litellm's typed 429.
@@ -56,10 +58,10 @@ def test_capacity_error_below_the_pi_bridge_is_found() -> None:
     assert _turn_error_payload(group)["code"] == "capacity"
 
 
-def test_spent_quota_429_is_not_capacity() -> None:
-    """A 429 for a spent quota does not clear with time, so it gets no retry code."""
+def test_spent_quota_429_is_no_funds() -> None:
+    """A 429 for a spent quota does not clear with time, so it gets the no-funds code."""
     exc = _rate_limit("You exceeded your current quota, please check your plan and billing details.")
-    assert "code" not in _turn_error_payload(exc)
+    assert _turn_error_payload(exc)["code"] == NO_FUNDS
 
 
 def test_openai_429_with_a_billing_link_is_capacity() -> None:
@@ -72,17 +74,36 @@ def test_openai_429_with_a_billing_link_is_capacity() -> None:
     assert _turn_error_payload(exc)["code"] == "capacity"
 
 
-def test_billing_details_429_is_not_capacity() -> None:
+def test_billing_details_429_is_no_funds() -> None:
     """A 429 that asks for billing details does not clear with time."""
     exc = _rate_limit("Your request was rejected. Please check your plan and billing details.")
-    assert "code" not in _turn_error_payload(exc)
+    assert _turn_error_payload(exc)["code"] == NO_FUNDS
 
 
-def test_anthropic_spend_cap_429_is_not_capacity() -> None:
-    """Anthropic's spend-cap 429 stays until the cap changes, so it gets no retry code."""
+def test_anthropic_spend_cap_429_is_no_funds() -> None:
+    """Anthropic's spend-cap 429 stays until the cap changes, so it gets the no-funds code."""
     exc = _rate_limit(
         "You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."
     )
+    assert _turn_error_payload(exc)["code"] == NO_FUNDS
+
+
+def test_empty_byok_key_is_no_funds() -> None:
+    """An own key with no credits shows the same message as an empty Skynet wallet."""
+    exc = RuntimeError("Insufficient credits. Add more using https://openrouter.ai/settings/credits")
+    assert _turn_error_payload(exc)["code"] == NO_FUNDS
+
+
+def test_relay_byok_refusal_below_a_wrapper_is_no_funds() -> None:
+    """The relay's own-key refusal code is found through the exception chain."""
+    exc = PiBridgeError("turn failed")
+    exc.__cause__ = RuntimeError('{"code": "byok_funds_exhausted"}')
+    assert _turn_error_payload(exc)["code"] == NO_FUNDS
+
+
+def test_managed_funds_refusal_is_not_the_users_no_funds() -> None:
+    """Skynet's own provider budget running out is not the user's wallet."""
+    exc = RuntimeError('{"code": "managed_funds_exhausted", "message": "Our team is alerted."}')
     assert "code" not in _turn_error_payload(exc)
 
 

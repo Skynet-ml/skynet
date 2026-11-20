@@ -4,7 +4,7 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import { List } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";

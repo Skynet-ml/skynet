@@ -1,4 +1,4 @@
-"""Tests for ``POST /connectors/github/repos``, which creates a seeded repository.
+"""Tests for ``POST /connectors/{github,gitlab,bitbucket}/repos``, which create a seeded repository.
 
 The GitHub credential check runs against a mocked :mod:`httpx` boundary, and
 the create library is replaced in the router module, so no test reaches the
@@ -168,3 +168,98 @@ def test_create_rejects_bad_body(body: dict[str, Any]) -> None:
         response = client.post("/connectors/github/repos", json=body)
     assert response.status_code == 422
     create.assert_not_called()
+
+
+def _host_user_api(method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """Answer the account check GitLab or Bitbucket runs when the credential is saved.
+
+    Args:
+        method: HTTP method.
+        url: Request URL.
+        **kwargs: Request options.
+
+    Returns:
+        The canned response.
+    """
+    if urlparse(url).path.endswith("/user"):
+        return _response(200, {"username": "alice"})
+    raise AssertionError(f"unexpected call {method} {url}")
+
+
+def _host_linked_client(provider: str):
+    """Build a client whose caller has a linked GitLab or Bitbucket token.
+
+    Args:
+        provider: ``gitlab`` or ``bitbucket``.
+
+    Returns:
+        The test client.
+    """
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_host_user_api):
+        saved = client.put(f"/connectors/{provider}/credentials", json={"fields": {"token": f"{provider}-tok"}})
+    assert saved.status_code == 200, saved.text
+    return client
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
+def test_host_create_seeds_the_same_files(provider: str) -> None:
+    """GitLab and Bitbucket get the host token and the same seeded files as GitHub."""
+    client = _host_linked_client(provider)
+    created = CreatedRepository(full_name="alice/app", default_branch="main", commit="d" * 40)
+    with (
+        patch.object(connectors_router.repo_hosts, "create_repository_with_files", return_value=created) as create,
+        patch.object(connectors_router, "create_repository_with_files") as github_create,
+    ):
+        response = client.post(
+            f"/connectors/{provider}/repos",
+            json={"name": "app", "objective": "Sort.", "description": "Sorts", "cases": _CASES},
+        )
+    assert response.status_code == 201, response.text
+    assert response.json() == {"full_name": "alice/app", "default_branch": "main", "commit": "d" * 40}
+    assert create.call_args.args == (
+        provider,
+        f"{provider}-tok",
+        "app",
+        {"README.md": _README, "data/cases.jsonl": _CASES_JSONL},
+    )
+    assert create.call_args.kwargs == {"private": True, "description": "Sorts"}
+    github_create.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
+@pytest.mark.parametrize(
+    ("message", "status"),
+    [
+        ("Your account already has a repository named 'x'. Choose another name.", 409),
+        ("The host does not accept 'x' as a repository name here.", 422),
+        ("The host refused to create the repository. Connect again and retry.", 502),
+    ],
+)
+def test_host_create_maps_library_errors(provider: str, message: str, status: int) -> None:
+    """GitLab and Bitbucket failures get the same statuses as GitHub ones."""
+    client = _host_linked_client(provider)
+    with patch.object(
+        connectors_router.repo_hosts, "create_repository_with_files", side_effect=RepoCreateError(message)
+    ):
+        response = client.post(f"/connectors/{provider}/repos", json={"name": "x", "objective": "Do it."})
+    assert response.status_code == status
+    assert response.json()["detail"] == message
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
+def test_host_create_without_a_link_is_409(provider: str) -> None:
+    """A caller who did not link the host gets ``connectors.not_connected``."""
+    client, _ = _make_client()
+    with patch.object(connectors_router.repo_hosts, "create_repository_with_files") as create:
+        response = client.post(f"/connectors/{provider}/repos", json={"name": "x", "objective": "Do it."})
+    assert response.status_code == 409
+    assert response.json()["code"] == "connectors.not_connected"
+    create.assert_not_called()
+
+
+def test_host_create_refuses_an_unknown_host() -> None:
+    """Only GitLab and Bitbucket use the generic create route."""
+    client, _ = _make_client()
+    response = client.post("/connectors/azure/repos", json={"name": "x", "objective": "Do it."})
+    assert response.status_code == 422

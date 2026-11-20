@@ -7,7 +7,8 @@ from typing import Any
 import pytest
 
 from ...api.errors import DomainError
-from .. import bitbucket, github, gitlab, repo_hosts
+from .. import bitbucket, github, github_repo, gitlab, repo_hosts
+from ..github_create_repo import RepoCreateError
 from ..github_publish import PublishedChange
 from ..github_repo import RepoFetchError
 
@@ -88,3 +89,70 @@ def test_open_change_dispatches_by_host(monkeypatch: pytest.MonkeyPatch) -> None
         change = repo_hosts.open_change(provider, "t", "a/b", head="h", base_branch=None, title="T", body="B")
         assert change.branch == "h"
     assert opened == ["github", "bitbucket"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "module", "origin"),
+    [
+        ("github", None, "https://github.com"),
+        ("gitlab", gitlab, "https://gitlab.com"),
+        ("bitbucket", bitbucket, "https://bitbucket.org"),
+    ],
+)
+def test_create_repository_with_files_uses_the_host_and_its_git_origin(
+    monkeypatch: pytest.MonkeyPatch, provider: str, module: Any, origin: str
+) -> None:
+    """Each host creates the repository, then the first commit goes to that host's git origin."""
+    created: list[tuple[str, bool, str | None]] = []
+
+    def create(token: str, name: str, *, private: bool, description: str | None = None) -> tuple[str, str]:
+        """Record the create call.
+
+        Args:
+            token: Host token.
+            name: Repository name.
+            private: Visibility.
+            description: Optional description.
+
+        Returns:
+            The full name and branch.
+        """
+        created.append((name, private, description))
+        return f"alice/{name}", "trunk"
+
+    pushes: list[dict[str, Any]] = []
+
+    def push(repository: str, branch: str, files: dict[str, str], message: str, token: str, **kwargs: Any) -> str:
+        """Record the push and resolve the remote the real push would use.
+
+        Args:
+            repository: Full name.
+            branch: Branch to push.
+            files: First-commit files.
+            message: Commit message.
+            token: Host token.
+            **kwargs: The ``provider`` keyword.
+
+        Returns:
+            A fake commit.
+        """
+        pushes.append({"repository": repository, "branch": branch, "token": token, **kwargs})
+        return "f" * 40
+
+    if module is None:
+        monkeypatch.setattr(repo_hosts, "github_create_repository", create)
+    else:
+        monkeypatch.setattr(module, "create_repository", create)
+    monkeypatch.setattr(repo_hosts, "push_initial_commit", push)
+    result = repo_hosts.create_repository_with_files(provider, "tok", "app", {"README.md": "# app\n"}, private=True)
+    assert (result.full_name, result.default_branch, result.commit) == ("alice/app", "trunk", "f" * 40)
+    assert created == [("app", True, None)]
+    assert pushes == [{"repository": "alice/app", "branch": "trunk", "token": "tok", "provider": provider}]
+    assert github_repo.git_host(pushes[0]["provider"])[0] == origin
+
+
+def test_create_repository_with_files_checks_paths_before_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bad file path fails before any repository is created."""
+    monkeypatch.setattr(gitlab, "create_repository", lambda *_a, **_k: pytest.fail("host called"))
+    with pytest.raises(RepoCreateError):
+        repo_hosts.create_repository_with_files("gitlab", "tok", "app", {"../x": "y"}, private=True)

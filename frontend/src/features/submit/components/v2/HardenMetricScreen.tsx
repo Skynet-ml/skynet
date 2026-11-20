@@ -18,8 +18,8 @@ import type {
 } from "@/shared/types/hardening";
 import { hardeningSurvived } from "@/shared/types/hardening";
 import { ArrowLeft, CheckCircle, CircleNotch, ShieldCheck, XCircle } from "@/shared/ui/icons";
+import { NumberInput } from "@/shared/ui/number-input";
 import { Button } from "@/shared/ui/primitives/button";
-import { Input } from "@/shared/ui/primitives/input";
 import {
   Select,
   SelectContent,
@@ -96,7 +96,9 @@ function FixPanel({ fix, h, t }: { fix: HardeningFix; h: HardeningState; t: T })
           <CheckLine name="reference_not_lower" result={checks.reference_not_lower} t={t} />
         )}
       </ul>
-      {blocked && <p className="text-sm text-muted-foreground">{t("submit.v2.harden.fix.blocked")}</p>}
+      {blocked && (
+        <p className="text-sm text-muted-foreground">{t("submit.v2.harden.fix.blocked")}</p>
+      )}
       {noting ? (
         <div className="space-y-2">
           <label htmlFor={noteId} className="text-sm font-medium">
@@ -137,7 +139,17 @@ function FixPanel({ fix, h, t }: { fix: HardeningFix; h: HardeningState; t: T })
 }
 
 /** The spend against the reserve, the round counter and the quiet stop. */
-function LiveBar({ job, h, t, usd }: { job: HardeningJob; h: HardeningState; t: T; usd: (n: number) => string }) {
+function LiveBar({
+  job,
+  h,
+  t,
+  usd,
+}: {
+  job: HardeningJob;
+  h: HardeningState;
+  t: T;
+  usd: (n: number) => string;
+}) {
   const share = job.reserved_usd > 0 ? Math.min(1, job.spent_usd / job.reserved_usd) : 0;
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-border/60 bg-card/60 px-4 py-3 text-sm">
@@ -162,12 +174,21 @@ function LiveBar({ job, h, t, usd }: { job: HardeningJob; h: HardeningState; t: 
             />
           </span>
           <span className="shrink-0 text-muted-foreground">
-            {t("submit.v2.harden.spend", { spent: usd(job.spent_usd), reserved: usd(job.reserved_usd) })}
+            {t("submit.v2.harden.spend", {
+              spent: usd(job.spent_usd),
+              reserved: usd(job.reserved_usd),
+            })}
           </span>
         </span>
       )}
       {STOPPABLE.has(job.status) && (
-        <Button variant="link" size="sm" className="ms-auto text-muted-foreground" disabled={h.busy} onClick={() => void h.stop()}>
+        <Button
+          variant="link"
+          size="sm"
+          className="ms-auto text-muted-foreground"
+          disabled={h.busy}
+          onClick={() => void h.stop()}
+        >
           {t("submit.v2.harden.stop")}
         </Button>
       )}
@@ -189,7 +210,13 @@ function SettingsForm({
   local: boolean;
   busy: boolean;
   hasScorer: boolean;
-  onStart: (s: { rounds: number; cap: number; attacker: string; judge: string; view: HardeningView }) => void;
+  onStart: (s: {
+    rounds: number;
+    cap: number;
+    attacker: string;
+    judge: string;
+    view: HardeningView;
+  }) => void;
   onSkip: () => void;
   t: T;
   usd: (n: number) => string;
@@ -209,6 +236,7 @@ function SettingsForm({
   const fallback = hardeningDefaultModel(reflectionModel, models, local, status);
   const [rounds, setRounds] = React.useState(DEFAULT_ROUNDS);
   const [cap, setCap] = React.useState(DEFAULT_CAP_USD);
+  const fieldId = React.useId();
   const [attacker, setAttacker] = React.useState<string | null>(null);
   const [judge, setJudge] = React.useState<string | null>(null);
   const [view, setView] = React.useState<HardeningView>("black_box");
@@ -218,7 +246,11 @@ function SettingsForm({
     ? models
     : [...models, { value: JEV_ROUTER, label: "TypeSafe Jev" } as CatalogModel];
   const valid =
-    Number.isInteger(rounds) && rounds >= 1 && rounds <= MAX_ROUNDS && cap > 0 && cap <= MAX_CAP_USD;
+    Number.isInteger(rounds) &&
+    rounds >= 1 &&
+    rounds <= MAX_ROUNDS &&
+    cap > 0 &&
+    cap <= MAX_CAP_USD;
 
   return (
     <section className="space-y-4">
@@ -232,29 +264,33 @@ function SettingsForm({
             })}
       </p>
       <div className="grid gap-3 rounded-xl border border-border/60 p-4 sm:grid-cols-2">
-        <label className="space-y-1 text-sm">
-          <span className="text-muted-foreground">{t("submit.v2.harden.rounds")}</span>
-          <Input
-            type="number"
-            dir="ltr"
+        {/* A wrapping <label> would send its clicks to the picker's first
+            button, so each label points at the field by id instead. */}
+        <div className="space-y-1 text-sm">
+          <label htmlFor={`${fieldId}-rounds`} className="text-muted-foreground">
+            {t("submit.v2.harden.rounds")}
+          </label>
+          <NumberInput
+            id={`${fieldId}-rounds`}
             min={1}
             max={MAX_ROUNDS}
             value={rounds}
-            onChange={(e) => setRounds(Number(e.target.value))}
+            onChange={setRounds}
           />
-        </label>
-        <label className="space-y-1 text-sm">
-          <span className="text-muted-foreground">{t("submit.v2.harden.cap")}</span>
-          <Input
-            type="number"
-            dir="ltr"
+        </div>
+        <div className="space-y-1 text-sm">
+          <label htmlFor={`${fieldId}-cap`} className="text-muted-foreground">
+            {t("submit.v2.harden.cap")}
+          </label>
+          <NumberInput
+            id={`${fieldId}-cap`}
             min={0.5}
             step={0.5}
             max={MAX_CAP_USD}
             value={cap}
-            onChange={(e) => setCap(Number(e.target.value))}
+            onChange={setCap}
           />
-        </label>
+        </div>
         <ModelSelect
           label={t("submit.v2.harden.attacker")}
           value={pickedAttacker}
@@ -343,7 +379,9 @@ function cardOrder(round: TreeRound): HardeningExploit[] {
     const at = e.session ?? LEAD_NODE;
     bySession.set(at, [...(bySession.get(at) ?? []), e]);
   }
-  return [...bySession.keys()].sort((a, b) => a - b).flatMap((at) => reviewOrder(bySession.get(at) ?? []));
+  return [...bySession.keys()]
+    .sort((a, b) => a - b)
+    .flatMap((at) => reviewOrder(bySession.get(at) ?? []));
 }
 
 /**
@@ -474,7 +512,10 @@ export function HardenMetricScreen({
   const order = reviewing ? cardOrder(round) : [];
   const pending = order.filter(needsReview);
   const redrafting =
-    job.status === "running" && lastRound !== null && lastRound.fix === null && (lastRound.fix_notes?.length ?? 0) > 0;
+    job.status === "running" &&
+    lastRound !== null &&
+    lastRound.fix === null &&
+    (lastRound.fix_notes?.length ?? 0) > 0;
 
   const moveCard = (step: 1 | -1) => {
     const card = cardStep(order, focusCard, step);
@@ -550,7 +591,11 @@ export function HardenMetricScreen({
         </div>
       )}
       {rounds.length > 1 && (
-        <div role="group" aria-label={t("submit.v2.harden.rounds")} className="flex flex-wrap gap-1.5">
+        <div
+          role="group"
+          aria-label={t("submit.v2.harden.rounds")}
+          className="flex flex-wrap gap-1.5"
+        >
           {rounds.map((r) => (
             <Button
               key={r.index}
@@ -578,7 +623,9 @@ export function HardenMetricScreen({
           t={t}
         />
       )}
-      {job.status === "waiting_fix" && lastRound?.fix && <FixPanel fix={lastRound.fix} h={h} t={t} />}
+      {job.status === "waiting_fix" && lastRound?.fix && (
+        <FixPanel fix={lastRound.fix} h={h} t={t} />
+      )}
       {(job.status === "failed" || job.status === "stale") && (
         <section className="space-y-2">
           <h3 className="text-base font-semibold">

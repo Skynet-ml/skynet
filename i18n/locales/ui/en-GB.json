@@ -120,7 +120,7 @@
   "settings.code.dark_theme": "Dark code theme",
   "settings.code.font": "Code font",
   "settings.code.font.description": "Set a custom monospace font for code and diffs.",
-  "settings.code.font.placeholder": "e.g. JetBrains Mono",
+  "settings.code.font.default": "Default",
   "settings.code.size": "Code font size",
   "settings.code.size.description": "Applies to open files, diffs and code blocks.",
   "settings.code.size.px": "px",

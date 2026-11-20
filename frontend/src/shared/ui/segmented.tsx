@@ -18,7 +18,7 @@ export interface SegmentedOption<T extends string> {
   desc?: string;
   // Shown while the option is hovered or focused; explains it without taking
   // a line in the card.
-  tip?: string;
+  tip?: ReactNode;
   /** Accessible name when it should say more than the visible label. */
   ariaLabel?: string;
   /** Native tooltip, e.g. why a disabled option is unavailable. */

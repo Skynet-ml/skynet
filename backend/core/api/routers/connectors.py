@@ -17,6 +17,7 @@ storage quota apply exactly as they do to an upload.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
@@ -29,7 +30,7 @@ from ...config import settings
 from ...connectors import github, github_repo, registry, repo_hosts
 from ...connectors import huggingface as hf
 from ...connectors import oauth as generic_oauth
-from ...connectors.github_create_repo import RepoCreateError, create_repository_with_files
+from ...connectors.github_create_repo import CreatedRepository, RepoCreateError, create_repository_with_files
 from ...connectors.pruning import browse_importable
 from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
@@ -732,6 +733,54 @@ def create_connectors_router(*, job_store) -> APIRouter:
         repos = github.list_repositories(_secret(user.username, github.PROVIDER), search)
         return GithubRepositoriesResponse(repositories=[GithubRepository(**r) for r in repos])
 
+    def _create_seeded(
+        create: Callable[[dict[str, str]], CreatedRepository], body: GithubCreateRepositoryRequest
+    ) -> GithubCreatedRepository:
+        """Build the first commit's files from the request and create the repository with them.
+
+        The first commit holds ``README.md`` with the objective, plus
+        ``scorer.py`` when a scorer is given and ``data/cases.jsonl`` (one JSON
+        object per line) when cases are given.
+
+        Args:
+            create: Creates the repository on its host with the given files.
+            body: Name, visibility, optional description, the objective text,
+                and the optional scorer code and cases.
+
+        Returns:
+            The new repository, its default branch and the first commit.
+
+        Raises:
+            HTTPException: 409 for a taken name, 413 for oversized cases,
+                422 for a name the host refuses, 502 when the host refuses the request or the first push fails.
+        """
+        files = {"README.md": f"# {body.name}\n\n{body.objective.strip()}\n"}
+        if body.scorer_code and body.scorer_code.strip():
+            files["scorer.py"] = body.scorer_code if body.scorer_code.endswith("\n") else body.scorer_code + "\n"
+        if body.cases:
+            cases = "".join(json.dumps(case, ensure_ascii=False) + "\n" for case in body.cases)
+            if len(cases.encode("utf-8")) > GITHUB_CASES_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"The cases are larger than {GITHUB_CASES_MAX_BYTES // (1024 * 1024)} MiB. Use fewer cases.",
+                )
+            files["data/cases.jsonl"] = cases
+        try:
+            created = create(files)
+        except RepoCreateError as error:
+            message = str(error)
+            # The library words its errors for the user but has no error kind, so the wording picks the status.
+            if "already has a repository" in message:
+                status = 409
+            elif "does not accept" in message:
+                status = 422
+            else:
+                status = 502
+            raise HTTPException(status_code=status, detail=message) from error
+        return GithubCreatedRepository(
+            full_name=created.full_name, default_branch=created.default_branch, commit=created.commit
+        )
+
     @router.post(
         "/connectors/github/repos",
         response_model=GithubCreatedRepository,
@@ -762,38 +811,48 @@ def create_connectors_router(*, job_store) -> APIRouter:
             HTTPException: 409 for a taken name, 413 for oversized cases,
                 422 for a name GitHub refuses, 502 when GitHub refuses the request or the first push fails.
         """
-        files = {"README.md": f"# {body.name}\n\n{body.objective.strip()}\n"}
-        if body.scorer_code and body.scorer_code.strip():
-            files["scorer.py"] = body.scorer_code if body.scorer_code.endswith("\n") else body.scorer_code + "\n"
-        if body.cases:
-            cases = "".join(json.dumps(case, ensure_ascii=False) + "\n" for case in body.cases)
-            if len(cases.encode("utf-8")) > GITHUB_CASES_MAX_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"The cases are larger than {GITHUB_CASES_MAX_BYTES // (1024 * 1024)} MiB. Use fewer cases.",
-                )
-            files["data/cases.jsonl"] = cases
         token = _secret(user.username, github.PROVIDER).access_token
-        try:
-            created = create_repository_with_files(
-                token,
-                body.name,
-                files,
-                private=body.private,
-                description=body.description or None,
-            )
-        except RepoCreateError as error:
-            message = str(error)
-            # The library words its errors for the user but has no error kind, so the wording picks the status.
-            if "already has a repository" in message:
-                status = 409
-            elif "does not accept" in message:
-                status = 422
-            else:
-                status = 502
-            raise HTTPException(status_code=status, detail=message) from error
-        return GithubCreatedRepository(
-            full_name=created.full_name, default_branch=created.default_branch, commit=created.commit
+        return _create_seeded(
+            lambda files: create_repository_with_files(
+                token, body.name, files, private=body.private, description=body.description or None
+            ),
+            body,
+        )
+
+    @router.post(
+        "/connectors/{provider}/repos",
+        response_model=GithubCreatedRepository,
+        status_code=201,
+        summary="Create a GitLab or Bitbucket repository seeded with the run's objective, scorer and cases",
+        tags=["agent"],
+    )
+    def create_host_repository(
+        provider: OtherRepoHost,
+        body: GithubCreateRepositoryRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> GithubCreatedRepository:
+        """Create a repository in the linked GitLab or Bitbucket account, seeded like the GitHub one.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            body: Name, visibility, optional description, the objective text,
+                and the optional scorer code and cases.
+            user: Authenticated caller.
+
+        Returns:
+            The new repository, its default branch and the first commit.
+
+        Raises:
+            DomainError: 409 ``connectors.not_connected`` when the host is not linked.
+            HTTPException: 409 for a taken name, 413 for oversized cases,
+                422 for a name the host refuses, 502 when the host refuses the request or the first push fails.
+        """
+        token = _secret(user.username, provider).access_token
+        return _create_seeded(
+            lambda files: repo_hosts.create_repository_with_files(
+                provider, token, body.name, files, private=body.private, description=body.description or None
+            ),
+            body,
         )
 
     @router.get(

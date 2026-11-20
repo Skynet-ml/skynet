@@ -311,7 +311,6 @@ void it("names the file by the type the recorder reports", async () => {
   assert.equal(call.audio.type, "audio/mp4");
 });
 
-
 void it("unmount aborts the final request", async () => {
   const { view, unmount } = await mount();
   await startTake(view);
@@ -321,7 +320,6 @@ void it("unmount aborts the final request", async () => {
   await unmount();
   assert.equal(final.signal?.aborted, true);
 });
-
 
 void it("shows the rate limit's reason when the final transcript answers 429", async () => {
   const { view, unmount } = await mount();
@@ -349,7 +347,6 @@ void it("shows the rate limit's reason when the final transcript answers 429", a
   });
 });
 
-
 void it("releases the mic when the recorder cannot start", async () => {
   const { view, unmount } = await mount();
   const start = FakeRecorder.prototype.start;
@@ -367,7 +364,6 @@ void it("releases the mic when the recorder cannot start", async () => {
   assert.equal(stream.track.stopped, true);
   assert.deepEqual(state, { kind: "err", message: msg("agent.composer.mic_unavailable") });
 });
-
 
 for (const [name, reply] of [
   ["fails", () => refusal(502, "transcription.failed")],
@@ -397,7 +393,6 @@ void it("drops the final text when the host unmounts while the final call runs",
   assert.deepEqual(view.texts, []);
 });
 
-
 void it("sends no final call when the host unmounts before the stop event", async () => {
   FakeRecorder.lazyStop = true;
   const { view, unmount } = await mount();
@@ -409,7 +404,6 @@ void it("sends no final call when the host unmounts before the stop event", asyn
   assert.equal(calls.length, 0);
   assert.deepEqual(view.texts, []);
 });
-
 
 /** A recorder the browser refuses to build, with or without a mime type. */
 class BrokenRecorder {
@@ -528,21 +522,21 @@ async function mountComposer() {
   };
 }
 
-void it("Cancel puts focus back in the textarea", async () => {
+void it("Cancel puts focus back in the editor", async () => {
   const composer = await mountComposer();
   await composer.record();
   const cancel = composer.button("agent.composer.record_cancel")!;
   cancel.focus();
   await React.act(async () => cancel.click());
   await composer.frame();
-  const textarea = composer.container.querySelector("textarea");
-  const focused = document.activeElement === textarea;
+  const editor = composer.container.querySelector(".ProseMirror");
+  const focused = document.activeElement === editor;
   await composer.unmount();
-  assert.ok(textarea);
+  assert.ok(editor);
   assert.equal(focused, true);
 });
 
-void it("focus returns to the textarea when a failed take's error closes", async () => {
+void it("focus returns to the editor when a failed take's error closes", async () => {
   const timers = fakeTimeouts();
   try {
     const composer = await mountComposer();
@@ -562,12 +556,12 @@ void it("focus returns to the textarea when a failed take's error closes", async
     await React.act(async () => calls.at(-1)!.reply.resolve(refusal(502, "transcription.failed")));
     await React.act(async () => [...timers.pending.values()].forEach((fire) => fire()));
     await composer.frame();
-    const textarea = composer.container.querySelector("textarea");
-    const focused = document.activeElement === textarea;
+    const editor = composer.container.querySelector(".ProseMirror");
+    const focused = document.activeElement === editor;
     await composer.unmount();
     assert.equal(disabled, true);
     assert.equal(dropped, true);
-    assert.ok(textarea);
+    assert.ok(editor);
     assert.equal(focused, true);
   } finally {
     timers.restore();
@@ -596,7 +590,7 @@ void it("shows the recording strip in the composer", async () => {
   recorders[0]!.speak();
   await tickTo(3000);
 
-  assert.equal(container.querySelector("textarea"), null);
+  assert.equal(container.querySelector(".ProseMirror"), null);
   const cancel = container.querySelector(
     `button[aria-label="${msg("agent.composer.record_cancel")}"]`,
   );
@@ -632,7 +626,6 @@ void it("shows the recording strip in the composer", async () => {
   await React.act(async () => root.unmount());
   container.remove();
 });
-
 
 /** A 2D context that records the line the wave draws. */
 function fakePen() {
@@ -710,7 +703,10 @@ void it("the wave draws one thin line that moves with the mic level, flat at bot
   assert.equal(last.ys.length, 51);
   assert.equal(last.ys[0], 12);
   assert.ok(Math.abs(last.ys.at(-1)! - 12) < 1e-9);
-  assert.ok(last.ys.some((y) => Math.abs(y - 12) > 1), `${last.ys}`);
+  assert.ok(
+    last.ys.some((y) => Math.abs(y - 12) > 1),
+    `${last.ys}`,
+  );
 });
 
 void it("while processing, the wave draws a flat, dim line", async () => {

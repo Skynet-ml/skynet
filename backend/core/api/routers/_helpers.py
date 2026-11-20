@@ -119,21 +119,34 @@ async def stream_with_llm_metering(
 
     Yields:
         The upstream events; a ``done`` event gains a ``stats`` block with the
-        turn's token usage, cost and timing. When model calls made after
+        turn's token usage, cost and timing. Its ``final_answer_at`` is the
+        wall-clock epoch ms of the first reply token after the last tool call:
+        the chat's time separators read it, as Codex reads the start of a
+        turn's final answer. When model calls made after
         ``done`` (late thinking labels) changed the usage, one last
         ``turn_stats`` event carries the full block, so the shown cost is
         what gets debited.
     """
     started = time.monotonic()
     first_token_at: float | None = None
+    final_answer_at: int | None = None
+    answer_open = False
     done_stats: dict[str, Any] | None = None
     try:
         async for event in source:
             name = event.get("event")
-            if name == "message_patch" and first_token_at is None:
-                first_token_at = time.monotonic()
+            if name == "message_patch":
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                if not answer_open:
+                    answer_open = True
+                    final_answer_at = round(time.time() * 1000)
+            elif name in ("tool_start", "tool_end", "message_reset"):
+                # Text that a tool call follows, or that the agent takes back, is not the final answer.
+                answer_open = False
             elif name == "done" and isinstance(event.get("data"), dict):
                 done_stats = _turn_stats(usage_sink, token_source, started, first_token_at)
+                done_stats["final_answer_at"] = final_answer_at
                 event = {**event, "data": {**event["data"], "stats": done_stats}}
             yield event
         if done_stats is not None:

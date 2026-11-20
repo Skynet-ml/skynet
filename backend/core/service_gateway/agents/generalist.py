@@ -57,10 +57,12 @@ from ...api.interview_model import interview_model_id
 from ...api.model_catalog import agent_model_id, catalog_snapshot
 from ...api.suggest_model import byok_suggest_model, cli_suggest_model
 from ...billing.cli_dispatch import NEXT_PROMPT_ROLE, THINKING_LABEL_ROLE
+from ...billing.model_dispatch import BYOK_FUNDS_EXHAUSTED
 from ...brand import APP_NAME
 from ...config import settings
 from ...constants import TOKEN_SOURCE_BYOK
 from ...exceptions import ServiceError
+from ...i18n_keys import I18nKey
 from ...local.cli_catalog import CliProvider
 from ...local.managed_models import HOSTED_INFERENCE_KEY
 from ...models import ModelConfig
@@ -81,7 +83,7 @@ from .code import _agent_error_payload, _format_agent_error, _reply_language, _r
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .feedback import FeedbackTarget, send_feedback_tool
-from .github_mcp import github_repo_tools
+from .github_mcp import github_repo_tools, tool_from_mcp
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
 from .secret_request import SECRET_REQUEST_TOOL, secret_request_problem, secret_request_result, secret_request_tool
@@ -3775,7 +3777,7 @@ async def _drive_generalist_agent(
         dspy_tools = [
             _wrap_tool_with_approval(
                 note_sample_language(
-                    scope_wizard_tool(dspy.Tool.from_mcp_tool(session, spec), wizard_state), reply_language
+                    scope_wizard_tool(tool_from_mcp(session, spec), wizard_state), reply_language
                 ),
                 trust_mode=trust_mode,
                 registry=registry,
@@ -3968,6 +3970,38 @@ def _is_capacity_error(exc: BaseException) -> bool:
     return found
 
 
+def _is_spent_quota(exc: BaseException) -> bool:
+    """Tell whether a turn failed because the paying account has no funds left.
+
+    Args:
+        exc: The exception that ended the turn.
+
+    Returns:
+        True for a provider quota or credit refusal anywhere in the chain.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        leaf = stack.pop()
+        if id(leaf) in seen:
+            continue
+        seen.add(id(leaf))
+        text = str(leaf).lower()
+        if any(pattern in text for pattern in _SPENT_FUNDS_PATTERNS):
+            return True
+        if isinstance(leaf, BaseExceptionGroup):
+            stack.extend(leaf.exceptions)
+        stack.extend(linked for linked in (leaf.__cause__, leaf.__context__) if linked is not None)
+    return False
+
+
+# A BYOK key out of credits gets the same code as an empty Skynet wallet, so
+# the chat shows one message and its Add funds button. The relay's managed
+# refusal (``managed_funds_exhausted``) is the platform's problem, not the
+# user's, so it is not in this list.
+_SPENT_FUNDS_PATTERNS = (*_QUOTA_PATTERNS, BYOK_FUNDS_EXHAUSTED, "insufficient credits")
+
+
 def _turn_error_payload(exc: BaseException) -> dict[str, str]:
     """Build the ``error`` event data for a failed turn.
 
@@ -3975,11 +4009,15 @@ def _turn_error_payload(exc: BaseException) -> dict[str, str]:
         exc: The exception that ended the turn.
 
     Returns:
-        The agent error payload. A capacity failure without another code gets
-        ``code="capacity"``, so the chat counts down and retries.
+        The agent error payload. A spent quota or credit gets the wallet's
+        ``billing.insufficient_funds`` code. A capacity failure without
+        another code gets ``code="capacity"``, so the chat counts down and
+        retries.
     """
     payload = _agent_error_payload(exc)
-    if "code" not in payload and _is_capacity_error(exc):
+    if "code" not in payload and _is_spent_quota(exc):
+        payload["code"] = I18nKey.BILLING_INSUFFICIENT_FUNDS.value
+    elif "code" not in payload and _is_capacity_error(exc):
         payload["code"] = "capacity"
     return payload
 

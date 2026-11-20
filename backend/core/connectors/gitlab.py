@@ -18,6 +18,7 @@ from ..api.errors import DomainError
 from ..config import settings
 from .base import Credential, Entry, range_header
 from .github import clean_file_path
+from .github_create_repo import RepoCreateError
 from .github_publish import HardeningSummary, PublishedChange, RepoPublishError, hardening_line
 from .github_repo import COMMIT_LIMIT, RepoFetchError, RepoRateLimitError, commit_summary, rate_limit_message
 from .oauth import OAuthApp
@@ -630,6 +631,75 @@ def display_file(path: str, fetched: dict[str, Any]) -> dict[str, Any]:
         "too_large": fetched["too_large"],
         "missing": fetched["missing"],
     }
+
+
+def _name_taken(token: str, name: str) -> bool:
+    """Report whether the user's namespace already holds a project called ``name``.
+
+    Args:
+        token: GitLab token.
+        name: Project name GitLab refused.
+
+    Returns:
+        Whether the name is taken.
+
+    Raises:
+        RepoCreateError: When GitLab fails with anything but 404, so an
+            outage never looks like a free name.
+    """
+    try:
+        account = get_json(f"{API_URL}/user", provider=PROVIDER, headers=_headers(token))
+        username = account.get("username") if isinstance(account, dict) else None
+        if not isinstance(username, str) or not username:
+            raise RepoCreateError(f"Could not check GitLab for a repository named '{name}'. Retry later.")
+        get_json(_project_url(f"{username}/{name}"), provider=PROVIDER, headers=_headers(token))
+    except DomainError as error:
+        if error.code in ("connectors.not_found", "connectors.invalid_ref"):
+            return False
+        raise RepoCreateError(f"Could not check GitLab for a repository named '{name}'. Retry later.") from error
+    return True
+
+
+def create_repository(token: str, name: str, *, private: bool, description: str | None = None) -> tuple[str, str]:
+    """Create an empty project in the user's GitLab namespace.
+
+    The ``api`` scope the connection already asks for allows this, so no new
+    OAuth permission is needed.
+
+    Args:
+        token: GitLab token with ``api`` scope.
+        name: Project name, also used as its path.
+        private: Whether only the user can see the project.
+        description: Optional one-line description.
+
+    Returns:
+        The project path and the default branch GitLab chose.
+
+    Raises:
+        RepoCreateError: When the name is taken or GitLab refuses the request.
+    """
+    fields: dict[str, object] = {
+        "name": name,
+        "path": name,
+        "visibility": "private" if private else "public",
+        "initialize_with_readme": False,
+    }
+    if description:
+        fields["description"] = description
+    try:
+        response = request("POST", f"{API_URL}/projects", provider=PROVIDER, headers=_headers(token), json=fields)
+    except DomainError as error:
+        # GitLab answers 400 both for a taken name and for an invalid name or visibility.
+        if error.params.get("status_code") == 400:
+            if _name_taken(token, name):
+                raise RepoCreateError(
+                    f"Your GitLab account already has a repository named '{name}'. Choose another name."
+                ) from error
+            raise RepoCreateError(f"GitLab does not accept '{name}' as a repository name here.") from error
+        raise RepoCreateError("GitLab refused to create the repository. Connect GitLab again and retry.") from error
+    created = response.json()
+    # An empty project may report no default branch; the first push then sets it.
+    return str(created["path_with_namespace"]), str(created.get("default_branch") or "main")
 
 
 def resolve_commit(token: str, repository: str, branch: str | None) -> str:

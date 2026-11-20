@@ -562,7 +562,13 @@ export function NotificationsTab() {
 
         {chromeBlocked && (
           <InlineWarningRow
-            message={msg("notifications.push.blocked")}
+            // One row: a narrow dialog cuts the text, and the tooltip keeps all of it.
+            message={
+              <span className="block truncate" title={msg("notifications.push.blocked")}>
+                {msg("notifications.push.blocked")}
+              </span>
+            }
+            className="items-center"
             onDismiss={() => setChromeBlocked(false)}
           />
         )}

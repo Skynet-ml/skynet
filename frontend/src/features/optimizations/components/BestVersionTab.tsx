@@ -4,7 +4,7 @@ import { InlineWarningRow } from "@/shared/ui/inline-warning-row";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { useMemo, useState, type KeyboardEvent } from "react";
 import { toast } from "react-toastify";
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
 import {
   ArrowSquareOut,
   Code,

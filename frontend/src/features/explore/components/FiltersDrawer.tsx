@@ -3,7 +3,7 @@
 import { Skeleton } from "@/shared/ui/skeleton";
 import { CountPill } from "@/shared/ui/count-badge";
 import * as React from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { CaretDown, Check, CircleNotch, MagnifyingGlass, X } from "@/shared/ui/icons";
 import type { FacetDimension, FacetOption } from "@/shared/lib/api";
 import { modelDisplayName } from "@/shared/lib/formatters";

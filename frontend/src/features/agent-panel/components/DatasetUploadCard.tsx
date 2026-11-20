@@ -3,7 +3,7 @@
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import * as React from "react";
 import { toast } from "react-toastify";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { CircleNotch, UploadSimple } from "@/shared/ui/icons";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";

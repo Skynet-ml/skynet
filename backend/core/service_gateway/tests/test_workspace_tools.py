@@ -669,6 +669,7 @@ class _Spec:
             name: The tool's MCP name.
         """
         self.name = name
+        self.inputSchema = {"type": "object", "properties": {}}
 
 
 class _FakeSession:

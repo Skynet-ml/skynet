@@ -63,7 +63,7 @@
   "settings.code.dark_theme": "Dunkles Code-Theme",
   "settings.code.font": "Code-Schrift",
   "settings.code.font.description": "Lege eine eigene Monospace-Schrift für Code und Diffs fest.",
-  "settings.code.font.placeholder": "z. B. JetBrains Mono",
+  "settings.code.font.default": "Standard",
   "settings.code.size": "Code-Schriftgröße",
   "settings.code.size.description": "Gilt für geöffnete Dateien, Diffs und Codeblöcke.",
   "settings.code.size.px": "px",
