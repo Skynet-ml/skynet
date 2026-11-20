@@ -22,6 +22,9 @@ import { HardenMetricScreen } from "./HardenMetricScreen";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
+// The optimize.toml setting that names the metric; code, so never translated.
+const METRIC_ENTRY = "[metric] entry";
+
 const HOST_ORIGIN: Record<RepoHost, string> = {
   github: "https://github.com",
   gitlab: "https://gitlab.com",
@@ -113,6 +116,9 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     if (code !== metricCode) setMetricCode(code);
   }, [page, metricCode, setMetricCode]);
 
+  // The section name is code: isolated LTR, so RTL text does not flip its brackets.
+  const [commandBefore, commandAfter = ""] = msg("submit.v2.metric.command").split("{entry}");
+
   // A repository run's setup is the agentic IDE: the chat beside its changes,
   // which the user edits in place.
   const agentic = isGeneralistAgentEnabled();
@@ -142,7 +148,11 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
         {metricCommand && (
           <div className="shrink-0 border-b border-border/60 px-4 py-2 text-sm text-muted-foreground">
             <p>
-              {msg("submit.v2.metric.command")}{" "}
+              {commandBefore}
+              <bdi className="font-mono text-foreground" dir="ltr">
+                {METRIC_ENTRY}
+              </bdi>
+              {commandAfter}{" "}
               <bdi className="break-all font-mono text-foreground" dir="ltr">
                 {metricCommandText(metricCommand)}
               </bdi>

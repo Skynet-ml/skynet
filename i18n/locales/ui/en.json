@@ -3897,7 +3897,7 @@
   "submit.v2.optimizer.issue.choice.guided": "The chosen method no longer fits what you set up. Pick another one, such as Auto.",
   "submit.v2.metric.issue.metric_code": "Add the metric code.",
   "submit.v2.metric.issue.metric_code.guided": "There's no code that scores the results yet. Ask the assistant to write it.",
-  "submit.v2.metric.command": "The run scores with the command that [metric] entry in optimize.toml names:",
+  "submit.v2.metric.command": "The run scores with the command that {entry} in optimize.toml names:",
   "submit.v2.metric.command_ignores_code": "The run does not use metric.py, because the contract names a command.",
   "submit.v2.metric.command_no_hardening": "Hardening needs a Python metric. This run's metric is a command, so it has no hardening.",
   "submit.v2.task.title": "What do you want to optimize?",

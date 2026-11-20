@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "Помічено під час введення",
   "submit.v2.metric.issue.metric_code": "Додайте код метрики.",
   "submit.v2.metric.issue.metric_code.guided": "Поки немає коду, який оцінює результати. Попросіть асистента написати його.",
-  "submit.v2.metric.command": "Запуск оцінює командою, яку задає [metric] entry в optimize.toml:",
+  "submit.v2.metric.command": "Запуск оцінює командою, яку задає {entry} в optimize.toml:",
   "submit.v2.metric.command_ignores_code": "Запуск не використовує metric.py, бо контракт задає команду.",
   "submit.v2.metric.command_no_hardening": "Зміцненню потрібна метрика на Python. Метрика цього запуску — команда, тому зміцнення немає.",
   "submit.v2.metric.title": "Код і метрика",

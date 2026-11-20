@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "Yazarken fark edildi",
   "submit.v2.metric.issue.metric_code": "Metrik kodunu ekleyin.",
   "submit.v2.metric.issue.metric_code.guided": "Henüz sonuçları puanlayan bir kod yok. Asistandan yazmasını isteyin.",
-  "submit.v2.metric.command": "Çalıştırma, optimize.toml içindeki [metric] entry'nin belirttiği komutla puanlar:",
+  "submit.v2.metric.command": "Çalıştırma, optimize.toml içindeki {entry}'nin belirttiği komutla puanlar:",
   "submit.v2.metric.command_ignores_code": "Sözleşme bir komut belirttiği için çalıştırma metric.py kullanmaz.",
   "submit.v2.metric.command_no_hardening": "Sağlamlaştırma bir Python metriği gerektirir. Bu çalıştırmanın metriği bir komut, bu yüzden sağlamlaştırma yok.",
   "submit.v2.metric.title": "Kod ve metrik",

@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "Замечено при вводе",
   "submit.v2.metric.issue.metric_code": "Добавьте код метрики.",
   "submit.v2.metric.issue.metric_code.guided": "Пока нет кода, который оценивает результаты. Попросите ассистента написать его.",
-  "submit.v2.metric.command": "Запуск оценивает командой, которую задаёт [metric] entry в optimize.toml:",
+  "submit.v2.metric.command": "Запуск оценивает командой, которую задаёт {entry} в optimize.toml:",
   "submit.v2.metric.command_ignores_code": "Запуск не использует metric.py, потому что контракт задаёт команду.",
   "submit.v2.metric.command_no_hardening": "Укреплению нужна метрика на Python. Метрика этого запуска — команда, поэтому укрепления нет.",
   "submit.v2.metric.title": "Код и метрика",

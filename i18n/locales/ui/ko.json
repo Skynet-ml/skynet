@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "입력 중에 발견됨",
   "submit.v2.metric.issue.metric_code": "메트릭 코드를 추가하세요.",
   "submit.v2.metric.issue.metric_code.guided": "아직 결과를 채점하는 코드가 없습니다. 어시스턴트에게 작성을 요청하세요.",
-  "submit.v2.metric.command": "실행은 optimize.toml의 [metric] entry가 지정한 명령으로 채점합니다:",
+  "submit.v2.metric.command": "실행은 optimize.toml의 {entry}가 지정한 명령으로 채점합니다:",
   "submit.v2.metric.command_ignores_code": "계약이 명령을 지정하므로 실행은 metric.py를 사용하지 않습니다.",
   "submit.v2.metric.command_no_hardening": "하드닝에는 Python 메트릭이 필요합니다. 이 실행의 메트릭은 명령이므로 하드닝이 없습니다.",
   "submit.v2.metric.title": "코드와 메트릭",

@@ -3897,7 +3897,7 @@
   "submit.v2.optimizer.issue.choice.guided": "השיטה שנבחרה כבר לא מתאימה למה שהגדרתם. בחרו שיטה אחרת, למשל אוטומטי.",
   "submit.v2.metric.issue.metric_code": "חסר קוד מדד.",
   "submit.v2.metric.issue.metric_code.guided": "עדיין אין קוד שנותן ציון לתוצאות. בקשו מהעוזר לכתוב אותו.",
-  "submit.v2.metric.command": "הריצה מנקדת עם הפקודה שמוגדרת ב־[metric] entry בקובץ optimize.toml:",
+  "submit.v2.metric.command": "הריצה מנקדת עם הפקודה שמוגדרת ב־{entry} בקובץ optimize.toml:",
   "submit.v2.metric.command_ignores_code": "הריצה לא משתמשת ב־metric.py, כי החוזה מגדיר פקודה.",
   "submit.v2.metric.command_no_hardening": "הקשחה דורשת מדד ב־Python. המדד של הריצה הזו הוא פקודה, ולכן אין לה הקשחה.",
   "submit.v2.task.title": "מה תרצו לייעל?",

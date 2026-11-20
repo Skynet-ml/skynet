@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "اكتُشف أثناء الكتابة",
   "submit.v2.metric.issue.metric_code": "أضف كود المقياس.",
   "submit.v2.metric.issue.metric_code.guided": "لا يوجد بعد كود يقيّم النتائج. اطلب من المساعد كتابته.",
-  "submit.v2.metric.command": "يقيّم التشغيل بالأمر الذي يحدده [metric] entry في optimize.toml:",
+  "submit.v2.metric.command": "يقيّم التشغيل بالأمر الذي يحدده {entry} في optimize.toml:",
   "submit.v2.metric.command_ignores_code": "لا يستخدم التشغيل metric.py، لأن العقد يحدد أمرًا.",
   "submit.v2.metric.command_no_hardening": "تقوية المقياس تحتاج إلى مقياس Python. مقياس هذا التشغيل أمر، لذلك لا توجد تقوية.",
   "submit.v2.metric.title": "الكود والمقياس",

@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "輸入時發現",
   "submit.v2.metric.issue.metric_code": "請加入指標程式碼。",
   "submit.v2.metric.issue.metric_code.guided": "仲未有為結果評分嘅程式碼。請叫助手寫。",
-  "submit.v2.metric.command": "今次運行會用 optimize.toml 入面 [metric] entry 指定嘅命令評分：",
+  "submit.v2.metric.command": "今次運行會用 optimize.toml 入面 {entry} 指定嘅命令評分：",
   "submit.v2.metric.command_ignores_code": "因為合約指定咗命令，今次運行唔會用 metric.py。",
   "submit.v2.metric.command_no_hardening": "加固要用 Python 指標。今次運行嘅指標係命令，所以冇加固。",
   "submit.v2.metric.title": "程式碼同指標",

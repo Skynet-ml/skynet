@@ -80,7 +80,7 @@
   "submit.v2.metric.check.static_title": "Rilevato durante la digitazione",
   "submit.v2.metric.issue.metric_code": "Aggiungi il codice della metrica.",
   "submit.v2.metric.issue.metric_code.guided": "Non c'è ancora codice che valuti i risultati. Chiedi all'assistente di scriverlo.",
-  "submit.v2.metric.command": "L'esecuzione valuta con il comando indicato da [metric] entry in optimize.toml:",
+  "submit.v2.metric.command": "L'esecuzione valuta con il comando indicato da {entry} in optimize.toml:",
   "submit.v2.metric.command_ignores_code": "L'esecuzione non usa metric.py, perché il contratto indica un comando.",
   "submit.v2.metric.command_no_hardening": "Il rafforzamento richiede una metrica Python. La metrica di questa esecuzione è un comando, quindi non ha rafforzamento.",
   "submit.v2.metric.title": "Codice e metrica",
