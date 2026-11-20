@@ -2806,7 +2806,9 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     stay alive above the runner with the command env, which holds no secret
     now. ``contained`` copies only the metric box command of a contained
     session: the shell ``exec``s the runner, whose environment holds the relay
-    address and token. It does not copy the session's own guest process; the next test does.
+    address. It also holds a tool relay token as a worst-case input: no current
+    runtime sets it, but an older image's guest did, and the runner must still
+    hide it. It does not copy the session's own guest process; the next test does.
     ``vercel_key_in_env`` is the old scorer, which put the key in the command
     env: the scan must find it in the wrapper shell, so the scan works.
 
