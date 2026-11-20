@@ -413,6 +413,13 @@ def dropped_rule_files(current: str, text: str) -> str | None:
         dropped = [f"{setting} = {path!r}" for setting, path in before.items() if after.get(setting) != path]
     if not dropped:
         return None
+    if before is None:
+        # The raw search also matches comments and string values, so it cannot say the file names the path.
+        return (
+            f"The new optimize.toml drops {', '.join(dropped)}. The current optimize.toml is not valid TOML, "
+            "and a raw search finds these as instructions or illegal rules files, maybe in a comment. Keep each "
+            "path. If the user wants one removed, ask them to fix optimize.toml in the editor."
+        )
     return (
         f"The new optimize.toml drops {', '.join(dropped)}, which the current optimize.toml names as its "
         "instructions or illegal rules file. Keep each setting with its path. If the user wants one removed, "
@@ -643,7 +650,7 @@ def workspace_tools(
                 reason = read.get("error", "")
                 advice = read.get("advice", "Try again, or ask the user.")
                 return {"error": f"optimize.toml cannot be checked against the repository's file: {reason} {advice}"}
-            # A refusal leaves the draft empty, so a retry must not read (and count) again.
+            # A refusal leaves the draft empty, so a retry must not ask the host for the file again.
             repo_toml.append(read)
         return repo_toml[0]
 

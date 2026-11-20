@@ -915,8 +915,19 @@ async def test_a_current_file_that_is_not_toml_still_keeps_its_rules_paths() -> 
     refused = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=_VALID_TOML)
     kept = await tools[WRITE_FILE_TOOL].acall(path="optimize.toml", text=OPTIMIZE_TOML_EXAMPLE)
 
-    assert "drops 'docs/intent.md', 'docs/rules.md'" in refused["error"]
+    assert "drops 'docs/intent.md', 'docs/rules.md'. The current optimize.toml is not valid TOML" in refused["error"]
+    assert "names as its" not in refused["error"]
     assert kept == {"wizard_state": {"optimize_toml": OPTIMIZE_TOML_EXAMPLE}}
+
+
+def test_a_commented_rules_path_in_a_broken_current_text_is_not_called_a_named_file() -> None:
+    """A raw-search match in a comment gives a refusal that does not claim the file names the path."""
+    refusal = workspace_tools.dropped_rule_files('# illegal = "docs/old.md"\n[broken\n', _VALID_TOML)
+
+    assert refusal is not None
+    assert "drops 'docs/old.md'" in refusal
+    assert "maybe in a comment" in refusal
+    assert "names as its" not in refusal
 
 
 def test_a_new_text_that_is_not_toml_is_refused_when_the_current_text_is_not_toml_either() -> None:
