@@ -2011,6 +2011,33 @@ def test_the_contract_files_command_keeps_a_key_token_as_text(tmp_path: Path) ->
     assert exact.stdout.strip() == harness_bridge.KEY_TOKEN
 
 
+@pytest.mark.parametrize("where", ["run_command", "env", "files"])
+@pytest.mark.parametrize("vendor", ["APP", "SKYNET"])
+def test_a_saved_launch_with_a_key_token_from_before_sky_776_is_refused(
+    tmp_path: Path, where: str, vendor: str
+) -> None:
+    """A resumed launch that still holds an old key token fails with an error that names the new token.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+        where: The part of the launch that holds the old token.
+        vendor: The old token's prefix.
+    """
+    old = f"__{vendor}_API_KEY__"
+    proposer: dict[str, Any] = {**_PLAIN, "run_command": "echo ok"}
+    if where == "run_command":
+        proposer["run_command"] = f"agent --key {old}"
+    elif where == "env":
+        proposer["env"] = {"TOKEN": old}
+    else:
+        proposer["files"] = {"config.json": json.dumps({"key": old})}
+
+    with pytest.raises(RuntimeError, match=f"old key token {old}.*{harness_bridge.KEY_TOKEN}"):
+        run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s", api_key="k")
+
+    assert not (tmp_path / "s" / "prompt-1.md").exists()
+
+
 def test_a_finished_setup_stops_the_processes_it_left_in_the_background(tmp_path: Path) -> None:
     """A setup that exits with a daemon still running leaves nothing behind beside the sessions (SKY-753).
 

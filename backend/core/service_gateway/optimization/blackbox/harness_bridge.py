@@ -45,6 +45,9 @@ KEY_ENV = "ASCENT_MODEL_KEY"
 # key is replaced by this token and only restored from the process environment.
 # ``repo_constraints`` refuses it in the contract file's own commands (SKY-776).
 KEY_TOKEN = "__ASCENT_MODEL_KEY__"
+# The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
+# otherwise its harness would send the token's text as the key and fail auth with no clear reason.
+_OLD_KEY_TOKEN = re.compile(r"__[A-Z]+_API_KEY__")
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
@@ -123,6 +126,31 @@ def _with_key(text: str, api_key: str) -> str:
         ``text`` with every key token replaced.
     """
     return text.replace(KEY_TOKEN, api_key)
+
+
+def _refuse_old_key_token(proposer: dict[str, Any]) -> None:
+    """Refuse a launch whose command, environment or files still hold a key token from before SKY-776.
+
+    The contract file's own command (``file_command``) is the user's text, so it is not checked here.
+
+    Args:
+        proposer: The serialized launch.
+
+    Raises:
+        RuntimeError: When a part of the launch holds an old key token.
+    """
+    parts = {
+        **({} if proposer.get("file_command") else {"run_command": proposer["run_command"]}),
+        **{f"env {name}": value for name, value in (proposer.get("env") or {}).items()},
+        **{f"file {path}": content for path, content in (proposer.get("files") or {}).items()},
+    }
+    for where, text in parts.items():
+        old = _OLD_KEY_TOKEN.search(text)
+        if old:
+            raise RuntimeError(
+                f"The proposer launch's {where} holds the old key token {old.group()}. Use {KEY_TOKEN} in its place,"
+                " or start the run again."
+            )
 
 
 def _json_lines(stdout: str) -> Iterator[dict[str, Any]]:
@@ -2253,8 +2281,9 @@ def run_session(
         The parsed answer, raw transcript, usage and exit status.
 
     Raises:
-        RuntimeError: When the setup fails or uses up the session's time, or a ``file_command`` session
-            outside a checkout has no ``outside_checkout`` launch.
+        RuntimeError: When the setup fails or uses up the session's time, a ``file_command`` session
+            outside a checkout has no ``outside_checkout`` launch, or the launch holds a key token from
+            before SKY-776.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -2268,6 +2297,7 @@ def run_session(
                 f"The [proposer] entry command in ascent.toml runs only in a repository checkout, not in {workspace}."
             )
         proposer = {**proposer, **fallback, "file_command": False, "setup": None}
+    _refuse_old_key_token(proposer)
     if api_key is None:
         api_key = _env(KEY_ENV)
     env = {

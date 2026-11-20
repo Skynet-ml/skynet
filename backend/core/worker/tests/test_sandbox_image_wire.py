@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,10 @@ import pytest
 from core.billing import guest_model_proxy
 from core.billing.model_gateway import ROUTE_KEY
 from core.billing.usage_tags import LEGACY_USAGE_TAGS_HEADER, USAGE_TAGS_HEADER, with_tags_header
+from core.models.blackbox import BlackboxProposer
+from core.service_gateway.optimization.blackbox import loop_tools, repo_scorer
+from core.service_gateway.optimization.blackbox.protocol import RepoSeed
+from core.service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway
 from core.worker import isolated_runner, vercel_dspy
 from core.worker.sandbox_protocol import READABLE_PROTOCOLS, SANDBOX_PROTOCOL
 
@@ -126,15 +131,33 @@ def _model_answer(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize(
-    "box",
-    [
-        # loop_tools gives the proposer box the key and the model (SKY-776).
-        "proposer",
-        # repo_scorer._model_env gives the candidate box the same two names.
-        "candidate",
-    ],
-)
+def _box_env(box: str) -> dict[str, str]:
+    """Build the model env that the real code gives a protected run's box.
+
+    Args:
+        box: ``proposer`` for the ``[proposer] entry`` box, ``candidate`` for the version's own box.
+
+    Returns:
+        The env that the box's model proxy and command get.
+    """
+    key = f"{box}-key"
+    if box == "proposer":
+        ctx = SimpleNamespace(repo_seed=RepoSeed(tree_id="seed"))
+        options = SimpleNamespace(
+            model="openai/run-model",
+            proposer=BlackboxProposer(run_command="my-agent"),
+            gateway=SimpleNamespace(url="", api_key=key),
+            budget_route={"token": key},
+            repo={"file_proposer": True},
+        )
+        env = loop_tools.FileProposer(ctx, options, ".lab")._env  # type: ignore[arg-type]
+        assert env is not None
+        return env
+    gateway = ScorerGateway(url="", model="openai/run-model", api_key=key, billing_model="openai/run-model")
+    return repo_scorer.RepoScorer._model_env(SimpleNamespace(_gateway=gateway))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("box", ["proposer", "candidate"])
 def test_a_stock_openai_client_reaches_the_model_through_the_model_url(tmp_path: Path, box: str) -> None:
     """In each box a stock OpenAI client on ``ASCENT_MODEL_URL`` gets answers, tool calls and a stream.
 
@@ -143,7 +166,7 @@ def test_a_stock_openai_client_reaches_the_model_through_the_model_url(tmp_path:
     responses = tmp_path / "responses"
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"prefix": "P:", "response_dir": str(responses), "timeout_seconds": 10}))
-    env = {**os.environ, "ASCENT_MODEL_KEY": f"{box}-key", "ASCENT_MODEL": "openai/run-model"}
+    env = {**os.environ, **_box_env(box)}
     proxy = subprocess.Popen(
         [sys.executable, guest_model_proxy.__file__, str(config), sys.executable, "-c", _CLIENT_PROBE],
         stdout=subprocess.PIPE,
