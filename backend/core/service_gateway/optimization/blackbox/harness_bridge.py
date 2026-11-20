@@ -79,6 +79,8 @@ _DEFERRED_STOP: list[int] = []
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
 SHIM_DIR = ".local/app-bin"
+# Mirrors guest_model_proxy.MODEL_BINDINGS_ENV: the box proxy's folder where a session names its model (SKY-884).
+MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
 SESSIONS_DIR = ".app-bridge"
 # Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
 EXEC_SHIM_DIR = "exec-bin"
@@ -2243,6 +2245,30 @@ def _reap_children() -> None:
             return
 
 
+def bind_model(folder: Path, api_key: str, model: str) -> None:
+    """Name a session's model for its route key in the box proxy's model bindings folder.
+
+    The layout mirrors ``guest_model_proxy._bound_models``: this file runs in
+    the box without the backend's code. The proxy then refuses a request for
+    another model with an error that names ``ASCENT_MODEL`` (SKY-884).
+
+    Args:
+        folder: The proxy's model bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+    """
+    target = folder / hashlib.sha256(api_key.encode()).hexdigest()
+    name = hashlib.sha256(model.encode()).hexdigest()
+    # The gateway refuses another model anyway, so a folder the session cannot write skips only the clearer error.
+    with contextlib.suppress(OSError):
+        target.mkdir(parents=True, exist_ok=True)
+        if not (target / name).exists():
+            # A concurrent session or the proxy must never read a partial name, so the name is renamed into place.
+            partial = target / f".{name}.{uuid.uuid4().hex}"
+            partial.write_text(model, encoding="utf-8")
+            partial.replace(target / name)
+
+
 def run_session(
     proposer: dict[str, Any],
     *,
@@ -2354,9 +2380,10 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
-    # The harness proposer box's proxy env has no ASCENT_MODEL, so the proxy model check does not run there
-    # and the gateway refuses other models. SKY-884 tracks that refusal text.
     env["ASCENT_MODEL"] = model
+    # The box proxy above this process cannot see this ASCENT_MODEL, so the session names it there (SKY-884).
+    if env.get(MODEL_BINDINGS_ENV) and api_key and model:
+        bind_model(Path(env[MODEL_BINDINGS_ENV]), api_key, model)
     for name, value in (
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
         # A harness with native resume keeps its own session state here, so the committed tree carries it.

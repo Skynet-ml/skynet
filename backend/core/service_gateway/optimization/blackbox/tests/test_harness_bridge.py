@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -22,6 +23,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from core.billing import guest_model_proxy
 
 from .. import exec_shim, harness, harness_bridge, repo_tree
 from ..harness_bridge import (
@@ -4104,3 +4107,149 @@ def test_checkout_git_refuses_a_bare_repository_layout(
         harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo)
     monkeypatch.setattr(harness_bridge, "_SAFE_GIT", ())
     assert harness_bridge._checkout_git(["rev-parse", "--git-dir"], repo).strip() == "."
+
+
+# A built-in agent's model calls: one chat request for each name, from the route key the bridge fills in.
+_AGENT_PROBE = """
+import json, os, sys, urllib.error, urllib.request
+
+key, record, *models = sys.argv[1:]
+statuses = {}
+for model in models:
+    request = urllib.request.Request(
+        os.environ["OPENAI_BASE_URL"] + "/chat/completions",
+        data=json.dumps({"model": model, "messages": [{"role": "user", "content": "go"}]}).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            statuses[model] = [response.status, ""]
+    except urllib.error.HTTPError as error:
+        statuses[model] = [error.code, json.loads(error.read())["error"]["message"]]
+open(record, "w").write(json.dumps(statuses))
+print("done")
+"""
+# What a built-in agent sends: the exact ASCENT_MODEL, LiteLLM's openai/ form (Aider, OpenHands, SWE-agent,
+# mini-SWE-agent, Terminus, OpenHands SDK), the harness provider's app/ form (OpenCode) and a transport prefix.
+_AGENT_NAMES = ("run-model", "openai/run-model", "app/run-model", "litellm_proxy/run-model")
+
+
+def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_model(tmp_path: Path) -> None:
+    """A session's request for another model gets the box error that names ``ASCENT_MODEL`` (SKY-884).
+
+    The box proxy has no ``ASCENT_MODEL`` of its own, as in the harness proposer box. The exact
+    model and each prefixed form that a built-in agent sends reach the supervisor.
+
+    Args:
+        tmp_path: Folder for the proxy's mailbox, the session and the probe's record.
+    """
+    home = tmp_path / "home"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    probe = tmp_path / "probe.py"
+    probe.write_text(_AGENT_PROBE)
+    record = tmp_path / "record.json"
+    models = ["other/model", *_AGENT_NAMES]
+    run_command = shlex.join([sys.executable, str(probe), harness_bridge.KEY_TOKEN, str(record), *models])
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "run_command": run_command}))
+    responses = tmp_path / "box" / "responses"
+    proxy_config = tmp_path / "proxy.json"
+    proxy_config.write_text(json.dumps({"prefix": "P:", "response_dir": str(responses), "timeout_seconds": 20}))
+    env = {
+        **{name: value for name, value in os.environ.items() if name != guest_model_proxy.MODEL_ENV},
+        "HOME": str(home),
+        harness_bridge.CONFIG_ENV: str(config),
+        harness_bridge.KEY_ENV: "route-key",
+    }
+    bridge = [sys.executable, harness_bridge.__file__, "--print", "task", "--output-format", "json"]
+    proxy = subprocess.Popen(
+        [sys.executable, guest_model_proxy.__file__, str(proxy_config), *bridge, "--model", "run-model"],
+        cwd=workspace,
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    relayed = []
+    try:
+        assert proxy.stdout is not None
+        for line in proxy.stdout:
+            if line.startswith("P:"):
+                request = json.loads(line[2:])
+                relayed.append(json.loads(base64.b64decode(request["body"]))["model"])
+                answer = {"status": 200, "content_type": "application/json", "body": base64.b64encode(b"{}").decode()}
+                staged = responses / f"{request['id']}.tmp"
+                staged.write_text(json.dumps(answer))
+                staged.rename(responses / f"{request['id']}.json")
+        assert proxy.wait(timeout=60) == 0
+    finally:
+        proxy.kill()
+
+    statuses = json.loads(record.read_text())
+    status, message = statuses.pop("other/model")
+    assert status == 400
+    assert "ASCENT_MODEL" in message
+    assert "run-model" in message
+    assert statuses == {name: [200, ""] for name in _AGENT_NAMES}
+    assert relayed == list(_AGENT_NAMES)
+
+
+@pytest.mark.parametrize("model", _AGENT_NAMES)
+def test_box_proxy_accepts_each_name_a_built_in_agent_sends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """The exact session model and each prefixed form of it pass the box check (SKY-884).
+
+    Args:
+        tmp_path: The model bindings folder.
+        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+        model: A name of the session's model.
+    """
+    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
+    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    body = json.dumps({"model": model}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("model", ["other/model", "openai/other", None])
+def test_box_proxy_refuses_another_model_for_a_bound_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str | None
+) -> None:
+    """A request for another model with a session's key gets the error that names ``ASCENT_MODEL`` (SKY-884).
+
+    Args:
+        tmp_path: The model bindings folder.
+        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+        model: Another model's name, or no model.
+    """
+    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
+    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    body = json.dumps({"model": model}).encode()
+
+    refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key")
+
+    assert refusal is not None
+    error = json.loads(refusal)["error"]
+    assert error["code"] == "model_not_allowed"
+    assert "ASCENT_MODEL" in error["message"]
+
+
+def test_box_proxy_lets_a_key_with_no_session_model_go_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key that no session named a model for is left to the gateway, and the folder holds no key (SKY-884).
+
+    Args:
+        tmp_path: The model bindings folder.
+        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+    """
+    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
+    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "another-key") is None
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body) is None
+    assert [path.name for path in tmp_path.iterdir()] == [guest_model_proxy.key_digest("route-key")]
+    assert "route-key" not in "".join(path.read_text() for path in tmp_path.rglob("*") if path.is_file())

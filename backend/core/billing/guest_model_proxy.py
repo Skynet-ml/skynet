@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -18,6 +20,12 @@ RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
 GATEWAY_URL_ENV = "ASCENT_MODEL_URL"
 # The model of the run. A chat request that names another model gets an error that names this variable (SKY-776).
 MODEL_ENV = "ASCENT_MODEL"
+# A built-in agent session gets its ASCENT_MODEL only in its own processes, so the harness bridge
+# names it in this folder for the session's route key (SKY-884). A box without its own ASCENT_MODEL
+# checks a request against the models named for the request's key. A scoped route key serves one model.
+MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
+# The provider prefixes that a built-in agent puts before ASCENT_MODEL: LiteLLM's and the harness provider's.
+_AGENT_PREFIXES = ("openai/", "app/")
 # The pinned sandbox image predates the APP_* names and reads only this one.
 _LEGACY_RELAY_URL_ENV = "SKYNET_BUDGET_RELAY_URL"
 _PRINT_LOCK = threading.Lock()
@@ -117,7 +125,7 @@ def main() -> int:
                 self.send_error(413)
                 return
             body = self.rfile.read(length) if length else b"" if raw else b"{}"
-            refusal = None if raw else _other_model_refusal(self.path, body)
+            refusal = None if raw else _other_model_refusal(self.path, body, _request_key(self.headers))
             if refusal is not None:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
@@ -185,6 +193,10 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
+    bindings = (response_dir.parent / "models").resolve()
+    bindings.mkdir(exist_ok=True)
+    # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
+    os.environ[MODEL_BINDINGS_ENV] = str(bindings)
     environment = {
         **os.environ,
         RELAY_URL_ENV: f"{endpoint}/v1",
@@ -235,28 +247,97 @@ def model_matches(model: object, expected: str) -> bool:
     return isinstance(model, str) and normalized(model) == normalized(expected)
 
 
-def _other_model_refusal(path: str, body: bytes) -> bytes | None:
+def agent_model_matches(model: object, expected: str) -> bool:
+    """Return whether a built-in agent's request names its session's model.
+
+    Args:
+        model: The model that the request names.
+        expected: The session's ``ASCENT_MODEL``.
+
+    Returns:
+        Whether the names match, also with a provider prefix that a built-in agent adds.
+    """
+    if not isinstance(model, str):
+        return False
+    names = [model, *(model.strip().removeprefix(prefix) for prefix in _AGENT_PREFIXES)]
+    return any(model_matches(name, expected) for name in names)
+
+
+def key_digest(key: str) -> str:
+    """Return the folder name of a route key in the model bindings folder.
+
+    Args:
+        key: The route key.
+
+    Returns:
+        The key's SHA-256 hex digest, so the folder holds no key.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _request_key(headers: Message) -> str:
+    """Return the route key that a model request sends.
+
+    Args:
+        headers: The request's headers.
+
+    Returns:
+        The bearer token or the ``x-api-key`` value, or an empty string.
+    """
+    bearer = headers.get("Authorization") or ""
+    return bearer.removeprefix("Bearer ").strip() or (headers.get("x-api-key") or "").strip()
+
+
+def _bound_models(key: str) -> list[str]:
+    """Return the models that built-in agent sessions named for a route key.
+
+    Args:
+        key: The request's route key.
+
+    Returns:
+        The models, or an empty list when no session named one for the key.
+    """
+    folder = os.environ.get(MODEL_BINDINGS_ENV)
+    if not folder or not key:
+        return []
+    try:
+        # The bridge writes each name to a dot file first, then renames it, so a dot file can be partial.
+        files = [file for file in sorted((Path(folder) / key_digest(key)).iterdir()) if not file.name.startswith(".")]
+        return [file.read_text(encoding="utf-8") for file in files]
+    except OSError:
+        return []
+
+
+def _other_model_refusal(path: str, body: bytes, key: str = "") -> bytes | None:
     """Return the error body for a chat request that names another model than ``ASCENT_MODEL``.
 
     The gateway refuses such a request too, but its error does not say which
-    variable holds the model, so the box answers first.
+    variable holds the model, so the box answers first. A box without its own
+    ``ASCENT_MODEL`` checks the models that its built-in agent sessions named
+    for the request's key (SKY-884).
 
     Args:
         path: The request path on this proxy.
         body: The raw request body.
+        key: The request's route key.
 
     Returns:
         An OpenAI-shaped error body, or ``None`` when the request may go on.
     """
-    expected = os.environ.get(MODEL_ENV)
-    if not expected or not path.split("?", 1)[0].endswith("/chat/completions"):
+    box_model = os.environ.get(MODEL_ENV)
+    if not path.split("?", 1)[0].endswith("/chat/completions"):
+        return None
+    allowed = [box_model] if box_model else _bound_models(key)
+    if not allowed:
         return None
     try:
         model = json.loads(body).get("model")
     except (ValueError, AttributeError, RecursionError):
         return None
-    if model_matches(model, expected):
+    matches = model_matches if box_model else agent_model_matches
+    if any(matches(model, name) for name in allowed):
         return None
+    expected = ", ".join(allowed)
     message = f"This box serves only the model that {MODEL_ENV} names ({expected}), not {model!r}."
     error = {"message": message, "type": "invalid_request_error", "param": "model", "code": "model_not_allowed"}
     return json.dumps({"error": error}).encode()
