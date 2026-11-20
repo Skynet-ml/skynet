@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import posixpath
 import re
 import tomllib
 from collections.abc import Callable
@@ -304,9 +305,12 @@ def _clean_rule_path(path: str) -> str:
         path: The path as the file holds it.
 
     Returns:
-        The path with ``/`` separators and no surrounding spaces or slashes.
+        The path with ``/`` separators, no surrounding spaces or slashes, and no
+        ``.`` or empty parts; ``""`` for an empty path.
     """
-    return path.strip().replace("\\", "/").strip("/")
+    # The parser refuses ./docs/intent.md, so the guard must see its fix, docs/intent.md, as the same file.
+    clean = posixpath.normpath(path.strip().replace("\\", "/").strip("/"))
+    return "" if clean == "." else clean
 
 
 def _rule_settings(text: str) -> dict[str, str] | None:
@@ -625,7 +629,8 @@ def workspace_tools(
             read = browser.read_unmetered("optimize.toml", DRAFT_FILE_BYTES)
         except Exception as exc:  # a failed host read refuses the write, not the turn
             logger.info("Setup agent cannot read optimize.toml of %s: %s", browser.repository, type(exc).__name__)
-            return {"error": "the host refused the read."}
+            # A failed read is not cached, so a retry can work.
+            return {"error": "the host refused the read.", "advice": "Try again, or ask the user."}
         if read is None:
             return ""
         text, truncated = read
@@ -651,7 +656,8 @@ def workspace_tools(
             read = await browse(read_repo_toml)
             if isinstance(read, dict):
                 reason = read.get("error", "")
-                advice = read.get("advice", "Try again, or ask the user.")
+                # A repository that cannot open stays closed for the turn, so a retry cannot work.
+                advice = read.get("advice", "Ask the user.")
                 return {"error": f"optimize.toml cannot be checked against the repository's file: {reason} {advice}"}
             # A refusal leaves the draft empty, so a retry must not ask the host for the file again.
             repo_toml.append(read)
@@ -673,6 +679,9 @@ def workspace_tools(
             # metric.py is the scorer, never a repository file.
             if text or field == "metric_code":
                 return text
+            # The guard read optimize.toml already; one host read serves both.
+            if field == "optimize_toml" and repo_toml and repo_toml[0]:
+                return repo_toml[0]
         else:
             files = drafts()
             if path in files:
@@ -701,6 +710,13 @@ def workspace_tools(
         clean, field = found
         if not old_text:
             return {"error": "Empty old_text: send the exact text to replace, or write the whole file instead."}
+        guarded = ""
+        if field == "optimize_toml":
+            # A blank draft is the edit's base but not the file to guard, so check against current_toml.
+            checked = await current_toml()
+            if isinstance(checked, dict):
+                return dict(checked)
+            guarded = checked
         current = await current_text(clean, field)
         if isinstance(current, dict):
             return dict(current)
@@ -711,13 +727,8 @@ def workspace_tools(
         edited = current.replace(old_text, new_text, 1)
         if not edited.strip():
             return {"error": "The edit leaves the file empty: send the whole file text instead."}
-        if field == "optimize_toml":
-            # A blank draft is the edit's base but not the file to guard, so check against current_toml.
-            guarded = await current_toml()
-            if isinstance(guarded, dict):
-                return dict(guarded)
-            if refusal := dropped_rule_files(guarded, edited):
-                return {"error": refusal}
+        if field == "optimize_toml" and (refusal := dropped_rule_files(guarded, edited)):
+            return {"error": refusal}
         return save(clean, field, edited)
 
     file_arg = "metric.py, or the path of any file of the repository, relative to its root, for example optimize.toml."

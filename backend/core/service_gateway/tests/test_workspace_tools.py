@@ -883,8 +883,54 @@ async def test_write_refuses_an_optimize_toml_when_the_repository_cannot_open() 
 
     assert result["error"].startswith("optimize.toml cannot be checked against the repository's file")
     assert "GitLab is not linked" in result["error"]
-    assert "Try again, or ask the user" in result["error"]
+    # The repository stays closed for the turn, so a retry cannot work.
+    assert result["error"].endswith("Ask the user.")
+    assert "Try again" not in result["error"]
     assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_a_host_read_failure_says_a_retry_can_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed host read is not cached, so its refusal tells the agent to try again."""
+    _fake_repo_with_toml(monkeypatch, [])
+
+    def refuse(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Fail the way a host error does."""
+        raise RuntimeError("host down")
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", refuse)
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="optimize.toml", text=_VALID_TOML
+    )
+
+    assert "the host refused the read. Try again, or ask the user." in result["error"]
+    assert turn.wizard_patch == {}
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_the_repository_optimize_toml_reads_it_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no draft, the edit's base and the guard share one host read of optimize.toml."""
+    reads: list[str] = []
+    _fake_repo_with_toml(monkeypatch, reads)
+    turn = _TurnAuthoringFlag()
+
+    result = await _tools(_REPO_METRIC, turn, token=lambda: "gh-token")[EDIT_FILE_TOOL].acall(
+        path="optimize.toml", old_text="target = 0.9", new_text="target = 0.8"
+    )
+
+    assert result["wizard_state"]["optimize_toml"] == OPTIMIZE_TOML_EXAMPLE.replace("target = 0.9", "target = 0.8")
+    assert reads == ["optimize.toml"]
+
+
+@pytest.mark.parametrize("raw", ["./docs/intent.md", "docs/./intent.md", "docs//intent.md", "/docs/intent.md"])
+def test_a_rules_path_the_parser_refuses_can_be_written_in_its_clean_form(raw: str) -> None:
+    """The fix of a path the parser refuses keeps the same file, so the guard lets it through."""
+    current = OPTIMIZE_TOML_EXAMPLE.replace('instructions = "docs/intent.md"', f'instructions = "{raw}"')
+    assert current != OPTIMIZE_TOML_EXAMPLE
+
+    assert workspace_tools.dropped_rule_files(current, OPTIMIZE_TOML_EXAMPLE) is None
 
 
 @pytest.mark.asyncio
