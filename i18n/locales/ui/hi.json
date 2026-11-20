@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "चेतावनी: {p1}",
   "submit.setup_check.warning_at": "पंक्ति {p1} में चेतावनी: {p2}",
   "submit.setup_check.warnings": "ascent.toml में चेतावनियाँ हैं। वे रन को नहीं रोकतीं। {p1}",
+  "submit.setup_check.more": "और {p1} अन्य।",
   "agent.tool.check_setup.title": "सेटअप जाँचें",
   "agent.tool.check_setup.running": "ascent.toml की जाँच हो रही है",
   "agent.tool.check_setup.ok": "ascent.toml मान्य है",

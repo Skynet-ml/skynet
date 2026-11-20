@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "Avertissement : {p1}",
   "submit.setup_check.warning_at": "Avertissement à la ligne {p1} : {p2}",
   "submit.setup_check.warnings": "ascent.toml contient des avertissements. Ils n’arrêtent pas l’exécution. {p1}",
+  "submit.setup_check.more": "Et {p1} de plus.",
   "agent.tool.check_setup.title": "Vérifier la configuration",
   "agent.tool.check_setup.running": "Vérification de ascent.toml",
   "agent.tool.check_setup.ok": "ascent.toml est valide",

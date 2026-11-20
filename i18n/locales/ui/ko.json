@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "경고: {p1}",
   "submit.setup_check.warning_at": "{p1}번째 줄 경고: {p2}",
   "submit.setup_check.warnings": "ascent.toml에 경고가 있습니다. 실행은 멈추지 않습니다. {p1}",
+  "submit.setup_check.more": "외 {p1}개 더.",
   "agent.tool.check_setup.title": "설정 확인",
   "agent.tool.check_setup.running": "ascent.toml 확인 중",
   "agent.tool.check_setup.ok": "ascent.toml이 유효합니다",

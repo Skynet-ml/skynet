@@ -34,6 +34,7 @@ const {
 } = await import("./ToolResultCards");
 const { TOOL_ICONS, getToolMeta } = await import("../lib/tool-meta");
 const { formatTemplate } = await import("@/shared/lib/i18n");
+const { ascentTomlDiagnosticLines } = await import("@/shared/lib/api");
 const localeDir = new URL("../../../../../i18n/locales/ui/", import.meta.url);
 function catalog(locale: string): Record<string, string> {
   return createRequire(import.meta.url)(new URL(`${locale}.json`, localeDir).pathname) as Record<
@@ -442,6 +443,34 @@ void describe("tool result cards", () => {
       repos,
       /<svg[^>]*role="img"[^>]*aria-label="agent\.tool\.github_repos\.private"|<svg[^>]*aria-label="agent\.tool\.github_repos\.private"[^>]*role="img"/,
     );
+  });
+
+  void it("a toast lists ten diagnostics, errors first, then counts the rest (SKY-763)", () => {
+    const items = [
+      { level: "warning" as const, line: 1, message: "old style" },
+      ...Array.from({ length: 11 }, (_, i) => ({
+        level: "error" as const,
+        line: i + 2,
+        message: `bad ${i}`,
+      })),
+    ];
+    const text = withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items));
+    const lines = text.split("\n");
+    assert.equal(lines[0], "");
+    assert.equal(lines.length, 12);
+    assert.equal(lines[1], "Error at line 2: bad 0");
+    assert.equal(lines[10], "Error at line 11: bad 9");
+    assert.equal(lines[11], "And 2 more.");
+    assert.equal(
+      withMessages(setupCheckMessages(), () => ascentTomlDiagnosticLines(items.slice(0, 10))),
+      [
+        "",
+        "Error at line 2: bad 0",
+        ...items.slice(2, 10).map((d) => `Error at line ${d.line}: ${d.message}`),
+        "Warning at line 1: old style",
+      ].join("\n"),
+    );
+    assert.equal(ascentTomlDiagnosticLines([]), "");
   });
 
   void it("a setup check says ok or failed, and puts [section.key] before each error and warning", () => {

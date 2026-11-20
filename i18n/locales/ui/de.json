@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "Warnung: {p1}",
   "submit.setup_check.warning_at": "Warnung in Zeile {p1}: {p2}",
   "submit.setup_check.warnings": "ascent.toml hat Warnungen. Sie stoppen den Lauf nicht. {p1}",
+  "submit.setup_check.more": "Und {p1} weitere.",
   "agent.tool.check_setup.title": "Einrichtung prüfen",
   "agent.tool.check_setup.running": "ascent.toml wird geprüft",
   "agent.tool.check_setup.ok": "ascent.toml ist gültig",

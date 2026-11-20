@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "هشدار: {p1}",
   "submit.setup_check.warning_at": "هشدار در خط {p1}: {p2}",
   "submit.setup_check.warnings": "ascent.toml هشدار دارد. این هشدارها اجرا را متوقف نمی‌کنند. {p1}",
+  "submit.setup_check.more": "و {p1} مورد دیگر.",
   "agent.tool.check_setup.title": "بررسی تنظیمات",
   "agent.tool.check_setup.running": "در حال بررسی ascent.toml",
   "agent.tool.check_setup.ok": "ascent.toml معتبر است",

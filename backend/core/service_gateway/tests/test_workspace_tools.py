@@ -650,6 +650,68 @@ async def test_write_reports_every_mistake_of_ascent_toml(monkeypatch: pytest.Mo
     ]
 
 
+def _many_diagnostics(errors: int, warnings: int) -> list[dict[str, Any]]:
+    """Build a made-up parser result: the warnings first, then the errors.
+
+    Args:
+        errors: How many errors.
+        warnings: How many warnings.
+
+    Returns:
+        The diagnostics, in the shape of ``ascent_toml_diagnostics``.
+    """
+    return [
+        *({"level": "warning", "line": i, "section": "", "key": "", "message": f"w{i}"} for i in range(warnings)),
+        *({"level": "error", "line": i, "section": "", "key": "", "message": f"e{i}"} for i in range(errors)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_caps_the_diagnostics_the_model_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One bad write gives the model at most 20 diagnostics, errors first, and the count of the rest (SKY-763)."""
+    _fake_github(monkeypatch, [])
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(5, 25))
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text="version = 1\n"
+    )
+
+    kept = result["ascent_toml_diagnostics"]
+    assert [e["message"] for e in kept] == [*(f"e{i}" for i in range(5)), *(f"w{i}" for i in range(15))]
+    assert result["ascent_toml_diagnostics_omitted"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_short_diagnostic_list_has_no_omitted_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twenty diagnostics or fewer reach the model whole, with no omitted count."""
+    _fake_github(monkeypatch, [])
+    monkeypatch.setattr(workspace_tools, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(20, 0))
+
+    result = await _tools(_REPO_METRIC, _TurnAuthoringFlag(), token=lambda: "gh-token")[WRITE_FILE_TOOL].acall(
+        path="ascent.toml", text="version = 1\n"
+    )
+
+    assert len(result["ascent_toml_diagnostics"]) == 20
+    assert "ascent_toml_diagnostics_omitted" not in result
+
+
+async def test_check_setup_and_continue_cap_the_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``check_setup`` and the Continue refusal give at most 20 diagnostics and count the rest (SKY-763)."""
+    monkeypatch.setattr(generalist_module, "ascent_toml_diagnostics", lambda _text: _many_diagnostics(30, 3))
+    turn = _TurnAuthoringFlag()
+    state = WizardState(**{**_REPO_METRIC, "wizard_screen": "metric"}, metric_code=_SCORER, ascent_toml="x = [")
+    tools = {tool.name: tool for tool in screen_nav_tools(state, turn)}
+
+    result = await tools["check_setup"].acall()
+    assert result["ok"] is False
+    assert [e["message"] for e in result["errors"]] == [f"e{i}" for i in range(20)]
+    assert result["errors_omitted"] == 13
+    refused = await tools["continue_to_next_screen"].acall()
+    assert "e19 (line 19)" in refused
+    assert "e20 (line 20)" not in refused
+    assert "ascent.toml has 10 more errors; call check_setup after the fix." in refused
+
+
 def test_diagnostic_text_keeps_the_message_and_adds_the_line() -> None:
     """A plain-text diagnostic is the parser's message, then its line; a warning says so first."""
     error = {"level": "error", "line": None, "section": None, "key": "version", "message": "ascent.toml: bad."}

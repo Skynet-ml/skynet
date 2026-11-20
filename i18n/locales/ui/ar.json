@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "تحذير: {p1}",
   "submit.setup_check.warning_at": "تحذير في السطر {p1}: {p2}",
   "submit.setup_check.warnings": "في ascent.toml تحذيرات. لا توقف التشغيل. {p1}",
+  "submit.setup_check.more": "و{p1} أخرى.",
   "agent.tool.check_setup.title": "فحص الإعداد",
   "agent.tool.check_setup.running": "جارٍ فحص ascent.toml",
   "agent.tool.check_setup.ok": "ascent.toml صالح",

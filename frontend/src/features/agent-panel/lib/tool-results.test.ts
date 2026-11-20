@@ -270,6 +270,18 @@ void test("a stored workspace save with the retired error key shows no error car
   );
 });
 
+void test("a stored workspace save with the retired single-error key shows no error card (SKY-763)", () => {
+  // Built from parts so the tree holds no retired name.
+  const retired = ["ascent", "toml", "error"].join("_");
+  assert.deepEqual(
+    workspaceSave({
+      wizard_state: { ascent_toml: "[run]\n" },
+      [retired]: { section: "run", key: "entry", message: "[run] entry is missing" },
+    }),
+    { text: "[run]\n", tomlDiagnostics: [] },
+  );
+});
+
 void test("write counts add the file; edit counts swap the old lines for the new", () => {
   assert.deepEqual(writeCounts("write_workspace_file", { text: "a\nb\nc\n" }), {
     added: 3,

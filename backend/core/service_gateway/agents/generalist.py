@@ -97,6 +97,7 @@ from .workspace_tools import (
     ascent_toml_diagnostics,
     diagnostic_text,
     has_error,
+    model_diagnostics,
     workspace_tools,
 )
 
@@ -1715,7 +1716,11 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "metric" and not str(state.get("metric_code") or "").strip():
         return ["metric_code must be written"]
     if screen == "metric" and has_error(diagnostics := _setup_diagnostics(state)):
-        return [f"ascent.toml is not valid: {diagnostic_text(item)}" for item in diagnostics if item["level"] == ERROR]
+        capped = model_diagnostics([item for item in diagnostics if item["level"] == ERROR])
+        missing = [f"ascent.toml is not valid: {diagnostic_text(item)}" for item in capped["diagnostics"]]
+        if omitted := capped.get("diagnostics_omitted"):
+            missing.append(f"ascent.toml has {omitted} more errors; call {SETUP_CHECK_TOOL} after the fix.")
+        return missing
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
@@ -2085,15 +2090,20 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
     async def check_setup() -> Any:
         """Check the setup draft's ascent.toml the way a run reads it."""
         diagnostics = _setup_diagnostics(cast(WizardState, {**state, **turn.wizard_patch}))
-        return {"ok": not has_error(diagnostics), "errors": diagnostics}
+        capped = model_diagnostics(diagnostics)
+        result = {"ok": not has_error(diagnostics), "errors": capped["diagnostics"]}
+        if "diagnostics_omitted" in capped:
+            result["errors_omitted"] = capped["diagnostics_omitted"]
+        return result
 
     setup_check = [
         dspy.Tool(
             check_setup,
             name=SETUP_CHECK_TOOL,
             desc=(
-                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, and every error "
-                "and warning with its level, line, section and key. continue_to_next_screen runs the same "
+                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, and the errors, "
+                "then the warnings, each with its level, line, section and key: at most 20, and errors_omitted "
+                "counts the rest. continue_to_next_screen runs the same "
                 "check and refuses while an error stays, so fix every error first; a warning blocks nothing."
             ),
             arg_desc={},

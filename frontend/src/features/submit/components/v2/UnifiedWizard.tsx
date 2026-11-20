@@ -15,7 +15,7 @@ import { toast } from "react-toastify";
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
-import { ascentTomlDiagnosticText, checkAscentToml } from "@/shared/lib/api";
+import { ascentTomlDiagnosticLines, checkAscentToml } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -66,14 +66,15 @@ const SHORTFALL_TOAST_ID = "submit-budget-shortfall";
 // A stalled check must not hold Continue silently; the timeout shows a toast.
 const SETUP_CHECK_TIMEOUT_MS = 15_000;
 const SETUP_CHECK_TOAST_ID = "submit-setup-check";
+const SETUP_WARNINGS_TOAST_ID = "submit-setup-warnings";
 const ASCENT_TOML = "ascent.toml";
 
-// A second failed press shows its own error, not the first one's.
-function setupToast(text: string) {
+// A second press shows its own text in place of the first one's, not a second toast.
+function setupToast(text: string, id = SETUP_CHECK_TOAST_ID, show = toast.error) {
   // A check can give many diagnostics, one on each line of the text (SKY-763).
   const render = <span className="whitespace-pre-line">{text}</span>;
-  if (toast.isActive(SETUP_CHECK_TOAST_ID)) toast.update(SETUP_CHECK_TOAST_ID, { render });
-  else toast.error(render, { toastId: SETUP_CHECK_TOAST_ID });
+  if (toast.isActive(id)) toast.update(id, { render });
+  else show(render, { toastId: id });
 }
 
 function shortfallMessage(shortfall: BudgetShortfall): string {
@@ -233,29 +234,27 @@ function UnifiedWizardFrame() {
           withoutFile();
           return Promise.resolve();
         }
-        return checkAscentToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then(
-          (result) => {
-            if (screenRef.current !== screen) return;
-            // The file changed while the check ran, so its answer is stale.
-            if (setupTextRef.current !== text) return run(setupTextRef.current);
-            // The lead sentence stands alone; each diagnostic starts its own line.
-            const lines = result.errors.map((d) => `\n${ascentTomlDiagnosticText(d)}`).join("");
-            if (result.ok) {
-              toast.dismiss(SETUP_CHECK_TOAST_ID);
-              // A warning blocks nothing, so the wizard says it and moves on.
-              if (lines) {
-                toast.warning(
-                  <span className="whitespace-pre-line">
-                    {formatMsg("submit.setup_check.warnings", { p1: lines })}
-                  </span>,
-                );
-              }
-              then();
-              return;
+        return checkAscentToml(text, AbortSignal.timeout(SETUP_CHECK_TIMEOUT_MS)).then((result) => {
+          if (screenRef.current !== screen) return;
+          // The file changed while the check ran, so its answer is stale.
+          if (setupTextRef.current !== text) return run(setupTextRef.current);
+          // The lead sentence stands alone; each diagnostic starts its own line.
+          const lines = ascentTomlDiagnosticLines(result.errors);
+          if (result.ok) {
+            toast.dismiss(SETUP_CHECK_TOAST_ID);
+            // A warning blocks nothing, so the wizard says it and moves on.
+            if (lines) {
+              setupToast(
+                formatMsg("submit.setup_check.warnings", { p1: lines }),
+                SETUP_WARNINGS_TOAST_ID,
+                toast.warning,
+              );
             }
-            setupToast(formatMsg("submit.setup_check.invalid", { p1: lines }));
-          },
-        );
+            then();
+            return;
+          }
+          setupToast(formatMsg("submit.setup_check.invalid", { p1: lines }));
+        });
       };
       run(setupText)
         .catch(() => setupToast(msg("submit.setup_check.unavailable")))

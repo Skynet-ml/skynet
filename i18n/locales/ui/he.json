@@ -4452,6 +4452,7 @@
   "submit.setup_check.warning": "אזהרה: {p1}",
   "submit.setup_check.warning_at": "אזהרה בשורה {p1}: {p2}",
   "submit.setup_check.warnings": "ב-ascent.toml יש אזהרות. הן לא עוצרות את ההרצה. {p1}",
+  "submit.setup_check.more": "ועוד {p1}.",
   "agent.tool.check_setup.title": "בדיקת ההגדרה",
   "agent.tool.check_setup.running": "בודק את ascent.toml",
   "agent.tool.check_setup.ok": "הקובץ ascent.toml תקין",

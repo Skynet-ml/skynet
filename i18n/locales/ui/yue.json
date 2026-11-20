@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "警告：{p1}",
   "submit.setup_check.warning_at": "第 {p1} 行警告：{p2}",
   "submit.setup_check.warnings": "ascent.toml 有警告。佢哋唔會停止運行。{p1}",
+  "submit.setup_check.more": "仲有 {p1} 個。",
   "agent.tool.check_setup.title": "檢查設定",
   "agent.tool.check_setup.running": "檢查緊 ascent.toml",
   "agent.tool.check_setup.ok": "ascent.toml 有效",

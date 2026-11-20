@@ -341,6 +341,30 @@ def has_error(diagnostics: list[dict[str, Any]]) -> bool:
     return any(item["level"] == ERROR for item in diagnostics)
 
 
+# One bad write can give hundreds of diagnostics; the model gets a short list and a count (SKY-763).
+MODEL_DIAGNOSTICS_MAX = 20
+
+
+def model_diagnostics(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cap a diagnostic list for a tool result the model reads, errors first.
+
+    Errors come before warnings, so a capped list still shows why the run is blocked.
+
+    Args:
+        diagnostics: The list from :func:`ascent_toml_diagnostics`.
+
+    Returns:
+        ``{"diagnostics": [...]}`` with at most :data:`MODEL_DIAGNOSTICS_MAX`
+        items, plus ``diagnostics_omitted`` (the count of dropped items) when
+        the list was longer.
+    """
+    ordered = sorted(diagnostics, key=lambda item: item["level"] != ERROR)
+    kept: dict[str, Any] = {"diagnostics": ordered[:MODEL_DIAGNOSTICS_MAX]}
+    if len(ordered) > MODEL_DIAGNOSTICS_MAX:
+        kept["diagnostics_omitted"] = len(ordered) - MODEL_DIAGNOSTICS_MAX
+    return kept
+
+
 # An ``instructions`` or ``illegal`` key and its string, anywhere in a current file that is not TOML
 # at all: at a line start, after a dotted or quoted key, or inside an inline table, in any TOML quote form.
 _RULE_STRING = re.compile(
@@ -611,8 +635,9 @@ def workspace_tools(
 
         Returns:
             ``{"wizard_state": {field: text}}`` or ``{"wizard_state": {"workspace_files":
-            {path: text}}}``, plus ``ascent_toml_diagnostics`` (each diagnostic of
-            :func:`ascent_toml_diagnostics`) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
+            {path: text}}}``, plus ``ascent_toml_diagnostics`` (the diagnostics of
+            :func:`ascent_toml_diagnostics`, capped by :func:`model_diagnostics`, with
+            ``ascent_toml_diagnostics_omitted`` for the dropped count) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
             file that is too large, one file too many, or files too large together.
         """
         if len(text.encode("utf-8", "surrogatepass")) > DRAFT_FILE_BYTES:
@@ -646,7 +671,10 @@ def workspace_tools(
         result["wizard_state"][field] = text
         # The file still reaches the draft (last write wins); the agent fixes it or tells the user.
         if field == "ascent_toml" and (diagnostics := ascent_toml_diagnostics(text)):
-            result["ascent_toml_diagnostics"] = diagnostics
+            capped = model_diagnostics(diagnostics)
+            result["ascent_toml_diagnostics"] = capped["diagnostics"]
+            if "diagnostics_omitted" in capped:
+                result["ascent_toml_diagnostics_omitted"] = capped["diagnostics_omitted"]
         return result
 
     async def write_workspace_file(path: str, text: str) -> dict[str, Any]:
@@ -819,8 +847,9 @@ def workspace_tools(
             desc=(
                 "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
                 "It goes into the editor at once, and the run uses it in place of the repository's file. For "
-                "ascent.toml the result has ascent_toml_diagnostics: every error and warning of the parser, each with "
-                "its level, line, section, key and message. Fix every error in one write; a warning blocks nothing."
+                "ascent.toml the result has ascent_toml_diagnostics: the parser's errors, then its warnings, each with "
+                "its level, line, section, key and message. It holds at most 20; ascent_toml_diagnostics_omitted counts "
+                "the rest. Fix every error in one write; a warning blocks nothing."
             ),
             arg_desc={"path": file_arg, "text": "The whole file text."},
         ),
@@ -854,6 +883,7 @@ __all__ = [
     "ascent_toml_diagnostics",
     "diagnostic_text",
     "has_error",
+    "model_diagnostics",
     "open_repo",
     "workspace_tools",
 ]

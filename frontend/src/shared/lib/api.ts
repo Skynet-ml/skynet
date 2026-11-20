@@ -1063,6 +1063,34 @@ export function ascentTomlDiagnosticText(
   });
 }
 
+// A long wrong file can give hundreds of diagnostics; one toast lists this many (SKY-763).
+const TOAST_DIAGNOSTICS_MAX = 10;
+
+/**
+ * Write ascent.toml diagnostics for a toast: errors first, each on its own line.
+ *
+ * Args:
+ *   items: The diagnostics.
+ *
+ * Returns:
+ *   One line for each of the first ten, each line starting with a line break,
+ *   then one line that counts the rest; empty for no diagnostic.
+ */
+export function ascentTomlDiagnosticLines(
+  items: Array<Pick<AscentTomlDiagnostic, "level" | "line" | "message">>,
+): string {
+  const ordered = [
+    ...items.filter((d) => d.level !== "warning"),
+    ...items.filter((d) => d.level === "warning"),
+  ];
+  const shown = ordered
+    .slice(0, TOAST_DIAGNOSTICS_MAX)
+    .map((d) => `\n${ascentTomlDiagnosticText(d)}`);
+  const rest = ordered.length - TOAST_DIAGNOSTICS_MAX;
+  if (rest > 0) shown.push(`\n${formatMsg("submit.setup_check.more", { p1: rest })}`);
+  return shown.join("");
+}
+
 /**
  * Check an ascent.toml text with the repository parser. `errors` holds every
  * error and warning of the file; `ok` is false only for an error (SKY-763).

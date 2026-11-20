@@ -4441,6 +4441,7 @@
   "submit.setup_check.warning": "Uyarı: {p1}",
   "submit.setup_check.warning_at": "{p1}. satırda uyarı: {p2}",
   "submit.setup_check.warnings": "ascent.toml dosyasında uyarılar var. Çalıştırmayı durdurmazlar. {p1}",
+  "submit.setup_check.more": "Ve {p1} tane daha.",
   "agent.tool.check_setup.title": "Kurulumu denetle",
   "agent.tool.check_setup.running": "ascent.toml denetleniyor",
   "agent.tool.check_setup.ok": "ascent.toml geçerli",
