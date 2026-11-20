@@ -46,6 +46,11 @@ from ..runner import (
 )
 from .mocks import FakeGateway
 
+_needs_openascent = pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
+# The OpenAscent package folder a command entry gets, as the parent copies it into a box (SKY-757).
+_PACKAGE = str(Path(openascent.__file__).parent) if openascent is not None else ""
+
+
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
 PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
 _LLM_SCORER = (
@@ -989,13 +994,17 @@ def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_pat
     }
 
 
-def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:
-    """``--stage-command`` runs the command on ``input.json`` into ``output.json``, with the relay's variables."""
+@_needs_openascent
+def test_stage_command_mode_serves_the_relay_and_uses_the_two_files(tmp_path: Path) -> None:
+    """``--stage-command`` gives the command ``ASCENT_INPUT`` and the relay's variables, and keeps its ``output`` (SKY-757)."""
     tree, call_dir = _stage_call(tmp_path, 0)
     script = (
         "import json, os, sys\n"
-        "print(json.dumps({'input': json.load(sys.stdin), 'url': os.environ['ASCENT_MCP_SEARCH_URL']}))\n"
-        "sys.exit(3)\n"
+        "assert sys.stdin.read() == ''\n"
+        "print('a debug line')\n"
+        "value = json.load(open(os.environ['ASCENT_INPUT']))\n"
+        "answer = {'input': value, 'url': os.environ['ASCENT_MCP_SEARCH_URL']}\n"
+        "json.dump({'output': answer}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
     )
     completed = subprocess.run(
         [
@@ -1003,6 +1012,8 @@ def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exi
             str(Path(runner.__file__)),
             runner.STAGE_COMMAND_FLAG,
             str(call_dir),
+            _PACKAGE,
+            "30",
             sys.executable,
             "-c",
             script,
@@ -1012,25 +1023,33 @@ def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exi
         text=True,
         check=False,
     )
-    assert completed.returncode == 3, completed.stderr
-    written = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
-    assert written["input"] == 3
+    assert completed.returncode == 0, completed.stderr
+    assert "a debug line" in completed.stderr
+    written = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"]
+    assert written["input"] == {"input": 3}
     assert written["url"].startswith("http://127.0.0.1:")
     assert written["url"].endswith("/mcp/search")
 
 
+@_needs_openascent
 def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_path: Path) -> None:
     """A call with no relay config runs the command with the box's own environment only."""
     call_dir = tmp_path / "call"
     call_dir.mkdir()
     (call_dir / runner.INPUT_FILE).write_text("{}")
-    script = "import json, os\nprint(json.dumps(sorted(k for k in os.environ if k.startswith('ASCENT_MCP'))))\n"
+    script = (
+        "import json, os\n"
+        "names = sorted(k for k in os.environ if k.startswith('ASCENT_MCP'))\n"
+        "json.dump({'output': names}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
+    )
     completed = subprocess.run(
         [
             sys.executable,
             str(Path(runner.__file__)),
             runner.STAGE_COMMAND_FLAG,
             str(call_dir),
+            _PACKAGE,
+            "30",
             sys.executable,
             "-c",
             script,
@@ -1042,7 +1061,154 @@ def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_pa
         env={key: value for key, value in os.environ.items() if not key.startswith("ASCENT_MCP")},
     )
     assert completed.returncode == 0, completed.stderr
-    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == []
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == {"output": []}
+
+
+@_needs_openascent
+def test_a_failed_stage_command_writes_the_package_error(tmp_path: Path) -> None:
+    """A command stage that exits nonzero writes ``{"error": ...}`` with the cause and its stderr tail (SKY-757)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *("sh", "-c", "echo broken >&2; exit 4"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert document["error"].startswith("The command exited with code 4.")
+    assert document["stderr"] == "broken\n"
+
+
+def test_a_command_error_drops_a_split_secret_at_the_edge_of_a_log_the_box_cut() -> None:
+    """The box's cut can leave the end of a secret first; the parent drops it before it masks (SKY-757).
+
+    The repeated secret masks down to less than ``COMMAND_LOG_CHARS``, so
+    only the drop keeps the split copy out of the error.
+    """
+    secret = "tok-" + "".join(f"{i:03d}" for i in range(40))
+    log = (secret * 60)[-4_000:]
+    assert not log.startswith(secret)
+    document = {"error": "The command exited with code 1.", "stderr": log, "stderr_cut": True}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret, ""])
+    assert error.startswith("The command exited with code 1.\nstderr: [secret][secret]")
+    assert not any(secret[i : i + 8] in error for i in range(len(secret) - 7))
+
+
+@_needs_openascent
+def test_the_box_marks_a_log_it_cut(tmp_path: Path) -> None:
+    """A command log over the box's bound reaches the parent cut, with a ``_cut`` mark (SKY-757)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    script = "import sys; sys.stderr.write('e' * 5000); print('short'); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert document["stderr"] == "e" * runner._COMMAND_LOG_BOUND
+    assert document["stderr_cut"] is True
+    assert document["stdout"] == "short\n"
+    assert "stdout_cut" not in document
+
+
+@_needs_openascent
+def test_the_box_logs_stdout_then_stderr_on_separate_lines(tmp_path: Path) -> None:
+    """The box writes a line break between a stdout without one and the stderr (SKY-757)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    script = "import sys; sys.stdout.write('out-text'); sys.stderr.write('err-text'); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "out-text\nerr-text" in completed.stderr
+
+
+@_needs_openascent
+def test_the_box_logs_no_part_of_a_secret_that_the_package_tail_cut_splits(tmp_path: Path) -> None:
+    """OpenAscent keeps the last 64 KiB of a log; the box drops the cut first line before it logs (SKY-757)."""
+    secret = "test-value-1234567890abcdef"
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    # The tail starts 12 characters before the end of the secret.
+    after = 64 * 1024 - 12
+    script = f"import sys; sys.stderr.write('a' * 100 + {secret!r} + '\\n' + 'b' * {after - 1}); sys.exit(1)"
+    completed = subprocess.run(
+        [
+            *(sys.executable, runner.__file__, runner.STAGE_COMMAND_FLAG, str(call_dir), _PACKAGE, "30"),
+            *(sys.executable, "-c", script),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[:200]
+    assert "b" * 1_000 in completed.stderr
+    assert not [i for i in range(len(secret) - 7) if secret[i : i + 8] in completed.stderr]
+
+
+def test_a_command_error_cuts_a_long_cause_so_both_tails_fit_the_run_feedback() -> None:
+    """A long cause keeps its first ``COMMAND_CAUSE_CHARS``, after the mask (SKY-757)."""
+    secret = "secret-value-9876"
+    cause = "x" * (runner.COMMAND_CAUSE_CHARS - 5) + secret + "y" * 1_000
+    document = {"error": cause, "stdout": "o" * 1_000, "stderr": "e" * 1_000}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret])
+    head, stderr, stdout = error.split("\n")
+    assert head == ("x" * (runner.COMMAND_CAUSE_CHARS - 5) + "[secret]")[: runner.COMMAND_CAUSE_CHARS - 1] + "…"
+    assert "secr" not in error
+    assert (stderr, stdout) == (
+        "stderr: " + "e" * runner.COMMAND_LOG_CHARS,
+        "stdout: " + "o" * runner.COMMAND_LOG_CHARS,
+    )
+    assert len(error) <= 2_000 - len("Run failed: ")
+
+
+def test_a_command_error_masks_each_log_before_it_cuts_it() -> None:
+    """The cause comes first, then each masked log's last ``COMMAND_LOG_CHARS``, stderr first (SKY-757)."""
+    secret = "secret-value-9876"
+    document = {"error": "The command exited with code 1.", "stdout": "out", "stderr": secret + "x" * 795}
+    error = runner.command_error(document, lambda text: text.replace(secret, "[secret]"), [secret])
+    cause, stderr, stdout = error.split("\n")
+    assert cause == "The command exited with code 1."
+    assert stderr == "stderr: " + ("[secret]" + "x" * 795)[-runner.COMMAND_LOG_CHARS :]
+    assert stdout == "stdout: out"
+    assert "9876" not in error
+
+
+def test_a_stage_command_without_the_package_writes_an_error(tmp_path: Path) -> None:
+    """A box that has no package folder fails the call with a plain reason, not a crash."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("null")
+    code = runner.run_stage_command(call_dir, str(tmp_path / "missing"), 5, ["true"])
+    assert code == 0
+    error = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["error"]
+    assert error == "ScorerError: The box has no OpenAscent package, so the command cannot run."
 
 
 def test_service_proxy_relays_each_request_through_the_parent() -> None:
@@ -1354,7 +1520,9 @@ def fakes_its_time(value):
 """
 
 
-def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+def _candidate(
+    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, logs: list[str] | None = None
+) -> dict[str, Any]:
     """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
 
     Args:
@@ -1362,6 +1530,7 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
+        logs: When given, gets the supervisor's stderr: the logs the box streams.
 
     Returns:
         The supervisor's output document.
@@ -1370,15 +1539,21 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
     call_dir = tmp_path / "call"
     call_dir.mkdir(exist_ok=True)
     payload = {"entry": entry, "input": value, "timeout": timeout, "stages": None}
+    if isinstance(entry, list):
+        payload[runner.ASCENT_PACKAGE_PARAM] = _PACKAGE
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
-    stdout = subprocess.run(
+    completed = subprocess.run(
         [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if logs is not None else None,
         text=True,
         check=True,
         timeout=timeout + 60,
-    ).stdout
+    )
+    stdout = completed.stdout
+    if logs is not None:
+        logs.append(completed.stderr)
     [frame] = [line for line in stdout.splitlines() if line.startswith(runner.RESULT_PREFIX)]
     assert not (call_dir / runner.OUTPUT_FILE).exists()
     return json.loads(frame[len(runner.RESULT_PREFIX) :])
@@ -1391,17 +1566,112 @@ def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Pa
     assert ran == {"output": {"got": {"a": 1}}, "error": None}
 
 
-def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
-    """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
-    ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
-    assert ran.pop(runner.ELAPSED_PARAM) >= 0
-    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None}
+_TWO_FILE_COMMAND = (
+    "import json, os, sys\n"
+    "assert sys.stdin.read() == ''\n"
+    "print('a debug line that is not the output')\n"
+    "value = json.load(open(os.environ['ASCENT_INPUT']))\n"
+    "answer = {'got': value, 'path': os.environ['ASCENT_OUTPUT']}\n"
+    "json.dump({'output': answer}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
+)
 
 
-def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
-    """Keep at most 1 MB of a command's stdout."""
-    ran = _candidate(tmp_path, [sys.executable, "-c", "print('x' * 3_000_000)"])
-    assert len(ran["output"]["stdout"].encode()) <= runner.MAX_RUN_STDOUT_BYTES
+@_needs_openascent
+def test_a_command_entry_reads_ascent_input_and_writes_ascent_output(tmp_path: Path) -> None:
+    """The command gets ``{"input": ...}`` in ``ASCENT_INPUT`` and an empty stdin; its file's ``output`` is the output (SKY-757).
+
+    Its print is not part of the output, and each call gets a new output path.
+    """
+    first = _candidate(tmp_path, [sys.executable, "-c", _TWO_FILE_COMMAND], {"a": 1})
+    second = _candidate(tmp_path, [sys.executable, "-c", _TWO_FILE_COMMAND], {"a": 1})
+    assert first.pop(runner.ELAPSED_PARAM) >= 0
+    path = first["output"].pop("path")
+    assert first == {"output": {"got": {"input": {"a": 1}}}, "error": None}
+    assert second["output"]["path"] != path
+
+
+@_needs_openascent
+def test_a_command_entry_with_no_cases_gets_a_null_input(tmp_path: Path) -> None:
+    """A run with no cases writes ``{"input": null}`` to the input file."""
+    ran = _candidate(tmp_path, ["sh", "-c", 'printf \'{"output": %s}\' "$(cat "$ASCENT_INPUT")" > "$ASCENT_OUTPUT"'])
+    assert ran["output"] == {"input": None}
+
+
+@_needs_openascent
+def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
+    """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout."""
+    ran = _candidate(tmp_path, ["sh", "-c", "echo '{\"output\": 1}'"])
+    assert ran["output"] is None
+    assert ran["error"] == "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+    assert ran["stdout"] == '{"output": 1}\n'
+
+
+@_needs_openascent
+def test_a_command_output_file_is_capped(tmp_path: Path) -> None:
+    """An output file over ``MAX_RUN_STDOUT_BYTES`` fails the run."""
+    script = "import json, os\njson.dump({'output': 'x' * 2_000_000}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
+    ran = _candidate(tmp_path, [sys.executable, "-c", script])
+    assert ran["output"] is None
+    assert f"larger than {runner.MAX_RUN_STDOUT_BYTES} bytes" in ran["error"]
+
+
+@_needs_openascent
+def test_a_command_output_near_the_limit_passes_the_supervisor_cap(tmp_path: Path) -> None:
+    """An output file just under the package limit still passes after the child writes it again (SKY-757).
+
+    ``1e15`` grows the most when it is written again, so the supervisor's cap must allow for it.
+    """
+    count = (runner.MAX_RUN_STDOUT_BYTES - 100) // 5
+    script = (
+        "import os\n"
+        f"open(os.environ['ASCENT_OUTPUT'], 'w').write('{{\"output\": [' + ','.join(['1e15'] * {count}) + ']}}')\n"
+    )
+    ran = _candidate(tmp_path, [sys.executable, "-c", script])
+    assert ran["error"] is None
+    assert len(ran["output"]) == count
+
+
+@_needs_openascent
+@pytest.mark.parametrize(("char", "count"), [("\x7f", 1_000_000), ("\U0001f600", 250_000)], ids=["del", "emoji"])
+def test_a_command_string_output_near_the_limit_passes_the_supervisor_cap(
+    tmp_path: Path, char: str, count: int
+) -> None:
+    """A raw character that an ASCII-only dump would escape keeps its size in the answer (SKY-757).
+
+    A DEL grew from 1 byte to 6, and an emoji from 4 bytes to 12.
+    """
+    script = (
+        "import os\n"
+        f"text = '{{\"output\": \"' + chr({ord(char)}) * {count} + '\"}}'\n"
+        "open(os.environ['ASCENT_OUTPUT'], 'w', encoding='utf-8').write(text)\n"
+    )
+    ran = _candidate(tmp_path, [sys.executable, "-c", script])
+    assert ran["error"] is None
+    assert ran["output"] == char * count
+
+
+def test_the_supervisor_refuses_a_command_answer_over_its_cap(tmp_path: Path) -> None:
+    """A huge answer file in place of the child's own fails the call, and the supervisor reads no more than the cap."""
+    path = tmp_path / runner.OUTPUT_FILE
+    path.write_bytes(b'{"output": "' + b"x" * 200 + b'"}')
+    assert runner._read_answer(path, None, 100) == {"error": "The command's answer file is larger than 100 bytes."}
+    assert runner._read_answer(path, None, 300) == {"output": "x" * 200}
+    assert runner._read_answer(path, None) == {"output": "x" * 200}
+
+
+_DETACHED_CHILD = (
+    "import json, os, subprocess\n"
+    "subprocess.Popen(['sleep', '30'], start_new_session=True)\n"
+    "json.dump({'output': 7}, open(os.environ['ASCENT_OUTPUT'], 'w'))\n"
+)
+
+
+@_needs_openascent
+def test_a_command_entry_does_not_wait_for_a_child_in_its_own_session(tmp_path: Path) -> None:
+    """A child that the command starts in a new session neither holds the result nor counts in the run time (SKY-757)."""
+    ran = _candidate(tmp_path, [sys.executable, "-c", _DETACHED_CHILD])
+    assert ran.pop(runner.ELAPSED_PARAM) < 5
+    assert ran == {"output": 7, "error": None}
 
 
 @pytest.mark.parametrize(
@@ -1410,18 +1680,47 @@ def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
         ("cand.py:boom", "boom"),
         ("cand.py:not_json", "JSON"),
         ("cand.py:slow", "timeout after 1 s"),
-        (["sh", "-c", "sleep 30"], "timeout after 1 s"),
-        (["no-such-command-e38"], "could not start"),
-        (["sh", "-c", "kill -9 $$"], "SIGKILL"),
     ],
 )
 def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
-    """A raise, a non-JSON return, a timeout, a command that cannot start and a signal kill are failures."""
+    """A raise, a non-JSON return and a timeout of a function entry are failures."""
     # Only the timeout cases get the short limit; a loaded test host can
     # take over a second just to start Python.
     ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
     assert ran["output"] is None
     assert error in ran["error"]
+
+
+@_needs_openascent
+@pytest.mark.parametrize(
+    ("entry", "error"),
+    [
+        (["sh", "-c", "sleep 30"], "longer than the time limit of 1"),
+        (["no-such-command-e38"], "The command cannot start"),
+        (["sh", "-c", "kill -9 $$"], "stopped by signal 9"),
+        (["sh", "-c", 'echo \'{"output": 1}\' > "$ASCENT_OUTPUT"; echo why >&2; exit 3'], "exited with code 3"),
+        (["sh", "-c", 'echo "{not json" > "$ASCENT_OUTPUT"'], "not valid JSON"),
+        (["sh", "-c", 'echo \'{"result": 1}\' > "$ASCENT_OUTPUT"'], '{"output": <any JSON value>}'),
+    ],
+)
+def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
+    """A timeout, a start failure, a signal, a nonzero exit, bad JSON and the wrong form fail a command (SKY-757)."""
+    ran = _candidate(tmp_path, entry, timeout=1 if "time limit" in error else 30)
+    assert ran["output"] is None
+    assert error in ran["error"]
+    if "code 3" in error:
+        assert ran["stderr"] == "why\n"
+
+
+@_needs_openascent
+def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path) -> None:
+    """A command that fails keeps its stdout tail next to its stderr, in the logs and in the error (SKY-757)."""
+    logs: list[str] = []
+    ran = _candidate(tmp_path, ["sh", "-c", "echo said-on-stdout; echo said-on-stderr >&2; exit 1"], logs=logs)
+    assert ran["output"] is None
+    assert "said-on-stdout\nsaid-on-stderr\n" in logs[0]
+    assert ran["error"].startswith("The command exited with code 1.")
+    assert runner.command_error(ran, str, []).endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
 
 
 def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:
@@ -1461,17 +1760,19 @@ def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp
     assert ran[runner.ELAPSED_PARAM] >= 0.4
 
 
+@_needs_openascent
 def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
     """A command entry gets the same time from the supervisor (SKY-642)."""
-    ran = _candidate(tmp_path, ["sh", "-c", "sleep 0.4"])
+    ran = _candidate(tmp_path, ["sh", "-c", 'sleep 0.4; echo \'{"output": 1}\' > "$ASCENT_OUTPUT"'])
     assert ran["error"] is None
     assert 0.4 <= ran[runner.ELAPSED_PARAM] < 30
 
 
+@_needs_openascent
 def test_a_timed_out_entry_still_reports_its_time(tmp_path: Path) -> None:
     """A timeout is a failure; its time is about the timeout (SKY-642)."""
     ran = _candidate(tmp_path, ["sh", "-c", "sleep 30"], timeout=1)
-    assert "timeout" in ran["error"]
+    assert "time limit" in ran["error"]
     assert 1 <= ran[runner.ELAPSED_PARAM] < 30
 
 
@@ -1842,9 +2143,6 @@ def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp
     assert "NoNewPrivs:\t1" in after
 
 
-_needs_openascent = pytest.mark.skipif(openascent is None, reason="openascent needs Python 3.12")
-
-
 def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]:
     """Run the runner on a command ``[metric] entry`` whose bash script is ``script`` (SKY-738).
 
@@ -1870,7 +2168,7 @@ def _command_metric(tmp_path: Path, script: str, **extra: Any) -> dict[str, Any]
         "gateway": None,
         runner.METRIC_ENTRY_PARAM: ["bash", "metric.sh"],
         runner.METRIC_TIMEOUT_PARAM: 20,
-        runner.ASCENT_PACKAGE_PARAM: str(Path(openascent.__file__).parent),
+        runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
         **extra,
     }
     for key in drop:

@@ -68,7 +68,7 @@ illegal = "docs/rules.md"
 network = ["pypi.org"]
 
 [run]
-entry = ["pytest", "-q"]
+entry = ["sh", "run.sh"]
 timeout = 300
 
 [metric]
@@ -115,13 +115,16 @@ How to write the run's files:
   in optimize.toml. Set the ``[run]`` ``entry`` to ``"path/to/file.py:function"`` or a command list,
   for example ``entry = "geocode.py:geocode"``, and write ``score(repo_path, case, output=None)``: ``output``
   is what the entry returned for the case, and ``None`` when nothing ran, so always give it the ``None``
-  default. That metric reads ``output`` and never imports or calls the candidate's code. When the repository
-  is scored by its own tests, put the test command in ``[run] entry``, for example
-  ``entry = ["pytest", "-q"]``, and write a metric that only reads ``output["stdout"]`` and
-  ``output["exit_code"]``; the metric never runs the tests itself. The metric box holds no candidate files, so
-  the metric cannot read a report file that the tests write. For a command entry, a nonzero exit code is normal
-  output, not a failure: the metric gets ``exit_code`` and decides what it means. For example, pytest exits 1
-  when some tests fail, so the metric counts the passed and failed tests in ``stdout`` and gives partial credit.
+  default. That metric reads ``output`` and never imports or calls the candidate's code. A command entry follows
+  one rule: it reads ``{{"input": <the case input>}}`` from the JSON file at ``ASCENT_INPUT`` and writes
+  ``{{"output": <any JSON>}}`` to the JSON file at ``ASCENT_OUTPUT``. What it prints goes only to the logs. A
+  nonzero exit, a missing output file or bad JSON fails the call, and the version gets no score. When the
+  repository is scored by its own tests, write a small script, for example ``run.sh``, set
+  ``entry = ["sh", "run.sh"]``, and end the script with the wrapper line that turns the test command's exit code
+  into the output: ``pytest -q > log.txt`` and then
+  ``echo "{{\\"output\\": {{\\"exit_code\\": $?}}}}" > "$ASCENT_OUTPUT"``. The metric reads
+  ``output["exit_code"]`` and never runs the tests itself. The metric box holds no candidate files, so put each
+  number the metric needs, such as the passed and failed test counts, into the output that the script writes.
   Write each API that a role calls as ``[services.<name>]`` with a ``url`` and ``headers`` that hold each
   secret as ``${{NAME}}``, for example ``url = "https://api.example.com/v1"`` and
   ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List in each role's ``services`` every service

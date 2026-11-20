@@ -441,6 +441,69 @@ One limit stays. A hosted run's sandbox image is in a private registry, so
 an outside person cannot pull it. SKY-737 (the contract names its own image
 for the metric) removes this limit later.
 
+## Command entries: one call rule
+
+A `[run] entry` or a `[target.<name>] entry` is a Python function
+(`"path/to/file.py:function"`) or a command list in any language. A command
+follows one rule, the same for the candidate and for each stage (SKY-757):
+
+- It reads the JSON file at the path in `ASCENT_INPUT`. The file holds one
+  object, `{"input": <the case input>}`, or `{"input": null}` when the run
+  has no cases.
+- It writes `{"output": <any JSON>}` to the path in `ASCENT_OUTPUT`. The
+  `output` value is what the metric scores.
+- What it prints, on stdout or stderr, goes to the logs only. Nothing goes
+  to the logs while the command runs. After the call ends, the logs get the
+  last 64 KiB of its stdout, then a line break when stdout does not end with
+  one, then the last 64 KiB of its stderr. A log of 64 KiB or more can start
+  inside a secret, so Skynet drops its first line before it logs it. A log
+  with no line break is not logged. Its stdin is empty.
+
+A nonzero exit code, a missing output file, an output that is not valid JSON
+or has another form, a time limit or an output file larger than the limit
+fails the call. For a `[run] entry`, the case then gets no score, and the
+metric does not run (SKY-751). For a stage, the metric's `openascent.call`
+gets the failure as an error. For a command entry, the error shows at most the first 300
+characters of the cause (a longer cause ends with "…"), then the last 800
+characters of the command's stderr and of its stdout, with the run's secrets
+masked. The box sends at most the last 4,000 characters of each log. That cut
+can split a secret, so Skynet drops the start of a log that the box cut. The
+drop is one character shorter than the longest secret, and it never stops
+inside a whole secret. Skynet then masks the secrets, and only then cuts the
+cause and each log. Thus no part of a masked secret (6 characters or more)
+shows across a cut. When the output file is not valid JSON, the cause is
+always "The output file is not valid JSON. Write one strict JSON value to
+ASCENT_OUTPUT: UTF-8, no NaN or Infinity, no duplicate keys, no lone surrogate
+escape." This cause quotes no part of the file. The feedback of a failed
+`[run]` case keeps its last 1,988 characters after "Run failed: ". The cause
+and the two tails always fit in that limit, so the feedback always starts with
+the cause. The 300-character cut is for command entries only. A function
+entry's feedback is its traceback, with the secrets masked, cut to the last
+1,988 characters, so it ends with the exception. The error of a failed stage keeps only its first 500 characters.
+Thus it can show less than the full tails: it shows the cause, then the start
+of the stderr part, or of the stdout part when stderr is empty. Each call gets
+a new output path, so a file
+from an earlier call is never read again. A function entry is not changed:
+it gets the input as its argument, and its return value is the output.
+
+A tool that exits with a nonzero code for a normal result, such as `pytest`
+when some tests fail, needs a wrapper line. The wrapper line writes the exit
+code as the output, and the script exits 0:
+
+```toml
+[run]
+entry = ["sh", "run.sh"]
+```
+
+```sh
+# run.sh
+pytest -q > log.txt
+echo "{\"output\": {\"exit_code\": $?}}" > "$ASCENT_OUTPUT"
+```
+
+The metric then reads `output["exit_code"]`. The metric box holds no
+candidate files, so put each number the metric needs into the output.
+
 ## Cases: `[data] cases`
 
 `[data] cases` names the only source of a repository run's cases. The file
@@ -452,7 +515,7 @@ holds one case on each line, as a JSON object:
 ```
 
 - `input` is required. It goes to the candidate: a function entry gets it as
-  its argument, and a command entry gets it as JSON on stdin.
+  its argument, and a command entry reads it from the `ASCENT_INPUT` file.
 - `expected` is optional. Only the metric gets it, in the whole case.
 - Blank lines are skipped. A UTF-8 byte-order mark at the start is allowed.
 - The file is hidden like the `[metric]` files (see "What is hidden"). The
@@ -464,7 +527,8 @@ holds one case on each line, as a JSON object:
 - A run that uploads its own cases for a repository with `[data]` fails:
   "This repo defines its cases in optimize.toml. Remove the uploaded cases."
 - Without `[data]`, the run uses its uploaded cases, if any. With no cases at
-  all, the candidate runs once with no input (`None`, or `null` on stdin),
+  all, the candidate runs once with no input (`None`, or `{"input": null}`
+  in the `ASCENT_INPUT` file),
   and the metric judges that one run.
 
 ## What is hidden
@@ -637,7 +701,9 @@ cause: the command could not start (for example a missing file), a time
 limit, a nonzero exit code (the message shows the code), no answer file, an
 answer file that is not a plain file, an answer that is not valid JSON, or
 an answer with no `score` or another wrong form. The stderr of the command
-stays in the server log.
+stays in the server log. For an answer that is not valid JSON, the server log
+gets the same fixed cause as a `[run]` command, which quotes no part of the
+answer file.
 
 The command has the same limits as a Python metric: the same box, network,
 services, vCPUs and time limit. The metric box holds no version code, so
@@ -765,9 +831,10 @@ process that the entry starts in a new session is not part of that time,
 and it ends when Skynet closes the candidate box. Until then, that process
 can write any file that the entry can write. Thus the supervisor sends its
 result as one line on its own stdout, not in a file. The entry never gets
-that stdout: a function entry's prints go to stderr, and a command entry's
-stdout is a pipe that the supervisor reads. The time includes the Python start
-for a function entry. It does not include setup or the metric. The
+that stdout: the entry's prints go to stderr, and the supervisor reads the
+entry's answer from a file. The time includes the start of the Python child
+process that runs the entry, for both entry forms. It does not include setup
+or the metric. The
 entry's code runs in other processes, so it cannot patch this clock. A time
 that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
 
@@ -783,7 +850,9 @@ supervisor also starts without site-packages (`-I -S`), and Skynet writes the
 runner again before each case. The supervisor starts a function entry with
 `python3` from `PATH`, so the entry gets the packages that `[setup]`
 installed. The entry is candidate code, so its interpreter does not need
-trust; the clock stays in the supervisor. The shell that starts the
+trust; the clock stays in the supervisor. A command entry's own process
+loads OpenAscent, so it starts with the supervisor's interpreter. The
+command itself still finds `python3` on `PATH`. The shell that starts the
 supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
 for its exit code. These steps make the supervisor harder to change. They
 do not replace the separate boxes; see the residual risk below. Skynet
@@ -858,8 +927,9 @@ Residual risk:
 
 A timeout, a crash, a function entry that exits before it returns, or other
 `[run]` failure gives the case no score, and the metric does not run. A
-command entry that exits with a non-zero code does not fail: the metric gets
-its `exit_code` and `stdout` as the output. The runner never makes a score.
+command entry that exits with a nonzero code, or writes no valid output file,
+also fails (see "Command entries: one call rule"). The runner never makes a
+score.
 Only the metric makes a score. The failure text goes to the proposer as
 feedback. A version with a case that has no score has no score itself:
 

@@ -80,16 +80,43 @@ from ..service import run_blackbox_optimization
 from ..tree_sandbox import BoxSession
 from .test_repo_workspace import _archive, _patch
 
-# The metric box holds no repository file, so the [run] entry prints what
+# The metric box holds no repository file, so the [run] entry's output is what
 # the metric scores: the version's source, then the file setup built (SKY-398).
-SCORER_RUN = ("sh", "-c", "cat src/app.py; echo ---; cat built.txt")
+# It writes that output to ASCENT_OUTPUT, as every command entry does (SKY-757).
+SCORER_RUN = (
+    "python3",
+    "-c",
+    "import json, os; text = open('src/app.py').read() + '---\\n' + open('built.txt').read();"
+    " json.dump({'output': text}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+)
+_needs_openascent = pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+
+
+def _require_openascent() -> None:
+    """Skip the test when this server has no OpenAscent package, which every command entry needs (SKY-757)."""
+    if repo_scorer.openascent is None:
+        pytest.skip("openascent needs Python 3.12")
+
+
+def _wrapped(command: str) -> tuple[str, ...]:
+    """Make a shell command a ``[run]`` entry with the documented wrapper line (SKY-757).
+
+    Args:
+        command: The shell command, whose printed text goes to the logs.
+
+    Returns:
+        A command entry whose output is ``{"exit_code": <the command's exit code>}``.
+    """
+    _require_openascent()
+    return ("sh", "-c", f'{command} > /dev/null; echo "{{\\"output\\": {{\\"exit_code\\": $?}}}}" > "$ASCENT_OUTPUT"')
+
 
 SCORER = """
 import json
 import os
 
 def score(repo_path, case=None, output=None):
-    source, built = output["stdout"].split("---\\n")
+    source, built = output.split("---\\n")
     value = int(source.split("=")[1])
     return {
         "score": value / 10,
@@ -151,6 +178,7 @@ def scored(tmp_path: Path) -> Iterator[tuple[RepoScorer, Path, Path]]:
     Yields:
         The scorer, the archive and the scratch folder.
     """
+    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -268,6 +296,7 @@ def _park_scorer(tmp_path: Path, budget: _ParkLog) -> tuple[RepoScorer, Path]:
     Returns:
         The scorer and its archive.
     """
+    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -436,7 +465,7 @@ def _labels_judge(
         ),
         judge,
         timeout_seconds=60,
-        run_entry=("python3", "src/app.py"),
+        run_entry=_wrapped("python3 src/app.py"),
     )
     return scorer, archive
 
@@ -644,6 +673,7 @@ def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, 
     Returns:
         The scorer, the archive, the recorded rule events and the judge.
     """
+    _require_openascent()
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "1\n"})
     events: list[dict[str, Any]] = []
     judge = RuleJudge(
@@ -665,11 +695,11 @@ def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, 
             protected_paths=["eval"],
         ),
         "def score(repo_path, case, output):\n"
-        "    value = int(output['stdout'].split('=')[1])\n"
+        "    value = int(output.split('=')[1])\n"
         "    return {'score': value / 10, 'feedback': 'value read'}\n",
         timeout_seconds=60,
         rule_judge=judge,
-        run_entry=("cat", "src/app.py"),
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
     )
     return scorer, archive, events, judge
 
@@ -1031,7 +1061,13 @@ STAGE_TREE = {
 STAGES = {
     "double": TargetStage(entry="src/stages.py:double", timeout=30),
     "shout": TargetStage(
-        entry=("python3", "-c", "import json, sys; print(json.dumps(json.load(sys.stdin).upper()))"), timeout=30
+        entry=(
+            "python3",
+            "-c",
+            "import json, os; value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+            " json.dump({'output': value.upper()}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
+        ),
+        timeout=30,
     ),
     "broken": TargetStage(entry="src/stages.py:broken", timeout=30),
     "slow": TargetStage(entry="src/stages.py:slow", timeout=1),
@@ -1112,6 +1148,8 @@ def _stage_scorer(
     Returns:
         The scorer and the tree's archive.
     """
+    if any(isinstance(stage.entry, tuple) for stage in stages.values()):
+        _require_openascent()
     files = {**STAGE_TREE, **(tree or {})}
     archive = _archive(tmp_path, {**files, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
     stage_archive = _archive(tmp_path / "stage", files)
@@ -1377,6 +1415,158 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
     for text in (call["failure_reason"], call["response"], feedback):
         assert "0123456789" not in text
         assert "[secret]" in text
+
+
+def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_masked(tmp_path: Path) -> None:
+    """A command stage that echoes a secret to stdout and stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"echo 'shown {secret}'; echo 'leaked {secret}' >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "stdout: shown [secret]" in feedback
+    assert "stderr: leaked [secret]" in feedback
+    assert secret not in feedback
+
+
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut (SKY-757)."""
+    secret = "stage-secret-value-9876"
+    failing = TargetStage(entry=("sh", "-c", f"printf '{secret}%0791d\\n' 0 >&2; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets={"JUDGE_KEY": secret})
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: " in feedback
+    assert "9876" not in feedback
+
+
+_LONG_SECRET = "tok-" + "".join(f"{i:03d}" for i in range(40))
+# 60 copies pass the box's 4,000-character bound, and 4,000 is no whole number
+# of copies, so the box's cut splits one copy (SKY-757).
+_REPEAT_SECRET = f"for i in $(seq 60); do printf '%s' '{_LONG_SECRET}' >&2; done"
+
+
+def _no_part_of_the_long_secret(text: str) -> bool:
+    """Say whether no 8-character piece of ``_LONG_SECRET`` is in the text.
+
+    Args:
+        text: The feedback to check.
+
+    Returns:
+        ``True`` when the text holds no part of the secret.
+    """
+    return not any(_LONG_SECRET[i : i + 8] in text for i in range(len(_LONG_SECRET) - 7))
+
+
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_a_stage_error(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut before it masks the log (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", f"{_REPEAT_SECRET}; exit 2"), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": _LONG_SECRET}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert "Stage 'failing' failed: The command exited with code 2." in feedback
+    assert "\nstderr: [secret]" in feedback
+    assert _no_part_of_the_long_secret(feedback)
+
+
+# Each script writes an output file whose OpenAscent cause quotes a secret in a
+# form the mask misses: a head cut of a number, or a key as a repr (SKY-757).
+_QUOTED_SECRETS = [
+    pytest.param(
+        "4111222233334444",
+        'printf \'{"output": %s%se400}\' "$(printf \'1%.0s\' $(seq 30))" 4111222233334444 > "$ASCENT_OUTPUT"',
+        ("4111222233", "22223333", "33334444"),
+        id="number",
+    ),
+    pytest.param(
+        "ab\\cd\\efgh",
+        'printf \'%s\' \'{"ab\\\\cd\\\\efgh": 1, "ab\\\\cd\\\\efgh": 2}\' > "$ASCENT_OUTPUT"',
+        ("efgh", "\\cd"),
+        id="repr-key",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_a_stage_error(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A stage whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    failing = TargetStage(entry=("sh", "-c", script), timeout=30)
+    code = (
+        "from openascent import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return {'score': 0.0, 'feedback': str(error)}\n"
+        "    return {'score': 1.0, 'feedback': 'no error'}\n"
+    )
+    secrets = {"JUDGE_KEY": secret}
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"failing": failing}, secrets=secrets)
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    assert f"Stage 'failing' failed: {runner.INVALID_JSON_CAUSE[:40]}" in feedback
+    assert not [piece for piece in pieces if piece in feedback]
+
+
+def test_a_command_stage_runs_on_the_base_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command stage's runner starts with the base python3, not the one [setup] put first on PATH (SKY-757)."""
+    marker = tmp_path / "base-python-ran"
+    base = tmp_path / "base" / "python3"
+    base.parent.mkdir()
+    base.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    base.chmod(0o755)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(base))
+    code = "from openascent import call\ndef score(repo_path, case=None):\n    return {'score': 1.0, 'feedback': call('shout', 'hi')}\n"
+    scorer, _ = _stage_scorer(tmp_path, code, RecordingRuntime(), {"shout": STAGES["shout"]})
+    try:
+        assert scorer.score("")["feedback"] == "HI"
+    finally:
+        scorer.close()
+    assert marker.exists()
 
 
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1645,7 +1835,7 @@ def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_pat
         {"double": STAGES["double"]},
         scorer_runtime=_WriteTouchingRuntime(),
         protected_paths=("judge",),
-        run_entry=("sh", "-c", "echo 9 > judge/labels.csv"),
+        run_entry=_wrapped("echo 9 > judge/labels.csv"),
     )
     try:
         with pytest.raises(RepoScoreError, match=r"'judge/labels\.csv' is protected") as caught:
@@ -4077,7 +4267,9 @@ def lookup(value):
 _LOOKUP_COMMAND = (
     "python3",
     "-c",
-    "import json, sys; sys.path.insert(0, 'src'); import lookup; print(json.dumps(lookup.lookup(json.load(sys.stdin))))",
+    "import json, os, sys; sys.path.insert(0, 'src'); import lookup;"
+    " value = json.load(open(os.environ['ASCENT_INPUT']))['input'];"
+    " json.dump({'output': lookup.lookup(value)}, open(os.environ['ASCENT_OUTPUT'], 'w'))",
 )
 _LOOKUP_SCORER = (
     "import json\n"
@@ -4797,12 +4989,165 @@ def test_run_failed_scrub_drops_metric_runner_and_library_frames() -> None:
     assert _scrub(text.removeprefix("Run failed: "), root, ("eval",)) == "RuntimeError: broke"
 
 
-def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: Path) -> None:
-    """A command's exit code and stdout reach the metric; a nonzero exit is not a run failure (E38)."""
+def _shell_run_scorer(tmp_path: Path, script: str, secrets: Mapping[str, str] | None = None) -> RepoScorer:
+    """Build a local scorer whose ``[run] entry`` is ``sh src/run.sh`` and whose metric echoes the output (SKY-757).
+
+    Args:
+        tmp_path: Scratch folder.
+        script: The body of ``src/run.sh``.
+        secrets: The run's secrets.
+
+    Returns:
+        The scorer; the caller closes it.
+    """
     metric = "import json\ndef score(repo_path, case, output):\n    return {'score': 0.5, 'feedback': json.dumps(output, sort_keys=True)}\n"
-    archive = _archive(
-        tmp_path, {"src/app.py": "x = 1\n", "src/cmd.py": "import sys\nprint(sys.stdin.read())\nsys.exit(3)\n"}
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/run.sh": script})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets=dict(secrets or {}),
+        ),
+        metric,
+        timeout_seconds=60,
+        run_entry=("sh", "src/run.sh"),
+        run_timeout=10.0,
     )
+
+
+@_needs_openascent
+def test_a_shell_command_entry_reads_ascent_input_and_its_output_file_reaches_the_metric(tmp_path: Path) -> None:
+    """A real shell ``[run]`` command reads ``ASCENT_INPUT`` and writes ``ASCENT_OUTPUT``; its prints stay out (SKY-757)."""
+    script = (
+        "echo 'a debug line'\n"
+        'test -z "$(cat)"\n'
+        'printf \'{"output": {"seen": %s}}\' "$(cat "$ASCENT_INPUT")" > "$ASCENT_OUTPUT"\n'
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+    finally:
+        scorer.close()
+    assert result["score"] == pytest.approx(0.5)
+    assert json.loads(result["feedback"]) == {"seen": {"input": {"q": 1}}}
+
+
+@_needs_openascent
+def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Path) -> None:
+    """The documented wrapper line turns a failing tool's exit code into the output (SKY-757)."""
+    script = 'python3 -c "import sys; sys.exit(3)" > log.txt\necho "{\\"output\\": {\\"exit_code\\": $?}}" > "$ASCENT_OUTPUT"\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": None})
+    finally:
+        scorer.close()
+    assert json.loads(result["feedback"]) == {"exit_code": 3}
+
+
+@_needs_openascent
+def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
+    """A command that prints its answer and writes no output file is a run failure that shows the print, and the metric is not called."""
+    scorer = _shell_run_scorer(tmp_path, "echo '{\"output\": 1}'\n")
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"] == (
+        "Run failed: The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+        '\nstdout: {"output": 1}'
+    )
+
+
+@_needs_openascent
+def test_a_failed_command_with_long_stdout_and_stderr_keeps_its_cause(tmp_path: Path) -> None:
+    """Full stderr and stdout tails still leave the cause in the run feedback (SKY-757)."""
+    script = 'for i in $(seq 300); do echo "out line $i"; echo "err line $i" >&2; done\nexit 1\n'
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert result["feedback"].endswith("out line 300")
+    assert "err line 300\nstdout: " in result["feedback"]
+
+
+@_needs_openascent
+def test_a_secret_across_the_command_log_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """A secret that the 800-character stderr cut would split is masked before the cut, and the cause stays (SKY-757)."""
+    secret = "run-secret-value-9876"
+    scorer = _shell_run_scorer(tmp_path, f"printf '{secret}%0791d\\n' 0 >&2\nexit 1\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: " in result["feedback"]
+    assert "9876" not in result["feedback"]
+
+
+@_needs_openascent
+def test_a_repeated_secret_split_by_the_box_cut_leaves_no_part_of_itself_in_the_run_feedback(tmp_path: Path) -> None:
+    """The parent drops the split copy at the edge of the box's cut, and the cause stays (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, f"{_REPEAT_SECRET}\nexit 1\n", {"JUDGE_KEY": _LONG_SECRET})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The command exited with code 1.")
+    assert "\nstderr: [secret]" in result["feedback"]
+    assert _no_part_of_the_long_secret(result["feedback"])
+
+
+@_needs_openascent
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_output_file_leaves_no_part_of_a_secret_in_the_run_feedback(
+    tmp_path: Path, secret: str, script: str, pieces: tuple[str, ...]
+) -> None:
+    """A [run] command whose output file is not valid JSON gets the fixed cause, which quotes no file (SKY-757)."""
+    scorer = _shell_run_scorer(tmp_path, script + "\n", {"JUDGE_KEY": secret})
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: " + runner.INVALID_JSON_CAUSE)
+    assert not [piece for piece in pieces if piece in result["feedback"]]
+
+
+@_needs_openascent
+def test_a_long_cause_and_long_logs_still_start_the_run_feedback_with_the_cause(tmp_path: Path) -> None:
+    """The cause keeps its head, so the feedback's tail cut never drops it (SKY-757)."""
+    keys = ", ".join(f'"unknown_key_{i:02d}": 1' for i in range(60))
+    script = (
+        'for i in $(seq 100); do echo "out line $i"; echo "err line $i" >&2; done\n'
+        f"printf '%s' '{{\"output\": 1, {keys}}}' > \"$ASCENT_OUTPUT\"\n"
+    )
+    scorer = _shell_run_scorer(tmp_path, script)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] is None
+    assert result["feedback"].startswith("Run failed: The run output is not in the valid form:")
+    assert "\nstderr: " in result["feedback"]
+    assert result["feedback"].endswith("out line 100")
+
+
+def test_a_function_entry_keeps_the_end_of_its_traceback_in_the_run_feedback(tmp_path: Path) -> None:
+    """A function entry's error takes no command cut, so the exception line at its end stays (SKY-757)."""
+    frames = "".join(f"def frame_{i}(case):\n    return frame_{i + 1}(case)  # {'padding ' * 8}\n" for i in range(6))
+    source = frames + "def frame_6(case):\n    return {}['missing']\n\ndef run(case):\n    return frame_0(case)\n"
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/cand.py": source})
+    metric = "def score(repo_path, case, output):\n    return {'score': 1.0, 'feedback': 'ran'}\n"
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=LocalSubprocessRuntime(),
@@ -4815,15 +5160,16 @@ def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: 
         ),
         metric,
         timeout_seconds=60,
-        run_entry=("python3", "src/cmd.py"),
+        run_entry="src/cand.py:run",
         run_timeout=10.0,
     )
     try:
-        result = scorer.score("", {"input": {"q": 1}, "expected": 2})
+        result = scorer.score("", {"input": 1})
     finally:
         scorer.close()
-    assert result["score"] == pytest.approx(0.5)
-    assert json.loads(result["feedback"]) == {"exit_code": 3, "stdout": '{"q": 1}\n'}
+    assert result["score"] is None
+    assert len(result["feedback"]) > runner.COMMAND_CAUSE_CHARS
+    assert result["feedback"].rstrip().endswith("KeyError: 'missing'")
 
 
 def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
@@ -5236,7 +5582,7 @@ def _command_scorer(
         ),
         "",
         timeout_seconds=60,
-        run_entry=("sh", "-c", "cat src/app.py"),
+        run_entry=("sh", "-c", 'printf \'{"output": "%s"}\' "$(cat src/app.py)" > "$ASCENT_OUTPUT"'),
         metric_entry=("bash", entry),
     )
     return scorer, archive
@@ -5307,6 +5653,28 @@ def test_a_failed_bash_metric_gives_no_score_and_names_the_cause(
         scorer.close()
 
     assert "secret-stderr" not in str(caught.value)
+
+
+@pytest.mark.skipif(repo_scorer.openascent is None, reason="openascent needs Python 3.12")
+@pytest.mark.parametrize(("secret", "script", "pieces"), _QUOTED_SECRETS)
+def test_an_invalid_metric_answer_leaves_no_part_of_a_secret_in_the_server_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+    script: str,
+    pieces: tuple[str, ...],
+) -> None:
+    """A command metric whose answer is not valid JSON logs the fixed cause, which quotes no file (SKY-757)."""
+    scorer, _ = _command_scorer(tmp_path, script + "\n", monkeypatch)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="result file is not valid JSON"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+    assert runner.INVALID_JSON_CAUSE in caplog.text
+    assert not [piece for piece in pieces if piece in caplog.text]
 
 
 def test_a_command_metric_is_refused_when_the_server_has_no_openascent(
