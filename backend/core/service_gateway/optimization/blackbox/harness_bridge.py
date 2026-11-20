@@ -70,6 +70,9 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
+# The model binding files of this bridge's live sessions. A stop signal exits
+# without ``finally`` blocks, so the handler removes them (SKY-884).
+_LIVE_BINDINGS: set[Path] = set()
 # A stop signal that lands while a group starts waits until the group is in
 # ``_OWNED_GROUPS``, so the stop also kills it. Masking the signal instead
 # would leave it masked in the child (SKY-753).
@@ -79,6 +82,8 @@ _DEFERRED_STOP: list[int] = []
 # harnesses and older callers still use these pre-rename spellings.
 _LEGACY_PREFIX = "SKYNET_"
 SHIM_DIR = ".local/app-bin"
+# Mirrors guest_model_proxy.MODEL_BINDINGS_ENV: the box proxy's folder where a session names its model (SKY-884).
+MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
 SESSIONS_DIR = ".app-bridge"
 # Inside a session folder: the exec shim wrappers and the log they append to (``exec_shim``).
 EXEC_SHIM_DIR = "exec-bin"
@@ -532,6 +537,10 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
         # Without /proc (macOS) nothing proves a reaped pid is still ours.
         if process.returncode is None or root_start is not None:
             _stop_group(process, signal.SIGKILL, root_start)
+    for binding in list(_LIVE_BINDINGS):
+        # A file in the set may not exist yet, or may already be renamed.
+        with contextlib.suppress(OSError):
+            binding.unlink()
     os._exit(128 + signum)
 
 
@@ -2243,6 +2252,79 @@ def _reap_children() -> None:
             return
 
 
+def bind_model(folder: Path, api_key: str, model: str) -> Path | None:
+    """Name a session's model for its route key in the box proxy's model bindings folder.
+
+    The layout mirrors ``guest_model_proxy._bound_models``: this file runs in
+    the box without the backend's code. The proxy then refuses a request for
+    a model that no live session of the key names, with an error that names
+    ``ASCENT_MODEL`` (SKY-884).
+
+    Args:
+        folder: The proxy's model bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+
+    Returns:
+        The session's own binding file, or ``None`` when the folder cannot be written or UTF-8
+        cannot hold the model name or the route key.
+    """
+    # One file for each session: concurrent sessions of one key with different models must all pass.
+    name = uuid.uuid4().hex
+    files: tuple[Path, ...] = ()
+    try:
+        target = folder / hashlib.sha256(api_key.encode()).hexdigest()
+        # The proxy must never read a partial name, so the name is renamed into place.
+        binding, partial = target / name, target / f".{name}"
+        # A stop signal can land at any point below, so both files are live before either exists.
+        files = (binding, partial)
+        _LIVE_BINDINGS.update(files)
+        target.mkdir(parents=True, exist_ok=True)
+        partial.write_text(model, encoding="utf-8")
+        partial.replace(binding)
+    except (OSError, ValueError):
+        # The gateway refuses another model anyway, so a folder the session cannot write, or a model name
+        # or route key that UTF-8 cannot hold, skips only the clearer error.
+        _unbind(*files)
+        return None
+    _LIVE_BINDINGS.discard(partial)
+    return binding
+
+
+def _unbind(*paths: Path) -> None:
+    """Remove binding files that may or may not exist, and stop tracking them.
+
+    Args:
+        paths: The binding files.
+    """
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        _LIVE_BINDINGS.discard(path)
+
+
+@contextlib.contextmanager
+def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> Iterator[None]:
+    """Name a session's model for the box proxy while the session runs, then remove the name.
+
+    Args:
+        env: The session's environment, which names the bindings folder.
+        api_key: The session's route key.
+        model: The session's model.
+
+    Yields:
+        Nothing; the name stays while the block runs.
+    """
+    folder = env.get(MODEL_BINDINGS_ENV)
+    binding = bind_model(Path(folder), api_key, model) if folder and api_key and model else None
+    try:
+        yield
+    finally:
+        # A finished session's model must not pass the box check or stay in its error.
+        if binding is not None:
+            _unbind(binding)
+
+
 def run_session(
     proposer: dict[str, Any],
     *,
@@ -2354,8 +2436,6 @@ def run_session(
         shim_dir = install_exec_shim(session_dir / EXEC_SHIM_DIR, exec_commands, sys.executable)
         env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
         env["APP_EXEC_LOG"] = str(session_dir / EXEC_LOG)
-    # The harness proposer box's proxy env has no ASCENT_MODEL, so the proxy model check does not run there
-    # and the gateway refuses other models. SKY-884 tracks that refusal text.
     env["ASCENT_MODEL"] = model
     for name, value in (
         ("ANSWER_FILE", str(session_dir / f"answer-{attempt}.txt")),
@@ -2372,7 +2452,8 @@ def run_session(
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
-    with stderr_file.open("w", encoding="utf-8") as stderr:
+    # The box proxy above this process cannot see this ASCENT_MODEL, so the session names it there (SKY-884).
+    with stderr_file.open("w", encoding="utf-8") as stderr, model_binding(env, api_key, model):
         with _defer_stop():
             process = subprocess.Popen(
                 command,

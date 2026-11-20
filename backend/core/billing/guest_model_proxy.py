@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
 import time
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -16,8 +20,20 @@ from uuid import uuid4
 
 RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
 GATEWAY_URL_ENV = "ASCENT_MODEL_URL"
-# The model of the run. A chat request that names another model gets an error that names this variable (SKY-776).
+# The model of the run. A model request that names another model gets an error that names this variable (SKY-776).
 MODEL_ENV = "ASCENT_MODEL"
+# A built-in agent session gets its ASCENT_MODEL only in its own processes, so the harness bridge
+# names it in this folder for the session's route key (SKY-884). A box without its own ASCENT_MODEL
+# checks a request against the models named for the request's key. A scoped route key serves one model.
+MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
+# The provider prefixes that a built-in agent puts before ASCENT_MODEL: LiteLLM's and the harness provider's.
+_AGENT_PREFIXES = ("openai/", "app/")
+# The box user can write the bindings folder, so the proxy reads only short, one-line names from it.
+_BINDING_MAX_BYTES = 256
+_MODEL_NAME_MAX = 200
+# The model routes whose body names its model at the top level: OpenAI chat, OpenAI Responses (Codex) and
+# Anthropic messages. Only these exact paths: /v1/threads/<id>/messages is not a model call.
+_MODEL_PATHS = frozenset({"/chat/completions", "/responses", "/messages"})
 # The pinned sandbox image predates the APP_* names and reads only this one.
 _LEGACY_RELAY_URL_ENV = "SKYNET_BUDGET_RELAY_URL"
 _PRINT_LOCK = threading.Lock()
@@ -117,7 +133,7 @@ def main() -> int:
                 self.send_error(413)
                 return
             body = self.rfile.read(length) if length else b"" if raw else b"{}"
-            refusal = None if raw else _other_model_refusal(self.path, body)
+            refusal = None if raw else _other_model_refusal(self.path, body, _request_key(self.headers), self.command)
             if refusal is not None:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
@@ -185,6 +201,15 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
+    if not _runs_as_root():
+        # Resolve only the parent, so the check below sees a link at the folder itself.
+        bindings = response_dir.parent.resolve() / "models"
+        # Without the folder the box only loses the clearer error: the gateway still refuses another model.
+        with contextlib.suppress(OSError):
+            bindings.mkdir(exist_ok=True)
+        if not bindings.is_symlink() and bindings.is_dir():
+            # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
+            os.environ[MODEL_BINDINGS_ENV] = str(bindings)
     environment = {
         **os.environ,
         RELAY_URL_ENV: f"{endpoint}/v1",
@@ -235,28 +260,148 @@ def model_matches(model: object, expected: str) -> bool:
     return isinstance(model, str) and normalized(model) == normalized(expected)
 
 
-def _other_model_refusal(path: str, body: bytes) -> bytes | None:
-    """Return the error body for a chat request that names another model than ``ASCENT_MODEL``.
+def agent_model_matches(model: object, expected: str) -> bool:
+    """Return whether a built-in agent's request names its session's model.
+
+    Args:
+        model: The model that the request names.
+        expected: The session's ``ASCENT_MODEL``.
+
+    Returns:
+        Whether the names match, also with a provider prefix that a built-in agent adds.
+    """
+    if not isinstance(model, str):
+        return False
+    names = [model, *(model.strip().removeprefix(prefix) for prefix in _AGENT_PREFIXES)]
+    return any(model_matches(name, expected) for name in names)
+
+
+def key_digest(key: str) -> str:
+    """Return the folder name of a route key in the model bindings folder.
+
+    Args:
+        key: The route key.
+
+    Returns:
+        The key's SHA-256 hex digest, so the folder holds no key.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _request_key(headers: Message) -> str:
+    """Return the route key that a model request sends.
+
+    Args:
+        headers: The request's headers.
+
+    Returns:
+        The bearer token or the ``x-api-key`` value, or an empty string.
+    """
+    bearer = headers.get("Authorization") or ""
+    return bearer.removeprefix("Bearer ").strip() or (headers.get("x-api-key") or "").strip()
+
+
+def _runs_as_root() -> bool:
+    """Return whether this proxy runs as root.
+
+    Returns:
+        Whether the effective user is root; ``False`` on a platform without user ids.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
+def _bound_models(key: str) -> list[str]:
+    """Return the models that built-in agent sessions named for a route key.
+
+    A root proxy reads no bindings: only the scorer's supervisor runs it as
+    root, the box user can rewrite its folder, and no built-in agent session
+    runs there. A link or a special file in the folder could otherwise make
+    root read a secret into the error, or hang a handler.
+
+    Args:
+        key: The request's route key.
+
+    Returns:
+        The valid model names, or an empty list when no session named one for the key.
+    """
+    folder = os.environ.get(MODEL_BINDINGS_ENV)
+    if not folder or not key or _runs_as_root():
+        return []
+    directory = Path(folder) / key_digest(key)
+    try:
+        if not all(stat.S_ISDIR(os.lstat(path).st_mode) for path in (Path(folder), directory)):
+            return []
+        # The bridge writes each name to a dot file first, then renames it, so a dot file can be partial.
+        names = sorted(entry.name for entry in directory.iterdir() if not entry.name.startswith("."))
+    except OSError:
+        return []
+    return [model for model in (_read_binding(directory / name) for name in names) if model is not None]
+
+
+def _read_binding(path: Path) -> str | None:
+    """Read one model name from a regular file, never through a link.
+
+    Args:
+        path: A binding file.
+
+    Returns:
+        The model name, or ``None`` when the file is not a short, one-line, printable name.
+    """
+    # O_NONBLOCK keeps a FIFO from blocking the open; fstat then refuses it.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        raw = os.read(descriptor, _BINDING_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    try:
+        model = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if len(raw) > _BINDING_MAX_BYTES or not 0 < len(model) <= _MODEL_NAME_MAX or not model.isprintable():
+        return None
+    return model
+
+
+def _other_model_refusal(path: str, body: bytes, key: str = "", method: str = "POST") -> bytes | None:
+    """Return the error body for a model request that names another model than ``ASCENT_MODEL``.
 
     The gateway refuses such a request too, but its error does not say which
-    variable holds the model, so the box answers first.
+    variable holds the model, so the box answers first. A box without its own
+    ``ASCENT_MODEL`` checks the models that its built-in agent sessions named
+    for the request's key (SKY-884).
 
     Args:
         path: The request path on this proxy.
         body: The raw request body.
+        key: The request's route key.
+        method: The request's HTTP method; only a POST calls a model.
 
     Returns:
         An OpenAI-shaped error body, or ``None`` when the request may go on.
     """
-    expected = os.environ.get(MODEL_ENV)
-    if not expected or not path.split("?", 1)[0].endswith("/chat/completions"):
+    box_model = os.environ.get(MODEL_ENV)
+    if method != "POST" or path.split("?", 1)[0].removeprefix("/v1") not in _MODEL_PATHS:
+        return None
+    allowed = [box_model] if box_model else _bound_models(key)
+    if not allowed:
         return None
     try:
         model = json.loads(body).get("model")
     except (ValueError, AttributeError, RecursionError):
         return None
-    if model_matches(model, expected):
+    matches = model_matches if box_model else agent_model_matches
+    if any(matches(model, name) for name in allowed):
         return None
+    expected = ", ".join(dict.fromkeys(allowed))
     message = f"This box serves only the model that {MODEL_ENV} names ({expected}), not {model!r}."
     error = {"message": message, "type": "invalid_request_error", "param": "model", "code": "model_not_allowed"}
     return json.dumps({"error": error}).encode()
