@@ -58,10 +58,16 @@ from ..models.blackbox import (
     BlackboxRepoSource,
     BlackboxRunRequest,
 )
-from ..service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE, ascent_toml_error
+from ..service_gateway.agents.workspace_tools import (
+    ASCENT_TOML_EXAMPLE,
+    METRIC_GUIDE,
+    ascent_toml_errors,
+    diagnostic_text,
+)
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
     CONSTRAINTS_REQUIRED,
+    ERROR,
     ConstraintsError,
     parse_constraints,
 )
@@ -826,12 +832,18 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
         text: The file text.
 
     Returns:
-        The parser's first error as an issue, and the notes.
+        Each error of the parser as an issue, which blocks the run, and the
+        notes: each warning, which does not (SKY-763).
     """
-    error = ascent_toml_error(text)
-    if error is not None:
-        return [error["message"]], []
-    return [], [f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged."]
+    diagnostics = ascent_toml_errors(text)
+    issues = [diagnostic_text(item) for item in diagnostics if item["level"] == ERROR]
+    notes = [diagnostic_text(item) for item in diagnostics if item["level"] != ERROR]
+    if issues:
+        return issues, notes
+    return [], [
+        *notes,
+        f"The run writes this {CONSTRAINTS_FILE} over the repository's own; the repository stays unchanged.",
+    ]
 
 
 def review_draft(

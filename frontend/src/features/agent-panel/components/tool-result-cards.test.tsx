@@ -87,6 +87,13 @@ function withMessages(messages: Record<string, string>, render: () => string): s
   }
 }
 
+/** Only the English ``ascent.toml`` mistake lines, so other labels still render as keys. */
+function setupCheckMessages(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(catalog("en")).filter(([key]) => key.startsWith("submit.setup_check.")),
+  );
+}
+
 void describe("tool result cards", () => {
   void it("links only http(s) URLs and site paths", () => {
     const html = renderOpen(
@@ -270,21 +277,28 @@ void describe("tool result cards", () => {
     assert.match(html, /Not a file you can write/);
   });
 
-  void it("a saved ascent.toml with a parser error shows the error, yet the write succeeds", () => {
+  void it("a saved ascent.toml with parser errors shows each error, yet the write succeeds", () => {
     const text = "[run]\nname = 1\n";
     const result = {
       wizard_state: { ascent_toml: text },
-      ascent_toml_error: { section: "run", key: "entry", message: "[run] entry is missing" },
+      ascent_toml_errors: [
+        { level: "error", line: 1, section: "run", key: "entry", message: "entry is missing" },
+        { level: "error", line: 2, section: "run", key: "name", message: "name is wrong" },
+      ],
     };
-    const html = renderOpen(
-      <WorkspaceWriteCard
-        call={call("write_workspace_file", result, { path: "ascent.toml", text })}
-      />,
+    const html = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <WorkspaceWriteCard
+          call={call("write_workspace_file", result, { path: "ascent.toml", text })}
+        />,
+      ),
     );
     assert.match(
       html,
-      /<p dir="auto" class="break-words text-\[var\(--danger\)\]">\[run\] entry is missing<\/p>/,
+      /\[run\.entry\]<\/code><span dir="auto" class="text-\[var\(--danger\)\]">Error at line 1: entry is missing<\/span>/,
     );
+    assert.match(html, /\[run\.name\]<\/code><span[^>]*>Error at line 2: name is wrong<\/span>/);
+    assert.match(html, /agent\.tool\.check_setup\.failed/);
     assert.match(html, /text-\[var\(--success\)\]">\+2</);
     assert.doesNotMatch(html, /aria-label="agent\.tool\.write_workspace_file\.title"/);
     assert.doesNotMatch(html, /line-clamp-4/);
@@ -430,30 +444,44 @@ void describe("tool result cards", () => {
     );
   });
 
-  void it("a setup check says ok or failed, and puts [section.key] before each error", () => {
+  void it("a setup check says ok or failed, and puts [section.key] before each error and warning", () => {
     const ok = renderOpen(<SetupCheckCard call={call("check_setup", { ok: true, errors: [] })} />);
     assert.match(ok, /<span>agent\.tool\.check_setup\.ok<\/span>/);
     assert.doesNotMatch(ok, /agent\.tool\.check_setup\.failed/);
-    const bad = renderOpen(
-      <SetupCheckCard
-        call={call("check_setup", {
-          ok: false,
-          errors: [
-            { section: "run", key: "entry", message: "entry is missing" },
-            { section: "metric", message: "metric is wrong" },
-            { message: "no place" },
-          ],
-        })}
-      />,
+    const bad = withMessages(setupCheckMessages(), () =>
+      renderOpen(
+        <SetupCheckCard
+          call={call("check_setup", {
+            ok: false,
+            errors: [
+              {
+                level: "error",
+                line: 4,
+                section: "run",
+                key: "entry",
+                message: "entry is missing",
+              },
+              { level: "error", line: null, section: "metric", message: "metric is wrong" },
+              { level: "warning", line: null, message: "no place" },
+            ],
+          })}
+        />,
+      ),
     );
     assert.match(
       bad,
       /text-\[var\(--danger\)\]"><svg[^>]*>.*?<\/svg>agent\.tool\.check_setup\.failed/,
     );
     assert.doesNotMatch(bad, /agent\.tool\.check_setup\.ok/);
-    assert.match(bad, /<code[^>]*>\[run\.entry\]<\/code><span[^>]*>entry is missing<\/span>/);
-    assert.match(bad, /<code[^>]*>\[metric\]<\/code><span[^>]*>metric is wrong<\/span>/);
-    assert.match(bad, /<li class="min-w-0"><span[^>]*>no place<\/span>/);
+    assert.match(
+      bad,
+      /<code[^>]*>\[run\.entry\]<\/code><span[^>]*>Error at line 4: entry is missing<\/span>/,
+    );
+    assert.match(bad, /<code[^>]*>\[metric\]<\/code><span[^>]*>Error: metric is wrong<\/span>/);
+    assert.match(
+      bad,
+      /<li class="min-w-0 break-words"><span dir="auto" class="text-\[var\(--warning\)\]">Warning: no place<\/span>/,
+    );
   });
 
   void it("a run lifecycle call with no status fails; the run id shows 8 characters", () => {

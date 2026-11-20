@@ -315,7 +315,7 @@ def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) ->
     draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
     body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml="[run]\nentry = 'a.py:f'\n")
     assert body["saved"] == {"ascent_toml": "[run]\nentry = 'a.py:f'\n"}
-    assert body["issues"] == [remote_mcp_repo.ascent_toml_error("[run]\nentry = 'a.py:f'\n")["message"]]
+    assert body["issues"] == [m["message"] for m in remote_mcp_repo.ascent_toml_errors("[run]\nentry = 'a.py:f'\n")]
     assert "version" in body["issues"][0]
     assert body["next_tool"] == "repo_draft_set_contract"
     assert "contract" not in body["remaining_steps"]
@@ -326,6 +326,26 @@ def test_contract_step_saves_the_file_and_reports_parser_errors(harness: Any) ->
     assert _spec(engine, draft_id)["contract"] == {"ascent_toml": CONTRACT}
     text = _error_text(_call(client, "repo_draft_set_contract", {"draft_id": draft_id, "ascent_toml": "  "}))
     assert CONSTRAINTS_REQUIRED in text
+
+
+def test_contract_step_and_review_list_every_mistake_with_its_line(harness: Any) -> None:
+    """A file with three mistakes gives three issues, each with its line, at the step and in the review (SKY-763)."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    text = 'version = 1\n[run]\nentry = "a.py:f"\nbogus = 1\n[metric]\nentry = 5\n[paths]\neditable = 3\n'
+    body = _step(client, "repo_draft_set_contract", draft_id=draft_id, ascent_toml=text)
+    expected = [
+        "ascent.toml: [run] bogus is not a supported setting. (line 4)",
+        "ascent.toml: [paths] editable must be a list of at most 200 paths. (line 8)",
+        'ascent.toml: [metric] entry must be "path/to/file.py:function" for a Python function, or a command list'
+        ' such as ["node", "planner.js"]. (line 6)',
+    ]
+    assert body["issues"] == expected
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+
+    assert review["ready"] is False
+    assert [issue for issue in review["issues"] if issue in expected] == expected
 
 
 def test_review_reports_a_contract_with_no_run_and_no_target(harness: Any) -> None:

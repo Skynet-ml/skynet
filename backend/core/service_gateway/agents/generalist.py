@@ -71,6 +71,7 @@ from ..language_models import (
     build_language_model,
     served_model_from,
 )
+from ..optimization.blackbox.repo_constraints import ERROR
 from ..optimization.training_ground.registry import hash_tool_schema
 from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
@@ -93,7 +94,9 @@ from .workspace_tools import (
     METRIC_GUIDE,
     READ_REPO_TOOL,
     WRITE_FILE_TOOL,
-    ascent_toml_error,
+    ascent_toml_errors,
+    diagnostic_text,
+    has_error,
     workspace_tools,
 )
 
@@ -1711,14 +1714,14 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     # A repository run has no run.py: its scorer reads the checkout itself.
     if screen == "metric" and not str(state.get("metric_code") or "").strip():
         return ["metric_code must be written"]
-    if screen == "metric" and (error := _setup_error(state)):
-        return [f"ascent.toml is not valid: {error['message']}"]
+    if screen == "metric" and has_error(diagnostics := _setup_errors(state)):
+        return [f"ascent.toml is not valid: {diagnostic_text(item)}" for item in diagnostics if item["level"] == ERROR]
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
 
 
-def _setup_error(state: WizardState) -> dict[str, Any] | None:
+def _setup_errors(state: WizardState) -> list[dict[str, Any]]:
     """Check the setup draft's ``ascent.toml`` with the parser a run uses.
 
     A draft with no ``ascent.toml`` passes: the run then reads the
@@ -1728,10 +1731,11 @@ def _setup_error(state: WizardState) -> dict[str, Any] | None:
         state: The wizard snapshot with this turn's writes merged in.
 
     Returns:
-        The parser's first error, or ``None`` when the file is valid or absent.
+        Every error and warning of the parser, as :func:`ascent_toml_errors`
+        gives them; empty when the file is valid with no warning, or absent.
     """
     text = str(state.get("ascent_toml") or "")
-    return ascent_toml_error(text) if text.strip() else None
+    return ascent_toml_errors(text) if text.strip() else []
 
 
 def _limit_below_floor(state: WizardState) -> str | None:
@@ -2080,17 +2084,17 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
 
     async def check_setup() -> Any:
         """Check the setup draft's ascent.toml the way a run reads it."""
-        error = _setup_error(cast(WizardState, {**state, **turn.wizard_patch}))
-        return {"ok": error is None, "errors": [error] if error else []}
+        diagnostics = _setup_errors(cast(WizardState, {**state, **turn.wizard_patch}))
+        return {"ok": not has_error(diagnostics), "errors": diagnostics}
 
     setup_check = [
         dspy.Tool(
             check_setup,
             name=SETUP_CHECK_TOOL,
             desc=(
-                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, or the first "
-                "error with its section and key. continue_to_next_screen runs the same check and refuses "
-                "while it fails, so fix the error first."
+                "Check the setup draft's ascent.toml with the parser a run uses. Returns ok, and every error "
+                "and warning with its level, line, section and key. continue_to_next_screen runs the same "
+                "check and refuses while an error stays, so fix every error first; a warning blocks nothing."
             ),
             arg_desc={},
         )

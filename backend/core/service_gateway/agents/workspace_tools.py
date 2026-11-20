@@ -35,7 +35,7 @@ from ...models.blackbox import (
     REPO_COMMIT_PATTERN,
     clean_draft_path,
 )
-from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints, rule_file_settings
+from ..optimization.blackbox.repo_constraints import ERROR, ConstraintsError, parse_constraints, rule_file_settings
 from .repo_browser import RepoBrowser, RepoRead
 
 if TYPE_CHECKING:
@@ -154,8 +154,8 @@ How to write the run's files:
   metric gets the whole case. When the metric needs no cases, such as a speed metric or a metric that reads a
   test report, write no ``[data]`` section.
 * ``ascent.toml`` is the whole file at the repository root. {APP_NAME} checks it with its parser, which
-  stops at the first error and refuses any section or key it does not know ("... is not a supported
-  setting"). Use only this schema. Every path is relative to the repository root.
+  reports every error of the file in one check, each with its line, and refuses any section or key it does
+  not know ("... is not a supported setting"). Use only this schema. Every path is relative to the repository root.
   - Top level, before any section: ``version = 1`` (required, and the only version) and
     ``instructions = "<path>"``. Put data that {APP_NAME} does not read only in a ``[tool.<name>]`` table.
   - ``[paths]``: ``editable`` and ``protected``, lists of paths. They can only narrow what the user approved,
@@ -289,21 +289,56 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     return browser, ""
 
 
-def ascent_toml_error(text: str) -> dict[str, Any] | None:
-    """Parse an ``ascent.toml`` text the way a run reads it, and return its first error.
+def ascent_toml_errors(text: str) -> list[dict[str, Any]]:
+    """Parse an ``ascent.toml`` text the way a run reads it, and return every diagnostic (SKY-763).
 
     Args:
         text: The file text from the setup draft.
 
     Returns:
-        The error's ``section``, ``key`` and ``message``, or ``None`` when the file is valid.
+        Each diagnostic's ``level`` (``error`` or ``warning``), ``line``,
+        ``section``, ``key`` and ``message``, in the parser's order; empty
+        when the file is valid with no warning. An ``error`` item blocks the
+        run; a ``warning`` item does not.
     """
     try:
         # A lone surrogate cannot encode as UTF-8; let the parser refuse it instead of raising here.
-        parse_constraints(text.encode("utf-8", "surrogatepass"))
+        diagnostics = parse_constraints(text.encode("utf-8", "surrogatepass")).warnings
     except ConstraintsError as error:
-        return {"section": error.section, "key": error.key, "message": str(error)}
-    return None
+        diagnostics = error.errors
+    return [
+        {"level": item.level, "line": item.line, "section": item.section, "key": item.key, "message": item.message}
+        for item in diagnostics
+    ]
+
+
+def diagnostic_text(item: dict[str, Any]) -> str:
+    """Write one diagnostic of :func:`ascent_toml_errors` as one line of text, for a list of plain strings.
+
+    The parser's message stays first and unchanged, so a file with one error
+    on no line reads as before; the level shows only for a warning, because
+    every list of plain strings holds errors, or warnings alone.
+
+    Args:
+        item: The diagnostic.
+
+    Returns:
+        The message, then the line when the parser found one.
+    """
+    text = item["message"] if item["level"] == ERROR else f"Warning: {item['message']}"
+    return f"{text} (line {item['line']})" if item["line"] is not None else text
+
+
+def has_error(diagnostics: list[dict[str, Any]]) -> bool:
+    """Say whether a diagnostic list from :func:`ascent_toml_errors` holds an error, which blocks the run.
+
+    Args:
+        diagnostics: The list.
+
+    Returns:
+        ``True`` when one item has the ``error`` level.
+    """
+    return any(item["level"] == ERROR for item in diagnostics)
 
 
 # An ``instructions`` or ``illegal`` key and its string, anywhere in a current file that is not TOML
@@ -576,8 +611,8 @@ def workspace_tools(
 
         Returns:
             ``{"wizard_state": {field: text}}`` or ``{"wizard_state": {"workspace_files":
-            {path: text}}}``, plus ``ascent_toml_error`` (section, key, message) when
-            the ``ascent.toml`` text does not parse; or ``{"error": ...}`` for a
+            {path: text}}}``, plus ``ascent_toml_errors`` (each diagnostic of
+            :func:`ascent_toml_errors`) when the ``ascent.toml`` text has one; or ``{"error": ...}`` for a
             file that is too large, one file too many, or files too large together.
         """
         if len(text.encode("utf-8", "surrogatepass")) > DRAFT_FILE_BYTES:
@@ -610,8 +645,8 @@ def workspace_tools(
         turn.wizard_patch[field] = text
         result["wizard_state"][field] = text
         # The file still reaches the draft (last write wins); the agent fixes it or tells the user.
-        if field == "ascent_toml" and (error := ascent_toml_error(text)):
-            result["ascent_toml_error"] = error
+        if field == "ascent_toml" and (diagnostics := ascent_toml_errors(text)):
+            result["ascent_toml_errors"] = diagnostics
         return result
 
     async def write_workspace_file(path: str, text: str) -> dict[str, Any]:
@@ -784,7 +819,8 @@ def workspace_tools(
             desc=(
                 "Write one file whole: metric.py, or any file of the run's repository, such as ascent.toml. "
                 "It goes into the editor at once, and the run uses it in place of the repository's file. For "
-                "ascent.toml the result has the parser's ascent_toml_error when the file is not valid."
+                "ascent.toml the result has ascent_toml_errors: every error and warning of the parser, each with "
+                "its level, line, section, key and message. Fix every error in one write; a warning blocks nothing."
             ),
             arg_desc={"path": file_arg, "text": "The whole file text."},
         ),
@@ -815,7 +851,9 @@ __all__ = [
     "UNWRITABLE_PATHS",
     "WORKSPACE_FILES",
     "WRITE_FILE_TOOL",
-    "ascent_toml_error",
+    "ascent_toml_errors",
+    "diagnostic_text",
+    "has_error",
     "open_repo",
     "workspace_tools",
 ]

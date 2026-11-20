@@ -15,7 +15,7 @@ import { toast } from "react-toastify";
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
-import { checkAscentToml } from "@/shared/lib/api";
+import { ascentTomlDiagnosticText, checkAscentToml } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -70,8 +70,10 @@ const ASCENT_TOML = "ascent.toml";
 
 // A second failed press shows its own error, not the first one's.
 function setupToast(text: string) {
-  if (toast.isActive(SETUP_CHECK_TOAST_ID)) toast.update(SETUP_CHECK_TOAST_ID, { render: text });
-  else toast.error(text, { toastId: SETUP_CHECK_TOAST_ID });
+  // A check can give many diagnostics, one on each line of the text (SKY-763).
+  const render = <span className="whitespace-pre-line">{text}</span>;
+  if (toast.isActive(SETUP_CHECK_TOAST_ID)) toast.update(SETUP_CHECK_TOAST_ID, { render });
+  else toast.error(render, { toastId: SETUP_CHECK_TOAST_ID });
 }
 
 function shortfallMessage(shortfall: BudgetShortfall): string {
@@ -236,14 +238,21 @@ function UnifiedWizardFrame() {
             if (screenRef.current !== screen) return;
             // The file changed while the check ran, so its answer is stale.
             if (setupTextRef.current !== text) return run(setupTextRef.current);
+            const lines = result.errors.map(ascentTomlDiagnosticText).join("\n");
             if (result.ok) {
               toast.dismiss(SETUP_CHECK_TOAST_ID);
+              // A warning blocks nothing, so the wizard says it and moves on.
+              if (lines) {
+                toast.warning(
+                  <span className="whitespace-pre-line">
+                    {formatMsg("submit.setup_check.warnings", { p1: lines })}
+                  </span>,
+                );
+              }
               then();
               return;
             }
-            setupToast(
-              formatMsg("submit.setup_check.invalid", { p1: result.errors[0]?.message ?? "" }),
-            );
+            setupToast(formatMsg("submit.setup_check.invalid", { p1: lines }));
           },
         );
       };

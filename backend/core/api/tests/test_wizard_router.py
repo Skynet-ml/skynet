@@ -345,15 +345,42 @@ def test_a_bad_file_names_no_proposer_command(wizard_client: TestClient) -> None
 def test_a_bad_ascent_toml_returns_the_error_and_its_place(
     wizard_client: TestClient, text: str, section: str | None, key: str | None, message: str
 ) -> None:
-    """A parser error comes back with the section and key the editor shows it next to."""
+    """A parser error comes back first, with the section and key the editor shows it next to."""
     resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": text})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is False
-    [error] = body["errors"]
-    assert (error["section"], error["key"]) == (section, key)
+    error = body["errors"][0]
+    assert (error["level"], error["section"], error["key"]) == ("error", section, key)
     assert message in error["message"]
+
+
+# Three mistakes in three sections, on lines 4, 6 and 8.
+_THREE_MISTAKES = """version = 1
+[run]
+entry = "a.py:f"
+bogus = 1
+[metric]
+entry = 5
+[paths]
+editable = 3
+"""
+
+
+def test_a_file_with_three_mistakes_returns_each_with_its_level_and_line(wizard_client: TestClient) -> None:
+    """One check returns every mistake, each with its level and line, in the parser's order (SKY-763)."""
+    resp = wizard_client.post("/wizard/ascent-toml/check", json={"text": _THREE_MISTAKES})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert [(e["level"], e["line"], e["section"], e["key"]) for e in body["errors"]] == [
+        ("error", 4, "run", "bogus"),
+        ("error", 8, "paths", "editable"),
+        ("error", 6, "metric", "entry"),
+    ]
+    assert body["errors"][0]["message"] == "ascent.toml: [run] bogus is not a supported setting."
 
 
 def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:

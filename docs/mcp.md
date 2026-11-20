@@ -77,7 +77,9 @@ Every new run needs an `ascent.toml` contract, in the draft or in the
 repository. `repo_draft_contract_guide` gives the format guide and an example
 file. The setup screen's agent uses the same guide. `repo_draft_set_contract`
 saves the text into the draft, and the run writes it over the repository's
-own file. A parser error is an issue with the parser's message. When the
+own file. Each parser error is one issue: the parser's message, then its
+line, such as `(line 4)`. One check gives every error of the file. A parser
+warning is a note, and it does not stop the run. When the
 repository has an `ascent.toml`, the step is optional. When the draft and
 the repository both have none, `repo_draft_review` reports an issue and the
 run does not start.

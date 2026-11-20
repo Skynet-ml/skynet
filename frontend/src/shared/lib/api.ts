@@ -1030,15 +1030,49 @@ export interface AccountDeletionResult {
   anonymized_rows: number;
 }
 
+/** One error or warning of an ascent.toml check, with its line when the parser found one (SKY-763). */
+export interface AscentTomlDiagnostic {
+  level: "error" | "warning";
+  line: number | null;
+  section: string | null;
+  key: string | null;
+  message: string;
+}
+
 /**
- * Check an ascent.toml text with the repository parser; it stops at the first error.
+ * Write one ascent.toml diagnostic as one line: its level, its line if known, and the message.
+ *
+ * Args:
+ *   d: The diagnostic.
+ *
+ * Returns:
+ *   The text in the UI language; the parser's message stays as it is.
+ */
+export function ascentTomlDiagnosticText(
+  d: Pick<AscentTomlDiagnostic, "level" | "line" | "message">,
+) {
+  const warning = d.level === "warning";
+  if (d.line === null) {
+    return formatMsg(warning ? "submit.setup_check.warning" : "submit.setup_check.error", {
+      p1: d.message,
+    });
+  }
+  return formatMsg(warning ? "submit.setup_check.warning_at" : "submit.setup_check.error_at", {
+    p1: d.line,
+    p2: d.message,
+  });
+}
+
+/**
+ * Check an ascent.toml text with the repository parser. `errors` holds every
+ * error and warning of the file; `ok` is false only for an error (SKY-763).
  * `metric_command` is the command that `[metric] entry` names, else null (SKY-770).
  * `proposer_command` is the command that `[proposer] entry` names, else null (SKY-771).
  */
 export function checkAscentToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
-    errors: Array<{ section: string | null; key: string | null; message: string }>;
+    errors: AscentTomlDiagnostic[];
     metric_command: string[] | null;
     proposer_command: string[] | null;
   }>("/wizard/ascent-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
