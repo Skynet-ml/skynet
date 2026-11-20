@@ -2091,9 +2091,14 @@ def run_stage_command(call_dir: Path, package: str, timeout: float, command: Seq
     except BaseException as exc:  # the command is arbitrary: any failure is reported, not raised
         if ascent is not None and isinstance(exc, ascent.AscentError):
             error = str(exc)
+            # The same logs as a passed call: stdout, then stderr (SKY-757).
+            sys.stderr.write(exc.stdout + exc.stderr)
+            # stderr comes first in the error: a stage error keeps only its
+            # head, and a command's stdout is often progress output.
             if exc.stderr:
-                sys.stderr.write(exc.stderr)
                 error += f"\nstderr: {exc.stderr[-1_000:]}"
+            if exc.stdout:
+                error += f"\nstdout: {exc.stdout[-1_000:]}"
         else:
             error = f"{type(exc).__name__}: {exc}"
         text = json.dumps({"error": error})

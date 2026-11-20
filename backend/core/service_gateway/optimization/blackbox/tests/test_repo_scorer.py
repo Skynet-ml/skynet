@@ -1418,9 +1418,9 @@ def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: 
 
 
 def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_masked(tmp_path: Path) -> None:
-    """A command stage that echoes a secret to stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
+    """A command stage that echoes a secret to stdout and stderr and exits 2 reaches the metric as ``Stage 'x' failed: <cause>`` (SKY-757)."""
     secret = "stage-secret-value-9876"
-    failing = TargetStage(entry=("sh", "-c", f"echo 'leaked {secret}' >&2; exit 2"), timeout=30)
+    failing = TargetStage(entry=("sh", "-c", f"echo 'shown {secret}'; echo 'leaked {secret}' >&2; exit 2"), timeout=30)
     code = (
         "from openascent import call, StageError\n"
         "def score(repo_path, case=None):\n"
@@ -1437,7 +1437,8 @@ def test_a_failed_command_stage_gives_the_metric_its_cause_with_the_secret_maske
         scorer.close()
 
     assert "Stage 'failing' failed: The command exited with code 2." in feedback
-    assert "leaked [secret]" in feedback
+    assert "stdout: shown [secret]" in feedback
+    assert "stderr: leaked [secret]" in feedback
     assert secret not in feedback
 
 
@@ -4921,7 +4922,7 @@ def test_the_wrapper_line_passes_a_nonzero_exit_code_to_the_metric(tmp_path: Pat
 
 @_needs_openascent
 def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
-    """A command that prints its answer and writes no output file is a run failure, and the metric is not called."""
+    """A command that prints its answer and writes no output file is a run failure that shows the print, and the metric is not called."""
     scorer = _shell_run_scorer(tmp_path, "echo '{\"output\": 1}'\n")
     try:
         result = scorer.score("", {"input": 1})
@@ -4930,6 +4931,7 @@ def test_a_command_entry_that_only_prints_has_no_score(tmp_path: Path) -> None:
     assert result["score"] is None
     assert result["feedback"] == (
         "Run failed: The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+        '\nstdout: {"output": 1}'
     )
 
 

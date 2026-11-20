@@ -395,7 +395,9 @@ A nonzero exit code, a missing output file, an output that is not valid JSON
 or has another form, a time limit or an output file larger than the limit
 fails the call. For a `[run] entry`, the case then gets no score, and the
 metric does not run (SKY-751). For a stage, the metric's `openascent.call`
-gets the failure as an error. Each call gets a new output path, so a file
+gets the failure as an error. The error names the cause, then shows the last
+1,000 characters of the command's stderr and of its stdout, with the run's
+secrets masked. Each call gets a new output path, so a file
 from an earlier call is never read again. A function entry is not changed:
 it gets the input as its argument, and its return value is the output.
 

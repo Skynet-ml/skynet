@@ -268,7 +268,7 @@ openai==2.24.0
     #   litellm
 openapi-pydantic==0.5.1
     # via fastmcp-slim
-openascent==0.1.0 ; python_full_version >= '3.12'
+openascent==0.2.1 ; python_full_version >= '3.12'
     # via skynet
 opentelemetry-api==1.45.1
     # via fastmcp-slim

@@ -1406,7 +1406,9 @@ def fakes_its_time(value):
 """
 
 
-def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+def _candidate(
+    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, logs: list[str] | None = None
+) -> dict[str, Any]:
     """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
 
     Args:
@@ -1414,6 +1416,7 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
+        logs: When given, gets the supervisor's stderr: the logs the box streams.
 
     Returns:
         The supervisor's output document.
@@ -1425,14 +1428,18 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
     if isinstance(entry, list):
         payload[runner.ASCENT_PACKAGE_PARAM] = _PACKAGE
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
-    stdout = subprocess.run(
+    completed = subprocess.run(
         [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if logs is not None else None,
         text=True,
         check=True,
         timeout=timeout + 60,
-    ).stdout
+    )
+    stdout = completed.stdout
+    if logs is not None:
+        logs.append(completed.stderr)
     [frame] = [line for line in stdout.splitlines() if line.startswith(runner.RESULT_PREFIX)]
     assert not (call_dir / runner.OUTPUT_FILE).exists()
     return json.loads(frame[len(runner.RESULT_PREFIX) :])
@@ -1478,10 +1485,13 @@ def test_a_command_entry_with_no_cases_gets_a_null_input(tmp_path: Path) -> None
 
 @_needs_openascent
 def test_a_command_that_only_prints_has_no_output(tmp_path: Path) -> None:
-    """A command that prints its answer but writes no output file fails with the package's exact reason."""
+    """A command that prints its answer but writes no output file fails with the package's exact reason and its stdout."""
     ran = _candidate(tmp_path, ["sh", "-c", "echo '{\"output\": 1}'"])
     assert ran["output"] is None
-    assert ran["error"] == "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+    assert ran["error"] == (
+        "The command wrote no output file. Write the result as JSON to the path in ASCENT_OUTPUT."
+        '\nstdout: {"output": 1}\n'
+    )
 
 
 @_needs_openascent
@@ -1569,6 +1579,17 @@ def test_command_run_failures_have_no_output(tmp_path: Path, entry: Any, error: 
     assert error in ran["error"]
     if "code 3" in error:
         assert ran["error"].endswith("stderr: why\n")
+
+
+@_needs_openascent
+def test_a_failed_command_puts_its_stdout_and_stderr_in_the_logs(tmp_path: Path) -> None:
+    """A command that fails keeps its stdout tail next to its stderr, in the logs and in the error (SKY-757)."""
+    logs: list[str] = []
+    ran = _candidate(tmp_path, ["sh", "-c", "echo said-on-stdout; echo said-on-stderr >&2; exit 1"], logs=logs)
+    assert ran["output"] is None
+    assert "said-on-stdout\nsaid-on-stderr\n" in logs[0]
+    assert ran["error"].startswith("The command exited with code 1.")
+    assert ran["error"].endswith("\nstderr: said-on-stderr\n\nstdout: said-on-stdout\n")
 
 
 def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:
