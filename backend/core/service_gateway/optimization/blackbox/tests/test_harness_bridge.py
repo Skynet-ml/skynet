@@ -2038,6 +2038,22 @@ def test_a_saved_launch_with_a_key_token_from_before_sky_776_is_refused(
     assert not (tmp_path / "s" / "prompt-1.md").exists()
 
 
+def test_a_launch_with_another_api_key_token_in_its_text_is_not_refused(tmp_path: Path) -> None:
+    """Only the old Skynet key tokens are refused; other ``__*_API_KEY__`` text in a command stays as text.
+
+    Args:
+        tmp_path: The workspace and the session folder.
+    """
+    proposer = {**_PLAIN, "run_command": "echo __OPENAI_API_KEY__"}
+
+    outcome = run_session(
+        proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s", api_key="k"
+    )
+
+    assert outcome.returncode == 0
+    assert outcome.stdout.strip() == "__OPENAI_API_KEY__"
+
+
 def test_a_finished_setup_stops_the_processes_it_left_in_the_background(tmp_path: Path) -> None:
     """A setup that exits with a daemon still running leaves nothing behind beside the sessions (SKY-753).
 

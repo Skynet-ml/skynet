@@ -47,7 +47,7 @@ KEY_ENV = "ASCENT_MODEL_KEY"
 KEY_TOKEN = "__ASCENT_MODEL_KEY__"
 # The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
 # otherwise its harness would send the token's text as the key and fail auth with no clear reason.
-_OLD_KEY_TOKEN = re.compile(r"__[A-Z]+_API_KEY__")
+_OLD_KEY_TOKEN = re.compile(r"__(?:APP|SKYNET)_API_KEY__")
 # The open standard's name for the task file; a custom command reads it (SKY-753).
 TASK_ENV = "ASCENT_TASK"
 # The same allowance as repo_workspace's setup command; this file runs alone
