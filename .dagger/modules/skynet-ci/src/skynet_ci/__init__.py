@@ -257,9 +257,7 @@ class SkynetCi:
     @function
     @check
     async def backend_gates(self) -> None:
-        """Run ruff, the terraform script tests, requirements sync, Postgres and SLO gates."""
-        # The docstring stays as is: sdk/entrypoint/types.dang copies it. This
-        # check also runs the user namespace tests (SKY-886), see below.
+        """Run ruff, the terraform script tests, requirements sync, Postgres, SLO and user namespace gates."""
         postgres = (
             core()
             .container()
