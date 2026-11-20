@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 בקובץ `ascent.toml` של המאגר חייב להיות קטע `[run]` או שלב `[target.<name>]`. ה-`entry` של `[run]` מריץ גרסה אחת על מקרה אחד, בתיבת sandbox משלו. ‏Skynet דוחה קובץ בלי אף אחד מהם, כי כל גרסה הייתה מקבלת את אותו ציון.
 
 - ‏`entry` של פונקציה, למשל `entry = "serve.py:serve"`, מקבל את `case["input"]` כארגומנט.‏ `output` הוא ערך ההחזרה שלו.
-- ‏`entry` של פקודה, למשל `entry = ["python", "-m", "pytest", "-q"]`, מקבל את הקלט כ-JSON ב-stdin.‏ `output` הוא `{"exit_code": ..., "stdout": "..."}`.
+- ‏`entry` של פקודה, למשל `entry = ["python", "run_tests.py"]`, קורא את `{"input": ...}` מקובץ ה-JSON בנתיב שב-`ASCENT_INPUT`.‏ הוא כותב את `{"output": ...}` לנתיב שב-`ASCENT_OUTPUT`.‏ `output` הוא הערך שתחת `"output"`.‏ מה שהפקודה מדפיסה הולך ללוגים בלבד.
 
 פונקציית הניקוד רצה בתיבת sandbox נפרדת. בתיבה הזו יש רק את קובצי המדד שלך. פונקציית הניקוד לא יכולה לייבא או להריץ את הקוד של הגרסה. היא רואה את הגרסה רק דרך `output`, או דרך `call()` לשלב `[target.<name>]`. את `call` מייבאים עם `from openascent import call`. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### הרצת הבדיקות של המאגר
 
-ה-`entry` של `[run]` מריץ את הבדיקות. פונקציית הניקוד קוראת את קוד היציאה ואת הפלט של הבדיקות.
+ה-`entry` של `[run]` מריץ את הבדיקות.‏ `pytest` יוצא עם קוד יציאה שונה מאפס כשבדיקה נכשלת, וקוד יציאה שונה מאפס מכשיל את המקרה. לכן קובץ העטיפה `run_tests.py` כותב את התוצאה ל-`ASCENT_OUTPUT` ויוצא עם 0. פונקציית הניקוד קוראת את התוצאה הזו.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-כשה-`entry` של `[run]` נכשל במקרה בדיקה, למקרה הזה אין ציון. אם ה-`entry` לא מתחיל, חורג מהזמן הקצוב או שאות עוצר אותו, או אם `entry` מסוג פונקציה זורק חריגה או יוצא לפני שהוא מחזיר ערך, המשוב הוא `Run failed: …`, ו-Skynet לא קורא לפונקציית הניקוד. קוד יציאה שונה מאפס של `entry` מסוג פקודה אינו כישלון: פונקציית הניקוד מקבלת אותו ב-`output`. לגרסה עם מקרה כזה אין ציון. היא לא יכולה להיות הגרסה הטובה ביותר, לא מגיעה לאף `[outcome] target` ולא פותחת pull request. אם כישלון חייב להיחשב כמספר, תפוס/י את הכישלון בתוכנית שלך, כתוב/כתבי פלט ותן/תני לפונקציית הניקוד לתת לו ציון. קרא/י את [כללי המאגר](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+כשה-`entry` של `[run]` נכשל במקרה בדיקה, למקרה הזה אין ציון. אם ה-`entry` לא מתחיל, חורג מהזמן הקצוב או שאות עוצר אותו, או אם `entry` מסוג פונקציה זורק חריגה או יוצא לפני שהוא מחזיר ערך, המשוב הוא `Run failed: …`, ו-Skynet לא קורא לפונקציית הניקוד. ‏`entry` מסוג פקודה נכשל גם כשהוא יוצא עם קוד יציאה שונה מאפס או לא כותב קובץ פלט תקין. לגרסה עם מקרה כזה אין ציון. היא לא יכולה להיות הגרסה הטובה ביותר, לא מגיעה לאף `[outcome] target` ולא פותחת pull request. אם כישלון חייב להיחשב כמספר, תפוס/י את הכישלון בתוכנית שלך, כתוב/כתבי פלט ותן/תני לפונקציית הניקוד לתת לו ציון. קרא/י את [כללי המאגר](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### מודל כשופט
 

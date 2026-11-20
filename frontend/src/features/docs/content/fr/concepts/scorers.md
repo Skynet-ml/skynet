@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 Le fichier `ascent.toml` du dépôt doit avoir une section `[run]` ou une étape `[target.<name>]`. L'`entry` de `[run]` exécute une version sur un cas, dans sa propre boîte de sandbox. Skynet refuse un fichier qui n'a ni l'une ni l'autre, car chaque version recevrait le même score.
 
 - Une entrée de fonction, par exemple `entry = "serve.py:serve"`, reçoit `case["input"]` comme argument. `output` est sa valeur de retour.
-- Une entrée de commande, par exemple `entry = ["python", "-m", "pytest", "-q"]`, reçoit l'entrée en JSON sur stdin. `output` est `{"exit_code": ..., "stdout": "..."}`.
+- Une entrée de commande, par exemple `entry = ["python", "run_tests.py"]`, lit `{"input": ...}` dans le fichier JSON au chemin de `ASCENT_INPUT`. Elle écrit `{"output": ...}` au chemin de `ASCENT_OUTPUT`. `output` est la valeur sous `"output"`. Ce que la commande affiche va seulement dans les journaux.
 
 L'évaluateur s'exécute dans une boîte de sandbox séparée. Cette boîte contient seulement vos fichiers de métrique. L'évaluateur ne peut ni importer ni exécuter le code de la version. Il voit la version seulement à travers `output`, ou à travers `call()` vers une étape `[target.<name>]`. Importez `call` avec `from openascent import call`. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### Lancer les tests du dépôt
 
-L'entrée `[run]` lance les tests. L'évaluateur lit le code de sortie et la sortie des tests.
+L'entrée `[run]` lance les tests. `pytest` se termine avec un code de sortie non nul quand un test échoue, et un code de sortie non nul fait échouer le cas. Le wrapper `run_tests.py` écrit donc le résultat dans `ASCENT_OUTPUT` et se termine avec 0. L'évaluateur lit ce résultat.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entrée ne démarre pas, dépasse le délai ou si un signal l'arrête, ou si une entrée de fonction lève une exception ou se termine avant de renvoyer une valeur, le retour est `Run failed: …`, et Skynet n'appelle pas l'évaluateur. Un code de sortie non nul d'une entrée de commande n'est pas un échec : l'évaluateur le reçoit dans `output`. Une version avec un tel cas n'a pas de score. Elle ne peut pas être la meilleure version, n'atteint aucun `[outcome] target` et n'ouvre aucune pull request. Si un échec doit compter comme un nombre, interceptez l'échec dans votre programme, écrivez une sortie et laissez l'évaluateur la noter. Lisez les [règles du dépôt](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Quand l'entrée `[run]` échoue sur un cas, ce cas n'a pas de score. Si l'entrée ne démarre pas, dépasse le délai ou si un signal l'arrête, ou si une entrée de fonction lève une exception ou se termine avant de renvoyer une valeur, le retour est `Run failed: …`, et Skynet n'appelle pas l'évaluateur. Une entrée de commande échoue aussi quand elle se termine avec un code de sortie non nul ou n'écrit pas de fichier de sortie valide. Une version avec un tel cas n'a pas de score. Elle ne peut pas être la meilleure version, n'atteint aucun `[outcome] target` et n'ouvre aucune pull request. Si un échec doit compter comme un nombre, interceptez l'échec dans votre programme, écrivez une sortie et laissez l'évaluateur la noter. Lisez les [règles du dépôt](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Un modèle comme juge
 

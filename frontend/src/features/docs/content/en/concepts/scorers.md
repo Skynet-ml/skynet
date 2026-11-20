@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 The `ascent.toml` file of the repository must have a `[run]` section or a `[target.<name>]` stage. The `[run]` `entry` runs one version on one case, in its own sandbox box. Skynet refuses a file with neither, because every version would get the same score.
 
 - A function entry, for example `entry = "serve.py:serve"`, gets `case["input"]` as its argument. `output` is its return value.
-- A command entry, for example `entry = ["python", "-m", "pytest", "-q"]`, gets the input as JSON on stdin. `output` is `{"exit_code": ..., "stdout": "..."}`.
+- A command entry, for example `entry = ["python", "run_tests.py"]`, reads `{"input": ...}` from the JSON file at the path in `ASCENT_INPUT`. It writes `{"output": ...}` to the path in `ASCENT_OUTPUT`. `output` is the value under `"output"`. What the command prints goes to the logs only.
 
 The scorer runs in a separate sandbox box. That box holds only your metric files. The scorer cannot import or run the code of the version. It sees the version only through `output`, or through `call()` to a `[target.<name>]` stage. Import `call` with `from openascent import call`. Read [How optimization works](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### Run the tests of the repository
 
-The `[run]` entry runs the tests. The scorer reads the exit code and the test output.
+The `[run]` entry runs the tests. `pytest` exits with a nonzero code when a test fails, and a nonzero exit code fails the case. Thus the wrapper `run_tests.py` writes the result to `ASCENT_OUTPUT` and exits 0. The scorer reads that result.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-When the `[run]` entry fails on a case, that case has no score. If the entry cannot start, times out or a signal stops it, or if a function entry raises or exits before it returns, the feedback is `Run failed: …`, and Skynet does not call the scorer. A nonzero exit code of a command entry is not a failure: the scorer gets it in `output`. A version with such a case has no score. It cannot be the best version, reaches no `[outcome] target` and opens no pull request. If a failure must count as a number, catch the failure in your program, write an output, and let the scorer score it. Read the [repository rules](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+When the `[run]` entry fails on a case, that case has no score. If the entry cannot start, times out or a signal stops it, or if a function entry raises or exits before it returns, the feedback is `Run failed: …`, and Skynet does not call the scorer. A command entry also fails when it exits with a nonzero code or writes no valid output file. A version with such a case has no score. It cannot be the best version, reaches no `[outcome] target` and opens no pull request. If a failure must count as a number, catch the failure in your program, write an output, and let the scorer score it. Read the [repository rules](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Model as judge
 

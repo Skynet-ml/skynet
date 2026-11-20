@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 倉庫嘅 `ascent.toml` 檔案一定要有一個 `[run]` 部分或者一個 `[target.<name>]` 階段。`[run]` 嘅 `entry` 會喺自己嘅沙盒入面，用一個案例運行一個版本。如果兩樣都冇，Skynet 會拒絕個檔案，因為每個版本都會攞到一樣嘅分數。
 
 - 函數入口，例如 `entry = "serve.py:serve"`，會收到 `case["input"]` 做參數。`output` 係佢嘅回傳值。
-- 指令入口，例如 `entry = ["python", "-m", "pytest", "-q"]`，會由 stdin 收到 JSON 格式嘅輸入。`output` 係 `{"exit_code": ..., "stdout": "..."}`。
+- 指令入口，例如 `entry = ["python", "run_tests.py"]`，會由 `ASCENT_INPUT` 路徑嘅 JSON 檔案讀 `{"input": ...}`。佢會將 `{"output": ...}` 寫去 `ASCENT_OUTPUT` 路徑。`output` 係 `"output"` 下面嘅值。指令印出嚟嘅嘢只會去日誌。
 
 評分器喺另一個獨立嘅沙盒入面運行。嗰個沙盒只裝住你啲指標檔案。評分器唔可以匯入或者運行版本嘅程式碼。佢只可以透過 `output`，或者透過對 `[target.<name>]` 階段嘅 `call()` 睇到個版本。用 `from openascent import call` 匯入 `call`。睇 [最佳化點樣運作](/docs/concepts/optimization)。
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### 運行倉庫嘅測試
 
-`[run]` 入口會運行測試。評分器會讀結束碼同測試輸出。
+`[run]` 入口會運行測試。有測試失敗嘅時候，`pytest` 會用非零結束碼結束，而非零結束碼會令個案例失敗。所以包裝腳本 `run_tests.py` 會將結果寫去 `ASCENT_OUTPUT`，再用 0 結束。評分器會讀呢個結果。
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-如果 `[run]` 入口喺某個案例失敗，嗰個案例就冇分數。如果入口開唔到、超時，或者俾信號停咗，又或者函數入口喺返回之前拋出異常或者退出，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。命令入口嘅非零結束碼唔算失敗：評分器會喺 `output` 收到佢。有呢種案例嘅版本冇分數。佢唔可以係最好嘅版本，唔會達到任何 `[outcome] target`，亦唔會開 pull request。如果失敗一定要算做一個數字，就喺你個程式入面捕捉個失敗，寫一個輸出，再俾評分器幫佢評分。睇 [儲存庫規則](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
+如果 `[run]` 入口喺某個案例失敗，嗰個案例就冇分數。如果入口開唔到、超時，或者俾信號停咗，又或者函數入口喺返回之前拋出異常或者退出，回饋就係 `Run failed: …`，Skynet 唔會呼叫評分器。命令入口用非零結束碼結束，或者冇寫出有效嘅輸出檔案，都會失敗。有呢種案例嘅版本冇分數。佢唔可以係最好嘅版本，唔會達到任何 `[outcome] target`，亦唔會開 pull request。如果失敗一定要算做一個數字，就喺你個程式入面捕捉個失敗，寫一個輸出，再俾評分器幫佢評分。睇 [儲存庫規則](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md)。
 
 ### 用模型做評判
 

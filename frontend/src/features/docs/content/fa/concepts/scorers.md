@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 فایل `ascent.toml` مخزن باید یک بخش `[run]` یا یک مرحلهٔ `[target.<name>]` داشته باشد. `entry` بخش `[run]` یک نسخه را روی یک مورد، در جعبهٔ ایزولهٔ خودش اجرا می‌کند. Skynet فایلی را که هیچ‌کدام را ندارد رد می‌کند، چون هر نسخه همان امتیاز را می‌گرفت.
 
 - یک entry تابعی، مثلاً `entry = "serve.py:serve"`، مقدار `case["input"]` را به‌عنوان آرگومان می‌گیرد. `output` مقدار بازگشتی آن است.
-- یک entry دستوری، مثلاً `entry = ["python", "-m", "pytest", "-q"]`، ورودی را به‌صورت JSON روی stdin می‌گیرد. `output` برابر `{"exit_code": ..., "stdout": "..."}` است.
+- یک entry دستوری، مثلاً `entry = ["python", "run_tests.py"]`، مقدار `{"input": ...}` را از فایل JSON در مسیر `ASCENT_INPUT` می‌خواند. این entry مقدار `{"output": ...}` را در مسیر `ASCENT_OUTPUT` می‌نویسد. `output` مقدارِ زیر `"output"` است. آنچه دستور چاپ می‌کند فقط به لاگ‌ها می‌رود.
 
 امتیازدهنده در یک جعبهٔ ایزولهٔ جداگانه اجرا می‌شود. این جعبه فقط فایل‌های معیار شما را نگه می‌دارد. امتیازدهنده نمی‌تواند کد نسخه را import یا اجرا کند. نسخه را فقط از طریق `output`، یا از طریق `call()` به یک مرحلهٔ `[target.<name>]` می‌بیند. تابع `call` را با `from openascent import call` import کنید. صفحهٔ [بهینه‌سازی چگونه کار می‌کند](/docs/concepts/optimization) را بخوانید.
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### اجرای آزمون‌های مخزن
 
-`entry` بخش `[run]` آزمون‌ها را اجرا می‌کند. امتیازدهنده کد خروج و خروجی آزمون‌ها را می‌خواند.
+`entry` بخش `[run]` آزمون‌ها را اجرا می‌کند. وقتی یک آزمون شکست می‌خورد، `pytest` با کد خروج غیرصفر تمام می‌شود و کد خروج غیرصفر مورد را شکست می‌دهد. برای همین پوشش `run_tests.py` نتیجه را در `ASCENT_OUTPUT` می‌نویسد و با کد 0 خارج می‌شود. امتیازدهنده همان نتیجه را می‌خواند.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-وقتی `entry` بخش `[run]` روی یک مورد شکست می‌خورد، آن مورد امتیاز ندارد. اگر `entry` شروع نشود، از مهلت بگذرد یا یک سیگنال آن را متوقف کند، یا اگر یک `entry` از نوع تابع خطا بدهد یا پیش از برگرداندن مقدار خارج شود، بازخورد `Run failed: …` است و Skynet امتیازدهنده را فراخوانی نمی‌کند. کد خروج غیرصفر یک `entry` از نوع فرمان شکست نیست: امتیازدهنده آن را در `output` می‌گیرد. نسخه‌ای که چنین موردی دارد امتیاز ندارد. آن نسخه نمی‌تواند بهترین نسخه باشد، به هیچ `[outcome] target` نمی‌رسد و هیچ pull request باز نمی‌کند. اگر شکست باید به‌صورت یک عدد حساب شود، شکست را در برنامهٔ خودتان بگیرید، یک خروجی بنویسید و بگذارید امتیازدهنده به آن امتیاز بدهد. صفحهٔ [قواعد مخزن](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) را بخوانید.
+وقتی `entry` بخش `[run]` روی یک مورد شکست می‌خورد، آن مورد امتیاز ندارد. اگر `entry` شروع نشود، از مهلت بگذرد یا یک سیگنال آن را متوقف کند، یا اگر یک `entry` از نوع تابع خطا بدهد یا پیش از برگرداندن مقدار خارج شود، بازخورد `Run failed: …` است و Skynet امتیازدهنده را فراخوانی نمی‌کند. یک `entry` از نوع فرمان همچنین وقتی با کد خروج غیرصفر خارج شود یا فایل خروجی معتبری ننویسد، شکست می‌خورد. نسخه‌ای که چنین موردی دارد امتیاز ندارد. آن نسخه نمی‌تواند بهترین نسخه باشد، به هیچ `[outcome] target` نمی‌رسد و هیچ pull request باز نمی‌کند. اگر شکست باید به‌صورت یک عدد حساب شود، شکست را در برنامهٔ خودتان بگیرید، یک خروجی بنویسید و بگذارید امتیازدهنده به آن امتیاز بدهد. صفحهٔ [قواعد مخزن](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md) را بخوانید.
 
 ### مدل به‌عنوان داور
 

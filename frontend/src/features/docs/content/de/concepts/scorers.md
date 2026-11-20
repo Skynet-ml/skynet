@@ -17,7 +17,7 @@ def score(repo_path, case, output=None):
 Die Datei `ascent.toml` des Repositorys muss einen Abschnitt `[run]` oder eine Stufe `[target.<name>]` haben. Der `entry` von `[run]` führt eine Version auf einem Fall aus, in einer eigenen Sandbox-Box. Skynet lehnt eine Datei ohne beides ab, weil sonst jede Version dieselbe Bewertung erhält.
 
 - Ein Funktionseintrag, zum Beispiel `entry = "serve.py:serve"`, erhält `case["input"]` als Argument. `output` ist sein Rückgabewert.
-- Ein Befehlseintrag, zum Beispiel `entry = ["python", "-m", "pytest", "-q"]`, erhält die Eingabe als JSON auf stdin. `output` ist `{"exit_code": ..., "stdout": "..."}`.
+- Ein Befehlseintrag, zum Beispiel `entry = ["python", "run_tests.py"]`, liest `{"input": ...}` aus der JSON-Datei unter dem Pfad in `ASCENT_INPUT`. Er schreibt `{"output": ...}` in den Pfad in `ASCENT_OUTPUT`. `output` ist der Wert unter `"output"`. Was der Befehl ausgibt, geht nur in die Logs.
 
 Der Scorer läuft in einer separaten Sandbox-Box. Diese Box enthält nur Ihre Metrikdateien. Der Scorer kann den Code der Version weder importieren noch ausführen. Er sieht die Version nur über `output` oder über `call()` an eine Stufe `[target.<name>]`. Importieren Sie `call` mit `from openascent import call`. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
 
@@ -88,24 +88,34 @@ def score(repo_path, case, output=None):
 
 ### Die Tests des Repositorys ausführen
 
-Der `[run]`-Eintrag führt die Tests aus. Der Scorer liest den Exit-Code und die Testausgabe.
+Der `[run]`-Eintrag führt die Tests aus. `pytest` endet mit einem Exit-Code ungleich null, wenn ein Test fehlschlägt, und ein Exit-Code ungleich null lässt den Fall fehlschlagen. Darum schreibt der Wrapper `run_tests.py` das Ergebnis in `ASCENT_OUTPUT` und endet mit 0. Der Scorer liest dieses Ergebnis.
 
 ```toml tab="ascent.toml"
 version = 1
 
 [run]
-entry = ["python", "-m", "pytest", "-q"]
+entry = ["python", "run_tests.py"]
 timeout = 300
+```
+
+```python tab="run_tests.py"
+import json
+import os
+import subprocess
+
+result = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True)
+with open(os.environ["ASCENT_OUTPUT"], "w") as f:
+    json.dump({"output": {"passed": result.returncode == 0, "log": result.stdout[-2000:]}}, f)
 ```
 
 ```python tab="scorer.py"
 def score(repo_path, case, output=None):
-    if output["exit_code"] == 0:
+    if output["passed"]:
         return {"score": 1.0, "feedback": "All tests pass."}
-    return {"score": 0.0, "feedback": output["stdout"][-2000:]}
+    return {"score": 0.0, "feedback": output["log"]}
 ```
 
-Wenn der `[run]`-Eintrag bei einem Fall fehlschlägt, hat dieser Fall keine Bewertung. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, oder wenn ein Funktionseintrag eine Ausnahme auslöst oder sich beendet, bevor er zurückgibt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Exit-Code ungleich null eines Befehlseintrags ist kein Fehlschlag: Der Scorer erhält ihn in `output`. Eine Version mit einem solchen Fall hat keine Bewertung. Sie kann nicht die beste Version sein, erreicht kein `[outcome] target` und öffnet keinen Pull Request. Wenn ein Fehlschlag als Zahl zählen soll, fangen Sie den Fehlschlag in Ihrem Programm ab, schreiben Sie eine Ausgabe und lassen Sie den Scorer sie bewerten. Lesen Sie die [Repository-Regeln](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
+Wenn der `[run]`-Eintrag bei einem Fall fehlschlägt, hat dieser Fall keine Bewertung. Wenn der Eintrag nicht startet, das Zeitlimit überschreitet oder ein Signal ihn stoppt, oder wenn ein Funktionseintrag eine Ausnahme auslöst oder sich beendet, bevor er zurückgibt, ist das Feedback `Run failed: …`, und Skynet ruft den Scorer nicht auf. Ein Befehlseintrag schlägt auch fehl, wenn er mit einem Exit-Code ungleich null endet oder keine gültige Ausgabedatei schreibt. Eine Version mit einem solchen Fall hat keine Bewertung. Sie kann nicht die beste Version sein, erreicht kein `[outcome] target` und öffnet keinen Pull Request. Wenn ein Fehlschlag als Zahl zählen soll, fangen Sie den Fehlschlag in Ihrem Programm ab, schreiben Sie eine Ausgabe und lassen Sie den Scorer sie bewerten. Lesen Sie die [Repository-Regeln](https://github.com/Skynet-ml/skynet/blob/main/docs/repository-constraints.md).
 
 ### Modell als Bewerter
 
