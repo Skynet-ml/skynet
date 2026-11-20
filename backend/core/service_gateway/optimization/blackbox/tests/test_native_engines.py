@@ -169,6 +169,12 @@ def test_a_missing_column_never_beats_a_negative_engine_score() -> None:
     assert native_engines.pareto_front(table, {"a": -0.5, "b": -0.4}) == ["b", "a"]
 
 
+def test_a_missing_score_shows_as_n_a_in_the_agent_report() -> None:
+    """The report writes ``n/a`` for a missing column, not ``-inf`` (SKY-750)."""
+    assert native_engines._shown(native_engines._MISSING_SCORE) == "n/a"
+    assert native_engines._shown(-0.5) == "-0.500"
+
+
 def test_the_task_brief_says_scores_are_on_the_engine_scale() -> None:
     """The agent learns that higher is always better and that a score may be negative (SKY-750)."""
     task = Task(name="t", seed_candidate="seed", objective="be better")

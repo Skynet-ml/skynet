@@ -111,6 +111,20 @@ NAMED_PREFIX = "score:"
 # A column a candidate has no score for counts as the worst score. Engine
 # scores of a minimize run are negative (SKY-750), so 0.0 would beat them.
 _MISSING_SCORE = -math.inf
+
+
+def _shown(score: float) -> str:
+    """Write one score for the agent's report, with ``n/a`` for a missing one.
+
+    Args:
+        score: The score, or :data:`_MISSING_SCORE`.
+
+    Returns:
+        The score to three decimals, or ``n/a``.
+    """
+    return "n/a" if score == _MISSING_SCORE else f"{score:.3f}"
+
+
 # The engines see every score on one scale where higher is better (SKY-750).
 _SCALE_NOTE = "Scores are on the engine scale: higher is always better, and a score may be negative."
 # The engine reads these files into memory, and the worker runs it in its own process, so a file past its cap
@@ -1074,7 +1088,7 @@ class AutoResearchEngine:
             lines += ["| column | " + " | ".join(self._ids[c] for c in front) + " |"]
             lines += ["| --- " * (len(front) + 1) + "|"]
             for column in columns:
-                cells = " | ".join(f"{table[c].get(column, _MISSING_SCORE):.3f}" for c in front)
+                cells = " | ".join(_shown(table[c].get(column, _MISSING_SCORE)) for c in front)
                 lines.append(f"| `{column}` | {cells} |")
         lines += ["", "## Failure dossier", ""]
         lines += self._dossier(table, front)
@@ -1150,14 +1164,14 @@ class AutoResearchEngine:
         weakest = sorted(columns, key=lambda column: table[leader].get(column, _MISSING_SCORE))[:_DOSSIER_EXAMPLES]
         lines += [
             "Hardest examples and named scores (best score any candidate reached): "
-            + ", ".join(f"`{column}` {best_anywhere[column]:.3f}" for column in hard),
+            + ", ".join(f"`{column}` {_shown(best_anywhere[column])}" for column in hard),
             "",
             f"Leader `{self._ids[leader]}` where it is weakest:",
             "",
         ]
         for eid in weakest:
             note = feedback.get(eid) or "(no feedback)"
-            lines += [f"- `{eid}` scored {table[leader].get(eid, _MISSING_SCORE):.3f}: {note}"]
+            lines += [f"- `{eid}` scored {_shown(table[leader].get(eid, _MISSING_SCORE))}: {note}"]
         return lines
 
     def _round_prompt(self, directive: str) -> str:
