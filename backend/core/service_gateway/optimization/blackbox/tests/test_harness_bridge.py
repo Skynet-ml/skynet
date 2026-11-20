@@ -4528,3 +4528,59 @@ def test_a_session_that_raises_still_removes_its_binding(
 
     assert seen == [["run-model"]]
     assert guest_model_proxy._bound_models("route-key") == []
+
+
+def test_the_error_names_each_bound_model_once(bindings: Path) -> None:
+    """Two live sessions with the same model put that model in the error once, in order.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    env = {harness_bridge.MODEL_BINDINGS_ENV: str(bindings)}
+    with (
+        harness_bridge.model_binding(env, "route-key", "run-model"),
+        harness_bridge.model_binding(env, "route-key", "run-model"),
+    ):
+        assert "(run-model), not" in _refusal_message()
+
+
+def test_a_stopped_bridge_removes_its_session_binding(bindings: Path, tmp_path: Path) -> None:
+    """A SIGTERM to the bridge, which exits without ``finally`` blocks, still removes the binding (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the session's config and workspace.
+    """
+    config = tmp_path / "proposer.json"
+    config.write_text(json.dumps({**_PLAIN, "run_command": "sleep 30"}))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        harness_bridge.CONFIG_ENV: str(config),
+        harness_bridge.KEY_ENV: "route-key",
+        harness_bridge.MODEL_BINDINGS_ENV: str(bindings),
+    }
+    bridge = subprocess.Popen(
+        [sys.executable, harness_bridge.__file__, "--print", "task", "--model", "run-model"],
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while guest_model_proxy._bound_models("route-key") != ["run-model"]:
+            assert bridge.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        bridge.send_signal(signal.SIGTERM)
+        assert bridge.wait(timeout=30) == 128 + signal.SIGTERM
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(bridge.pid, signal.SIGKILL)
+
+    assert guest_model_proxy._bound_models("route-key") == []
+    assert list((bindings / guest_model_proxy.key_digest("route-key")).iterdir()) == []

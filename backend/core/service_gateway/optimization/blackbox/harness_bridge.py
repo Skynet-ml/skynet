@@ -70,6 +70,9 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\udc80-\udcff]")
 # The setup and harness processes this bridge runs now, by pid, with their
 # start times. A stop signal to the bridge kills their groups (SKY-753).
 _OWNED_GROUPS: dict[int, tuple[subprocess.Popen[Any], int | None]] = {}
+# The model binding files of this bridge's live sessions. A stop signal exits
+# without ``finally`` blocks, so the handler removes them (SKY-884).
+_LIVE_BINDINGS: set[Path] = set()
 # A stop signal that lands while a group starts waits until the group is in
 # ``_OWNED_GROUPS``, so the stop also kills it. Masking the signal instead
 # would leave it masked in the child (SKY-753).
@@ -534,6 +537,9 @@ def _stop_owned_groups(signum: int, _frame: Any) -> None:
         # Without /proc (macOS) nothing proves a reaped pid is still ours.
         if process.returncode is None or root_start is not None:
             _stop_group(process, signal.SIGKILL, root_start)
+    for binding in list(_LIVE_BINDINGS):
+        with contextlib.suppress(OSError):
+            binding.unlink()
     os._exit(128 + signum)
 
 
@@ -2289,6 +2295,8 @@ def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> It
     """
     folder = env.get(MODEL_BINDINGS_ENV)
     binding = bind_model(Path(folder), api_key, model) if folder and api_key and model else None
+    if binding is not None:
+        _LIVE_BINDINGS.add(binding)
     try:
         yield
     finally:
@@ -2296,6 +2304,7 @@ def model_binding(env: Mapping[str, str], api_key: str | None, model: str) -> It
         if binding is not None:
             with contextlib.suppress(OSError):
                 binding.unlink()
+            _LIVE_BINDINGS.discard(binding)
 
 
 def run_session(

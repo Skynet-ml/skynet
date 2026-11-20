@@ -202,7 +202,8 @@ def main() -> int:
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
     if not _runs_as_root():
-        bindings = (response_dir.parent / "models").resolve()
+        # Resolve only the parent, so the check below sees a link at the folder itself.
+        bindings = response_dir.parent.resolve() / "models"
         # Without the folder the box only loses the clearer error: the gateway still refuses another model.
         with contextlib.suppress(OSError):
             bindings.mkdir(exist_ok=True)
@@ -400,7 +401,7 @@ def _other_model_refusal(path: str, body: bytes, key: str = "", method: str = "P
     matches = model_matches if box_model else agent_model_matches
     if any(matches(model, name) for name in allowed):
         return None
-    expected = ", ".join(allowed)
+    expected = ", ".join(dict.fromkeys(allowed))
     message = f"This box serves only the model that {MODEL_ENV} names ({expected}), not {model!r}."
     error = {"message": message, "type": "invalid_request_error", "param": "model", "code": "model_not_allowed"}
     return json.dumps({"error": error}).encode()
