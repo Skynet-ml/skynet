@@ -101,7 +101,11 @@ How to write the run's files:
   ``score(repo_path, case, output=None)`` and scores ``output``; a metric with fewer arguments never gets the
   output. Only a contract with no ``[run]`` entry, only ``[target.<name>]`` stages, may define
   ``score(repo_path)`` or ``score(repo_path, case)``, and that metric calls its stages with
-  ``from skynet import call``. The metric box holds no repository files. It returns one object,
+  ``from skynet import call``. ``[metric] entry`` names the metric; without it, it is ``"metric.py:score"``,
+  the ``metric.py`` you write. A command list, for example ``entry = ["./metric.sh"]``, runs a metric in any
+  language: it reads the JSON file at ``ASCENT_INPUT`` and writes its answer as JSON to ``ASCENT_OUTPUT``, and
+  ``[metric] files`` lists its file. The setup screen sends only ``metric.py``, so leave ``entry`` out there.
+  The metric box holds no repository files. It returns one object,
   ``{{"score": ..., "feedback": ..., "scores": {{"<name>": {{"score": ..., "feedback": ...}}}}}}``.
   Only ``score`` is required. Give ``feedback`` that says what was wrong or missing: without it the proposer
   sees only the scores. A bare number, a pair or any other key is an error.
@@ -159,7 +163,8 @@ How to write the run's files:
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
     60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``. A contract needs a ``[run]`` section
     or at least one ``[target.<name>]`` stage.
-  - ``[metric]``: ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
+  - ``[metric]``: ``entry`` (``"path.py:function"``, default ``"metric.py:score"``, or a command list),
+    ``files`` (a list of paths hidden from the agent), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
     ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts
     besides the relay, default none) and ``vcpus`` (SKY-398).

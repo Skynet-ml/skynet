@@ -2352,3 +2352,54 @@ def test_a_tool_value_that_is_not_a_table_fails(raw: bytes, message: str, sectio
     with pytest.raises(ConstraintsError, match=message) as caught:
         parse_constraints(raw)
     assert (caught.value.section, caught.value.key) == (section, key)
+
+
+_METRIC_ENTRY_BASE = b'version = 1\n[run]\nentry = "run.py:main"\n[metric]\nfiles = ["eval"]\n'
+
+
+def test_a_contract_without_metric_entry_gets_the_default_python_entry() -> None:
+    """A file written before ``[metric] entry`` existed scores as ``metric.py:score`` (SKY-738)."""
+    assert parse_constraints(_METRIC_ENTRY_BASE).metric.entry == "metric.py:score"
+    assert MetricSpec().entry == "metric.py:score"
+
+
+@pytest.mark.parametrize(
+    ("line", "entry"),
+    [
+        (b'entry = "eval/metric.py:grade"', "eval/metric.py:grade"),
+        (b'entry = ["bash", "eval/metric.sh"]', ("bash", "eval/metric.sh")),
+        (b'entry = ["./eval/metric.sh"]', ("./eval/metric.sh",)),
+        (b'entry = ["node", "eval/metric.mjs", "--strict"]', ("node", "eval/metric.mjs", "--strict")),
+    ],
+)
+def test_metric_entry_reads_a_python_function_or_a_command(line: bytes, entry: str | tuple[str, ...]) -> None:
+    """``[metric] entry`` takes ``"path.py:function"`` or a command list (SKY-738)."""
+    assert parse_constraints(_METRIC_ENTRY_BASE + line + b"\n").metric.entry == entry
+
+
+@pytest.mark.parametrize(
+    "line", [b"entry = 3", b'entry = "metric.py"', b"entry = []", b'entry = [""]', b"entry = [1]", b"entry = {}"]
+)
+def test_any_other_metric_entry_fails_with_one_message_that_shows_both_forms(line: bytes) -> None:
+    """Every malformed value gets the same message, which names the two valid forms."""
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(_METRIC_ENTRY_BASE + line + b"\n")
+
+    assert (caught.value.section, caught.value.key) == ("metric", "entry")
+    assert '"path/to/file.py:function"' in str(caught.value)
+    assert "command list" in str(caught.value)
+
+
+def test_a_command_metric_entry_must_run_a_metric_file() -> None:
+    """Only the ``[metric] files`` reach the metric box, so the command must run one of them."""
+    with pytest.raises(ConstraintsError, match=re.escape("runs no file from [metric] files")) as caught:
+        parse_constraints(_METRIC_ENTRY_BASE + b'entry = ["bash", "metric.sh"]\n')
+    assert caught.value.key == "entry"
+
+
+def test_a_command_metric_entry_needs_a_run_section() -> None:
+    """A command metric scores the ``[run]`` output; a contract with only a target stage is refused."""
+    raw = b'version = 1\n[target.a]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/m.sh"]\n'
+    with pytest.raises(ConstraintsError, match=re.escape("has no [run] section")) as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == ("metric", "entry")

@@ -161,6 +161,15 @@ ELAPSED_PARAM = "elapsed_s"
 # the metric's packages into. ``-I`` reads no user or PYTHONPATH folder, and
 # the image's venv has no system site, so the runner adds this one (SKY-398).
 METRIC_SITE_PARAM = "metric_site"
+# A command [metric] entry (SKY-738): the input keys that carry the command, its
+# time limit and the folder the parent copied the OpenAscent package into. The
+# package's call_metric runs the command under the two-file rule, so this file
+# holds no second copy of that rule.
+METRIC_ENTRY_PARAM = "metric_entry"
+METRIC_TIMEOUT_PARAM = "metric_timeout"
+ASCENT_PACKAGE_PARAM = "ascent_package"
+# The function a "path.py:function" [metric] entry names; absent keeps the default lookup.
+METRIC_FUNCTION_PARAM = "function"
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
 RERUN_REFUSED = (
@@ -219,6 +228,10 @@ SideInfo = dict[str, Any]
 
 class ScorerError(Exception):
     """A mistake in the scorer or its use of the helpers, reported to the user verbatim."""
+
+
+class MissingScorerError(ScorerError):
+    """The scorer code loads but defines none of the functions the default entry looks for."""
 
 
 class GatewayControl(BaseException):
@@ -984,7 +997,9 @@ def helper_module(helpers: dict[str, Any]) -> types.ModuleType:
     return module
 
 
-def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -> Callable[..., Any]:
+def load_scorer_from_code(
+    code: str, *, helpers: dict[str, Any] | None = None, entrypoint: str | None = None
+) -> Callable[..., Any]:
     """Execute scorer source and return the callable it defines.
 
     Looks for ``score`` then ``metric``, then falls back to the single
@@ -995,13 +1010,16 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
         helpers: Names the scorer may import from the ``skynet`` module. They
             are also bound in its namespace, for scorers written before the
             import existed.
+        entrypoint: The function that ``[metric] entry`` names. ``None`` and
+            ``score``, the default entry's function, keep the lookup above.
 
     Returns:
         The scorer callable.
 
     Raises:
         ScorerError: When the code fails to compile or load, or defines no
-            unambiguous scorer function.
+            unambiguous scorer function. ``MissingScorerError`` marks the
+            default lookup that finds no function.
     """
     namespace: dict[str, Any] = dict(helpers or {})
     sys.modules[HELPER_MODULE_NAME] = helper_module(namespace)
@@ -1014,6 +1032,11 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
         raise ScorerError(f"scorer code has a syntax error: {exc}") from exc
     except Exception as exc:
         raise ScorerError(f"scorer code failed to load: {type(exc).__name__}: {exc}") from exc
+    if entrypoint not in (None, "score"):
+        named = namespace.get(entrypoint)
+        if not callable(named):
+            raise ScorerError(f"scorer code defines no function '{entrypoint}', which [metric] entry names.")
+        return named
     for name in _ENTRYPOINT_NAMES:
         candidate = namespace.get(name)
         if callable(candidate):
@@ -1023,7 +1046,7 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
     ]
     if len(defined) == 1:
         return defined[0]
-    raise ScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
+    raise MissingScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
 
 
 def _takes_positional(fn: Callable[..., Any], count: int) -> bool:
@@ -1372,7 +1395,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     }
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     try:
-        fn = load_scorer_from_code(str(payload.get("code") or ""), helpers=helpers)
+        fn = load_scorer_from_code(
+            str(payload.get("code") or ""), helpers=helpers, entrypoint=payload.get(METRIC_FUNCTION_PARAM)
+        )
         if payload.get("mode") == "readiness":
             result["readiness"] = {
                 "ready": True,
@@ -1401,6 +1426,82 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         result["usage"] = llm.usage
         if llm.control is not None:
             result.update(score=None, side_info={}, error=None, control=llm.control)
+    return result
+
+
+def _load_openascent(folder: Any) -> types.ModuleType:
+    """Import the OpenAscent package from the folder the parent copied it into.
+
+    The runner starts with ``-I`` and the image may not install the package,
+    so it loads the folder by path; no ``sys.path`` entry lets a planted
+    module shadow a standard one.
+
+    Args:
+        folder: The package folder from the metric input.
+
+    Returns:
+        The ``openascent`` package.
+
+    Raises:
+        ScorerError: When the input names no package folder.
+    """
+    init = Path(str(folder or "")) / "__init__.py"
+    if not folder or not init.is_file():
+        raise ScorerError("The metric box has no OpenAscent package, so the metric command cannot run.")
+    spec = importlib.util.spec_from_file_location("openascent", init, submodule_search_locations=[str(init.parent)])
+    if spec is None or spec.loader is None:
+        raise ScorerError("The metric box has no OpenAscent package, so the metric command cannot run.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["openascent"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_metric_command(payload: dict[str, Any]) -> dict[str, Any]:
+    """Call a command ``[metric] entry`` once, through OpenAscent's ``call_metric`` (SKY-738).
+
+    The command gets ``ASCENT_INPUT`` and ``ASCENT_OUTPUT`` and runs in this
+    process's box, folder and environment, so it has the same network,
+    services, vCPUs and time limit as a Python metric.
+
+    Args:
+        payload: The decoded ``input.json``, with ``metric_entry``.
+
+    Returns:
+        The ``output.json`` contents: score, side info and error, and
+        ``cause``, the package's short name of a failed call's cause.
+    """
+    result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
+    stages = payload.get("stages")
+    relay = StageClient(stages) if isinstance(stages, dict) else None
+    if relay is not None:
+        os.environ.update(_relay_env(relay, stages))
+    case = payload.get("case")
+    case = case if isinstance(case, dict) else {"input": case}
+    metric_input: dict[str, Any] = {"input": case.get("input"), "output": payload.get("output")}
+    if "expected" in case:
+        metric_input["expected"] = case["expected"]
+    if ELAPSED_PARAM in payload:
+        metric_input[ELAPSED_PARAM] = payload[ELAPSED_PARAM]
+    ascent: types.ModuleType | None = None
+    try:
+        ascent = _load_openascent(payload.get(ASCENT_PACKAGE_PARAM))
+        call = ascent.call_metric(
+            tuple(payload[METRIC_ENTRY_PARAM]),
+            metric_input,
+            timeout_s=float(payload[METRIC_TIMEOUT_PARAM]),
+            cwd=str(Path.cwd()),
+        )
+        score, side_info = normalize_score(call.result.to_dict())
+        result.update(score=score, side_info=side_info)
+    except BaseException as exc:  # the metric is arbitrary — any failure is reported, not raised
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        if ascent is not None and isinstance(exc, ascent.AscentError):
+            result["cause"] = exc.code
+            if getattr(exc, "exit_code", None) is not None:
+                result["exit_code"] = exc.exit_code
+            if exc.stderr:
+                result["error"] += f"\nstderr: {exc.stderr[-2_000:]}"
     return result
 
 
@@ -1474,8 +1575,10 @@ def main(argv: list[str] | None = None) -> int:
     if "code" not in payload:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
-    refused = refuse_processes() if "output" in payload else None
-    result = run_call(payload)
+    command = payload.get(METRIC_ENTRY_PARAM)
+    allowed = [str(part) for part in command] if isinstance(command, list) else None
+    refused = refuse_processes(allow=allowed) if "output" in payload else None
+    result = run_metric_command(payload) if allowed is not None else run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)
@@ -1511,17 +1614,24 @@ def _print_result(text: str) -> None:
     stream.flush()
 
 
-def refuse_processes() -> list[bool]:
+def refuse_processes(allow: Sequence[str] | None = None) -> list[bool]:
     """Refuse every process the metric starts from now on in this process (E40).
 
     The metric reads the candidate's report; it must not run the candidate
     again. An audit hook stays for the life of the process, so only the
     metric call's own process installs it.
 
+    Args:
+        allow: A command ``[metric] entry`` (SKY-738): the one process start
+            this process may make, once, for exactly this argument list. The
+            metric box holds no candidate code, so the command cannot run the
+            candidate again.
+
     Returns:
         A list that gets an entry each time a process start was refused.
     """
     refused: list[bool] = []
+    pending = [list(allow)] if allow is not None else []
 
     def hook(event: str, args: tuple[Any, ...]) -> None:
         """Abort a process start with the refusal message.
@@ -1534,6 +1644,9 @@ def refuse_processes() -> list[bool]:
             ScorerError: When the event starts a process.
         """
         if event in _PROCESS_EVENTS:
+            if event == "subprocess.Popen" and pending and list(args[1]) == pending[0]:
+                pending.clear()
+                return
             refused.append(True)
             raise ScorerError(RERUN_REFUSED)
 

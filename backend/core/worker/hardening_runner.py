@@ -63,7 +63,11 @@ from ..service_gateway.optimization.blackbox.hardening import (
     Candidate,
     HardeningRunner,
 )
-from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    DEFAULT_METRIC_ENTRY,
+    RepoConstraints,
+    read_constraints,
+)
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
@@ -895,7 +899,11 @@ def open_hardening_runner(
             configured, or a BYOK scorer model has no vault.
     """
     scorer_spec = copy.deepcopy(job.scorer or {})
-    if scorer_spec.get("kind", "python") != "python" or not scorer_spec.get("metric_code"):
+    if (
+        scorer_spec.get("kind", "python") != "python"
+        or not scorer_spec.get("metric_code")
+        or scorer_spec.get("command_metric")
+    ):
         raise ValueError("A hardening job needs a Python metric.")
     if settings.openrouter_api_key is None:
         raise ValueError("Managed model routing is not configured.")
@@ -936,6 +944,9 @@ def open_hardening_runner(
         # file list and [run] and [metric] settings. Each box still packs the
         # metric files from its own fixed tree into the metric box (SKY-398).
         constraints = _trusted_constraints(workspace.trusted_root, require_version=workspace.require_version)
+        # The attackers and the fixes read and edit Python metric code; a command metric is out of scope (SKY-738).
+        if constraints is not None and not isinstance(constraints.metric.entry, str):
+            raise ValueError("A hardening job needs a Python metric.")
         compose_services = constraints.compose_services if constraints is not None else ()
         hidden = hidden_repo_paths(constraints)
 
@@ -986,6 +997,7 @@ def open_hardening_runner(
                 hidden_paths=hidden,
                 run_entry=constraints.run_entry if constraints is not None else None,
                 run_timeout=constraints.run_timeout if constraints is not None else 60.0,
+                metric_entry=constraints.metric.entry if constraints is not None else DEFAULT_METRIC_ENTRY,
             )
             try:
                 scorer.prepare()
@@ -1313,7 +1325,11 @@ def _start_failure(job: HardeningJob, settings: Settings, *, username: str, vaul
         return "hardening.no_scorer"
     if job.binding_id is None or job.target is None:
         return "hardening.no_target"
-    if job.scorer.get("kind", "python") != "python" or not job.scorer.get("metric_code"):
+    if (
+        job.scorer.get("kind", "python") != "python"
+        or not job.scorer.get("metric_code")
+        or job.scorer.get("command_metric")
+    ):
         return "hardening.no_python_metric"
     if settings.openrouter_api_key is None:
         return "hardening.no_managed_models"

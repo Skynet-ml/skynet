@@ -78,7 +78,9 @@ def normalize_score(raw: Any, *, own_keys: bool = False) -> tuple[float | None, 
         raise ServiceError(str(exc)) from exc
 
 
-def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -> Callable[..., Any]:
+def load_scorer_from_code(
+    code: str, *, helpers: dict[str, Any] | None = None, entrypoint: str | None = None
+) -> Callable[..., Any]:
     """Execute scorer source and return the callable it defines.
 
     Looks for ``score`` then ``metric``, then falls back to the single
@@ -87,6 +89,8 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
     Args:
         code: User-authored python source.
         helpers: Names the scorer may import from ``skynet``; also bound in its namespace.
+        entrypoint: The function that ``[metric] entry`` names. ``None`` and
+            ``score`` keep the lookup above.
 
     Returns:
         The scorer callable.
@@ -96,7 +100,7 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
             unambiguous scorer function.
     """
     try:
-        return runner.load_scorer_from_code(code, helpers=helpers)
+        return runner.load_scorer_from_code(code, helpers=helpers, entrypoint=entrypoint)
     except runner.ScorerError as exc:
         raise ServiceError(str(exc)) from exc
 

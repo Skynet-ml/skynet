@@ -3829,7 +3829,7 @@ def test_the_record_hashes_the_bytes_the_run_read_and_names_the_split(monkeypatc
 
     record = result["details"]["record"]
     metric = hashlib.sha256(
-        _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): ...\n")
+        _framed("eval/scorer.py", b"def score(): ...\n") + _framed("metric.py", _RECORD_METRIC.encode())
     )
     assert record["contract_sha256"] == hashlib.sha256(tree["optimize.toml"].encode()).hexdigest()
     assert record["metric_sha256"] == metric.hexdigest()
@@ -3857,7 +3857,7 @@ def test_a_draft_metric_file_makes_the_request_the_metric_source(monkeypatch: py
     staged.cleanup()
 
     assert staged.record_facts["metric_source"] == "request"
-    metric = _framed("metric.py", _RECORD_METRIC.encode()) + _framed("eval/scorer.py", b"def score(): return 2\n")
+    metric = _framed("eval/scorer.py", b"def score(): return 2\n") + _framed("metric.py", _RECORD_METRIC.encode())
     assert staged.record_facts["metric_sha256"] == hashlib.sha256(metric).hexdigest()
 
 
@@ -3889,6 +3889,7 @@ def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) 
         archive,
         contract_sha256="0" * 64,
         metric_files=("eval",),
+        metric_entry="metric.py:score",
         metric_code=_RECORD_METRIC,
         drafts={},
         cases_file="cases.jsonl",
@@ -3897,8 +3898,8 @@ def test_the_metric_hash_streams_a_member_larger_than_one_chunk(tmp_path: Path) 
 
     code = _RECORD_METRIC.encode()
     parts = [
-        b"metric.py\0" + str(len(code)).encode() + b"\0" + hashlib.sha256(code).hexdigest().encode(),
         b"eval/data.bin\0" + str(len(body)).encode() + b"\0" + hashlib.sha256(body).hexdigest().encode(),
+        b"metric.py\0" + str(len(code)).encode() + b"\0" + hashlib.sha256(code).hexdigest().encode(),
     ]
     assert facts["metric_sha256"] == hashlib.sha256(b"".join(parts)).hexdigest()
     assert facts["cases_sha256"] == hashlib.sha256(b"{}\n").hexdigest()
@@ -3943,6 +3944,7 @@ def test_the_record_facts_never_read_a_whole_member(tmp_path: Path, monkeypatch:
         archive,
         contract_sha256="0" * 64,
         metric_files=("eval",),
+        metric_entry="metric.py:score",
         metric_code="",
         drafts={},
         cases_file="cases.jsonl",
@@ -4702,3 +4704,94 @@ def test_a_setting_the_engine_loop_cannot_give_the_files_proposer_fails_the_setu
     with pytest.raises(ConstraintsError, match=re.escape(f"cannot give {setting} to the [proposer] entry")) as caught:
         _stage_with(files, monkeypatch, payload=payload)
     assert (caught.value.section, caught.value.key) == ("proposer", key)
+
+
+_COMMAND_TREE = {
+    "optimize.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n'
+    '[metric]\nfiles = ["eval"]\nentry = ["bash", "eval/metric.sh"]\n',
+    "src/app.py": "def run(case):\n    return case\n",
+    "eval/metric.sh": '#!/usr/bin/env bash\necho \'{"score": 1}\' > "$ASCENT_OUTPUT"\n',
+    "eval/words.txt": "alpha\nbeta\n",
+}
+
+
+def test_a_command_metric_entry_stages_without_metric_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Python scorer with no metric code stages when ``[metric] entry`` is a command (SKY-738)."""
+    payload = {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": None, "command_metric": True}}
+    _, staged = _stage_with(_COMMAND_TREE, monkeypatch, payload)
+    staged.cleanup()
+
+    assert staged.metric_entry == ("bash", "eval/metric.sh")
+
+
+def test_a_python_metric_entry_without_metric_code_fails_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default ``metric.py:score`` entry needs the run's metric code, and the message names both fixes."""
+    payload = {**_payload("c" * 40), "scorer": {"kind": "python", "metric_code": "", "command_metric": True}}
+
+    with pytest.raises(ConstraintsError, match=re.escape("names a Python function")) as caught:
+        _stage_with(_METRIC_TREE, monkeypatch, payload)
+    assert (caught.value.section, caught.value.key) == ("metric", "entry")
+    assert "metric.py:score" in str(caught.value)
+    assert 'entry = ["./metric.sh"]' in str(caught.value)
+
+
+def test_the_metric_hash_matches_the_documented_sha256sum_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record's metric hash equals the shell line in the docs, run on the two metric files (SKY-738)."""
+    if shutil.which("sha256sum") is None:
+        pytest.skip("sha256sum is not installed")
+    _, staged = _stage_with(_COMMAND_TREE, monkeypatch, _record_payload())
+    staged.cleanup()
+    for name in ("eval/metric.sh", "eval/words.txt"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(_COMMAND_TREE[name])
+    line = (
+        'for f in eval/metric.sh eval/words.txt; do printf \'%s\\0%s\\0%s\' "$f" "$(wc -c < "$f" | tr -d \' \')"'
+        ' "$(sha256sum "$f" | cut -d\' \' -f1)"; done | sha256sum'
+    )
+    shell = subprocess.run(["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=True)
+
+    assert staged.record_facts["metric_sha256"] == shell.stdout.split()[0]
+
+
+def test_a_python_and_a_command_entry_hash_the_same_metric_files(tmp_path: Path) -> None:
+    """Request code counts as one file at the entry path, so the two entry forms give one hash (SKY-738)."""
+    code = "def score(repo_path, case, output=None):\n    return 1.0\n"
+    files = {"eval/metric.sh": "exit 0\n"}
+    command = tmp_path / "command"
+    command.mkdir()
+    python = tmp_path / "python"
+    python.mkdir()
+    facts = {}
+    for name, folder, tree, entry, metric_code in (
+        ("command", command, {**files, "eval/metric.py": code}, ("bash", "eval/metric.sh"), ""),
+        ("python", python, files, "eval/metric.py:score", code),
+    ):
+        facts[name] = repo_staging._record_facts(
+            _tree(folder, tree),
+            contract_sha256="0" * 64,
+            metric_files=("eval",),
+            metric_entry=entry,
+            metric_code=metric_code,
+            drafts={},
+            cases_file=None,
+            cases=None,
+        )
+
+    expected = hashlib.sha256(_framed("eval/metric.py", code.encode()) + _framed("eval/metric.sh", b"exit 0\n"))
+    assert facts["command"]["metric_sha256"] == facts["python"]["metric_sha256"] == expected.hexdigest()
+
+
+def test_a_command_entry_ignores_request_code_in_the_metric_hash(tmp_path: Path) -> None:
+    """A command metric does not run the request's code, so the code is not a part of the hash."""
+    facts = repo_staging._record_facts(
+        _tree(tmp_path, {"eval/metric.sh": "exit 0\n"}),
+        contract_sha256="0" * 64,
+        metric_files=("eval",),
+        metric_entry=("bash", "eval/metric.sh"),
+        metric_code="def score(): return 1\n",
+        drafts={},
+        cases_file=None,
+        cases=None,
+    )
+
+    assert facts["metric_sha256"] == hashlib.sha256(_framed("eval/metric.sh", b"exit 0\n")).hexdigest()

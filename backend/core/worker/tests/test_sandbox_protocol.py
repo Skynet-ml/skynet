@@ -39,6 +39,8 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     17: {"blackbox": "f9cc6701c073a012"},
     # proposer.host_cli_auto: a host_cli that local mode filled in (SKY-753).
     18: {"blackbox": "21df1d4329719130"},
+    # scorer.command_metric: a command [metric] entry needs no metric_code (SKY-738).
+    19: {"blackbox": "3e02206ab3dc54ab"},
 }
 
 

@@ -476,3 +476,13 @@ def test_a_stored_text_or_agent_run_still_loads_for_its_history(target: dict[str
 
     assert request.target.kind == target["kind"]
     assert request.seed_candidate == "candidate"
+
+
+def test_a_command_metric_scorer_needs_no_metric_code() -> None:
+    """A command ``[metric] entry`` runs in the metric box, so the scorer may carry no code (SKY-738)."""
+    request = BlackboxRunRequest.model_validate(_repo_request(scorer={"kind": "python", "command_metric": True}))
+
+    assert request.scorer.command_metric is True
+    assert request.scorer.metric_code is None
+    with pytest.raises(ValidationError, match="needs metric_code"):
+        BlackboxRunRequest.model_validate(_repo_request(scorer={"kind": "python"}))

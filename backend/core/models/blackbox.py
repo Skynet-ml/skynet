@@ -143,9 +143,13 @@ BlackboxCandidate = str | dict[str, str]
 # ``install_command`` runs inside the offline managed sandbox. It may use
 # dependencies already in the immutable image or deployment-owned package
 # artifacts; it cannot reach a public package registry at run time.
+# ``command_metric`` says the repository's ``optimize.toml`` names a command
+# ``[metric] entry``: the metric box runs that command, so the request needs no
+# ``metric_code``, and the run fails at staging if the entry is Python (SKY-738).
 class BlackboxScorer(BaseModel):
     kind: Literal["python", "remote"] = "python"
     metric_code: str | None = None
+    command_metric: bool = False
     url: str | None = None
     secret: str | None = None
     timeout_seconds: float = Field(default=60.0, gt=0, le=600)
@@ -161,10 +165,10 @@ class BlackboxScorer(BaseModel):
             The validated scorer instance.
 
         Raises:
-            ValueError: When a python scorer has no code or a remote scorer
-                has no URL.
+            ValueError: When a python scorer has no code and no command
+                metric, or a remote scorer has no URL.
         """
-        if self.kind == "python" and not (self.metric_code or "").strip():
+        if self.kind == "python" and not self.command_metric and not (self.metric_code or "").strip():
             raise ValueError("A python scorer needs metric_code.")
         if self.kind == "remote" and not (self.url or "").strip():
             raise ValueError("A remote scorer needs a url.")
