@@ -12,8 +12,6 @@ only what needs Skynet:
   the package Skynet's Compose parser, so the file's services fill
   ``compose_services``.
 - ``CONSTRAINTS_REQUIRED``, the text that a new run without a contract gets.
-- The refusal of Skynet's launch key token in ``[proposer] entry`` and
-  ``setup``: the package refuses only the older tokens (SKY-776).
 
 The file format and its errors: ``docs/repository-constraints.md`` and the
 package's own documentation.
@@ -54,7 +52,6 @@ from openascent.contract import read_constraints as _read_constraints
 
 from ....sandbox.capabilities import VERCEL_CAPABILITIES
 from ....sandbox.services import parse_compose
-from .harness_bridge import KEY_ENV, KEY_TOKEN
 
 __all__ = [
     "CONSTRAINTS_FILE",
@@ -95,32 +92,6 @@ CONSTRAINTS_REQUIRED = (
 _LIMITS = RunnerLimits(max_vcpus=VERCEL_CAPABILITIES.max_vcpus, max_timeout=None)
 
 
-def _refuse_key_token(constraints: RepoConstraints) -> RepoConstraints:
-    """Refuse a ``[proposer] entry`` or ``setup`` that contains the launch key token.
-
-    The harness bridge puts the proposer's relay key in place of the token, so
-    a command with it would carry the key in its text (SKY-776).
-
-    Args:
-        constraints: The validated proposal.
-
-    Returns:
-        ``constraints``, unchanged.
-
-    Raises:
-        ConstraintsError: When ``entry`` or ``setup`` contains the token.
-    """
-    for key, command in (("entry", constraints.proposer_entry), ("setup", constraints.proposer_setup)):
-        if any(KEY_TOKEN in part for part in command or ()):
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: [proposer] {key} cannot contain {KEY_TOKEN}. The command reads the model"
-                f" key from the {KEY_ENV} environment variable.",
-                section="proposer",
-                key=key,
-            )
-    return constraints
-
-
 def parse_constraints(raw: bytes, *, require_version: bool = True, legacy_forms: bool = False) -> RepoConstraints:
     """Check the bytes of a contract file with the package parser and Skynet's limits.
 
@@ -140,12 +111,9 @@ def parse_constraints(raw: bytes, *, require_version: bool = True, legacy_forms:
 
     Raises:
         ConstraintsError: When the file is too large, not TOML, or holds an
-            unknown, malformed, or unsupported setting, or when a ``[proposer]``
-            command contains the launch key token.
+            unknown, malformed, or unsupported setting.
     """
-    return _refuse_key_token(
-        _parse_constraints(raw, require_version=require_version, limits=_LIMITS, legacy_forms=legacy_forms)
-    )
+    return _parse_constraints(raw, require_version=require_version, limits=_LIMITS, legacy_forms=legacy_forms)
 
 
 def read_constraints(
@@ -164,14 +132,12 @@ def read_constraints(
 
     Raises:
         ConstraintsError: When the file or a file it names is invalid, or when
-            the ``[sandbox] compose`` file is not a compose file the box can run,
-            or when a ``[proposer]`` command contains the launch key token.
+            the ``[sandbox] compose`` file is not a compose file the box can run.
     """
-    constraints = _read_constraints(
+    return _read_constraints(
         archive,
         require_version=require_version,
         limits=_LIMITS,
         compose_parser=parse_compose,
         legacy_forms=legacy_forms,
     )
-    return None if constraints is None else _refuse_key_token(constraints)

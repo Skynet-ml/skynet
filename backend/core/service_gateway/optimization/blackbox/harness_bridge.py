@@ -43,7 +43,7 @@ CONFIG_ENV = "APP_PROPOSER_CONFIG"
 KEY_ENV = "ASCENT_MODEL_KEY"
 # The serialized launch travels through the sandbox input file, so the gateway
 # key is replaced by this token and only restored from the process environment.
-# ``repo_constraints`` refuses it in the contract file's own commands (SKY-776).
+# The openascent parser refuses it in the contract file's own commands (SKY-776).
 KEY_TOKEN = "__ASCENT_MODEL_KEY__"
 # The key tokens before SKY-776. The bridge no longer fills them, so a saved launch that still holds one is refused:
 # otherwise its harness would send the token's text as the key and fail auth with no clear reason.

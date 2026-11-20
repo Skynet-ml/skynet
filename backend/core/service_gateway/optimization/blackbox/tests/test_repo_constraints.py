@@ -293,7 +293,7 @@ def test_a_command_path_through_a_tracked_link_is_refused(
 
 @pytest.mark.parametrize("key", ["entry", "setup"])
 def test_a_proposer_command_with_the_launch_key_token_is_refused(tmp_path: Path, key: str) -> None:
-    """The bridge puts the relay key in place of the token, so a command cannot name it (SKY-776).
+    """The bridge puts the relay key in place of the token, so the package refuses it in a command (SKY-776).
 
     Args:
         tmp_path: Folder for the packed snapshot.
@@ -311,6 +311,23 @@ def test_a_proposer_command_with_the_launch_key_token_is_refused(tmp_path: Path,
 
     assert (parsed.value.section, parsed.value.key) == ("proposer", key)
     assert (read.value.section, read.value.key) == ("proposer", key)
+
+
+@pytest.mark.parametrize("vendor", ["APP", "SKYNET"])
+def test_an_old_key_token_in_the_proposer_entry_names_the_current_key_variable(vendor: str) -> None:
+    """The refusal of a key token from before SKY-776 points at ``ASCENT_MODEL_KEY``, which every box sets.
+
+    Args:
+        vendor: The old token's prefix.
+    """
+    old_variable = f"{vendor}_API_KEY"
+    raw = f'version = 1\n[run]\nentry = "run.py:main"\n[proposer]\nentry = ["node", "--key=__{old_variable}__"]\n'
+
+    with pytest.raises(ConstraintsError, match=f"cannot contain __{old_variable}__.*ASCENT_MODEL_KEY") as caught:
+        parse_constraints(raw.encode())
+
+    assert (caught.value.section, caught.value.key) == ("proposer", "entry")
+    assert "_".join(("APP", "API", "KEY")) not in str(caught.value).replace(f"__{old_variable}__", "")
 
 
 @pytest.mark.parametrize(

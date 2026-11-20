@@ -162,6 +162,10 @@ def test_a_stock_openai_client_reaches_the_model_through_the_model_url(tmp_path:
     """In each box a stock OpenAI client on ``ASCENT_MODEL_URL`` gets answers, tool calls and a stream.
 
     A request for another model gets an error that names ``ASCENT_MODEL`` and never reaches the supervisor.
+
+    Args:
+        tmp_path: Folder for the proxy's config and its answer mailbox.
+        box: The box whose real env builder gives the model env.
     """
     responses = tmp_path / "responses"
     config = tmp_path / "config.json"
