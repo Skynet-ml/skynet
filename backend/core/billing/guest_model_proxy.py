@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -18,7 +19,7 @@ from uuid import uuid4
 
 RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
 GATEWAY_URL_ENV = "ASCENT_MODEL_URL"
-# The model of the run. A chat request that names another model gets an error that names this variable (SKY-776).
+# The model of the run. A model request that names another model gets an error that names this variable (SKY-776).
 MODEL_ENV = "ASCENT_MODEL"
 # A built-in agent session gets its ASCENT_MODEL only in its own processes, so the harness bridge
 # names it in this folder for the session's route key (SKY-884). A box without its own ASCENT_MODEL
@@ -26,6 +27,12 @@ MODEL_ENV = "ASCENT_MODEL"
 MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
 # The provider prefixes that a built-in agent puts before ASCENT_MODEL: LiteLLM's and the harness provider's.
 _AGENT_PREFIXES = ("openai/", "app/")
+# The box user can write the bindings folder, so the proxy reads only short, one-line names from it.
+_BINDING_MAX_BYTES = 256
+_MODEL_NAME_MAX = 200
+# The model routes whose body names its model at the top level: OpenAI chat, OpenAI Responses (Codex) and
+# Anthropic messages.
+_MODEL_PATHS = ("/chat/completions", "/responses", "/messages")
 # The pinned sandbox image predates the APP_* names and reads only this one.
 _LEGACY_RELAY_URL_ENV = "SKYNET_BUDGET_RELAY_URL"
 _PRINT_LOCK = threading.Lock()
@@ -193,10 +200,11 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
-    bindings = (response_dir.parent / "models").resolve()
-    bindings.mkdir(exist_ok=True)
-    # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
-    os.environ[MODEL_BINDINGS_ENV] = str(bindings)
+    if not _runs_as_root():
+        bindings = (response_dir.parent / "models").resolve()
+        bindings.mkdir(exist_ok=True)
+        # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
+        os.environ[MODEL_BINDINGS_ENV] = str(bindings)
     environment = {
         **os.environ,
         RELAY_URL_ENV: f"{endpoint}/v1",
@@ -288,28 +296,78 @@ def _request_key(headers: Message) -> str:
     return bearer.removeprefix("Bearer ").strip() or (headers.get("x-api-key") or "").strip()
 
 
+def _runs_as_root() -> bool:
+    """Return whether this proxy runs as root.
+
+    Returns:
+        Whether the effective user is root; ``False`` on a platform without user ids.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
 def _bound_models(key: str) -> list[str]:
     """Return the models that built-in agent sessions named for a route key.
+
+    A root proxy reads no bindings: only the scorer's supervisor runs it as
+    root, the box user can rewrite its folder, and no built-in agent session
+    runs there. A link or a special file in the folder could otherwise make
+    root read a secret into the error, or hang a handler.
 
     Args:
         key: The request's route key.
 
     Returns:
-        The models, or an empty list when no session named one for the key.
+        The valid model names, or an empty list when no session named one for the key.
     """
     folder = os.environ.get(MODEL_BINDINGS_ENV)
-    if not folder or not key:
+    if not folder or not key or _runs_as_root():
         return []
+    directory = Path(folder) / key_digest(key)
     try:
+        if not all(stat.S_ISDIR(os.lstat(path).st_mode) for path in (Path(folder), directory)):
+            return []
         # The bridge writes each name to a dot file first, then renames it, so a dot file can be partial.
-        files = [file for file in sorted((Path(folder) / key_digest(key)).iterdir()) if not file.name.startswith(".")]
-        return [file.read_text(encoding="utf-8") for file in files]
+        names = sorted(entry.name for entry in directory.iterdir() if not entry.name.startswith("."))
     except OSError:
         return []
+    return [model for model in (_read_binding(directory / name) for name in names) if model is not None]
+
+
+def _read_binding(path: Path) -> str | None:
+    """Read one model name from a regular file, never through a link.
+
+    Args:
+        path: A binding file.
+
+    Returns:
+        The model name, or ``None`` when the file is not a short, one-line, printable name.
+    """
+    # O_NONBLOCK keeps a FIFO from blocking the open; fstat then refuses it.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        raw = os.read(descriptor, _BINDING_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    try:
+        model = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if len(raw) > _BINDING_MAX_BYTES or not 0 < len(model) <= _MODEL_NAME_MAX or not model.isprintable():
+        return None
+    return model
 
 
 def _other_model_refusal(path: str, body: bytes, key: str = "") -> bytes | None:
-    """Return the error body for a chat request that names another model than ``ASCENT_MODEL``.
+    """Return the error body for a model request that names another model than ``ASCENT_MODEL``.
 
     The gateway refuses such a request too, but its error does not say which
     variable holds the model, so the box answers first. A box without its own
@@ -325,7 +383,7 @@ def _other_model_refusal(path: str, body: bytes, key: str = "") -> bytes | None:
         An OpenAI-shaped error body, or ``None`` when the request may go on.
     """
     box_model = os.environ.get(MODEL_ENV)
-    if not path.split("?", 1)[0].endswith("/chat/completions"):
+    if not path.split("?", 1)[0].endswith(_MODEL_PATHS):
         return None
     allowed = [box_model] if box_model else _bound_models(key)
     if not allowed:

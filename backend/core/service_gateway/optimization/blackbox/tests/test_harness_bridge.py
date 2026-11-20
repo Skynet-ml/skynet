@@ -4134,6 +4134,27 @@ print("done")
 _AGENT_NAMES = ("run-model", "openai/run-model", "app/run-model", "litellm_proxy/run-model")
 
 
+@pytest.fixture
+def bindings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Give a non-root box proxy a model bindings folder and no ``ASCENT_MODEL`` of its own.
+
+    Args:
+        tmp_path: Holds the bindings folder.
+        monkeypatch: Sets the folder, removes ``ASCENT_MODEL`` and makes the proxy a non-root user.
+
+    Returns:
+        The bindings folder.
+    """
+    folder = tmp_path / "models"
+    folder.mkdir()
+    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
+    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(folder))
+    monkeypatch.setattr(guest_model_proxy.os, "geteuid", lambda: 1000, raising=False)
+    return folder
+
+
+# The test cannot change the proxy subprocess's user, and a root proxy reads no bindings.
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="a root box proxy reads no model bindings")
 def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_model(tmp_path: Path) -> None:
     """A session's request for another model gets the box error that names ``ASCENT_MODEL`` (SKY-884).
 
@@ -4171,6 +4192,9 @@ def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_mo
         env=env,
     )
     relayed = []
+    # A hung proxy closes its output when killed, so the loop ends and the test fails instead of blocking.
+    watchdog = threading.Timer(60, proxy.kill)
+    watchdog.start()
     try:
         assert proxy.stdout is not None
         for line in proxy.stdout:
@@ -4183,6 +4207,7 @@ def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_mo
                 staged.rename(responses / f"{request['id']}.json")
         assert proxy.wait(timeout=60) == 0
     finally:
+        watchdog.cancel()
         proxy.kill()
 
     statuses = json.loads(record.read_text())
@@ -4195,38 +4220,28 @@ def test_box_proxy_refuses_another_model_in_an_agent_session_and_names_ascent_mo
 
 
 @pytest.mark.parametrize("model", _AGENT_NAMES)
-def test_box_proxy_accepts_each_name_a_built_in_agent_sends(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
-) -> None:
+def test_box_proxy_accepts_each_name_a_built_in_agent_sends(bindings: Path, model: str) -> None:
     """The exact session model and each prefixed form of it pass the box check (SKY-884).
 
     Args:
-        tmp_path: The model bindings folder.
-        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+        bindings: The model bindings folder.
         model: A name of the session's model.
     """
-    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
-    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
-    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
     body = json.dumps({"model": model}).encode()
 
     assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
 
 
 @pytest.mark.parametrize("model", ["other/model", "openai/other", None])
-def test_box_proxy_refuses_another_model_for_a_bound_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str | None
-) -> None:
+def test_box_proxy_refuses_another_model_for_a_bound_key(bindings: Path, model: str | None) -> None:
     """A request for another model with a session's key gets the error that names ``ASCENT_MODEL`` (SKY-884).
 
     Args:
-        tmp_path: The model bindings folder.
-        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+        bindings: The model bindings folder.
         model: Another model's name, or no model.
     """
-    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
-    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
-    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
     body = json.dumps({"model": model}).encode()
 
     refusal = guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key")
@@ -4237,19 +4252,129 @@ def test_box_proxy_refuses_another_model_for_a_bound_key(
     assert "ASCENT_MODEL" in error["message"]
 
 
-def test_box_proxy_lets_a_key_with_no_session_model_go_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_box_proxy_lets_a_key_with_no_session_model_go_on(bindings: Path) -> None:
     """A key that no session named a model for is left to the gateway, and the folder holds no key (SKY-884).
 
     Args:
-        tmp_path: The model bindings folder.
-        monkeypatch: Sets the bindings folder and removes the box's own ``ASCENT_MODEL``.
+        bindings: The model bindings folder.
     """
-    monkeypatch.delenv(guest_model_proxy.MODEL_ENV, raising=False)
-    monkeypatch.setenv(guest_model_proxy.MODEL_BINDINGS_ENV, str(tmp_path))
-    harness_bridge.bind_model(tmp_path, "route-key", "run-model")
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
     body = json.dumps({"model": "other/model"}).encode()
 
     assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "another-key") is None
     assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body) is None
-    assert [path.name for path in tmp_path.iterdir()] == [guest_model_proxy.key_digest("route-key")]
-    assert "route-key" not in "".join(path.read_text() for path in tmp_path.rglob("*") if path.is_file())
+    assert [path.name for path in bindings.iterdir()] == [guest_model_proxy.key_digest("route-key")]
+    assert "route-key" not in "".join(path.read_text() for path in bindings.rglob("*") if path.is_file())
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/messages"])
+def test_box_proxy_checks_the_responses_and_messages_routes(bindings: Path, path: str) -> None:
+    """Codex's Responses requests and Anthropic messages get the same model check as chat (SKY-884).
+
+    Args:
+        bindings: The model bindings folder.
+        path: A model route that names its model at the top level of the body.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+
+    refusal = guest_model_proxy._other_model_refusal(path, json.dumps({"model": "other/model"}).encode(), "route-key")
+
+    assert refusal is not None
+    assert "ASCENT_MODEL" in json.loads(refusal)["error"]["message"]
+    accepted = json.dumps({"model": "openai/run-model"}).encode()
+    assert guest_model_proxy._other_model_refusal(path, accepted, "route-key") is None
+
+
+def _refusal_message(key: str = "route-key") -> str:
+    """Return the box error for a request for another model with a key.
+
+    Args:
+        key: The request's route key.
+
+    Returns:
+        The error message.
+    """
+    refusal = guest_model_proxy._other_model_refusal(
+        "/v1/chat/completions", json.dumps({"model": "other/model"}).encode(), key
+    )
+    assert refusal is not None
+    return json.loads(refusal)["error"]["message"]
+
+
+def test_box_proxy_ignores_a_linked_binding_file(bindings: Path, tmp_path: Path) -> None:
+    """A link in a key folder never puts the linked file's text in the error.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the secret that the link points at.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    secret = tmp_path / "environ"
+    secret.write_text("APP_MCP_RELAY_TOKEN=secret-value")
+    (bindings / guest_model_proxy.key_digest("route-key") / "linked").symlink_to(secret)
+
+    message = _refusal_message()
+
+    assert "secret-value" not in message
+    assert "run-model" in message
+
+
+def test_box_proxy_ignores_a_linked_key_folder(bindings: Path, tmp_path: Path) -> None:
+    """A key folder that is a link is not read, so the request goes on to the gateway.
+
+    Args:
+        bindings: The model bindings folder.
+        tmp_path: Holds the folder that the link points at.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "name").write_text("secret-value")
+    (bindings / guest_model_proxy.key_digest("route-key")).symlink_to(elsewhere, target_is_directory=True)
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
+
+
+@pytest.mark.parametrize("text", ["x" * 300, "run-model\nAPP_MCP_RELAY_TOKEN=secret-value", ""])
+def test_box_proxy_ignores_a_long_or_multi_line_binding(bindings: Path, text: str) -> None:
+    """A binding that is not one short printable line is skipped, and its text is not in the error.
+
+    Args:
+        bindings: The model bindings folder.
+        text: An oversized, multi-line or empty binding.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    (bindings / guest_model_proxy.key_digest("route-key") / "bad").write_text(text)
+
+    message = _refusal_message()
+
+    assert "secret-value" not in message
+    assert "x" * 300 not in message
+    assert "(run-model)" in message
+
+
+def test_box_proxy_ignores_a_fifo_binding(bindings: Path) -> None:
+    """A FIFO in a key folder neither blocks the handler nor counts as a model.
+
+    Args:
+        bindings: The model bindings folder.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    os.mkfifo(bindings / guest_model_proxy.key_digest("route-key") / "fifo")
+
+    assert "(run-model)" in _refusal_message()
+
+
+def test_root_box_proxy_reads_no_bindings(bindings: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root proxy, as the scorer's supervisor runs it, reads no model bindings.
+
+    Args:
+        bindings: The model bindings folder.
+        monkeypatch: Makes the proxy root.
+    """
+    harness_bridge.bind_model(bindings, "route-key", "run-model")
+    monkeypatch.setattr(guest_model_proxy.os, "geteuid", lambda: 0, raising=False)
+    body = json.dumps({"model": "other/model"}).encode()
+
+    assert guest_model_proxy._bound_models("route-key") == []
+    assert guest_model_proxy._other_model_refusal("/v1/chat/completions", body, "route-key") is None
