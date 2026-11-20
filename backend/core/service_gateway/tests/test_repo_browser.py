@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from ...api.errors import DomainError
 from ..agents import repo_browser
 from ..agents.repo_browser import KEY_FILE_BYTES, RepoBrowser
 
@@ -128,3 +131,49 @@ def _with_editable(paths: list[str]) -> RepoBrowser:
         entries=[{"path": "a.py", "type": "file"}],
         truncated=False,
     )
+
+
+def test_read_unmetered_skips_the_read_limit_and_the_read_list(monkeypatch) -> None:
+    """An unmetered read works past the read limit, does not use a read, and returns ``None`` for a missing file."""
+    reads: list[tuple[str, int]] = []
+
+    def fake_read(_token: str, _repo: str, _branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+        """Record the read and return short text."""
+        reads.append((path, max_bytes))
+        return f"contents of {path}", False
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", fake_read)
+    browser = _browser(["optimize.toml"])
+    browser._reads = repo_browser.READS_PER_TURN
+
+    assert browser.read_unmetered("optimize.toml", 100) == ("contents of optimize.toml", False)
+    assert browser.read_unmetered("missing.toml", 100) is None
+    assert reads == [("optimize.toml", 100)]
+    assert browser._reads == repo_browser.READS_PER_TURN
+    assert browser.files_read == []
+
+
+def test_read_unmetered_asks_the_host_when_the_tree_is_cut(monkeypatch) -> None:
+    """On a cut tree an unlisted file is read from the host: a 404 means no file, another failure raises."""
+    answers: dict[str, Exception | tuple[str, bool]] = {
+        "optimize.toml": ("contents", False),
+        "missing.toml": DomainError("connectors.not_found", status=404, provider="GitHub"),
+        "broken.toml": DomainError("connectors.unreachable", status=502, provider="GitHub"),
+    }
+
+    def fake_read(_token: str, _repo: str, _branch: str, path: str, _max_bytes: int) -> tuple[str, bool]:
+        """Answer like the host would for each path."""
+        answer = answers[path]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(repo_browser.github, "read_text_file", fake_read)
+    browser = RepoBrowser(
+        token="t", repository="acme/shop", branch="main", editable_paths=["."], entries=[], truncated=True
+    )
+
+    assert browser.read_unmetered("optimize.toml", 100) == ("contents", False)
+    assert browser.read_unmetered("missing.toml", 100) is None
+    with pytest.raises(DomainError):
+        browser.read_unmetered("broken.toml", 100)

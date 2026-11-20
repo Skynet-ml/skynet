@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from ...api.errors import DomainError
 from ...connectors import github, repo_hosts
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,32 @@ class RepoBrowser:
             return text
 
         return self._tool(run)
+
+    def read_unmetered(self, path: str, limit: int) -> tuple[str, bool] | None:
+        """Read one repository file for Skynet's own checks, outside the agent's read limit.
+
+        The read does not count toward the per-turn read limit and is not
+        added to ``files_read``: it is not the agent's read.
+
+        Args:
+            path: File path inside the repository, exactly as the tree shows it.
+            limit: Most bytes to return.
+
+        Returns:
+            The text and whether it was cut at ``limit``, or ``None`` when the
+            repository has no such file. A failed host read raises.
+        """
+        if path not in self._files:
+            if not self._truncated:
+                return None
+            # A cut tree may not list the file, so only the host's 404 proves it is missing.
+            try:
+                return self._read_text(path, limit)
+            except DomainError as error:
+                if error.code == "connectors.not_found":
+                    return None
+                raise
+        return self._read_text(path, limit)
 
     def overview(self) -> RepoRead:
         """Show the repository's tree with its README and manifest, as one read.
