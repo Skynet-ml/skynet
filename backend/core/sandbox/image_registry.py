@@ -10,7 +10,9 @@ pins it. v1 uses one ECR repository for each owner in Skynet's account
 from __future__ import annotations
 
 import base64
+import json
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -38,6 +40,14 @@ _PUSH_ACTIONS = (
     "ecr:PutImage",
     "ecr:UploadLayerPart",
 )
+_PULL_ACTIONS = (
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:BatchGetImage",
+    "ecr:GetDownloadUrlForLayer",
+)
+# The worker task role assumes the pull role (role chaining), so AWS caps the
+# session at one hour.
+_PULL_SESSION_SECONDS = 3600
 
 
 class ImageRegistryError(RuntimeError):
@@ -116,8 +126,11 @@ class ImageRegistry(Protocol):
         """
         ...
 
-    def pull_credentials(self) -> RegistryCredentials:
-        """Return credentials to pull from the registry.
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return credentials that pull only from the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
 
         Returns:
             The short-lived credentials.
@@ -146,6 +159,18 @@ class ImageRegistry(Protocol):
         Args:
             owner: The owner of the repository.
             digest: The image digest, ``sha256:<64 hex>``.
+
+        Raises:
+            ImageRegistryError: The registry refused the delete.
+        """
+        ...
+
+    def delete_cache(self, owner: str, scope: str) -> None:
+        """Delete the build cache manifest of one scope from the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+            scope: The cache name inside the owner's repository.
 
         Raises:
             ImageRegistryError: The registry refused the delete.
@@ -210,16 +235,34 @@ class EcrRegistry:
 
     The repositories are ``<prefix>/<owner>``. ECR creates each one on its
     first push from the repository creation template in Terraform. The boto3
-    ECR client is injected, so tests pass a fake and the caller chooses the
+    clients are injected, so tests pass fakes and the caller chooses the
     credentials and the Region.
+
+    Pull credentials never come from the worker's own role, which reaches
+    every owner's repository. The registry assumes the pull role with a
+    session policy for one owner, so a box that gets the token can pull only
+    that owner's images.
     """
 
-    def __init__(self, client: Any, repository_prefix_uri: str) -> None:
-        """Bind the registry to one repository prefix.
+    def __init__(
+        self,
+        client: Any,
+        repository_prefix_uri: str,
+        *,
+        sts: Any,
+        pull_role_arn: str,
+        ecr_for: Callable[[Mapping[str, Any]], Any],
+    ) -> None:
+        """Bind the registry to one repository prefix and its pull role.
 
         Args:
             client: A boto3 ECR client (or a fake with the same methods).
             repository_prefix_uri: ``<account>.dkr.ecr.<region>.amazonaws.com/<prefix>``.
+            sts: A boto3 STS client.
+            pull_role_arn: The role to assume, with an owner session policy,
+                for pull credentials.
+            ecr_for: Make an ECR client from the ``Credentials`` that STS
+                ``AssumeRole`` returns.
 
         Raises:
             ImageRegistryError: The URI is not an ECR repository prefix URI.
@@ -228,6 +271,9 @@ class EcrRegistry:
         if match is None:
             raise ImageRegistryError(f"not an ECR repository prefix URI: {repository_prefix_uri!r}")
         self._client = client
+        self._sts = sts
+        self._pull_role = pull_role_arn
+        self._ecr_for = ecr_for
         self.registry_id = match["registry"]
         self.region = match["region"]
         self.prefix = match["prefix"]
@@ -282,6 +328,26 @@ class EcrRegistry:
                 # GetAuthorizationToken has no resource-level permission.
                 {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
                 {"Effect": "Allow", "Action": list(_PUSH_ACTIONS), "Resource": self.repository_arn(owner)},
+            ],
+        }
+
+    def pull_session_policy(self, owner: str) -> dict[str, Any]:
+        """Return the IAM session policy that limits pull credentials to one owner.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            The policy document.
+
+        Raises:
+            ImageRegistryError: The owner is not valid.
+        """
+        return {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
+                {"Effect": "Allow", "Action": list(_PULL_ACTIONS), "Resource": self.repository_arn(owner)},
             ],
         }
 
@@ -344,16 +410,30 @@ class EcrRegistry:
         """
         return f"{self._uri(owner)}@{require_digest(digest)}"
 
-    def pull_credentials(self) -> RegistryCredentials:
-        """Return an ECR authorization token as registry credentials.
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return an ECR token that pulls only from the owner's repository.
+
+        The token comes from the pull role, assumed with the owner's session
+        policy. The expiry is the earlier of the token and the session expiry.
+
+        Args:
+            owner: The owner of the repository.
 
         Returns:
             The user name, password, server and expiry of the token.
 
         Raises:
-            ImageRegistryError: ECR returns no token or a token in an unknown form.
+            ImageRegistryError: The owner is invalid, or ECR returns no token
+                or a token in an unknown form.
         """
-        response = self._client.get_authorization_token(registryIds=[self.registry_id])
+        policy = self.pull_session_policy(owner)
+        session = self._sts.assume_role(
+            RoleArn=self._pull_role,
+            RoleSessionName="skynet-image-pull",
+            Policy=json.dumps(policy, separators=(",", ":")),
+            DurationSeconds=_PULL_SESSION_SECONDS,
+        )["Credentials"]
+        response = self._ecr_for(session).get_authorization_token(registryIds=[self.registry_id])
         data = response.get("authorizationData") or []
         if not data:
             raise ImageRegistryError("ECR returned no authorization token")
@@ -361,11 +441,12 @@ class EcrRegistry:
         username, sep, password = base64.b64decode(token["authorizationToken"]).decode().partition(":")
         if not sep:
             raise ImageRegistryError("ECR returned an authorization token in an unknown form")
+        expiries = [e for e in (token.get("expiresAt"), session.get("Expiration")) if e is not None]
         return RegistryCredentials(
             server=self.server,
             username=username,
             password=password,
-            expires_at=token.get("expiresAt"),
+            expires_at=min(expiries) if expiries else None,
         )
 
     def check_digest(self, owner: str, digest: str) -> RegistryImage:
@@ -413,17 +494,44 @@ class EcrRegistry:
         Raises:
             ImageRegistryError: The digest is malformed or ECR refused the delete.
         """
+        self._batch_delete(owner, {"imageDigest": require_digest(digest)})
+
+    def delete_cache(self, owner: str, scope: str) -> None:
+        """Delete the build cache manifest of one scope from the owner's repository.
+
+        The cache layers that only this manifest names become untagged, and
+        the lifecycle rule deletes them after a day.
+
+        Args:
+            owner: The owner of the repository.
+            scope: The cache name inside the owner's repository.
+
+        Raises:
+            ImageRegistryError: The scope makes an invalid tag or ECR refused the delete.
+        """
+        self._batch_delete(owner, {"imageTag": _require_tag(CACHE_TAG_PREFIX + scope)})
+
+    def _batch_delete(self, owner: str, image_id: Mapping[str, str]) -> None:
+        """Delete one image id from the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+            image_id: The ECR image id (a digest or a tag).
+
+        Raises:
+            ImageRegistryError: The owner is invalid or ECR refused the delete.
+        """
         name = self.repository_name(owner)
-        require_digest(digest)
         try:
             response = self._client.batch_delete_image(
                 registryId=self.registry_id,
                 repositoryName=name,
-                imageIds=[{"imageDigest": digest}],
+                imageIds=[dict(image_id)],
             )
         except self._client.exceptions.RepositoryNotFoundException:
             return
         failures = [f for f in response.get("failures", []) if f.get("failureCode") != "ImageNotFound"]
         if failures:
             reason = failures[0].get("failureReason") or failures[0].get("failureCode")
-            raise ImageRegistryError(f"cannot delete image {digest} from {name}: {reason}")
+            label = next(iter(image_id.values()))
+            raise ImageRegistryError(f"cannot delete image {label} from {name}: {reason}")
