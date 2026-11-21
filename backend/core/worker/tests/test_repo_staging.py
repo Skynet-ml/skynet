@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import io
@@ -16,8 +17,10 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,7 +41,7 @@ from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy
+from core.billing.operation_pricing import ChargePolicy, image_build_usd
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
@@ -6297,6 +6300,199 @@ def test_a_cancelled_build_is_charged_keeps_no_record_and_stops_the_run(monkeypa
     assert store.builds == []
     assert len(budget.charges) == 1
     assert runtime.specs == []
+
+
+class _SlowBuilder(_FakeBuilder):
+    """Build like the fake, but let more time pass than the build's time limit."""
+
+    def __init__(self, clock: list[float], *, fail: bool = False) -> None:
+        """Keep the offset that the build moves the clock by.
+
+        Args:
+            clock: The one offset that the patched monotonic clock adds.
+            fail: Whether each build fails.
+        """
+        super().__init__(fail=fail)
+        self._clock = clock
+
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Move the clock past the time limit, then build as the fake does.
+
+        Args:
+            request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
+
+        Returns:
+            What the fake builder returns.
+        """
+        self._clock[0] += image_build.BuildLimits.from_settings().timeout_seconds + 600
+        return super().build(request, cancelled=cancelled)
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["built", "cancelled"])
+def test_a_build_that_runs_past_its_reservation_settles_at_the_reserved_limit(
+    monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    """The settled minutes never pass the reserved time limit, also after a cancel's stop wait (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        cancel: Whether the run is cancelled during the build.
+    """
+    offset = [0.0]
+    monotonic = time.monotonic
+    monkeypatch.setattr(repo_staging.time, "monotonic", lambda: monotonic() + offset[0])
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    budget = _FakeBudget()
+    try:
+        with pytest.raises(ImageBuildCancelledError) if cancel else contextlib.nullcontext():
+            _prepare(
+                staged,
+                _ImageRuntime(),
+                builder=_SlowBuilder(offset),
+                budget=budget,
+                registry=_FakeRegistry({"sha256:" + "b" * 64}),
+                cancelled=lambda: cancel,
+            )
+    finally:
+        staged.cleanup()
+    limit = image_build.BuildLimits.from_settings().timeout_seconds
+    assert [charge["provider_usd"] for charge in budget.charges] == [image_build_usd("codebuild", limit)]
+
+
+class _CancelledBeforeStart(_FakeBuilder):
+    """Stop on a cancel before any paid build starts."""
+
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Raise the cancel that the builder raises before it starts a build.
+
+        Args:
+            request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
+
+        Raises:
+            ImageBuildCancelledError: Always, with no started build.
+        """
+        raise ImageBuildCancelledError("image build not started: the run was cancelled", started=False)
+
+
+def test_a_build_cancelled_before_it_started_costs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel before CodeBuild started the build settles at zero and keeps no record (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget = _ImageStore(), _FakeBudget()
+    try:
+        with pytest.raises(ImageBuildCancelledError):
+            _prepare(staged, _ImageRuntime(), builder=_CancelledBeforeStart(), store=store, budget=budget)
+    finally:
+        staged.cleanup()
+    assert [charge["provider_usd"] for charge in budget.charges] == [Decimal(0)]
+    assert store.builds == []
+
+
+class _StartRecorder:
+    """Stand in for S3, CodeBuild and the registry, and record each upload and build start."""
+
+    def __init__(self) -> None:
+        """Start with no uploads and no starts."""
+        self.calls: list[str] = []
+
+    def push_reference(self, owner: str, tag: str) -> str:
+        """Return a push reference.
+
+        Args:
+            owner: The image owner.
+            tag: The image tag.
+
+        Returns:
+            The reference.
+        """
+        return f"registry/{owner}:{tag}"
+
+    def cache_reference(self, owner: str, scope: str) -> str:
+        """Return a cache reference.
+
+        Args:
+            owner: The image owner.
+            scope: The cache scope.
+
+        Returns:
+            The reference.
+        """
+        return f"registry/{owner}:cache-{scope}"
+
+    def push_session_policy(self, owner: str) -> dict[str, Any]:
+        """Return an empty session policy.
+
+        Args:
+            owner: The image owner.
+
+        Returns:
+            The policy.
+        """
+        return {}
+
+    def upload_fileobj(self, archive: Any, bucket: str, key: str) -> None:
+        """Record an upload.
+
+        Args:
+            archive: The context archive.
+            bucket: The bucket.
+            key: The object key.
+        """
+        self.calls.append("upload")
+
+    def start_build(self, **kwargs: Any) -> dict[str, Any]:
+        """Record a build start.
+
+        Args:
+            **kwargs: The start arguments.
+
+        Returns:
+            A started build.
+        """
+        self.calls.append("start")
+        return {"build": {"id": "build-1"}}
+
+
+@pytest.mark.parametrize(
+    ("answers", "calls"), [([True], []), ([False, True], ["upload"])], ids=["before-upload", "before-start"]
+)
+def test_a_cancel_before_codebuild_starts_the_build_starts_no_build(
+    tmp_path: Path, answers: list[bool], calls: list[str]
+) -> None:
+    """A cancel during the context zip or upload raises before CodeBuild starts a paid build (SKY-891).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        answers: The cancel check's answers, in order.
+        calls: The uploads and starts that must happen before the cancel.
+    """
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    aws = _StartRecorder()
+    builder = CodeBuildImageBuilder(
+        codebuild=aws,
+        logs=None,
+        s3=aws,
+        registry=aws,  # type: ignore[arg-type]
+        project_name="images",
+        source_bucket="bucket",
+        push_role_arn="arn:aws:iam::123456789012:role/push",
+        limits=image_build.BuildLimits(timeout_seconds=600, max_size_bytes=1, max_context_bytes=1_000_000),
+        sleep=lambda _seconds: None,
+        clock=lambda: 0.0,
+    )
+    request = image_build.BuildRequest(context_dir=tmp_path, owner=image_registry.image_owner("alice"))
+    replies = iter(answers)
+
+    with pytest.raises(ImageBuildCancelledError, match="not started") as raised:
+        builder.build(request, cancelled=lambda: next(replies))
+
+    assert raised.value.started is False
+    assert aws.calls == calls
 
 
 class _RunningCodeBuild:

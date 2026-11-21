@@ -154,6 +154,16 @@ class ImageTooLargeError(ImageBuildError):
 class ImageBuildCancelledError(ImageBuildError):
     """Report a build that the builder stopped because its run was cancelled."""
 
+    def __init__(self, message: str, *, started: bool = True) -> None:
+        """Keep the message and whether a paid build started.
+
+        Args:
+            message: What stopped.
+            started: Whether the provider started a build before the cancel.
+        """
+        super().__init__(message)
+        self.started = started
+
 
 # Every build of one owner shares this cache. It is in the owner's repository, so account deletion
 # removes it with the repository (SKY-891).
@@ -760,8 +770,9 @@ class CodeBuildImageBuilder:
 
         Args:
             request: The Dockerfile, the build context and the build args.
-            cancelled: Tells whether the run was cancelled. Each status poll
-                calls it, and a true answer stops the build before it pushes.
+            cancelled: Tells whether the run was cancelled. The builder calls
+                it before the upload, before the build starts and on each
+                status poll. A true answer stops the build before it pushes.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -772,7 +783,7 @@ class CodeBuildImageBuilder:
             ImageBuildTimeoutError: The build ran longer than the time limit,
                 or waited longer than the queue limit.
             ImageTooLargeError: The pushed image is larger than the size limit.
-            ImageBuildCancelledError: ``cancelled`` answered true while the build ran.
+            ImageBuildCancelledError: ``cancelled`` answered true before or while the build ran.
         """
         dockerfile = _check_request(request)
         input_hash = compute_input_hash(
@@ -791,6 +802,7 @@ class CodeBuildImageBuilder:
         except ImageRegistryError as exc:
             raise ImageBuildError(str(exc)) from exc
         key = f"{self._prefix}{request.owner}/{_hex(input_hash)}/{token}.zip"
+        _raise_if_cancelled_before_start(cancelled)
         with tempfile.TemporaryFile() as archive:
             _zip_context(request.context_dir, archive, self._limits.max_context_bytes)
             archive.seek(0)
@@ -800,6 +812,7 @@ class CodeBuildImageBuilder:
                 raise ImageBuildError(f"cannot upload the build context ({_aws_error(exc)})") from exc
 
         timeout_minutes = max(_MIN_TIMEOUT_MINUTES, math.ceil(self._limits.timeout_seconds / 60))
+        _raise_if_cancelled_before_start(cancelled)
         try:
             started = self._codebuild.start_build(
                 projectName=self._project,
@@ -1076,6 +1089,19 @@ def codebuild_builder(registry: EcrRegistry | None, config: Any = settings) -> C
         source_bucket=bucket,
         push_role_arn=push_role,
     )
+
+
+def _raise_if_cancelled_before_start(cancelled: Callable[[], bool] | None) -> None:
+    """Stop a build whose run was cancelled before CodeBuild started it (SKY-891).
+
+    Args:
+        cancelled: Tells whether the run was cancelled, or ``None``.
+
+    Raises:
+        ImageBuildCancelledError: ``cancelled`` answered true. No build started.
+    """
+    if cancelled is not None and cancelled():
+        raise ImageBuildCancelledError("image build not started: the run was cancelled", started=False)
 
 
 def _aws_error(exc: BaseException) -> str:

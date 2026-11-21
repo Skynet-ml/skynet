@@ -1957,16 +1957,27 @@ def _dockerfile_image(
     limits = BuildLimits.from_settings()
 
     def build() -> PaidResult[BuildResult | ImageBuildError]:
-        """Run the build once and charge its started minutes, also for a failed build."""
+        """Run the build once and charge its started minutes, also for a failed build.
+
+        Returns:
+            The build result or its error, with the charge of its started minutes up
+            to the reserved limit. A build that a cancel stopped before it started
+            costs nothing.
+        """
         started = time.monotonic()
         try:
             value: BuildResult | ImageBuildError = builder.build(request, cancelled=cancelled)
         except ImageBuildError as error:
             value = error
         seconds = time.monotonic() - started
+        # The measured time also holds the upload, the queue, the log wait and a cancel's stop
+        # wait, so it can pass the reserved limit; the settlement must stay inside the reservation.
+        charged = min(seconds, limits.timeout_seconds)
+        if isinstance(value, ImageBuildCancelledError) and not value.started:
+            charged = 0.0
         return PaidResult(
             value=value,
-            provider_usd=image_build_usd(kind, seconds),
+            provider_usd=image_build_usd(kind, charged),
             evidence={"builder": kind, "input_hash": input_hash, "seconds": round(seconds, 3)},
         )
 
