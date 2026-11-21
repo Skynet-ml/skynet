@@ -793,9 +793,10 @@ def test_a_run_in_progress_does_not_block_the_deletion_without_a_registry(
 def test_the_registry_delete_is_the_last_step_before_the_commit(
     harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The repository delete runs after the wallet closure, the user row delete and the shard purge (SKY-891).
+    """The repository delete runs after the wallet closure and the user row delete, before the shard purge (SKY-891).
 
-    The registry has no rollback, so every step that can still fail runs first.
+    The registry has no rollback, so every main-database step runs first. The shard purge commits
+    on its own and cannot roll back, so it runs after the registry delete.
 
     Args:
         harness: The test client and its engine.
@@ -860,7 +861,7 @@ def test_the_registry_delete_is_the_last_step_before_the_commit(
         delete_account(session, _EMAIL, registry_for=lambda: registry)
         session.commit()
 
-    assert steps == ["close-wallet", "purge-shards", "delete-repository"]
+    assert steps == ["close-wallet", "delete-repository", "purge-shards"]
     assert registry.repositories == [image_owner(_EMAIL)]
 
 

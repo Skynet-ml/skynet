@@ -577,7 +577,7 @@ def delete_account(
             still holds a live lease on it; nothing is deleted.
         ImageRegistryError: The user image registry refused to delete the
             account's repository, or its settings are set but not usable;
-            nothing in the main database is deleted.
+            nothing in the main database or the step log shards is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -790,18 +790,21 @@ def delete_account(
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
-    # The other step log shards commit here, as the last step before the caller's main commit, so every
-    # main-database statement above already ran when they commit. The databases have no two-phase commit:
-    # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
-    # deletes it. purge_user ran every check that can fail the deletion before this point.
-    deleted += tree_purge.purge_user_shards(trees)
-    # The registry has no rollback, so its delete is the last step before the caller's commit. The whole
-    # repository goes with every image and tag, the build cache included, because its layers hold the
-    # user's source; a build can push and then stop before it records a row. A refused delete still
-    # rolls the main database back. A deployment with no registry makes no call (SKY-891).
+    # The registry has no rollback, so its delete runs after every main-database statement. It runs
+    # before the shard purge: a refused delete then rolls the main database back and leaves every
+    # shard row, so the account loses nothing that a rebuild cannot restore. The whole repository goes
+    # with every image and tag, the build cache included, because its layers hold the user's source; a
+    # build can push and then stop before it records a row. A deployment with no registry makes no
+    # call (SKY-891).
     # Known gap: Vercel keeps its copy of each image that a Vercel box started from. The Vercel
     # Sandbox SDK has no call that deletes a copied image, so the copies stay in Vercel's registry.
     if registry is not None:
         registry.delete_repository(image_owner(username))
+
+    # The other step log shards commit here, as the last step before the caller's main commit, so every
+    # main-database statement above already ran when they commit. The databases have no two-phase commit:
+    # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
+    # deletes it. purge_user and the registry delete ran every other check that can fail the deletion.
+    deleted += tree_purge.purge_user_shards(trees)
 
     return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

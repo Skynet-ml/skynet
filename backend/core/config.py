@@ -571,7 +571,7 @@ class Settings(BaseSettings):
     image_pull_role_arn: str | None = Field(
         default=None,
         alias="IMAGE_PULL_ROLE_ARN",
-        description="Role the worker assumes, with a session policy for one owner, to get a token that pulls only that owner's images (SKY-891).",
+        description="Role the worker assumes, with a session policy for one owner, to get a token that pulls only that owner's images and reads their manifests and configs for the USER check (SKY-891).",
     )
     image_build_project: str | None = Field(
         default=None,
