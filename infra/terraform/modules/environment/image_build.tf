@@ -327,6 +327,51 @@ resource "aws_codebuild_project" "image_build" {
 
 # ---------------------------------------------------------------- worker access
 
+data "aws_iam_policy_document" "image_build_pull_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.task["worker"].arn]
+    }
+  }
+}
+
+# The worker assumes this role with a session policy for one owner's
+# repository, and gives the token to a box that pulls that owner's image. The
+# session gets the overlap, so the token cannot pull other owners' images.
+resource "aws_iam_role" "image_build_pull" {
+  name               = "${local.image_build_name}-pull"
+  assume_role_policy = data.aws_iam_policy_document.image_build_pull_trust.json
+}
+
+data "aws_iam_policy_document" "image_build_pull" {
+  # GetAuthorizationToken has no resource-level permission.
+  statement {
+    sid       = "EcrLogin"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "PullUserImages"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [local.user_images_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "image_build_pull" {
+  name   = "image-build-pull"
+  role   = aws_iam_role.image_build_pull.id
+  policy = data.aws_iam_policy_document.image_build_pull.json
+}
+
+
 data "aws_iam_policy_document" "image_build_worker" {
   statement {
     sid       = "RunImageBuilds"
@@ -346,24 +391,19 @@ data "aws_iam_policy_document" "image_build_worker" {
     resources = ["${aws_s3_bucket.image_build_source.arn}/*"]
   }
 
-  # The worker checks a digest before it pins it, pulls the image to copy it
-  # into a provider's registry, and deletes an image over the size limit.
+  # The worker checks a digest before it pins it and deletes an image (or its
+  # cache) over the size limit. It gets no pull access of its own: a token
+  # from this role would reach every owner's repository.
   statement {
-    sid       = "EcrLogin"
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"]
+    sid       = "ManageUserImages"
+    actions   = ["ecr:BatchDeleteImage", "ecr:DescribeImages"]
+    resources = [local.user_images_arn]
   }
 
   statement {
-    sid = "ManageUserImages"
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:BatchDeleteImage",
-      "ecr:BatchGetImage",
-      "ecr:DescribeImages",
-      "ecr:GetDownloadUrlForLayer",
-    ]
-    resources = [local.user_images_arn]
+    sid       = "AssumeImagePullRole"
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.image_build_pull.arn]
   }
 }
 

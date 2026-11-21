@@ -478,7 +478,8 @@ def _zip_context(context_dir: Path, target: IO[bytes], max_bytes: int) -> None:
     Raises:
         ImageBuildError: The context cannot be read or is too large.
     """
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    # strict_timestamps=False stores a pre-1980 mtime as 1980 instead of raising.
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
         for entry in _context_entries(context_dir, max_bytes):
             if stat.S_ISLNK(entry.info.st_mode):
                 info = zipfile.ZipInfo(entry.relative)
@@ -565,6 +566,15 @@ def codebuild_buildspec(
                     "iptables -I DOCKER-USER -d 169.254.0.0/16 -j DROP",
                     "iptables -I DOCKER-USER -d 169.254.169.253/32 -p udp --dport 53 -j ACCEPT",
                     "iptables -I DOCKER-USER -d 169.254.169.253/32 -p tcp --dport 53 -j ACCEPT",
+                    # DOCKER-USER sees only forwarded traffic. BuildKit runs on the
+                    # default bridge, and its traffic to the build host's own
+                    # addresses (172.17.0.1, or an endpoint the host DNATs to
+                    # itself) goes through INPUT. buildx reaches buildkitd through
+                    # docker exec, so the build needs only DNS from the host.
+                    # Replies to host-started connections are not NEW, so they pass.
+                    "iptables -I INPUT -i docker0 -m conntrack --ctstate NEW -j DROP",
+                    "iptables -I INPUT -i docker0 -p udp --dport 53 -j ACCEPT",
+                    "iptables -I INPUT -i docker0 -p tcp --dport 53 -j ACCEPT",
                     f"echo {base64.b64encode(helper.encode()).decode()} | base64 -d > {_CREDENTIAL_HELPER_PATH}",
                     f"chmod 755 {_CREDENTIAL_HELPER_PATH}",
                     f"mkdir -p ~/.docker && echo {shlex.quote(docker_config)} > ~/.docker/config.json",
@@ -720,6 +730,12 @@ class CodeBuildImageBuilder:
                 self._registry.delete_image(request.owner, image.digest)
             except ImageRegistryError as exc:
                 message += f"; the image stays in the registry until its lifecycle rule deletes it ({exc})"
+            # mode=max exports every layer to the cache before the size check,
+            # so the cache would keep the over-size layers for 14 days.
+            try:
+                self._registry.delete_cache(request.owner, request.cache_scope)
+            except ImageRegistryError as exc:
+                message += f"; the build cache stays in the registry until its lifecycle rule deletes it ({exc})"
             raise ImageTooLargeError(message, log=log, log_tail=tail)
         return BuildResult(
             image=image.reference,

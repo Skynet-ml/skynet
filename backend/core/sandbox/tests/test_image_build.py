@@ -76,6 +76,8 @@ class FakeRegistry:
         self.sizes = sizes
         self.deleted: list[tuple[str, str]] = []
         self.delete_error: str | None = None
+        self.deleted_caches: list[tuple[str, str]] = []
+        self.cache_delete_error: str | None = None
 
     def _repo(self, owner: str) -> str:
         """Return the owner's repository URI.
@@ -135,8 +137,11 @@ class FakeRegistry:
         """
         return {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Resource": f"repository/{owner}"}]}
 
-    def pull_credentials(self) -> RegistryCredentials:
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
         """Return fixed fake credentials.
+
+        Args:
+            owner: The owner.
 
         Returns:
             The credentials.
@@ -169,6 +174,17 @@ class FakeRegistry:
         if self.delete_error:
             raise ImageRegistryError(self.delete_error)
         self.deleted.append((owner, digest))
+
+    def delete_cache(self, owner: str, scope: str) -> None:
+        """Record a cache delete, or fail when told to.
+
+        Args:
+            owner: The owner.
+            scope: The cache scope.
+        """
+        if self.cache_delete_error:
+            raise ImageRegistryError(self.cache_delete_error)
+        self.deleted_caches.append((owner, scope))
 
 
 class FakeS3:
@@ -633,6 +649,12 @@ def test_buildspec_blocks_link_local_and_scopes_the_push_credentials(tmp_path: P
     commands = json.loads(codebuild.started["buildspecOverride"])["phases"]["pre_build"]["commands"]
     assert commands[0] == "iptables -I DOCKER-USER -d 169.254.0.0/16 -j DROP"
     assert all("169.254.169.253/32" in c and "--dport 53 -j ACCEPT" in c for c in commands[1:3])
+    # Each -I goes first, so the DNS accepts end above the drop of new host connections.
+    assert commands[3:6] == [
+        "iptables -I INPUT -i docker0 -m conntrack --ctstate NEW -j DROP",
+        "iptables -I INPUT -i docker0 -p udp --dport 53 -j ACCEPT",
+        "iptables -I INPUT -i docker0 -p tcp --dport 53 -j ACCEPT",
+    ]
     assert commands[-1] == (f"docker buildx create --use --driver docker-container --driver-opt image={BUILDKIT_IMAGE}")
     assert "@sha256:" in BUILDKIT_IMAGE
     assert not any("docker login" in c for c in commands)
@@ -759,6 +781,7 @@ def test_codebuild_deletes_an_image_over_the_size_limit(tmp_path: Path) -> None:
         builder.build(_request(_context(tmp_path)))
 
     assert registry.deleted == [(OWNER, DIGEST)]
+    assert registry.deleted_caches == [(OWNER, "default")]
 
 
 def test_codebuild_reports_a_failed_delete_of_an_over_size_image(tmp_path: Path) -> None:
@@ -767,8 +790,38 @@ def test_codebuild_reports_a_failed_delete_of_an_over_size_image(tmp_path: Path)
     registry.delete_error = "denied"
     builder, _ = _builder(FakeCodeBuild([_done()]), registry=registry)
 
-    with pytest.raises(ImageTooLargeError, match="stays in the registry"):
+    with pytest.raises(ImageTooLargeError, match="the image stays in the registry") as caught:
         builder.build(_request(_context(tmp_path)))
+
+    assert "build cache stays" not in str(caught.value)
+    assert registry.deleted_caches == [(OWNER, "default")]
+
+
+def test_codebuild_reports_a_failed_cache_delete_of_an_over_size_image(tmp_path: Path) -> None:
+    """When the cache delete fails, the error says that the cache stays."""
+    registry = FakeRegistry({DIGEST: 21_000_000_000})
+    registry.cache_delete_error = "denied"
+    builder, _ = _builder(FakeCodeBuild([_done()]), registry=registry)
+
+    with pytest.raises(ImageTooLargeError, match=r"the build cache stays in the registry .*\(denied\)$"):
+        builder.build(_request(_context(tmp_path)))
+
+    assert registry.deleted == [(OWNER, DIGEST)]
+
+
+def test_zip_context_stores_a_file_with_a_pre_1980_mtime(tmp_path: Path) -> None:
+    """A file or folder older than 1980 goes into the archive instead of raising."""
+    context = _context(tmp_path)
+    os.utime(context / "hello.txt", (0, 0))
+    os.utime(context / "src", (0, 0))
+    target = io.BytesIO()
+
+    image_build._zip_context(context, target, max_bytes=1_000_000)
+
+    with zipfile.ZipFile(io.BytesIO(target.getvalue())) as archive:
+        assert archive.read("hello.txt") == b"hello\n"
+        assert archive.getinfo("hello.txt").date_time[0] == 1980
+        assert archive.getinfo("src/").date_time[0] == 1980
 
 
 def test_codebuild_refuses_an_invalid_owner(tmp_path: Path) -> None:

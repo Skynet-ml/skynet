@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,6 +15,7 @@ SERVER = "123456789012.dkr.ecr.us-east-2.amazonaws.com"
 PREFIX = "skynet/user-images-staging"
 URI = f"{SERVER}/{PREFIX}"
 DIGEST = "sha256:" + "a" * 64
+PULL_ROLE = "arn:aws:iam::123456789012:role/skynet-staging-image-build-pull"
 
 
 class _ImageNotFoundError(Exception):
@@ -112,9 +114,69 @@ class FakeEcr:
         return {"imageIds": [] if self.delete_failures else kwargs["imageIds"], "failures": self.delete_failures}
 
 
+class FakeSts:
+    """Return scripted credentials for AssumeRole and record each call."""
+
+    def __init__(self, expiration: datetime | None = None) -> None:
+        """Hold the session expiry.
+
+        Args:
+            expiration: The ``Expiration`` of the returned credentials.
+        """
+        self.expiration = expiration or datetime(2026, 11, 20, 13, tzinfo=UTC)
+        self.calls: list[dict[str, Any]] = []
+
+    def assume_role(self, **kwargs: Any) -> dict[str, Any]:
+        """Record the call and return session credentials.
+
+        Args:
+            **kwargs: The request.
+
+        Returns:
+            The STS response.
+        """
+        self.calls.append(kwargs)
+        return {
+            "Credentials": {
+                "AccessKeyId": "ASIA-test",
+                "SecretAccessKey": "test-secret",
+                "SessionToken": "test-session",
+                "Expiration": self.expiration,
+            }
+        }
+
+
+def _registry(
+    client: Any,
+    uri: str,
+    *,
+    sts: FakeSts | None = None,
+    ecr_for: Any = None,
+) -> EcrRegistry:
+    """Build a registry with a fake STS client and pull role.
+
+    Args:
+        client: The fake worker ECR client.
+        uri: The repository prefix URI.
+        sts: The fake STS client.
+        ecr_for: The factory for the assumed-role ECR client. The default
+            returns ``client``.
+
+    Returns:
+        The registry.
+    """
+    return EcrRegistry(
+        client,
+        uri,
+        sts=sts or FakeSts(),
+        pull_role_arn=PULL_ROLE,
+        ecr_for=ecr_for or (lambda _credentials: client),
+    )
+
+
 def test_references_use_the_owner_repository() -> None:
     """Push, cache and pinned references name the owner's own repository."""
-    registry = EcrRegistry(FakeEcr(), URI)
+    registry = _registry(FakeEcr(), URI)
 
     assert registry.repository_name("user-7") == f"{PREFIX}/user-7"
     assert registry.push_reference("user-7", "abc-1") == f"{URI}/user-7:abc-1"
@@ -127,12 +189,12 @@ def test_references_use_the_owner_repository() -> None:
 def test_owner_must_be_one_repository_name_component(owner: str) -> None:
     """An owner can never name a path in another owner's repository."""
     with pytest.raises(ImageRegistryError, match="not a valid image owner"):
-        EcrRegistry(FakeEcr(), URI).push_reference(owner, "abc")
+        _registry(FakeEcr(), URI).push_reference(owner, "abc")
 
 
 def test_push_session_policy_allows_only_the_owner_repository() -> None:
     """The session policy limits every push action to the owner's repository."""
-    registry = EcrRegistry(FakeEcr(), URI)
+    registry = _registry(FakeEcr(), URI)
 
     policy = registry.push_session_policy("user-7")
 
@@ -146,7 +208,7 @@ def test_push_session_policy_allows_only_the_owner_repository() -> None:
 
 def test_push_reference_refuses_cache_and_invalid_tags() -> None:
     """An image tag cannot take the cache prefix or a character ECR refuses."""
-    registry = EcrRegistry(FakeEcr(), URI)
+    registry = _registry(FakeEcr(), URI)
 
     with pytest.raises(ImageRegistryError, match="cache-"):
         registry.push_reference("u1", "cache-user-7")
@@ -160,31 +222,89 @@ def test_push_reference_refuses_cache_and_invalid_tags() -> None:
 def test_rejects_a_uri_that_is_not_an_ecr_prefix(uri: str) -> None:
     """Only an ECR repository prefix URI is accepted."""
     with pytest.raises(ImageRegistryError, match="ECR repository prefix URI"):
-        EcrRegistry(FakeEcr(), uri)
+        _registry(FakeEcr(), uri)
 
 
-def test_pull_credentials_decode_the_token_and_hide_the_password() -> None:
-    """The token splits into user and password, and repr never shows the password."""
-    fake = FakeEcr()
-    credentials = EcrRegistry(fake, URI).pull_credentials()
+def test_pull_session_policy_allows_only_pulls_from_the_owner_repository() -> None:
+    """The pull session policy allows the token and the 3 pull actions on one repository."""
+    registry = _registry(FakeEcr(), URI)
 
+    policy = registry.pull_session_policy("user-7")
+
+    [login, pull] = policy["Statement"]
+    assert login == {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"}
+    assert pull == {
+        "Effect": "Allow",
+        "Action": ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+        "Resource": f"arn:aws:ecr:us-east-2:123456789012:repository/{PREFIX}/user-7",
+    }
+
+
+def test_pull_credentials_come_from_the_pull_role_scoped_to_the_owner() -> None:
+    """The token comes from an ECR client on the assumed pull role, never the worker client."""
+    worker = FakeEcr(token="AWS:worker-token")
+    pull = FakeEcr()
+    sts = FakeSts()
+    seen: list[Any] = []
+
+    def _ecr_for(credentials: Any) -> FakeEcr:
+        """Record the session credentials and return the pull client.
+
+        Args:
+            credentials: The assumed-role credentials.
+
+        Returns:
+            The pull client.
+        """
+        seen.append(credentials)
+        return pull
+
+    credentials = _registry(worker, URI, sts=sts, ecr_for=_ecr_for).pull_credentials("user-7")
+
+    [call] = sts.calls
+    assert call["RoleArn"] == PULL_ROLE
+    assert call["DurationSeconds"] == 3600
+    assert json.loads(call["Policy"]) == _registry(worker, URI).pull_session_policy("user-7")
+    assert seen[0]["SessionToken"] == "test-session"
+    assert worker.calls == []
+    assert pull.calls == [("get_authorization_token", {"registryIds": ["123456789012"]})]
     assert credentials.server == SERVER
     assert (credentials.username, credentials.password) == ("AWS", "secret-token")
-    assert credentials.expires_at == datetime(2026, 11, 21, tzinfo=UTC)
     assert "secret-token" not in repr(credentials)
-    assert fake.calls == [("get_authorization_token", {"registryIds": ["123456789012"]})]
+
+
+def test_pull_credentials_expire_with_the_earlier_of_token_and_session() -> None:
+    """The session ends before the 12-hour token, so the credentials expire with the session."""
+    session_end = datetime(2026, 11, 20, 13, tzinfo=UTC)
+    credentials = _registry(FakeEcr(), URI, sts=FakeSts(session_end)).pull_credentials("u1")
+
+    assert credentials.expires_at == session_end
+
+    late = datetime(2026, 11, 22, tzinfo=UTC)
+    assert _registry(FakeEcr(), URI, sts=FakeSts(late)).pull_credentials("u1").expires_at == datetime(
+        2026, 11, 21, tzinfo=UTC
+    )
+
+
+def test_pull_credentials_refuse_an_invalid_owner_before_assuming_the_role() -> None:
+    """An invalid owner fails before any STS call."""
+    sts = FakeSts()
+
+    with pytest.raises(ImageRegistryError, match="not a valid image owner"):
+        _registry(FakeEcr(), URI, sts=sts).pull_credentials("../x")
+    assert sts.calls == []
 
 
 def test_pull_credentials_refuse_a_malformed_token() -> None:
     """A token with no colon is an error, not a password."""
     with pytest.raises(ImageRegistryError, match="unknown form"):
-        EcrRegistry(FakeEcr(token="no-colon"), URI).pull_credentials()
+        _registry(FakeEcr(token="no-colon"), URI).pull_credentials("u1")
 
 
 def test_check_digest_returns_the_pinned_image_and_size() -> None:
     """A held digest returns its pinned reference and the size ECR reports."""
     fake = FakeEcr({DIGEST: 1234})
-    image = EcrRegistry(fake, URI).check_digest("user-7", DIGEST)
+    image = _registry(fake, URI).check_digest("user-7", DIGEST)
 
     assert (image.reference, image.digest, image.size_bytes) == (f"{URI}/user-7@{DIGEST}", DIGEST, 1234)
     assert fake.calls[0][1] == {
@@ -196,12 +316,12 @@ def test_check_digest_returns_the_pinned_image_and_size() -> None:
 
 def test_check_digest_fails_for_a_missing_or_malformed_digest() -> None:
     """A missing image, a missing repository and a non-digest value fail clearly."""
-    registry = EcrRegistry(FakeEcr(), URI)
+    registry = _registry(FakeEcr(), URI)
 
     with pytest.raises(ImageRegistryError, match="has no image"):
         registry.check_digest("u1", DIGEST)
     with pytest.raises(ImageRegistryError, match="has no image"):
-        EcrRegistry(FakeEcr({DIGEST: 1}, repositories=set()), URI).check_digest("u1", DIGEST)
+        _registry(FakeEcr({DIGEST: 1}, repositories=set()), URI).check_digest("u1", DIGEST)
     with pytest.raises(ImageRegistryError, match="not an image digest"):
         registry.check_digest("u1", "latest")
     with pytest.raises(ImageRegistryError, match="not an image digest"):
@@ -214,14 +334,14 @@ def test_check_digest_fails_for_a_missing_or_malformed_digest() -> None:
 def test_check_digest_refuses_an_image_with_no_size(detail: dict[str, Any]) -> None:
     """A missing or bad size is an error, so the size limit never sees 0 by mistake."""
     with pytest.raises(ImageRegistryError, match="reports no size"):
-        EcrRegistry(FakeEcr({DIGEST: detail}), URI).check_digest("u1", DIGEST)
+        _registry(FakeEcr({DIGEST: detail}), URI).check_digest("u1", DIGEST)
 
 
 def test_delete_image_deletes_one_digest_from_the_owner_repository() -> None:
     """A delete names the owner's repository and the digest."""
     fake = FakeEcr()
 
-    EcrRegistry(fake, URI).delete_image("user-7", DIGEST)
+    _registry(fake, URI).delete_image("user-7", DIGEST)
 
     assert fake.calls == [
         (
@@ -233,8 +353,8 @@ def test_delete_image_deletes_one_digest_from_the_owner_repository() -> None:
 
 def test_delete_image_ignores_an_image_or_repository_that_is_gone() -> None:
     """An image or a repository that is already gone counts as deleted."""
-    EcrRegistry(FakeEcr(delete_failures=[{"failureCode": "ImageNotFound"}]), URI).delete_image("u1", DIGEST)
-    EcrRegistry(FakeEcr(repositories=set()), URI).delete_image("u1", DIGEST)
+    _registry(FakeEcr(delete_failures=[{"failureCode": "ImageNotFound"}]), URI).delete_image("u1", DIGEST)
+    _registry(FakeEcr(repositories=set()), URI).delete_image("u1", DIGEST)
 
 
 def test_delete_image_raises_on_another_failure() -> None:
@@ -242,4 +362,34 @@ def test_delete_image_raises_on_another_failure() -> None:
     fake = FakeEcr(delete_failures=[{"failureCode": "KmsError", "failureReason": "no key"}])
 
     with pytest.raises(ImageRegistryError, match="no key"):
-        EcrRegistry(fake, URI).delete_image("u1", DIGEST)
+        _registry(fake, URI).delete_image("u1", DIGEST)
+
+
+def test_delete_cache_deletes_the_cache_tag_from_the_owner_repository() -> None:
+    """A cache delete names the owner's repository and the cache tag."""
+    fake = FakeEcr()
+
+    _registry(fake, URI).delete_cache("user-7", "default")
+
+    assert fake.calls == [
+        (
+            "batch_delete_image",
+            {
+                "registryId": "123456789012",
+                "repositoryName": f"{PREFIX}/user-7",
+                "imageIds": [{"imageTag": "cache-default"}],
+            },
+        )
+    ]
+
+
+def test_delete_cache_ignores_a_missing_cache_and_raises_on_another_failure() -> None:
+    """A cache that is gone counts as deleted; a refused delete raises with the reason."""
+    _registry(FakeEcr(delete_failures=[{"failureCode": "ImageNotFound"}]), URI).delete_cache("u1", "default")
+    _registry(FakeEcr(repositories=set()), URI).delete_cache("u1", "default")
+
+    fake = FakeEcr(delete_failures=[{"failureCode": "KmsError", "failureReason": "no key"}])
+    with pytest.raises(ImageRegistryError, match=r"cache-default.*no key"):
+        _registry(fake, URI).delete_cache("u1", "default")
+    with pytest.raises(ImageRegistryError, match="valid image tag"):
+        _registry(FakeEcr(), URI).delete_cache("u1", "x" * 128)
