@@ -6952,6 +6952,67 @@ def test_a_metric_image_in_another_users_repository_stops_before_the_paid_run_bu
     assert runtime.specs == []
 
 
+class _CopyingImageRuntime(_ImageRuntime):
+    """Record boxes like ``_ImageRuntime``, for a provider that copies each user image (Vercel)."""
+
+    copies_user_images = True
+
+
+_PUBLIC_IMAGE = "docker.io/library/python@sha256:" + "c" * 64
+
+
+@pytest.mark.parametrize("has_registry", [True, False])
+def test_a_copying_runtime_refuses_a_public_image_before_any_paid_work(
+    monkeypatch: pytest.MonkeyPatch, has_registry: bool
+) -> None:
+    """Vercel starts no image outside the owner's repository, so it stops before the paid build (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        has_registry: Whether the deployment has a user image registry.
+    """
+    tree = {
+        **_BOX_TREE,
+        "ascent.toml": _BOX_TREE["ascent.toml"].replace(
+            '[metric]\ndockerfile = "box/Dockerfile"\n', f'[metric]\nimage = "{_PUBLIC_IMAGE}"\n'
+        ),
+    }
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, builder, budget = _CopyingImageRuntime(), _FakeBuilder(), _FakeBudget()
+    registry = _FakeRegistry(set()) if has_registry else None
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\].*cannot start a public image"):
+            _prepare(staged, runtime, builder=builder, budget=budget, registry=registry)
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[run\].*cannot start a public image"):
+            _prepare(staged, runtime, builder=None, registry=registry, pinned={"run": {"image": _PUBLIC_IMAGE}})
+    finally:
+        staged.cleanup()
+    assert builder.requests == []
+    assert budget.charges == []
+    assert runtime.specs == []
+
+
+def test_a_pulling_runtime_still_starts_a_public_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docker pulls a public image itself, so it keeps working with no repository or token (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    try:
+        staged = _prepare(
+            staged,
+            _ImageRuntime(),
+            builder=None,
+            registry=_FakeRegistry(set()),
+            pinned={"run": {"image": _PUBLIC_IMAGE}},
+        )
+    finally:
+        staged.cleanup()
+    image = staged.box_user_images["run"]
+    assert (image.reference, image.repository, image.credentials) == (_PUBLIC_IMAGE, None, None)
+
+
 def test_a_resume_gives_each_pinned_box_its_pull_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """A resume checks nothing again, but each box still gets its repository and a fresh token (SKY-891).
 

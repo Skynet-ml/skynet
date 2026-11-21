@@ -660,6 +660,16 @@ class AsyncBridgeRuntime:
         return self._capabilities.snapshots
 
     @property
+    def copies_user_images(self) -> bool:
+        """Return whether this provider copies a user image into its own registry (SKY-891).
+
+        Returns:
+            True for a provider that starts a box from its own copy, which
+            needs the owner's image repository.
+        """
+        return self._copies_user_images
+
+    @property
     def accepts_user_images(self) -> bool:
         """Return whether a box of this provider can start from a spec's user image (SKY-891).
 

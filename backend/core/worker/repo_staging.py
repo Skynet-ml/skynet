@@ -1185,6 +1185,11 @@ OTHER_REPOSITORY_IMAGE = (
     "The [{role}] image '{image}' is in {app}'s registry, but not in your own image repository."
     " Use an image that {app} built from your Dockerfile, or an image from another registry."
 )
+COPIED_IMAGE_OUTSIDE_REPOSITORY = (
+    "The [{role}] image '{image}' is not in your own image repository. This deployment starts each box"
+    " from a copy of an image that {app} built from your Dockerfile, so it cannot start a public image or"
+    " an image from another registry. Use dockerfile in [{role}] in ascent.toml."
+)
 ROOT_BOX_USER = (
     "The [run] image '{image}' runs the box as root (uid 0), or `id -u` failed in it. A root box user could replace the Python and the"
     " standard library that {app} checks the protected files with. Set a non-root USER in the image."
@@ -1376,7 +1381,9 @@ def image_builder(config: Any = settings) -> ImageBuilder | None:
 _CREDENTIALS_MARGIN = timedelta(minutes=15)
 
 
-def _user_image(registry: ImageRegistry | None, username: str, role: str, image: str) -> UserImage:
+def _user_image(
+    registry: ImageRegistry | None, username: str, role: str, image: str, *, copies: bool = False
+) -> UserImage:
     """Give one box the access its start needs to its user image (SKY-891).
 
     Pull credentials reach only the owner's own repository: an image there
@@ -1384,27 +1391,35 @@ def _user_image(registry: ImageRegistry | None, username: str, role: str, image:
     ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one.
     The Vercel copy cache keys on the credentials, so a new token at each
     box start would copy the image again for each box. An image from
-    another registry gets none.
+    another registry gets none, and a provider that copies images cannot
+    start it, because its copy needs the owner's repository.
 
     Args:
         registry: The user image registry, or ``None`` when local Docker keeps the images.
         username: The run's owner.
         role: ``run`` or ``metric``.
         image: The box image reference.
+        copies: Whether the runtime starts each box from a copy of the image (Vercel).
 
     Returns:
         The reference, with the owner's repository and its pull credentials for an image there.
 
     Raises:
-        BoxImageError: The image is in the user image registry, but in another repository.
+        BoxImageError: The image is in the user image registry, but in another repository, or
+            the runtime copies images and the image is not in the owner's repository.
     """
+    outside = BoxImageError(COPIED_IMAGE_OUTSIDE_REPOSITORY.format(role=role, image=image, app=APP_NAME))
     if registry is None:
+        if copies:
+            raise outside
         return UserImage(image)
     owner = image_owner(username)
     repository = registry.repository_uri(owner)
     if not in_repository(image, repository):
         if registry_host(image) == registry_host(repository):
             raise BoxImageError(OTHER_REPOSITORY_IMAGE.format(role=role, image=image, app=APP_NAME))
+        if copies:
+            raise outside
         return UserImage(image)
 
     lock = threading.Lock()
@@ -1474,14 +1489,21 @@ def prepare_box_images(
 
     Raises:
         BoxImageError: When the runtime cannot start a user image, an image is in another user's
-            repository, a build fails, or a check fails.
+            repository, a copying runtime gets an image outside the owner's repository, a build
+            fails, or a check fails.
     """
     if not staged.box_sources:
         return staged
+    # Vercel copies each image into its own registry, keyed by the owner's repository, so it
+    # starts no public image and no image from another registry (SKY-891).
+    copies = bool(getattr(runtime, "copies_user_images", False))
     if pinned:
         images = {role: dict(record) for role, record in pinned.items()}
         # A resume checks nothing again, but its boxes still need the pull access of today's registry.
-        user_images = {role: _user_image(registry, username, role, record["image"]) for role, record in images.items()}
+        user_images = {
+            role: _user_image(registry, username, role, record["image"], copies=copies)
+            for role, record in images.items()
+        }
     else:
         # A runtime that ignores the spec's image would run Skynet's image in its place, with no sign.
         # A runtime that sets ``accepts_user_images`` must not run the box user as uid 0: the
@@ -1491,7 +1513,7 @@ def prepare_box_images(
         images = {}
         # A refused image reference must stop the run before any paid build or check box.
         user_images = {
-            role: _user_image(registry, username, role, value)
+            role: _user_image(registry, username, role, value, copies=copies)
             for role, (kind, value) in staged.box_sources.items()
             if kind == "image"
         }
@@ -1517,7 +1539,7 @@ def prepare_box_images(
                     registry=registry,
                 )
             if role not in user_images:
-                user_images[role] = _user_image(registry, username, role, record["image"])
+                user_images[role] = _user_image(registry, username, role, record["image"], copies=copies)
             python = _check_box_image(runtime, user_images[role], role, owner_id=owner_id)
             if python is not None:
                 record["python"] = python

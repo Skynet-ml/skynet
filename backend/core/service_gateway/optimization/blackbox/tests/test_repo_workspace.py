@@ -1667,6 +1667,7 @@ class _ImageRuntime:
             accepts: Whether this runtime can start a user image.
         """
         self.accepts_user_images = accepts
+        self.copies_user_images = accepts
         self.specs: list[SandboxSpec] = []
 
     def open(self, spec: SandboxSpec) -> Any:
@@ -1695,6 +1696,7 @@ def test_the_workspace_box_start_reaches_the_provider_with_its_user_image(accept
     image = UserImage("registry.example/u/a@sha256:" + "a" * 64, repository="registry.example/u/a")
 
     assert parent.accepts_user_images is accepts
+    assert parent.copies_user_images is accepts
     parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-1", user_image=image))
     parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-2"))
     broker.close()

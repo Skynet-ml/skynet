@@ -631,6 +631,7 @@ def test_vercel_box_gets_the_source_image_the_repository_and_a_metered_copier(
     runtime = bridge.ProtectedBridgeRuntime("vercel", budget=_BUDGET, copy_image=_copier)
 
     assert runtime.accepts_user_images
+    assert runtime.copies_user_images
     with pytest.raises(_StopError):
         runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image()))
 
@@ -663,6 +664,7 @@ def test_docker_box_pulls_the_user_image_with_its_credentials(monkeypatch: pytes
     runtime = bridge.ProtectedBridgeRuntime("docker", budget=_BUDGET, image=_LOCAL_IMAGE, docker_bin="dk")
 
     assert runtime.accepts_user_images
+    assert not runtime.copies_user_images
     with pytest.raises(_StopError):
         runtime.open(_spec(image=_USER_IMAGE, user_image=_user_image()))
 
@@ -817,6 +819,34 @@ def test_metered_copier_settles_a_failed_copy_and_raises_its_error() -> None:
         asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
     (result,) = budget.settled
     assert result.provider_usd == image_copy_usd(0.0001)
+
+
+def test_metered_copier_settles_a_copy_past_its_time_limit_at_the_reserved_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle a copy that runs past the reserved time limit at that limit, never above it (SKY-891)."""
+    budget = _CopyBudget()
+    clock = iter([0.0, bridge.COPY_RESERVE_SECONDS + 65])
+    monkeypatch.setattr(bridge, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Return the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        return source_image
+
+    asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+    (quote,) = budget.reserved
+    (result,) = budget.settled
+    assert image_copy_usd(bridge.COPY_RESERVE_SECONDS + 65) > image_copy_usd(bridge.COPY_RESERVE_SECONDS)
+    assert result.provider_usd == image_copy_usd(bridge.COPY_RESERVE_SECONDS)
+    assert ChargePolicy("sandbox").convert(result.provider_usd) == quote.maximum
 
 
 def test_metered_copier_starts_no_copy_when_the_budget_refuses() -> None:

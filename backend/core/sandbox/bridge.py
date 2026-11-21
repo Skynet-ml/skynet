@@ -106,9 +106,12 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
                 except BaseException as error:
                     value = error
             seconds = time.monotonic() - started
+            # The copy timeout starts before the reservation, and a cancel takes
+            # time too, so the measured time can pass the reserved limit. The
+            # settlement must stay inside the reservation.
             return PaidResult(
                 value=value,
-                provider_usd=image_copy_usd(seconds),
+                provider_usd=image_copy_usd(min(seconds, COPY_RESERVE_SECONDS)),
                 evidence={"provider": "image-copy", "seconds": round(seconds, 3)},
             )
 

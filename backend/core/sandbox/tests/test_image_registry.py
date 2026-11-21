@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from core.sandbox import image_registry as image_registry_module
 from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, image_owner, image_registry, require_digest
@@ -365,6 +366,53 @@ def test_delete_image_raises_on_another_failure() -> None:
 
     with pytest.raises(ImageRegistryError, match="no key"):
         _registry(fake, URI).delete_image("u1", DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (
+            ClientError({"Error": {"Code": "AccessDeniedException", "Message": "secret-detail"}}, "BatchDeleteImage"),
+            "ClientError AccessDeniedException",
+        ),
+        (
+            ClientError({"Error": {"Code": "ThrottlingException", "Message": "secret-detail"}}, "BatchDeleteImage"),
+            "ClientError ThrottlingException",
+        ),
+        (EndpointConnectionError(endpoint_url="https://secret-detail.example"), "EndpointConnectionError"),
+    ],
+)
+def test_a_failed_delete_call_names_only_the_error_type_and_code(error: Exception, kind: str) -> None:
+    """Map an AWS error of a delete to ImageRegistryError, so account deletion answers 503 (SKY-891).
+
+    Args:
+        error: The error the ECR call raises.
+        kind: The error type and code the message names.
+    """
+    fake = FakeEcr()
+
+    def refuse(**kwargs: Any) -> dict[str, Any]:
+        """Fail the delete.
+
+        Args:
+            **kwargs: The request.
+
+        Raises:
+            Exception: Always, the scripted AWS error.
+        """
+        raise error
+
+    fake.batch_delete_image = refuse  # type: ignore[method-assign]
+
+    for delete in (
+        lambda: _registry(fake, URI).delete_image("u1", DIGEST),
+        lambda: _registry(fake, URI).delete_cache("u1", "default"),
+    ):
+        with pytest.raises(ImageRegistryError) as caught:
+            delete()
+        assert kind in str(caught.value)
+        assert "secret-detail" not in str(caught.value)
+        assert caught.value.__cause__ is None
 
 
 def test_delete_cache_deletes_the_cache_tag_from_the_owner_repository() -> None:

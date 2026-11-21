@@ -25,6 +25,15 @@ try:
 except ImportError:
     boto3 = None
 
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:
+    BotoCoreError = None
+    ClientError = None
+
+# Without botocore the names above are None, and except takes no None entry.
+_AWS_ERRORS = tuple(kind for kind in (BotoCoreError, ClientError) if kind is not None)
+
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 # ECR tags allow at most 128 characters from this set.
 _TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
@@ -620,7 +629,8 @@ class EcrRegistry:
             image_id: The ECR image id (a digest or a tag).
 
         Raises:
-            ImageRegistryError: The owner is invalid or ECR refused the delete.
+            ImageRegistryError: The owner is invalid, ECR refused the delete,
+                or the AWS call failed.
         """
         name = self.repository_name(owner)
         try:
@@ -631,6 +641,11 @@ class EcrRegistry:
             )
         except self._client.exceptions.RepositoryNotFoundException:
             return
+        except _AWS_ERRORS as exc:
+            # Name only the error type and code: an AWS message can echo request details.
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            kind = f"{type(exc).__name__} {code}" if code else type(exc).__name__
+            raise ImageRegistryError(f"cannot delete from {name}: {kind}") from None
         failures = [f for f in response.get("failures", []) if f.get("failureCode") != "ImageNotFound"]
         if failures:
             reason = failures[0].get("failureReason") or failures[0].get("failureCode")

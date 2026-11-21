@@ -302,6 +302,11 @@ class _ParentSandboxRuntime:
         return bool(getattr(self._broker._runtime, "accepts_user_images", False))
 
     @property
+    def copies_user_images(self) -> bool:
+        """Return whether a box opened here starts from a copy of the user image (SKY-891)."""
+        return bool(getattr(self._broker._runtime, "copies_user_images", False))
+
+    @property
     def max_lifetime_seconds(self) -> float:
         """Return the longest lifetime a box opened here may ask for, the profile maximum.
 
