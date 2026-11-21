@@ -697,8 +697,9 @@ when the file has no `[metric]` section, because the metric code can come
 with the run request. A contract with neither fails setup, because the
 metric would give each version the same score.
 
-The box user can be root. The boxes depend on the microVM boundary between
-boxes, not on file permissions inside a box.
+In Skynet's default image, the box user can be root. The boxes depend on the
+microVM boundary between boxes, not on file permissions inside a box. A user
+image must set a non-root numeric `USER` (see "Box images" below).
 
 ## Box images: `image` and `dockerfile`
 
@@ -742,6 +743,8 @@ A minimal metric image:
 # eval/box/Dockerfile
 FROM python:3.12-slim
 RUN pip install --no-cache-dir openascent==0.4.4 numpy==2.1.0
+RUN useradd --uid 1000 --create-home box
+USER 1000
 ```
 
 ```toml
@@ -754,10 +757,16 @@ dockerfile = "eval/box/Dockerfile"
 ```
 
 The image must hold `openascent`, because the check and the metric's runner
-use it. Two limits stay. The sandbox broker does not start a box from a user
-image yet, so a run with these keys stops before its first version with a
-clear error. A hosted run has no Dockerfile builder yet. A hardening run does
-not support a user image yet.
+use it. The image must also set `USER` to a numeric user id that is not 0,
+for example `USER 1000`. The setup check refuses an image with no `USER`, a
+root `USER`, or a named `USER` such as `USER app`. Skynet cannot confirm
+outside the box that a name is not root, because the image's own
+`/etc/passwd` maps the name to a user id. `USER 1000:1000` also works.
+
+Two limits stay. A hosted run builds a Dockerfile and pulls a user image only
+when the image build settings are configured for that environment. Without
+them, a run with these keys stops before its first version with a clear
+error. A hardening run does not support a user image yet.
 
 ## The metric: `[metric] entry`
 
