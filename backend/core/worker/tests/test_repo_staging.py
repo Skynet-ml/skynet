@@ -6212,3 +6212,110 @@ def test_the_build_context_holds_only_the_dockerfile_folder(tmp_path: Path) -> N
         "box/lib/a.txt",
     ]
     assert (whole / "src" / "app.py").read_text() == "x = 1\n"
+
+
+def _context_build(
+    tmp_path: Path, role: str, links: dict[str, tuple[bytes, str]] | None = None, *, hidden_file: bool = True
+) -> _FakeBuilder:
+    """Build ``box/Dockerfile`` for one role from a tree whose ``box`` folder holds the hidden ``box/score.py``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        role: ``run`` or ``metric``.
+        links: Links in the tree, as ``_tree`` takes them.
+        hidden_file: Whether ``box/score.py`` is a regular file; a link in ``links`` can take its place.
+
+    Returns:
+        The builder, which holds the build request.
+    """
+    files = {"box/Dockerfile": "FROM x\n", "box/app.py": "x = 1\n", "secret.txt": "SECRET = 1\n"}
+    if hidden_file:
+        files["box/score.py"] = "SECRET = 1\n"
+    staged = repo_staging.StagedRepository(
+        snapshot=RepoSnapshot(commit="c" * 40, archive=_tree(tmp_path, files, links), readonly_paths=(), size_bytes=1),
+        secrets={},
+        workdir=tmp_path,
+        hidden_paths=("box/score.py",),
+    )
+    builder = _FakeBuilder()
+    repo_staging._dockerfile_image(
+        staged,
+        role,
+        "box/Dockerfile",
+        owner_id="job-1",
+        username="alice",
+        builder=builder,
+        store=_ImageStore(),
+        budget=_FakeBudget(),
+        registry=None,
+    )
+    return builder
+
+
+def _context_files(builder: _FakeBuilder) -> dict[str, str]:
+    """Return each regular file of the build context with its text, by context path.
+
+    Args:
+        builder: The builder that holds one build request.
+
+    Returns:
+        The context's regular files; a link is never followed.
+    """
+    context = builder.requests[0].context_dir
+    return {
+        str(path.relative_to(context)): path.read_text()
+        for path in context.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_the_candidate_image_context_never_holds_a_hidden_file(tmp_path: Path) -> None:
+    """A hidden scoring file inside the Dockerfile's folder never reaches the [run] image build (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(tmp_path, "run")
+
+    assert _context_files(builder) == {"Dockerfile": "FROM x\n", "app.py": "x = 1\n"}
+
+
+def test_the_metric_image_context_keeps_the_hidden_scoring_files(tmp_path: Path) -> None:
+    """The metric box may read the hidden files, so its build context keeps them (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(tmp_path, "metric")
+
+    assert _context_files(builder)["score.py"] == "SECRET = 1\n"
+
+
+def test_a_link_to_a_hidden_file_carries_nothing_into_the_candidate_image(tmp_path: Path) -> None:
+    """A hard link to a hidden file is dropped, and a symlink to one points at nothing (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(
+        tmp_path,
+        "run",
+        links={"box/copy.py": (tarfile.LNKTYPE, "box/score.py"), "box/peek.py": (tarfile.SYMTYPE, "score.py")},
+    )
+
+    context = builder.requests[0].context_dir
+    assert _context_files(builder) == {"Dockerfile": "FROM x\n", "app.py": "x = 1\n"}
+    assert not (context / "copy.py").exists()
+    assert not (context / "peek.py").exists()
+
+
+def test_a_hidden_path_that_is_a_link_stops_the_candidate_image_build(tmp_path: Path) -> None:
+    """A hidden path that is a link loses only the link in the strip, so the build refuses it (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    with pytest.raises(
+        repo_staging.BoxImageError, match=r"hidden scoring path 'box/score\.py' is, holds or lies inside"
+    ):
+        _context_build(tmp_path, "run", links={"box/score.py": (tarfile.SYMTYPE, "../secret.txt")}, hidden_file=False)

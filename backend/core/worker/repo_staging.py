@@ -1337,9 +1337,17 @@ def _dockerfile_image(
     """
     if builder is None:
         raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
-    context = extract_folder(
-        staged.snapshot.archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}"
-    )
+    archive = staged.snapshot.archive
+    if role == "run":
+        # The candidate image must never hold the hidden scoring files, so its
+        # context comes from the tree with them stripped, as the candidate's own.
+        if linked := linked_hidden_paths(archive, staged.hidden_paths):
+            raise BoxImageError(
+                f"[run] dockerfile '{dockerfile}': the hidden scoring path '{linked[0]}' is, holds or lies inside"
+                " a link."
+            )
+        archive = strip_archive(archive, staged.hidden_paths, staged.workdir / "image-context-run.tgz")
+    context = extract_folder(archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}")
     request = BuildRequest(context_dir=context, owner=_image_owner(username), dockerfile=posixpath.basename(dockerfile))
     kind = builder.kind
     try:
