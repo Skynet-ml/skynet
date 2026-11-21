@@ -12,6 +12,7 @@ from enum import StrEnum
 class I18nKey(StrEnum):
     """Stable identifiers for catalog ``messages`` entries (formatted via ``t()``)."""
 
+    ACCOUNTS_DELETION_RUNS_ACTIVE = 'accounts.deletion_runs_active'
     ACCOUNTS_DELETION_STORAGE_UNAVAILABLE = 'accounts.deletion_storage_unavailable'
     ACCOUNTS_EMAIL_DELIVERY_UNAVAILABLE = 'accounts.email_delivery_unavailable'
     ACCOUNTS_EMAIL_NOT_VERIFIED = 'accounts.email_not_verified'

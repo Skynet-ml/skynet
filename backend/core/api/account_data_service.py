@@ -20,7 +20,8 @@ Two deliberate exceptions to "hard delete everything":
   tied them to a person, leaving only the already-anonymous per-browser id.
 
 The only outside call deletes the account's whole repository from the user
-image registry, before the database rows go (SKY-891). The tree purge here
+image registry, as the last step before the caller's commit. With a registry,
+the deletion refuses while a run of the account is not finished (SKY-891). The tree purge here
 only locks, marks and plans the account's step log packs; the router deletes
 the unused packs from the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
 OpenRouter, or any other provider; severing the local link is the whole of
@@ -97,6 +98,7 @@ from ..storage.models import (
     WebAuthnChallengeModel,
     WebAuthnCredentialModel,
 )
+from .routers.constants import TERMINAL_STATUSES
 
 EXPORT_FORMAT = "skynet-account-export/v2"
 
@@ -521,28 +523,13 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
     }
 
 
-def _delete_user_images(username: str, registry_for: Callable[[], ImageRegistry | None]) -> None:
-    """Delete the account's whole repository from the user image registry (SKY-891).
+class AccountRunsActiveError(Exception):
+    """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
 
-    The repository goes with every image and tag in it, the build cache
-    included, because its layers hold the user's source. Rows are not
-    needed: a build can push an image and its cache and then stop before it
-    records a row. A deployment with no registry (the prefix setting is
-    empty, as in local mode) makes no registry call and no AWS client.
-
-    Args:
-        username: The caller's lowercased-email identity.
-        registry_for: Return the user image registry, or ``None`` when this
-            deployment has none. It is called only here, when the delete runs.
-
-    Raises:
-        ImageRegistryError: The registry refused the delete, or its settings
-            are set but not usable; the caller rolls the account deletion
-            back, so no image outlives the account.
+    A run in progress can still push to the user image registry after the
+    repository delete. The registry then makes the repository again, and the
+    pushed layers outlive the account with no row that names them.
     """
-    registry = registry_for()
-    if registry is not None:
-        registry.delete_repository(image_owner(username))
 
 
 def delete_account(
@@ -567,15 +554,19 @@ def delete_account(
         registry_for: Return the user image registry, or ``None`` when this
             deployment has none. ``None`` reads the deployment's settings, which
             need only the repository prefix, since deletes use no pull role.
+            It is called once, before any row is deleted.
 
     Returns:
         Counts of hard-deleted and anonymized rows. The summary also holds the
         tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
+        AccountRunsActiveError: The deployment has a user image registry and
+            one of the account's runs is not in a terminal status; nothing is
+            deleted.
         ImageRegistryError: The user image registry refused to delete the
             account's repository, or its settings are set but not usable;
-            nothing in the database is deleted.
+            nothing in the main database is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -607,10 +598,22 @@ def delete_account(
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
+    registry = (registry_for or (lambda: image_registry(pull=False)))()
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
     # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
     # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
     deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
+    # Read after the job locks, so a worker that changes a status commits first. Nothing
+    # cancels the runs here: a running build could push again after the repository delete.
+    if registry is not None and job_ids:
+        active = session.scalar(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(job_ids))
+            .where(JobModel.status.not_in([status.value for status in TERMINAL_STATUSES]))
+            .limit(1)
+        )
+        if active is not None:
+            raise AccountRunsActiveError
     if job_ids:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
@@ -707,9 +710,6 @@ def delete_account(
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
     _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
-    # The registry has no rollback, so its deletes run last before the rows
-    # that name them; a refused delete still rolls the database back.
-    _delete_user_images(username, registry_for or (lambda: image_registry(pull=False)))
     _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
@@ -778,5 +778,11 @@ def delete_account(
     # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
     # deletes it. purge_user ran every check that can fail the deletion before this point.
     deleted += tree_purge.purge_user_shards(trees)
+    # The registry has no rollback, so its delete is the last step before the caller's commit. The whole
+    # repository goes with every image and tag, the build cache included, because its layers hold the
+    # user's source; a build can push and then stop before it records a row. A refused delete still
+    # rolls the main database back. A deployment with no registry makes no call (SKY-891).
+    if registry is not None:
+        registry.delete_repository(image_owner(username))
 
     return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

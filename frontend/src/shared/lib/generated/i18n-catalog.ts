@@ -67,6 +67,7 @@ export const TERMS = {
 } as const;
 
 export const I18N_MESSAGES = {
+  "accounts.deletion_runs_active": "החשבון לא נמחק: חלק מהאופטימיזציות שלך עדיין רצות. בטלו אותן או חכו שיסתיימו, ואז נסו שוב.",
   "accounts.deletion_storage_unavailable": "החשבון לא נמחק: לא ניתן היה למחוק כרגע את נתוני הריצות השמורים שלו. נסו שוב בעוד כמה דקות.",
   "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
   "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
@@ -1477,6 +1478,7 @@ export const TERMS_EN: Partial<Record<TermKey, string>> = {
 };
 
 export const I18N_MESSAGES_EN: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Your account was not deleted: some of your optimizations are still running. Cancel them or wait for them to finish, then try again.",
   "accounts.deletion_storage_unavailable": "Your account was not deleted: its stored run data could not be removed right now. Try again in a few minutes.",
   "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
   "accounts.email_not_verified": "Please verify your email before signing in.",
@@ -8148,6 +8150,7 @@ export const I18N_MESSAGES_BY_LOCALE: Record<string, Record<string, string>> = {
 };
 
 export const I18N_KEY = {
+  ACCOUNTS_DELETION_RUNS_ACTIVE: "accounts.deletion_runs_active",
   ACCOUNTS_DELETION_STORAGE_UNAVAILABLE: "accounts.deletion_storage_unavailable",
   ACCOUNTS_EMAIL_DELIVERY_UNAVAILABLE: "accounts.email_delivery_unavailable",
   ACCOUNTS_EMAIL_NOT_VERIFIED: "accounts.email_not_verified",

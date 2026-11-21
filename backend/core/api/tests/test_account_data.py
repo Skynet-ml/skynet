@@ -110,7 +110,7 @@ def _seed_user_data(engine: Any, username: str, stripe_id: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                JobModel(optimization_id=f"job-{username}", username=username, status="completed"),
+                JobModel(optimization_id=f"job-{username}", username=username, status="success"),
                 DatasetModel(
                     id=f"ds-{username}",
                     owner_username=username,
@@ -630,6 +630,177 @@ def test_a_refused_registry_delete_keeps_the_account(harness: SimpleNamespace) -
     with Session(harness.engine) as session:
         assert session.scalars(select(ImageBuildModel).where(ImageBuildModel.username == _EMAIL)).all()
         assert session.scalars(select(UserModel).where(UserModel.email == _EMAIL)).all()
+
+
+@pytest.mark.parametrize("status", ["pending", "validating", "running"])
+def test_a_run_in_progress_refuses_the_deletion_with_a_registry(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """A run that is not finished answers 409 and deletes nothing, not even the repository (SKY-891).
+
+    Its build could push again after the repository delete, and the registry
+    would make the repository again with the user's layers in it.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+        status: The status of the account's unfinished run.
+    """
+    with Session(harness.engine) as session:
+        session.add(JobModel(optimization_id="job-active", username=_EMAIL, status=status))
+        session.commit()
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "accounts.deletion_runs_active"
+    assert registry.repositories == []
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.get(JobModel, "job-active") is not None
+        assert session.get(JobModel, f"job-{_EMAIL}") is not None
+
+
+@pytest.mark.parametrize("status", ["success", "failed", "cancelled", "stopped", "paused"])
+def test_finished_runs_allow_the_deletion_with_a_registry(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Runs in a terminal status do not block the deletion (SKY-891).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+        status: The terminal status of the account's run.
+    """
+    with Session(harness.engine) as session:
+        session.add(JobModel(optimization_id="job-done", username=_EMAIL, status=status))
+        session.commit()
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert registry.repositories == [image_owner(_EMAIL)]
+
+
+def test_another_account_run_in_progress_does_not_block_the_deletion(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the account's own runs block its deletion (SKY-891).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    with Session(harness.engine) as session:
+        session.add(JobModel(optimization_id="job-bystander", username=_OTHER, status="running"))
+        session.commit()
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    with Session(harness.engine) as session:
+        assert session.get(JobModel, "job-bystander") is not None
+
+
+def test_a_run_in_progress_does_not_block_the_deletion_without_a_registry(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no user image registry, no build can push after the delete, so a running run does not block it.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    with Session(harness.engine) as session:
+        session.add(JobModel(optimization_id="job-active", username=_EMAIL, status="running"))
+        session.commit()
+    monkeypatch.setattr(image_registry_module.settings, "user_images_repository_prefix_uri", "")
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
+
+
+def test_the_registry_delete_is_the_last_step_before_the_commit(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository delete runs after the wallet closure, the user row delete and the shard purge (SKY-891).
+
+    The registry has no rollback, so every step that can still fail runs first.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    steps: list[str] = []
+    close = BudgetService.close_for_deleted_account
+    purge_shards = tree_purge.purge_user_shards
+
+    def _close(self: BudgetService, username: str, **kwargs: Any) -> int:
+        """Record the wallet closure, then run it.
+
+        Args:
+            self: The budget service.
+            username: The deleted account.
+            **kwargs: The closure's options.
+
+        Returns:
+            The closure's result.
+        """
+        steps.append("close-wallet")
+        return close(self, username, **kwargs)
+
+    def _purge_shards(trees: tree_purge.TreePurgeSummary) -> int:
+        """Record the shard purge, then run it.
+
+        Args:
+            trees: The tree purge of the account.
+
+        Returns:
+            The count of deleted shard rows.
+        """
+        steps.append("purge-shards")
+        return purge_shards(trees)
+
+    class _OrderRegistry(_FakeImageRegistry):
+        """Record the repository delete and check that the user row is already gone."""
+
+        def __init__(self, session: Session) -> None:
+            """Keep the deletion session.
+
+            Args:
+                session: The session that runs the deletion.
+            """
+            super().__init__()
+            self.session = session
+
+        def delete_repository(self, owner: str) -> None:
+            """Record the delete after the user row delete.
+
+            Args:
+                owner: The registry repository's owner.
+            """
+            assert self.session.get(UserModel, _EMAIL, populate_existing=True) is None
+            steps.append("delete-repository")
+            super().delete_repository(owner)
+
+    monkeypatch.setattr(BudgetService, "close_for_deleted_account", _close)
+    monkeypatch.setattr(tree_purge, "purge_user_shards", _purge_shards)
+    with Session(harness.engine) as session:
+        registry = _OrderRegistry(session)
+        delete_account(session, _EMAIL, registry_for=lambda: registry)
+        session.commit()
+
+    assert steps == ["close-wallet", "purge-shards", "delete-repository"]
+    assert registry.repositories == [image_owner(_EMAIL)]
 
 
 def test_delete_oauth_account_needs_no_password(harness: SimpleNamespace) -> None:

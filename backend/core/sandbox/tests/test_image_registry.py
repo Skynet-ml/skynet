@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -607,3 +608,211 @@ def test_a_delete_only_registry_needs_no_pull_role(monkeypatch: pytest.MonkeyPat
         registry.pull_credentials("user-7")
     # Only pull credentials use STS, so the delete-only registry makes no STS client.
     assert image_registry_module.boto3.clients == [("ecr", {"region_name": "us-east-2"})]
+
+
+_OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+_OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+
+
+def _config_blob(user: str | None) -> tuple[str, bytes]:
+    """Make an image config blob and its digest.
+
+    Args:
+        user: The config ``User``, or ``None`` for a config that sets none.
+
+    Returns:
+        The blob's digest and bytes.
+    """
+    config: dict[str, Any] = {"Env": ["PATH=/usr/bin"]}
+    if user is not None:
+        config["User"] = user
+    blob = json.dumps({"architecture": "amd64", "os": "linux", "config": config}).encode()
+    return "sha256:" + hashlib.sha256(blob).hexdigest(), blob
+
+
+class FakeManifestEcr(FakeEcr):
+    """Answer the manifest and layer calls that read an image config (SKY-891)."""
+
+    def __init__(self, manifests: dict[str, tuple[str, dict[str, Any]]], blobs: dict[str, bytes]) -> None:
+        """Hold the manifests by digest and the config blobs by digest.
+
+        Args:
+            manifests: The media type and JSON of each manifest, by digest.
+            blobs: The config blobs, by digest.
+        """
+        super().__init__()
+        self.manifests = manifests
+        self.blobs = blobs
+
+    def batch_get_image(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the manifest of the asked digest, or no image.
+
+        Args:
+            **kwargs: The request.
+
+        Returns:
+            The ECR response.
+        """
+        self.calls.append(("batch_get_image", kwargs))
+        digest = kwargs["imageIds"][0]["imageDigest"]
+        if digest not in self.manifests:
+            return {"images": [], "failures": [{"failureCode": "ImageNotFound"}]}
+        media_type, manifest = self.manifests[digest]
+        return {
+            "images": [
+                {
+                    "imageId": {"imageDigest": digest},
+                    "imageManifest": json.dumps(manifest),
+                    "imageManifestMediaType": media_type,
+                }
+            ]
+        }
+
+    def get_download_url_for_layer(self, **kwargs: Any) -> dict[str, Any]:
+        """Return a download URL that names the layer digest.
+
+        Args:
+            **kwargs: The request.
+
+        Returns:
+            The ECR response.
+        """
+        self.calls.append(("get_download_url_for_layer", kwargs))
+        return {"downloadUrl": f"https://layers.example/{kwargs['layerDigest']}", "layerDigest": kwargs["layerDigest"]}
+
+    def fetch(self, url: str) -> bytes:
+        """Return the blob that a download URL names.
+
+        Args:
+            url: The download URL.
+
+        Returns:
+            The blob.
+        """
+        return self.blobs[url.rsplit("/", 1)[-1]]
+
+
+def _manifest_registry(ecr: FakeManifestEcr, sts: FakeSts | None = None) -> EcrRegistry:
+    """Build a registry whose pull session and downloads use the fake.
+
+    Args:
+        ecr: The fake ECR client.
+        sts: The fake STS client.
+
+    Returns:
+        The registry.
+    """
+    return EcrRegistry(
+        ecr, URI, sts=sts or FakeSts(), pull_role_arn=PULL_ROLE, ecr_for=lambda _credentials: ecr, fetch=ecr.fetch
+    )
+
+
+@pytest.mark.parametrize(("user", "expected"), [("1000:1000", "1000:1000"), ("root", "root"), (None, "")])
+def test_image_users_reads_the_config_user_with_the_owner_pull_session(user: str | None, expected: str) -> None:
+    """The config User comes from the owner's repository through the pull role (SKY-891).
+
+    Args:
+        user: The config ``User``.
+        expected: The value the registry returns.
+    """
+    config_digest, blob = _config_blob(user)
+    ecr = FakeManifestEcr({DIGEST: (_OCI_MANIFEST, {"config": {"digest": config_digest}})}, {config_digest: blob})
+    sts = FakeSts()
+
+    assert _manifest_registry(ecr, sts).image_users("user-7", DIGEST) == (expected,)
+    assert json.loads(sts.calls[0]["Policy"]) == _registry(FakeEcr(), URI).pull_session_policy("user-7")
+    names = {kwargs["repositoryName"] for _, kwargs in ecr.calls}
+    assert names == {f"{PREFIX}/user-7"}
+
+
+def test_image_users_reads_each_platform_image_of_an_index_and_skips_attestations() -> None:
+    """An index gives one User for each platform image, and its attestation manifests are skipped (SKY-891)."""
+    amd_digest, amd_blob = _config_blob("1000")
+    arm_digest, arm_blob = _config_blob("")
+    amd, arm, attestation = "sha256:" + "b" * 64, "sha256:" + "c" * 64, "sha256:" + "d" * 64
+    index = {
+        "manifests": [
+            {"digest": amd, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": arm, "platform": {"os": "linux", "architecture": "arm64"}},
+            {
+                "digest": attestation,
+                "platform": {"os": "unknown", "architecture": "unknown"},
+                "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
+            },
+        ]
+    }
+    ecr = FakeManifestEcr(
+        {
+            DIGEST: (_OCI_INDEX, index),
+            amd: (_OCI_MANIFEST, {"config": {"digest": amd_digest}}),
+            arm: (_OCI_MANIFEST, {"config": {"digest": arm_digest}}),
+        },
+        {amd_digest: amd_blob, arm_digest: arm_blob},
+    )
+
+    assert _manifest_registry(ecr).image_users("user-7", DIGEST) == ("1000", "")
+
+
+def test_image_users_refuses_a_config_that_does_not_match_its_digest() -> None:
+    """A config whose bytes do not match its digest is refused (SKY-891)."""
+    config_digest, _ = _config_blob("1000")
+    _, other = _config_blob("root")
+    ecr = FakeManifestEcr({DIGEST: (_OCI_MANIFEST, {"config": {"digest": config_digest}})}, {config_digest: other})
+
+    with pytest.raises(ImageRegistryError, match="does not match its digest"):
+        _manifest_registry(ecr).image_users("user-7", DIGEST)
+
+
+@pytest.mark.parametrize(
+    "manifests",
+    [
+        pytest.param({}, id="missing-image"),
+        pytest.param({DIGEST: (_OCI_INDEX, {"manifests": []})}, id="empty-index"),
+        pytest.param({DIGEST: ("application/vnd.unknown+json", {"config": {}})}, id="unknown-type"),
+        pytest.param({DIGEST: (_OCI_MANIFEST, {"layers": []})}, id="no-config"),
+    ],
+)
+def test_image_users_refuses_a_manifest_it_cannot_read(manifests: dict[str, tuple[str, dict[str, Any]]]) -> None:
+    """A missing image or a manifest in an unknown form is an ImageRegistryError (SKY-891).
+
+    Args:
+        manifests: The manifests that the fake ECR holds.
+    """
+    with pytest.raises(ImageRegistryError):
+        _manifest_registry(FakeManifestEcr(manifests, {})).image_users("user-7", DIGEST)
+
+
+def test_image_users_wraps_an_aws_error() -> None:
+    """An AWS failure becomes an ImageRegistryError that names only its kind (SKY-891)."""
+
+    class _FailingEcr(FakeManifestEcr):
+        """Fail every manifest read."""
+
+        def batch_get_image(self, **kwargs: Any) -> dict[str, Any]:
+            """Raise an access error.
+
+            Args:
+                **kwargs: The request.
+
+            Raises:
+                ClientError: Always.
+            """
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "secret detail"}}, "BatchGetImage")
+
+    with pytest.raises(ImageRegistryError, match="AccessDenied") as raised:
+        _manifest_registry(_FailingEcr({}, {})).image_users("user-7", DIGEST)
+    assert "secret detail" not in str(raised.value)
+
+
+def test_a_delete_only_registry_cannot_read_image_users() -> None:
+    """A registry with no pull role and no STS client refuses to read configs (SKY-891)."""
+    registry = EcrRegistry(FakeEcr(), URI, sts=None, pull_role_arn=None, ecr_for=lambda _credentials: None)
+
+    with pytest.raises(ImageRegistryError, match="no pull role"):
+        registry.image_users("user-7", DIGEST)
+
+
+def test_the_config_download_needs_https() -> None:
+    """The default download refuses a URL that is not HTTPS (SKY-891)."""
+    with pytest.raises(ImageRegistryError, match="not HTTPS"):
+        image_registry_module._fetch_url("http://layers.example/blob")

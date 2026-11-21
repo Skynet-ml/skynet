@@ -119,6 +119,20 @@ def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
+# The autouse fixture below replaces the read, so its test calls the real one.
+_LOCAL_IMAGE_USER = repo_staging._local_image_user
+
+
+@pytest.fixture(autouse=True)
+def _local_images_have_a_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each image outside the registry a non-root USER, so no test needs local Docker (SKY-891).
+
+    Args:
+        monkeypatch: Restores the local USER read after the test.
+    """
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: ("1000",))
+
+
 def _payload(commit: str | None) -> dict[str, Any]:
     """Build a repository payload whose secret is still a vault reference.
 
@@ -5844,15 +5858,36 @@ class _ImageStore:
 class _FakeRegistry:
     """Hold a set of digests, like the user image registry."""
 
-    def __init__(self, held: set[str]) -> None:
+    def __init__(self, held: set[str], users: tuple[str, ...] | None = ("1000",)) -> None:
         """Hold ``held``.
 
         Args:
             held: The digests the registry still holds.
+            users: The USER of each platform image; ``None`` fails the read.
         """
         self.held = held
+        self.users = users
         self.checks: list[tuple[str, str]] = []
         self.pulls: list[str] = []
+        self.user_reads: list[tuple[str, str]] = []
+
+    def image_users(self, owner: str, digest: str) -> tuple[str, ...]:
+        """Return the fixed USER values and record the read.
+
+        Args:
+            owner: The registry repository's owner.
+            digest: The image digest.
+
+        Returns:
+            The USER of each platform image.
+
+        Raises:
+            ImageRegistryError: When ``users`` is ``None``.
+        """
+        self.user_reads.append((owner, digest))
+        if self.users is None:
+            raise ImageRegistryError("unreadable")
+        return self.users
 
     def repository_uri(self, owner: str) -> str:
         """Return the owner's repository, which holds the built image.
@@ -6026,15 +6061,17 @@ _TRUSTED_PROBE = _listing()
 class _CheckSession:
     """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n") -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
+            uid_probe: What the metric role's box uid probe prints.
         """
         self.ok = ok
         self.probe = probe
+        self.uid_probe = uid_probe
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
@@ -6048,6 +6085,8 @@ class _CheckSession:
             The report, with exit code 1 when the image fails.
         """
         self.commands.append(command)
+        if command.endswith(shlex.quote(repo_staging._BOX_UID_PROBE)):
+            return CommandResult(exit_code=0, stdout=self.uid_probe)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -6064,15 +6103,19 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(
+        self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n"
+    ) -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
+            uid_probe: What the metric role's box uid probe prints.
         """
         self.check_ok = check_ok
         self.probe = probe
+        self.uid_probe = uid_probe
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -6088,7 +6131,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe))
+            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid_probe))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6168,7 +6211,10 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
             "ascent check --image --role candidate",
             repo_staging._TRUSTED_PYTHON_PROBE,
         ],
-        ["ascent check --image --role metric"],
+        [
+            "ascent check --image --role metric",
+            f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}",
+        ],
     ]
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
     assert all(spec.network_disabled for spec in checks)
@@ -7562,6 +7608,151 @@ def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.Monke
     finally:
         staged.cleanup()
     assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def _check(role: str, runtime: Any, registry: Any = None, repository: str | None = "registry.example/u") -> Any:
+    """Check :data:`_BUILT_IMAGE` in one role, as ``prepare_box_images`` does.
+
+    Args:
+        role: ``run`` or ``metric``.
+        runtime: The runtime that opens the check box.
+        registry: The user image registry.
+        repository: The owner's repository that holds the image, or ``None`` for an image elsewhere.
+
+    Returns:
+        The trusted Python path for the metric role; ``None`` for the run role.
+    """
+    user_image = UserImage(_BUILT_IMAGE, repository=repository, credentials=None)
+    return repo_staging._check_box_image(
+        runtime, user_image, role, owner_id="job-1", registry=registry, username="alice"
+    )
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize("users", [("",), ("root",), ("0",), ("0:1000",), ("root:root",), ("1000", "0")])
+def test_an_image_whose_own_user_is_root_is_refused_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """The registry reads the image's USER, and root in any platform image refuses the image (SKY-891).
+
+    Args:
+        role: ``run`` or ``metric``.
+        users: The USER of each platform image.
+    """
+    registry = _FakeRegistry(set(), users=users)
+
+    with pytest.raises(repo_staging.BoxImageError, match=rf"\[{role}\] image .* sets no USER, or sets root"):
+        _check(role, _ImageRuntime(), registry)
+    assert registry.user_reads == [(image_registry.image_owner("alice"), "sha256:" + "b" * 64)]
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_an_image_with_a_non_root_user_passes_in_each_role(role: str) -> None:
+    """A non-root USER in each platform image passes (SKY-891).
+
+    Args:
+        role: ``run`` or ``metric``.
+    """
+    registry = _FakeRegistry(set(), users=("1000:1000", "app"))
+
+    assert _check(role, _ImageRuntime(), registry) == (sys.executable if role == "metric" else None)
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_an_image_whose_user_cannot_be_read_is_refused(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """A USER that the registry or local Docker cannot read refuses the image (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        role: ``run`` or ``metric``.
+    """
+    with pytest.raises(repo_staging.BoxImageError, match="could not read the USER"):
+        _check(role, _ImageRuntime(), _FakeRegistry(set(), users=None))
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: None)
+    with pytest.raises(repo_staging.BoxImageError, match="could not read the USER"):
+        _check(role, _ImageRuntime(), None, repository=None)
+
+
+def test_an_image_outside_the_registry_has_its_user_read_from_local_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image outside the owner's repository has its USER read from local Docker (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    read: list[str] = []
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: read.append(image) or ("root",))
+
+    with pytest.raises(repo_staging.BoxImageError, match="sets no USER, or sets root"):
+        _check("run", _ImageRuntime(), _FakeRegistry(set()), repository=None)
+    assert read == [_BUILT_IMAGE]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "user"),
+    [(0, '"1000"\n', ("1000",)), (0, '""\n', ("",)), (1, "", None), (0, "null\n", None), (0, "{", None)],
+)
+def test_the_local_user_read_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, user: tuple[str, ...] | None
+) -> None:
+    """Local Docker gives the USER as JSON, and any other answer reads as no USER (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        returncode: The exit code of ``docker image inspect``.
+        stdout: What it prints.
+        user: The USER the read returns.
+    """
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        """Answer ``docker image inspect`` with the fixed result."""
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(repo_staging.subprocess, "run", run)
+
+    assert _LOCAL_IMAGE_USER("img@sha256:" + "a" * 64) == user
+    assert calls == [["docker", "image", "inspect", "--format", "{{json .Config.User}}", "img@sha256:" + "a" * 64]]
+
+
+@pytest.mark.parametrize(
+    ("user", "root"),
+    [
+        ("", True),
+        ("root", True),
+        ("0", True),
+        ("00", True),
+        ("0:0", True),
+        ("root:wheel", True),
+        ("1000", False),
+        ("1000:0", False),
+        ("app", False),
+        ("\u0660", False),
+        ("rootless", False),
+    ],
+)
+def test_a_root_image_user_is_none_root_or_uid_0(user: str, root: bool) -> None:
+    """No USER, ``root`` or uid 0 runs as root with any group; other names wait for the box uid check (SKY-891).
+
+    Args:
+        user: The image config ``User``.
+        root: Whether it runs as root.
+    """
+    assert repo_staging._root_user(user) is root
+
+
+@pytest.mark.parametrize("uid_probe", ["account ok 0\n", "", "account none 1000\n"])
+def test_a_metric_image_whose_box_user_is_root_is_refused(uid_probe: str) -> None:
+    """The metric check runs the image's Python for the box uid, and uid 0 or no uid refuses it (SKY-891).
+
+    Args:
+        uid_probe: What the uid probe prints.
+    """
+    runtime = _ImageRuntime(uid_probe=uid_probe)
+
+    with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\] image .* runs the box as root \(uid 0\)"):
+        _check("metric", runtime, _FakeRegistry(set()))
+    assert runtime.checks[0].commands[-1] == (
+        f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}"
+    )
 
 
 @pytest.mark.parametrize(

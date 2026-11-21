@@ -149,7 +149,8 @@ class ImageTooLargeError(ImageBuildError):
     """Report an image larger than the size limit."""
 
 
-# Every build uses this scope today, so account deletion deletes its cache tag (SKY-891).
+# Every build of one owner shares this cache. It is in the owner's repository, so account deletion
+# removes it with the repository (SKY-891).
 DEFAULT_CACHE_SCOPE = "default"
 
 

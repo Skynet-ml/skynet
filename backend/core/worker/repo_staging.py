@@ -1191,8 +1191,17 @@ COPIED_IMAGE_OUTSIDE_REPOSITORY = (
     " an image from another registry. Use dockerfile in [{role}] in ascent.toml."
 )
 ROOT_BOX_USER = (
-    "The [run] image '{image}' runs the box as root (uid 0), or its check reported no box uid. A root box user"
+    "The [{role}] image '{image}' runs the box as root (uid 0), or its check reported no box uid. A root box user"
     " could replace the Python and the standard library that {app} checks the protected files with. Set a non-root USER in the image."
+)
+ROOT_IMAGE_USER = (
+    "The [{role}] image '{image}' sets no USER, or sets root (uid 0) as its USER, so its boxes run as root."
+    " A root box user could replace the Python and the standard library that {app} checks the protected files with."
+    " Set a non-root USER in the image."
+)
+UNREADABLE_IMAGE_USER = (
+    "{app} could not read the USER of the [{role}] image '{image}', so it cannot confirm that its boxes do not run"
+    " as root. Try again, or use an image that {app} built from your Dockerfile."
 )
 
 
@@ -1502,6 +1511,8 @@ _ACCOUNT_OK = re.compile(r"ok [0-9]+")
 _ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
 # Only ASCII digits: ``str.isdigit`` would also take digits such as "²".
 _BOX_UID = re.compile(r"account ok ([0-9]+)")
+# The metric role runs no trusted-Python probe, so this gives its box uid (SKY-891).
+_BOX_UID_PROBE = 'import os; print("account ok", os.getuid())'
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 # The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
 # An ``absent`` path is a CPython build or venv landmark, and it must be missing.
@@ -1649,9 +1660,8 @@ def _pull_access(registry: ImageRegistry, owner: str) -> Callable[[], tuple[str,
     """Return a callable that gives one token for the owner's repository while it has time left (SKY-891).
 
     The callable reuses one token while it has more than
-    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one.
-    The Vercel copy cache keys on the credentials, so a new token at each
-    box start would copy the image again for each box.
+    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one,
+    so the boxes of a run do not ask STS for a new token at each start.
 
     Args:
         registry: The user image registry.
@@ -1729,9 +1739,8 @@ def _run_pull_access(
 ) -> Callable[[], tuple[str, str]] | None:
     """Return the one pull access that every box of the run shares (SKY-891).
 
-    The Vercel copy cache keys on the token, so each role and each prepare
-    of one run must use the same token, or the same image is copied twice.
-    A second prepare of the run (after a parallel start pinned first) keeps
+    Each role and each prepare of one run share one token, so the run asks
+    STS for one token and not one for each role. A second prepare of the run (after a parallel start pinned first) keeps
     the access of the first, but only when it is for the same owner's repository.
 
     Args:
@@ -1821,8 +1830,8 @@ def prepare_box_images(
         }
     else:
         # A runtime that ignores the spec's image would run Skynet's image in its place, with no sign.
-        # A runtime that sets ``accepts_user_images`` must not run the box user as uid 0: the
-        # trusted-Python probe checks only for root ownership, so it cannot guard against a root box user.
+        # A runtime that sets ``accepts_user_images`` starts the box as the image's USER, so
+        # :func:`_check_box_image` refuses a root USER in each role (SKY-891).
         if not getattr(runtime, "accepts_user_images", False):
             raise BoxImageError(USER_IMAGES_UNSUPPORTED)
         images = {}
@@ -1857,7 +1866,9 @@ def prepare_box_images(
                 user_images[role] = _user_image(
                     registry, username, role, record["image"], copies=copies, credentials=access
                 )
-            python = _check_box_image(runtime, user_images[role], role, owner_id=owner_id)
+            python = _check_box_image(
+                runtime, user_images[role], role, owner_id=owner_id, registry=registry, username=username
+            )
             if python is not None:
                 record["python"] = python
             images[role] = record
@@ -2013,18 +2024,29 @@ def _local_image_exists(image: str) -> bool:
     return result.returncode == 0
 
 
-def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id: str) -> str | None:
+def _check_box_image(
+    runtime: Any,
+    user_image: UserImage,
+    role: str,
+    *,
+    owner_id: str,
+    registry: ImageRegistry | None,
+    username: str,
+) -> str | None:
     """Run ``ascent check --image`` in an offline box of the image.
 
-    The run role also needs a trusted interpreter and standard library and a
-    box user that is not root, on every runtime: a root box user could change
-    both after the check (SKY-891).
+    The run role also needs a trusted interpreter and standard library. Both
+    roles need a box user that is not root, on every runtime: a root box user
+    could change the checked files after the check (SKY-891). The image's
+    own USER and the uid in the box must both be non-root.
 
     Args:
         runtime: The parent's metered sandbox runtime.
         user_image: The box image to check, with the access its start needs.
         role: ``run`` or ``metric``.
         owner_id: Job identity naming the check operation.
+        registry: The user image registry, which reads the USER of an image in the owner's repository.
+        username: The run's owner.
 
     Returns:
         The trusted absolute Python path for the metric role; ``None`` for the run role.
@@ -2047,13 +2069,23 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
     try:
         result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
         probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
+        report = _check_report(result.stdout)
+        python = report.get("python") if report is not None else None
+        absolute = isinstance(python, str) and python.startswith("/")
+        # The image's python reports the uid, so a root user that replaced it could lie;
+        # the image's USER, read outside the box below, covers that case.
+        uid_probe = (
+            session.run(
+                f"{shlex.quote(python)} -I -S -c {shlex.quote(_BOX_UID_PROBE)}", timeout_seconds=_CHECK_TIMEOUT_SECONDS
+            )
+            if check_role == "metric" and absolute
+            else probe
+        )
     finally:
         with contextlib.suppress(Exception):
             session.close()
-    report = _check_report(result.stdout)
-    python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
-    if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
+    if passed and (check_role != "metric" or absolute):
         names = _root_variables(probe) if probe is not None else []
         if names:
             raise BoxImageError(
@@ -2074,8 +2106,9 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
                     path=_ROOT_PATH,
                 )
             )
-        if probe is not None and _root_box_user(probe):
-            raise BoxImageError(ROOT_BOX_USER.format(image=image, app=APP_NAME))
+        if uid_probe is None or _root_box_user(uid_probe):
+            raise BoxImageError(ROOT_BOX_USER.format(role=role, image=image, app=APP_NAME))
+        _check_image_user(registry, user_image, role, username)
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -2087,6 +2120,73 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
         f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
         f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
     )
+
+
+def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, role: str, username: str) -> None:
+    """Refuse an image whose own USER is root, read outside the box (SKY-891).
+
+    The registry reads the config of an image in the owner's repository, for
+    each platform. Any other image must be in local Docker, which the check
+    box's start pulled it into. A USER that cannot be read refuses the image.
+
+    Args:
+        registry: The user image registry, or ``None`` when local Docker keeps the images.
+        user_image: The checked box image.
+        role: ``run`` or ``metric``.
+        username: The run's owner.
+
+    Raises:
+        BoxImageError: When the USER is root or cannot be read.
+    """
+    image = user_image.reference
+    if registry is not None and user_image.repository is not None:
+        try:
+            users: tuple[str, ...] | None = registry.image_users(image_owner(username), _digest(image))
+        except ImageRegistryError:
+            users = None
+    else:
+        users = _local_image_user(image)
+    if not users:
+        raise BoxImageError(UNREADABLE_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+    if any(_root_user(user) for user in users):
+        raise BoxImageError(ROOT_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+
+
+def _local_image_user(image: str) -> tuple[str, ...] | None:
+    """Read an image's USER from local Docker.
+
+    Args:
+        image: The image id or reference.
+
+    Returns:
+        The USER, or ``None`` when Docker cannot read it.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.User}}", image],
+            capture_output=True,
+            text=True,
+            timeout=_INSPECT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        user = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return (user,) if isinstance(user, str) else None
+
+
+def _root_user(user: str) -> bool:
+    """Tell whether an image USER runs as root: no user, ``root`` or uid 0, with any group.
+
+    Args:
+        user: The image config ``User``, as ``name``, ``uid``, ``name:group`` or ``uid:gid``.
+
+    Returns:
+        True for root. A user name that maps to uid 0 in the image's
+        ``/etc/passwd`` is caught by the uid check in the box.
+    """
+    name = user.split(":", 1)[0]
+    return name in ("", "root") or (name.isascii() and name.isdigit() and int(name) == 0)
 
 
 def _root_box_user(probe: Any) -> bool:

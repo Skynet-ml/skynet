@@ -1201,6 +1201,17 @@ def _box_staged(tmp_path: Path, source: tuple[str, str]) -> repo_staging.StagedR
     )
 
 
+@pytest.fixture
+def _non_root_local_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each image outside a registry a non-root USER, so the tests need no local Docker (SKY-891).
+
+    Args:
+        monkeypatch: Restores the local USER read after the test.
+    """
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: ("1000",))
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
 @pytest.mark.parametrize(("held", "builds"), [(True, 1), (False, 2)], ids=["held", "pruned"])
 def test_a_repository_run_builds_again_when_its_reused_local_image_is_gone(
     worker: BackgroundWorker,
@@ -1271,6 +1282,7 @@ def test_a_resumed_repository_run_boots_from_its_pinned_box_images(
     assert runtime.specs == []
 
 
+@pytest.mark.usefixtures("_non_root_local_images")
 def test_a_parallel_start_that_pinned_first_gives_its_box_images(
     worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
 ) -> None:

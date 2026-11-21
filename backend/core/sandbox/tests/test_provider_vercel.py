@@ -3519,37 +3519,46 @@ async def test_a_cancel_during_the_copy_stops_it_and_creates_no_box(client: Fake
     assert vercel._COPIED == {}
 
 
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"pull_credentials": ("other", "token")},
-        {"pull_credentials": None},
-        {"pull_credentials": ("reader", "secret"), "user_image_repository": "ghcr.io/acme/repo"},
-    ],
-)
-async def test_another_owner_or_other_credentials_never_reuse_a_copy(
-    client: FakeClient, log: list[str], options: dict[str, Any]
+@pytest.mark.parametrize("pull_credentials", [("AWS", "renewed-token"), None])
+async def test_a_renewed_token_of_the_same_owner_reuses_the_copy(
+    client: FakeClient, log: list[str], pull_credentials: tuple[str, str] | None
 ) -> None:
-    """Check that the same digest with other credentials, no credentials or another owner copies again."""
+    """Check that the same owner and digest reuse the copy when the pull token renews (SKY-891)."""
     first = FakeCopier(log)
-    env = _user_env(client, log, first, pull_credentials=("reader", "secret"))
+    env = _user_env(client, log, first, pull_credentials=("AWS", "first-token"))
     await env.start()
     await env.stop()
     second = FakeCopier(log)
-    other = _user_env(client, log, second, **options)
+    renewed = _user_env(client, log, second, pull_credentials=pull_credentials)
+    await renewed.start()
+    assert first.calls == [(_USER_IMAGE, ("AWS", "first-token"))]
+    assert second.calls == []
+    assert client.create_kwargs[-1]["image"] == _VCR_IMAGE
+    await renewed.stop()
+
+
+async def test_another_owner_never_reuses_a_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that the same digest in another owner's repository copies again, with the same token."""
+    first = FakeCopier(log)
+    env = _user_env(client, log, first, pull_credentials=("AWS", "token"))
+    await env.start()
+    await env.stop()
+    second = FakeCopier(log)
+    other = _user_env(client, log, second, pull_credentials=("AWS", "token"), user_image_repository="ghcr.io/acme/repo")
     await other.start()
-    assert first.calls == [(_USER_IMAGE, ("reader", "secret"))]
-    assert second.calls == [(_USER_IMAGE, options["pull_credentials"])]
+    assert first.calls == [(_USER_IMAGE, ("AWS", "token"))]
+    assert second.calls == [(_USER_IMAGE, ("AWS", "token"))]
     await other.stop()
 
 
-def test_the_copy_cache_never_holds_the_secret(client: FakeClient, log: list[str]) -> None:
-    """Check that the cache key holds a keyed hash of the credentials, never the password."""
-    tag = vercel._credentials_tag(("reader", "secret"))
-    assert "secret" not in tag
-    assert len(tag) == 64
-    assert tag != vercel._credentials_tag(("reader", "other"))
-    assert vercel._credentials_tag(None) == ""
+async def test_the_copy_cache_never_holds_the_secret(client: FakeClient, log: list[str]) -> None:
+    """Check that the cache key of a copy holds the owner's repository and no pull credentials."""
+    env = _user_env(client, log, FakeCopier(log), pull_credentials=("AWS", "secret-token"))
+    await env.start()
+    await env.stop()
+    (key,) = vercel._COPIED
+    assert key[:2] == (_USER_IMAGE, _OWNER_REPOSITORY)
+    assert not any("secret-token" in part for part in key)
 
 
 def test_a_user_image_needs_the_owners_repository(client: FakeClient, log: list[str]) -> None:

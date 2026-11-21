@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import re
+import urllib.request
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,6 +66,19 @@ _PULL_ACTIONS = (
 # The worker task role assumes the pull role (role chaining), so AWS caps the
 # session at one hour.
 _PULL_SESSION_SECONDS = 3600
+_IMAGE_MANIFEST_TYPES = (
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+)
+_IMAGE_INDEX_TYPES = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
+# An image config is a few kilobytes; the cap stops a huge blob before it is parsed.
+_CONFIG_MAX_BYTES = 1 << 20
+_CONFIG_FETCH_SECONDS = 30.0
+# buildx adds one attestation manifest for each platform image of an index.
+_INDEX_MAX_IMAGES = 32
 # A user image can be up to 20 GB (SKY-737), so its copy into a provider's own
 # registry gets a long limit. The provider ends a longer copy, and the run's
 # reservation for the copy covers this limit (SKY-891).
@@ -190,6 +204,21 @@ class ImageRegistry(Protocol):
         """
         ...
 
+    def image_users(self, owner: str, digest: str) -> tuple[str, ...]:
+        """Return the config ``User`` of the image, or of each platform image of an index.
+
+        Args:
+            owner: The owner of the repository.
+            digest: The image digest, ``sha256:<64 hex>``.
+
+        Returns:
+            One ``User`` value for each platform image, ``""`` when the config sets none.
+
+        Raises:
+            ImageRegistryError: The registry cannot give the image's config.
+        """
+        ...
+
     def delete_image(self, owner: str, digest: str) -> None:
         """Delete one image from the owner's repository.
 
@@ -293,6 +322,25 @@ def _aws_error_kind(exc: BaseException) -> str:
     return f"{type(exc).__name__} {code}" if code else type(exc).__name__
 
 
+def _fetch_url(url: str) -> bytes:
+    """Read the bytes at an ECR layer download URL, up to one byte past the config cap.
+
+    Args:
+        url: The presigned HTTPS URL that ECR returns.
+
+    Returns:
+        The bytes, cut one byte past ``_CONFIG_MAX_BYTES``, so the caller sees a larger blob.
+
+    Raises:
+        ImageRegistryError: The URL is not HTTPS.
+        OSError: The download failed.
+    """
+    if not url.startswith("https://"):
+        raise ImageRegistryError("ECR returned a layer download URL that is not HTTPS")
+    with urllib.request.urlopen(url, timeout=_CONFIG_FETCH_SECONDS) as response:
+        return response.read(_CONFIG_MAX_BYTES + 1)
+
+
 def image_owner(username: str) -> str:
     """Name the registry repository of one user's images.
 
@@ -379,20 +427,26 @@ class EcrRegistry:
         client: Any,
         repository_prefix_uri: str,
         *,
-        sts: Any,
-        pull_role_arn: str,
+        sts: Any | None,
+        pull_role_arn: str | None,
         ecr_for: Callable[[Mapping[str, Any]], Any],
+        fetch: Callable[[str], bytes] | None = None,
     ) -> None:
         """Bind the registry to one repository prefix and its pull role.
 
         Args:
             client: A boto3 ECR client (or a fake with the same methods).
             repository_prefix_uri: ``<account>.dkr.ecr.<region>.amazonaws.com/<prefix>``.
-            sts: A boto3 STS client.
+            sts: A boto3 STS client, or ``None`` for a registry that only
+                deletes images.
             pull_role_arn: The role to assume, with an owner session policy,
-                for pull credentials.
+                for pull credentials and image configs. ``None`` or an empty
+                string makes a registry that only deletes images: each call
+                that needs the pull role raises ``ImageRegistryError``.
             ecr_for: Make an ECR client from the ``Credentials`` that STS
                 ``AssumeRole`` returns.
+            fetch: Read the bytes at an ECR layer download URL. ``None`` uses
+                an HTTPS GET with a time limit.
 
         Raises:
             ImageRegistryError: The URI is not an ECR repository prefix URI.
@@ -404,6 +458,7 @@ class EcrRegistry:
         self._sts = sts
         self._pull_role = pull_role_arn
         self._ecr_for = ecr_for
+        self._fetch = fetch or _fetch_url
         self.registry_id = match["registry"]
         self.region = match["region"]
         self.prefix = match["prefix"]
@@ -570,15 +625,7 @@ class EcrRegistry:
             ImageRegistryError: The registry has no pull role, the owner is
                 invalid, or ECR returns no token or a token in an unknown form.
         """
-        if not self._pull_role:
-            raise ImageRegistryError("the user image registry has no pull role")
-        policy = self.pull_session_policy(owner)
-        session = self._sts.assume_role(
-            RoleArn=self._pull_role,
-            RoleSessionName="skynet-image-pull",
-            Policy=json.dumps(policy, separators=(",", ":")),
-            DurationSeconds=_PULL_SESSION_SECONDS,
-        )["Credentials"]
+        session = self._pull_session(owner)
         response = self._ecr_for(session).get_authorization_token(registryIds=[self.registry_id])
         data = response.get("authorizationData") or []
         if not data:
@@ -594,6 +641,135 @@ class EcrRegistry:
             password=password,
             expires_at=min(expiries) if expiries else None,
         )
+
+    def _pull_session(self, owner: str) -> Mapping[str, Any]:
+        """Assume the pull role with the owner's session policy.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            The ``Credentials`` that STS ``AssumeRole`` returns.
+
+        Raises:
+            ImageRegistryError: The registry has no pull role, or the owner is invalid.
+        """
+        if not self._pull_role or self._sts is None:
+            raise ImageRegistryError("the user image registry has no pull role")
+        policy = self.pull_session_policy(owner)
+        return self._sts.assume_role(
+            RoleArn=self._pull_role,
+            RoleSessionName="skynet-image-pull",
+            Policy=json.dumps(policy, separators=(",", ":")),
+            DurationSeconds=_PULL_SESSION_SECONDS,
+        )["Credentials"]
+
+    def image_users(self, owner: str, digest: str) -> tuple[str, ...]:
+        """Return the config ``User`` of the image, or of each platform image of an index (SKY-891).
+
+        The calls use the pull role with the owner's session policy, so they
+        read only the owner's repository. An index skips its attestation
+        manifests and the entries with an ``unknown`` platform, which hold no
+        runnable image. Each config's bytes must match its digest.
+
+        Args:
+            owner: The owner of the repository.
+            digest: The image digest.
+
+        Returns:
+            One ``User`` value for each platform image, ``""`` when the config sets none.
+
+        Raises:
+            ImageRegistryError: The digest is malformed, the registry has no
+                pull role, the AWS call or the download failed, or the
+                manifest or config is not in a known form.
+        """
+        name = self.repository_name(owner)
+        require_digest(digest)
+        try:
+            ecr = self._ecr_for(self._pull_session(owner))
+            media_type, manifest = self._manifest(ecr, name, digest)
+            if media_type in _IMAGE_INDEX_TYPES:
+                children = [
+                    child["digest"]
+                    for child in manifest.get("manifests") or []
+                    if isinstance(child, dict)
+                    and (child.get("annotations") or {}).get("vnd.docker.reference.type") != "attestation-manifest"
+                    and (child.get("platform") or {}).get("os") != "unknown"
+                ]
+                if not children or len(children) > _INDEX_MAX_IMAGES:
+                    raise ImageRegistryError(f"{name} image {digest} is an index with {len(children)} platform images")
+                images = [self._manifest(ecr, name, require_digest(str(child))) for child in children]
+            else:
+                images = [(media_type, manifest)]
+            return tuple(self._config_user(ecr, name, *image) for image in images)
+        except _AWS_ERRORS as exc:
+            raise ImageRegistryError(
+                f"cannot read the config of {name} image {digest}: {_aws_error_kind(exc)}"
+            ) from None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ImageRegistryError(f"cannot read the config of {name} image {digest}: {type(exc).__name__}") from None
+
+    def _manifest(self, ecr: Any, name: str, digest: str) -> tuple[str, dict[str, Any]]:
+        """Read one manifest of the repository by its digest.
+
+        Args:
+            ecr: An ECR client with the owner's pull session.
+            name: The repository name.
+            digest: The manifest digest.
+
+        Returns:
+            The manifest's media type and its JSON object.
+
+        Raises:
+            ImageRegistryError: ECR does not hold the manifest, or it is not a JSON object.
+        """
+        response = ecr.batch_get_image(
+            registryId=self.registry_id,
+            repositoryName=name,
+            imageIds=[{"imageDigest": digest}],
+            acceptedMediaTypes=[*_IMAGE_MANIFEST_TYPES, *_IMAGE_INDEX_TYPES],
+        )
+        images = [i for i in response.get("images") or [] if (i.get("imageId") or {}).get("imageDigest") == digest]
+        if not images:
+            raise ImageRegistryError(f"{name} has no image {digest}")
+        manifest = json.loads(images[0]["imageManifest"])
+        if not isinstance(manifest, dict):
+            raise ImageRegistryError(f"{name} image {digest} has a manifest in an unknown form")
+        return str(images[0].get("imageManifestMediaType") or manifest.get("mediaType") or ""), manifest
+
+    def _config_user(self, ecr: Any, name: str, media_type: str, manifest: Mapping[str, Any]) -> str:
+        """Read the ``User`` of one platform image's config.
+
+        Args:
+            ecr: An ECR client with the owner's pull session.
+            name: The repository name.
+            media_type: The manifest's media type.
+            manifest: The image manifest.
+
+        Returns:
+            The config ``User``, or ``""`` when the config sets none.
+
+        Raises:
+            ImageRegistryError: The manifest is not an image manifest, or the
+                config is too large, does not match its digest, or has a ``User`` that is not a string.
+        """
+        if media_type not in _IMAGE_MANIFEST_TYPES:
+            raise ImageRegistryError(f"{name} has a manifest of the unknown type {media_type!r}")
+        config_digest = require_digest(str(manifest["config"]["digest"]))
+        url = ecr.get_download_url_for_layer(
+            registryId=self.registry_id, repositoryName=name, layerDigest=config_digest
+        )["downloadUrl"]
+        blob = self._fetch(url)
+        if len(blob) > _CONFIG_MAX_BYTES:
+            raise ImageRegistryError(f"{name} config {config_digest} is larger than {_CONFIG_MAX_BYTES} bytes")
+        if "sha256:" + hashlib.sha256(blob).hexdigest() != config_digest:
+            raise ImageRegistryError(f"{name} config {config_digest} does not match its digest")
+        config = json.loads(blob)
+        user = ((config.get("config") if isinstance(config, dict) else None) or {}).get("User") or ""
+        if not isinstance(user, str):
+            raise ImageRegistryError(f"{name} config {config_digest} has a User that is not a string")
+        return user
 
     def check_digest(self, owner: str, digest: str) -> RegistryImage:
         """Confirm that the owner's repository holds an image with this digest.

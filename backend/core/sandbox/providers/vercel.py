@@ -44,13 +44,9 @@ import codecs
 import contextlib
 import dataclasses
 import functools
-import hashlib
-import hmac
-import json
 import logging
 import math
 import posixpath
-import secrets
 import shlex
 import subprocess
 import time
@@ -238,13 +234,14 @@ class _Copy:
 
 
 # The digest pins the content, so each process copies one source image into
-# one Vercel project once for each owner and credentials, and later boxes
-# reuse that copy. The key holds the owner's repository and a keyed hash of
-# the pull credentials, so a box that did not prove the same read access never
-# reuses a private copy. A failed or cancelled copy is not kept. Tasks are
-# kept for each event loop, because a task cannot be awaited from another loop.
-_CopyKey = tuple[str, str, str, str, str]
-_CREDENTIALS_KEY = secrets.token_bytes(32)
+# one Vercel project once for each owner, and later boxes reuse that copy. The
+# key holds the owner's repository, and the box refuses a source image outside
+# it, so another owner never reuses a private copy. The key holds no pull
+# credentials: the run's token renews about every 45 minutes, and a renewed
+# token must not copy the same image again. A failed or cancelled copy is not
+# kept. Tasks are kept for each event loop, because a task cannot be awaited
+# from another loop.
+_CopyKey = tuple[str, str, str, str]
 _COPIED: dict[_CopyKey, str] = {}
 _COPYING: dict[tuple[_CopyKey, asyncio.AbstractEventLoop], _Copy] = {}
 
@@ -280,22 +277,6 @@ async def _copy_image_once(copy_image: ImageCopier, source_image: str, pull_cred
     if not digest_image(copied):
         raise ImageCopyError(f"The copy of {source_image} in Vercel's registry is not pinned by digest.")
     return copied
-
-
-def _credentials_tag(pull_credentials: tuple[str, str] | None) -> str:
-    """Return a keyed hash of the pull credentials, never the secret itself.
-
-    Args:
-        pull_credentials: The (username, password), or ``None``.
-
-    Returns:
-        An HMAC-SHA256 hex digest under a random key of this process, or an
-        empty string for no credentials.
-    """
-    if pull_credentials is None:
-        return ""
-    message = json.dumps(list(pull_credentials)).encode()
-    return hmac.new(_CREDENTIALS_KEY, message, hashlib.sha256).hexdigest()
 
 
 def _finish_copy(key: _CopyKey, loop: asyncio.AbstractEventLoop, copy: _Copy, task: asyncio.Task[str]) -> None:
@@ -828,8 +809,8 @@ class VercelEnvironment(SandboxEnvironment):
     async def _copy_source_image(self) -> str:
         """Return the copy of the user image in Vercel's registry, and copy it once.
 
-        Boxes of the same owner and credentials that start at the same time
-        wait for one copy. Each waiter is shielded: a cancel of one waiter
+        Boxes of the same owner that start at the same time wait for one copy,
+        also when their pull credentials differ. Each waiter is shielded: a cancel of one waiter
         does not stop the copy while another box still waits for it. The copy
         is cancelled only when its last waiter leaves.
 
@@ -846,7 +827,6 @@ class VercelEnvironment(SandboxEnvironment):
         key = (
             self._source_image,
             self._user_image_repository,
-            _credentials_tag(self._pull_credentials),
             str(settings.vercel_team_id),
             str(settings.vercel_project_id),
         )

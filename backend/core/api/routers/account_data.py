@@ -25,7 +25,7 @@ from ...sandbox.image_registry import ImageRegistryError
 from ...service_gateway.agents.attachment_sandbox import stop_chat_runner
 from ...storage.models import AgentConversationModel, UserModel
 from ...storage.tree_purge import TreePurgeError, delete_unused_packs
-from ..account_data_service import delete_account, export_account
+from ..account_data_service import AccountRunsActiveError, delete_account, export_account
 from ..account_export_formats import ExportFormat, render_export
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -125,6 +125,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 401 (``accounts.invalid_credentials``) when a local
                 account's confirmation password is missing or does not match.
+            DomainError: 409 (``accounts.deletion_runs_active``) when the
+                deployment has a user image registry and one of the account's
+                runs is not finished, because its build could push after the
+                repository delete (SKY-891). Nothing is deleted.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
                 the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
                 is not set or the bucket client cannot be built (for example,
@@ -148,6 +152,8 @@ def create_account_data_router(*, job_store) -> APIRouter:
             ).all()
             try:
                 summary = delete_account(session, user.username)
+            except AccountRunsActiveError as exc:
+                raise DomainError("accounts.deletion_runs_active", status=409) from exc
             except TreePurgeError as exc:
                 logger.exception("Account deletion stopped: the tree packs of the account were not deleted")
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
