@@ -647,7 +647,7 @@ def _search_corpus() -> list[dict[str, Any]]:
         {
             "optimization_id": "pub_0008",
             "name": "cold email prompt",
-            "task_name": "prompt optimization",
+            "task_name": "outreach copywriting",
             "module_name": "blackbox",
             "optimizer_name": "gepa",
             "winning_model": CLAUDE_SONNET,
