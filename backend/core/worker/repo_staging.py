@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 import hashlib
@@ -108,7 +109,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
     scorer_only_paths,
 )
-from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
+from ..service_gateway.optimization.blackbox.repo_scorer import _SUPERVISOR_BOOT, RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
@@ -123,7 +124,14 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     patch_violations,
     strip_archive,
 )
-from ..service_gateway.optimization.blackbox.repo_workspace import BASE_PYTHON, RepoSetupError, RepoWorkspace
+from ..service_gateway.optimization.blackbox.repo_workspace import (
+    _HASH_PREPARED,
+    _HASH_PROTECTED,
+    _WRITE_ANSWER,
+    BASE_PYTHON,
+    RepoSetupError,
+    RepoWorkspace,
+)
 from ..service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
@@ -132,7 +140,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     run_log_emitter,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
-from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from ..service_gateway.optimization.blackbox.sandbox_scorer import RUNNER_SOURCE, ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
@@ -1168,67 +1176,144 @@ DOCKERFILE_UNSUPPORTED = (
 )
 
 
-# The candidate box hashes the protected files with BASE_PYTHON and never
-# falls back to PATH in a user image, so the image must hold it where the box
-# user cannot replace it. A writable folder anywhere above a path, or a link
-# on the way to the file, would let the box user swap it after the check. The
-# probe walks the link chain with plain ``readlink``, as ``namei`` and
-# ``readlink -f`` hide the hops. For each hop it prints ``stat`` (owner uid,
-# octal mode, type, name) of ``/``, every folder down to the hop and the hop
-# itself, then ``link <target>`` for a link. ``_trusted_python`` judges it.
-# A newline in a name or target could forge a listing line, so the probe stops
-# at any byte outside printable ASCII. ``$(...)`` drops trailing newlines, so
-# the ``x`` keeps them and the probe sees the target the kernel follows.
-# The hash scripts run with ``-I -S``, so they import only the standard
-# library and load libpython. Under the prefix above the file's last ``bin``
-# folder, the probe prints ``stat`` of ``lib`` and of each ``python3*`` and
-# ``libpython*`` entry in it. It fails when any file or folder below them,
-# except ``site-packages`` and ``dist-packages``, is not root's or is group or
-# other writable, or when a link entry resolves outside ``lib``.
+def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
+    """List the absolute modules that the module body of each source imports.
+
+    Args:
+        sources: Python sources that root runs in a candidate box.
+
+    Returns:
+        The sorted module names, without ``__future__``.
+    """
+    names = set()
+    for source in sources:
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module != "__future__":
+                names.add(node.module)
+    return sorted(names)
+
+
+# The candidate box runs root scripts with BASE_PYTHON and never falls back
+# to PATH in a user image, so the box user must not be able to change any
+# file that the interpreter loads. The check asks the interpreter itself:
+# it runs it as root runs it, with ``-I -S``, imports the modules that the
+# root scripts import, and prints a tagged line for each path that it uses:
+# ``path`` for a ``sys.path`` entry, ``file`` for each file mapped into it or
+# into its shell (``/proc/<pid>/maps``, so libpython, libc and any preloaded
+# library wherever they are) and for the ELF loader that it names, ``opt``
+# for a loader file that may be missing, and ``dir`` for its prefix. The hash
+# scripts start it with ``env -i`` and the supervisor with the box's own
+# environment, so it runs both ways. ``w`` walks one path from ``/``: it
+# prints ``stat`` (owner uid, octal mode, type, name) of ``/`` and of each
+# part, follows each link hop by hop with plain ``readlink``, as ``namei`` and
+# ``readlink -f`` hide the hops, and prints ``link <target>`` after it, or
+# ``none <path>`` for the first part that does not exist. ``_trusted_python``
+# judges the listing. Below each ``sys.path`` folder, except
+# ``site-packages`` and ``dist-packages``, which ``-S`` keeps out of
+# ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
+# group or others can write, or that is a link. A ``pyvenv.cfg`` or ``._pth``
+# file next to the interpreter would move ``sys.path``, so it fails the probe
+# too. A newline in a name or target could forge a listing line, so the probe
+# stops at any byte outside printable ASCII. ``$(...)`` drops trailing
+# newlines, so the ``x`` keeps them and the probe sees the target the kernel follows.
 _MAX_LINK_HOPS = 40
+_ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
+_PATH_SCRIPT = (
+    "import "
+    + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
+    + r"""
+if sys.prefix != sys.base_prefix:
+    sys.exit("the interpreter runs in a virtual environment")
+for entry in sys.path:
+    print("path", entry)
+seen = set()
+for pid in ("self", str(os.getppid())):
+    with open(f"/proc/{pid}/maps") as maps:
+        for line in maps:
+            name = line.rstrip("\n").split(None, 5)[5:]
+            if name and name[0].startswith("/") and name[0] not in seen:
+                seen.add(name[0])
+                print("file", name[0])
+with open(sys.executable, "rb") as elf:
+    data = elf.read()
+if data[:6] != b"\x7fELF\x02\x01":
+    sys.exit("the interpreter is not a 64-bit little-endian ELF file")
+start, size, count = (int.from_bytes(data[a:b], "little") for a, b in ((32, 40), (54, 56), (56, 58)))
+for at in range(start, start + size * count, size):
+    if int.from_bytes(data[at : at + 4], "little") == 3:
+        offset, length = (int.from_bytes(data[a:b], "little") for a, b in ((at + 8, at + 16), (at + 32, at + 40)))
+        print("file", data[offset : offset + length].rstrip(b"\0").decode())
+for name in ["ld.so.preload", "ld.so.cache"] + [n for n in os.listdir("/etc") if n.startswith("ld-musl-")]:
+    print("opt", "/etc/" + name)
+print("dir", sys.prefix)
+print("dir", sys.exec_prefix)
+"""
+)
 _TRUSTED_PYTHON_PROBE = (
-    f"export LC_ALL=C; f='%u %a %F %n'; p={shlex.quote(BASE_PYTHON)}; n=0\n"
-    f"while [ $n -lt {_MAX_LINK_HOPS} ]; do n=$((n+1))\n"
-    "  case $p in *[![:print:]]*) exit 1;; esac\n"
+    f"export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
+    "w() {\n"
+    "  a=; r=${1#/}; n=0; z=\n"
     '  stat -c "$f" / || exit 1\n'
-    "  a=; r=${p#/}\n"
-    '  while [ "${r#*/}" != "$r" ]; do a=$a/${r%%/*}; r=${r#*/}; stat -c "$f" "$a" || exit 1; done\n'
-    '  stat -c "$f" "$p" || exit 1\n'
-    '  if [ ! -h "$p" ]; then\n'
-    "    case $p in */bin/*) ;; *) exit 1;; esac\n"
-    "    d=${p%/bin/*}/lib\n"
-    '    stat -c "$f" "$d" || exit 1\n'
-    '    for e in "$d"/python3* "$d"/libpython*; do\n'
-    '      [ -e "$e" ] || [ -h "$e" ] || continue\n'
-    "      case $e in *[![:print:]]*) exit 1;; esac\n"
-    '      stat -c "$f" "$e" || exit 1\n'
-    '      if [ -h "$e" ]; then r=$(readlink -f "$e") || exit 1\n'
-    '        case $r in *[![:print:]]*) exit 1;; "$d"/*) ;; *) exit 1;; esac; fi\n'
-    '      o=$(find -L "$e" \\( -path "$e/site-packages" -o -path "$e/dist-packages" \\) -prune'
-    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 \\) -print) || exit 1\n"
-    '      [ -z "$o" ] || exit 1\n'
-    "    done\n"
-    "    exit 0\n"
-    "  fi\n"
-    '  l=$(readlink "$p" && echo x) || exit 1\n'
-    "  l=${l%?x}\n"
-    "  case $l in *[![:print:]]*|'') exit 1;; esac\n"
-    "  printf 'link %s\\n' \"$l\"\n"
-    "  case $l in /*) p=$l;; *) p=${p%/*}/$l;; esac\n"
+    '  while [ -n "$r" ]; do\n'
+    "    c=${r%%/*}\n"
+    "    case $r in */*) r=${r#*/};; *) r=;; esac\n"
+    "    case $c in ''|.) continue;; ..) a=${a%/*}; continue;; esac\n"
+    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
+    '    stat -c "$f" "$a/$c" || exit 1\n'
+    '    if [ -h "$a/$c" ]; then\n'
+    f"      n=$((n+1)); [ $n -le {_MAX_LINK_HOPS} ] || exit 1\n"
+    '      l=$(readlink "$a/$c" && echo x) || exit 1\n'
+    "      l=${l%?x}\n"
+    "      case $l in *[![:print:]]*|'') exit 1;; esac\n"
+    "      printf 'link %s\\n' \"$l\"\n"
+    '      case $l in /*) a=; r=${l#/}${r:+/$r}; stat -c "$f" / || exit 1;; *) r=$l${r:+/$r};; esac\n'
+    "    else a=$a/$c; fi\n"
+    "  done\n"
+    "}\n"
+    'w "$s"\n'
+    '[ -z "$z" ] || exit 1\n'
+    'for d in "${s%/*}" "${a%/*}"; do\n'
+    '  for e in "$d/pyvenv.cfg" "${d%/*}/pyvenv.cfg" "$d"/*._pth; do\n'
+    '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
+    "  done\n"
     "done\n"
-    "exit 1"
+    "printf 'file /usr/bin/env\\n'; w /usr/bin/env\n"
+    "for m in clean box; do\n"
+    "  printf 'run %s\\n' $m\n"
+    '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
+    '  else o=$("$s" -I -S -c "$y") || exit 1; fi\n'
+    "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
+    "    case $v in *[![:print:]]*) exit 1;; 'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; w "${v#* }"\n'
+    '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
+    '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
+    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
+    '      [ -z "$q" ] || exit 1\n'
+    "    fi\n"
+    "  done || exit 1\n"
+    "done"
 )
 # An absolute path of printable ASCII only, as the probe allows.
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
-_STDLIB_ENTRY = re.compile(r"python3[^/]*|libpython[^/]*")
+# The file types that each tagged path may have; ``path`` and ``opt`` may also be missing.
+_ENTRY_KINDS = {
+    "path": frozenset({"directory", "regular file"}),
+    "file": frozenset({"regular file"}),
+    "opt": frozenset({"regular file"}),
+    "dir": frozenset({"directory"}),
+}
+_MAY_BE_MISSING = frozenset({"path", "opt"})
+_RUN_MODES = ("clean", "box")
+_MISSING = "missing"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
-    " The image must hold it as an executable regular file, or as a chain of links to one. That file, each"
-    " link and every folder from / down to each of them must be owned by root and not writable by group or"
-    " others. A folder on the way must not be a link. Its standard library (lib/python3.X) and the"
-    " libpython files next to it must also be owned by root and not writable by group or others,"
-    " except site-packages."
+    " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
+    " virtual environment. Every file that it loads, each folder on its import path and every file and"
+    " folder below that path (except site-packages), and every folder from / down to each of them, must be"
+    " owned by root and not writable by group or others. Links count only below / and outside the import path."
 )
 
 
@@ -1569,83 +1654,103 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
 
 
 def _trusted_python(probe: Any) -> bool:
-    """Tell whether the image's base interpreter is out of the box user's reach.
+    """Tell whether every path that the image's base interpreter uses is out of the box user's reach.
 
-    The listing must follow the exact walk that the probe makes from
-    ``BASE_PYTHON``, so a missing tool, a short listing or any odd line refuses.
+    The listing must follow the exact walks that the probe makes, so a
+    missing tool, a short listing or any odd line refuses.
 
     Args:
         probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
 
     Returns:
-        True when every folder from ``/`` down to each hop is a root-owned
-        folder that group and others cannot write, each link is root-owned,
-        the chain ends within the hop cap at a root-owned executable regular
-        file that group and others cannot write, and its standard library
-        passes :func:`_trusted_stdlib`.
+        True when ``BASE_PYTHON`` resolves to a root-owned regular file that
+        group and others cannot write and others can run, ``/usr/bin/env``
+        resolves to one that group and others cannot write, and both runs
+        list at least one ``path``, ``file`` and ``dir`` entry, each of which
+        passes :func:`_walk` with the file type that its tag allows.
     """
     if not probe.ok:
         return False
     # Only a newline ends a line; ``splitlines`` would also split at other control bytes.
     lines = probe.stdout.removesuffix("\n").split("\n")[::-1]
-    path = BASE_PYTHON
-    for _ in range(_MAX_LINK_HOPS):
-        parts = path.split("/")[1:]
-        # The probe and this walk join paths the same way only with no "." or "..".
-        if not _PRINTABLE_PATH.fullmatch(path) or any(part in ("", ".", "..") for part in parts):
+    python = _walk(lines, BASE_PYTHON)
+    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or not python[0] & 0o001:
+        return False
+    if not lines or lines.pop() != "file /usr/bin/env":
+        return False
+    env = _walk(lines, "/usr/bin/env")
+    if env in (None, _MISSING) or env[1] != "regular file" or env[0] & 0o022:
+        return False
+    for mode in _RUN_MODES:
+        if not lines or lines.pop() != f"run {mode}":
             return False
-        for depth in range(len(parts)):
-            entry = _stat_entry(lines.pop() if lines else "", "/" + "/".join(parts[:depth]))
-            if entry is None or entry[1] != "directory" or entry[0] & 0o022:
+        tags = set()
+        while lines and not lines[-1].startswith("run "):
+            tag, _, path = lines.pop().partition(" ")
+            if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
                 return False
-        entry = _stat_entry(lines.pop() if lines else "", path)
-        if entry is None:
+            entry = _walk(lines, path)
+            if entry is None or (entry == _MISSING and tag not in _MAY_BE_MISSING):
+                return False
+            if entry != _MISSING and (entry[1] not in _ENTRY_KINDS[tag] or entry[0] & 0o022):
+                return False
+            tags.add(tag)
+        if not {"path", "file", "dir"} <= tags:
             return False
-        mode, kind = entry
-        if kind == "regular file":
-            return not mode & 0o022 and bool(mode & 0o001) and _trusted_stdlib(lines, path)
-        # A link's own mode is always 777 and grants nothing; its folder guards it.
-        if kind != "symbolic link" or not lines or not lines[-1].startswith("link "):
-            return False
-        target = lines.pop().removeprefix("link ")
-        path = target if target.startswith("/") else posixpath.join(posixpath.dirname(path), target)
-    return False
+    return not lines
 
 
-def _trusted_stdlib(lines: list[str], python: str) -> bool:
-    """Tell whether the listing's rest shows a standard library out of the box user's reach.
-
-    The probe exits 0 only when ``find`` found nothing writable below the
-    entries, so this checks the entries that it listed.
+def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:
+    """Follow the probe's walk of one path from ``/``, the way the kernel resolves it.
 
     Args:
-        lines: The probe's lines after the interpreter, last line first.
-        python: The interpreter file that the link chain ends at.
+        lines: The probe's remaining lines, last line first; the walk pops its own.
+        path: The absolute path that the probe walked.
 
     Returns:
-        True when ``lib`` under the interpreter's prefix is a root-owned folder
-        that group and others cannot write, and every line after it is a
-        root-owned ``python3*`` or ``libpython*`` entry of it, with at least
-        one ``python3.X`` folder. Group and others must not write any entry
-        but a link, whose target the probe checks.
+        The octal mode and the file type of the path's last part,
+        :data:`_MISSING` when a part does not exist, or None when a line is
+        not the one the walk expects, a folder on the way is not a root-owned
+        folder that group and others cannot write, or the links take more
+        than ``_MAX_LINK_HOPS`` hops.
     """
-    prefix, bin_folder, _ = python.rpartition("/bin/")
-    lib = prefix + "/lib"
-    entry = _stat_entry(lines.pop() if lines else "", lib)
-    if not bin_folder or entry is None or entry[1] != "directory" or entry[0] & 0o022:
-        return False
-    stdlib = False
-    while lines:
-        line = lines.pop()
-        base = line.rsplit("/", 1)[-1]
-        entry = _stat_entry(line, f"{lib}/{base}")
-        if entry is None or not _STDLIB_ENTRY.fullmatch(base) or not _PRINTABLE_PATH.fullmatch(f"{lib}/{base}"):
-            return False
-        mode, kind = entry
-        if kind != "symbolic link" and mode & 0o022:
-            return False
-        stdlib = stdlib or (kind == "directory" and re.fullmatch(r"python3\.\d+", base) is not None)
-    return stdlib
+    root = _stat_entry(lines.pop() if lines else "", "/")
+    if root is None or root[1] != "directory" or root[0] & 0o022:
+        return None
+    folder, rest, hops, entry = "", path.removeprefix("/"), 0, root
+    while rest:
+        part, _, rest = rest.partition("/")
+        if part in ("", "."):
+            continue
+        if part == "..":
+            folder = folder.rpartition("/")[0]
+            continue
+        here = f"{folder}/{part}"
+        if lines and lines[-1] == f"none {here}":
+            lines.pop()
+            return _MISSING
+        entry = _stat_entry(lines.pop() if lines else "", here)
+        if entry is None:
+            return None
+        if entry[1] == "symbolic link":
+            # A link's own mode is always 777 and grants nothing; its folder guards it.
+            hops += 1
+            if hops > _MAX_LINK_HOPS or not lines or not lines[-1].startswith("link "):
+                return None
+            target = lines.pop().removeprefix("link ")
+            if not target or not _PRINTABLE_PATH.fullmatch("/" + target):
+                return None
+            if target.startswith("/"):
+                root = _stat_entry(lines.pop() if lines else "", "/")
+                if root is None or root[1] != "directory" or root[0] & 0o022:
+                    return None
+                folder, target = "", target.removeprefix("/")
+            rest = f"{target}/{rest}" if rest else target
+            continue
+        if rest and (entry[1] != "directory" or entry[0] & 0o022):
+            return None
+        folder = here
+    return entry
 
 
 def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
