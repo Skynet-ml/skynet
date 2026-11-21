@@ -544,6 +544,19 @@ class Settings(BaseSettings):
         le=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS,
         description="Ceiling on a sandbox's lifetime in seconds. 2700 (45 minutes) is the Hobby plan limit; Pro and Enterprise teams can raise it to 86400 (24 hours), the most Vercel accepts. A job that outlives its box reopens one on its next call.",
     )
+    image_build_timeout_minutes: int = Field(
+        default=60,
+        alias="IMAGE_BUILD_TIMEOUT_MINUTES",
+        ge=5,
+        le=480,
+        description="Longest time one user image build may take, in minutes. A build over it fails the run. CodeBuild accepts 5 to 480 minutes (SKY-888).",
+    )
+    image_build_max_size_gb: float = Field(
+        default=20.0,
+        alias="IMAGE_BUILD_MAX_SIZE_GB",
+        gt=0.0,
+        description="Largest user image a build may produce, in GB (10^9 bytes). An image over it fails the build. Hosted builds measure the compressed size that the registry reports; local builds measure the size that Docker reports (SKY-888).",
+    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",
