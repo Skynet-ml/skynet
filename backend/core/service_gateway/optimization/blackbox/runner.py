@@ -102,6 +102,7 @@ import os
 import shutil
 import signal
 import site
+import socketserver
 import ssl
 import stat
 import subprocess
@@ -640,7 +641,7 @@ def start_service_proxy(
                 *args: The values for the format string.
             """
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = _LoopbackHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     env = {service_env_name(name): f"{base}/service/{urllib.parse.quote(name, safe='')}/" for name in names}
@@ -1690,7 +1691,23 @@ def _refuse_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON.")
 
 
-class _QuietHTTPServer(http.server.ThreadingHTTPServer):
+class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """A loopback HTTP server that binds without a host name lookup."""
+
+    def server_bind(self) -> None:
+        """Bind the socket and name the server by its address.
+
+        ``HTTPServer.server_bind`` calls ``socket.getfqdn``, an NSS hosts
+        lookup that can load NSS modules into the root supervisor, which
+        the image check does not walk (SKY-737).
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+
+class _QuietHTTPServer(_LoopbackHTTPServer):
     """A loopback HTTP server that prints nothing when a request fails."""
 
     def handle_error(self, request: Any, client_address: Any) -> None:

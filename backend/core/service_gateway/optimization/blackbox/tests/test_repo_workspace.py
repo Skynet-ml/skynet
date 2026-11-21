@@ -1201,7 +1201,7 @@ def test_the_check_runs_as_root_unless_the_provider_root_has_no_capability(
     space, _ = _guarded(tmp_path)
     try:
         session = _SudoRecordingSession(**attributes)
-        assert space.fingerprint(session, WORK_DIR) == ({}, {})  # type: ignore[arg-type]
+        assert space.fingerprint(session, WORK_DIR, "/box") == ({}, {})  # type: ignore[arg-type]
         assert session.sudo == [sudo]
     finally:
         space.close()
@@ -1236,10 +1236,12 @@ def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: 
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
     space = _space(archive, _Runtime(), setup=None, protected_paths=["eval"], run_image=run_image)
     session = _CommandRecordingSession()
-    space.fingerprint(session, WORK_DIR)  # type: ignore[arg-type]
-    space._digest_prepared(session)  # type: ignore[arg-type]
-    repo_workspace._write_answer(session, "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
-    assert len(session.commands) == 3
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    with pytest.raises(RepoSetupError, match="working directory"):
+        repo_workspace.physical_root(session, space.user_run_image)  # type: ignore[arg-type]
+    assert len(session.commands) == 4
     assert all(f"p={shlex.quote(repo_workspace.BASE_PYTHON)} && " in command for command in session.commands)
     assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
     assert all(('"$p" -I -S -c' in command) for command in session.commands)
@@ -1247,25 +1249,27 @@ def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: 
 
 
 def test_the_root_hash_and_answer_commands_change_folder_only_to_absolute_paths(tmp_path: Path) -> None:
-    """Every ``cd`` in the hash and answer commands names ``/`` or ``"$PWD"/``, so ``CDPATH`` cannot move it (SKY-737)."""
+    """Every ``cd`` and answer path names the box root that the parent holds, never ``$PWD`` (SKY-737)."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
     space = _space(
         archive, _Runtime(), setup=None, protected_paths=["eval"], run_image="registry.example/u@sha256:" + "b" * 64
     )
     session = _CommandRecordingSession()
-    space.fingerprint(session, WORK_DIR)  # type: ignore[arg-type]
-    space.fingerprint(session, "/abs/tree")  # type: ignore[arg-type]
-    space._digest_prepared(session)  # type: ignore[arg-type]
-    repo_workspace._write_answer(session, "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space.fingerprint(session, "/abs/tree", "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
     targets = [target for command in session.commands for target in re.findall(r"\bcd (\S+)", command)]
-    assert targets == [f'"$PWD"/{WORK_DIR}', "/abs/tree", f'"$PWD"/{repo_workspace.PREPARED_DIR}']
+    assert targets == [f"/box/{WORK_DIR}", "/abs/tree", f"/box/{repo_workspace.PREPARED_DIR}"]
+    assert session.commands[-1].endswith(" /box/answer")
+    assert not any("PWD" in command for command in session.commands)
 
 
 def test_an_absolute_cd_ignores_a_cdpath_decoy(tmp_path: Path) -> None:
     """A ``cd`` from :func:`absolute_cd` stays in the working folder when ``CDPATH`` names a decoy with the same folder (SKY-737)."""
     for parent in (tmp_path / "box", tmp_path / "decoy"):
         (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
-    script = f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR)} && pwd -P"
+    script = f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, str((tmp_path / 'box').resolve()))} && pwd -P"
     for shell in ("/bin/sh", "/bin/bash"):
         done = subprocess.run(
             [shell, "-c", script],
@@ -1276,6 +1280,51 @@ def test_an_absolute_cd_ignores_a_cdpath_decoy(tmp_path: Path) -> None:
             check=True,
         )
         assert done.stdout.strip() == str((tmp_path / "box" / repo_workspace.PREPARED_DIR).resolve())
+
+
+def test_an_image_pwd_through_a_link_cannot_move_the_box_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An exported ``PWD`` through a box-owned link gives no root that the link can later move to a decoy (SKY-737).
+
+    Bash takes ``PWD`` from the environment when it names the working
+    folder, so ``pwd`` and ``"$PWD"`` follow the link; ``getcwd`` does not.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Pytest temporary folder.
+    """
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    box, decoy, link = tmp_path / "box", tmp_path / "decoy", tmp_path / "l"
+    for parent in (box, decoy):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    link.symlink_to(box)
+
+    class Session:
+        """Run each command in the box folder with the image's ``PWD``."""
+
+        def run(self, command: str, **options: Any) -> CommandResult:
+            """Run one command with bash.
+
+            Args:
+                command: The shell command.
+                **options: Other run options.
+
+            Returns:
+                The command's result.
+            """
+            env = {"PATH": "/usr/bin:/bin", "PWD": str(link)}
+            done = subprocess.run(
+                ["/bin/bash", "-c", command], cwd=box, env=env, capture_output=True, text=True, check=False
+            )
+            return CommandResult(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+    session = Session()
+    assert session.run("pwd").stdout.strip() == str(link)
+    root = repo_workspace.physical_root(session, True)  # type: ignore[arg-type]
+    assert root == str(box.resolve())
+    link.unlink()
+    link.symlink_to(decoy)
+    done = session.run(f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, root)} && pwd -P")
+    assert done.stdout.strip() == str((box / repo_workspace.PREPARED_DIR).resolve())
 
 
 @pytest.mark.parametrize("user_image", [False, True], ids=["skynet", "user"])
@@ -1453,7 +1502,7 @@ def test_a_python3_that_the_version_plants_on_path_never_hashes_the_tree(
     )
     try:
         box = _open(space, "")
-        clean = space.fingerprint(box.session, WORK_DIR)
+        clean = space.fingerprint(box.session, WORK_DIR, box.root)
         box.close()
         assert clean is not None
         marker = tmp_path / "planted-python3-ran"
@@ -2162,8 +2211,8 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
     )
     try:
         space = SimpleNamespace(_protected=("eval/metric.py",), watched=True, changes=lambda current, before: ())
-        space.fingerprint = lambda box, directory, **options: RepoWorkspace.fingerprint(
-            space, box, directory, **options
+        space.fingerprint = lambda box, directory, root, **options: RepoWorkspace.fingerprint(
+            space, box, directory, root, **options
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
@@ -2189,7 +2238,7 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{WORK_DIR}/eval/hidden/data.py": "y = 2\n"})
         made = session.run(f"chmod 0600 {WORK_DIR}/eval/metric.py && chmod 0700 {WORK_DIR}/eval/hidden")
         assert made.exit_code == 0
-        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR)  # type: ignore[arg-type]
+        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR, "/workspace")  # type: ignore[arg-type]
         assert sorted(files) == ["eval/hidden/data.py", "eval/metric.py"]
     finally:
         session.close()

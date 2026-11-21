@@ -1233,8 +1233,11 @@ _OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
 _ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
 # The PATH of every root script on Vercel (``vercel.ROOT_PATH``, which a test
 # keeps equal). Its root output poll runs ``_ROOT_TOOLS`` by name every 0.5 s,
-# so each folder and the file that each name finds must be out of the box
-# user's reach. A missing folder is skipped by the lookup, so it may be missing.
+# so each folder must be out of the box user's reach. Root's lookup is not the
+# box user's ``command -v``: root takes the first file with any x bit, and a
+# dangling link can get a target later. So every ``folder/tool`` entry that
+# exists or is a link must resolve to a root-owned regular file, and at least
+# one folder must hold each tool. A missing folder may be missing.
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
@@ -1280,6 +1283,14 @@ for at in range(start, start + size * count, size):
     if int.from_bytes(data[at : at + 4], "little") == 3:
         offset, length = (int.from_bytes(data[a:b], "little") for a, b in ((at + 8, at + 16), (at + 32, at + 40)))
         print("file", data[offset : offset + length].rstrip(b"\0").decode())
+try:
+    with open("/etc/passwd", encoding="utf-8") as accounts:
+        known = any(
+            len(f) == 7 and f[0] and f[2] == str(os.getuid()) for f in (line.rstrip("\n").split(":") for line in accounts)
+        )
+except (OSError, UnicodeDecodeError):
+    known = False
+print("account", "ok" if known else "none", os.getuid())
 for name in ["ld.so.preload", "ld.so.cache"] + [n for n in os.listdir("/etc") if n.startswith("ld-musl-")]:
     print("opt", "/etc/" + name)
 print("dir", sys.prefix)
@@ -1317,19 +1328,17 @@ _TRUSTED_PYTHON_PROBE = (
     "done\n"
     f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
     f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; done\n'
-    f"for b in {' '.join(_ROOT_TOOLS)}; do\n"
-    f'  q=$(PATH={_ROOT_PATH}; command -v "$b") || exit 1\n'
-    "  case $q in *[![:print:]]*) exit 1;; /*) ;; *) exit 1;; esac\n"
-    '  printf \'tool %s %s\\n\' "$b" "$q"; w "$q"\n'
-    "done\n"
+    f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
+    '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; fi\n'
+    "done; done\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
     '  elif [ -n "$g" ]; then o=$(LC_ALL="$h" "$s" -I -S -c "$y") || exit 1\n'
     '  else o=$(/usr/bin/env -u LC_ALL "$s" -I -S -c "$y") || exit 1; fi\n'
     "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
-    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
-    '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale) continue;; esac; w "${v#* }"\n'
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'account '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale|account) continue;; esac; w "${v#* }"\n'
     '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
     '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
     " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
@@ -1340,6 +1349,8 @@ _TRUSTED_PYTHON_PROBE = (
 )
 # An absolute path of printable ASCII only, as the probe allows.
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
+_ACCOUNT_OK = re.compile(r"ok [0-9]+")
+_ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 # The file types that each tagged path may have; ``path`` and ``opt`` may also be missing.
 _ENTRY_KINDS = {
@@ -1420,12 +1431,17 @@ UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
     " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
-    " /etc/nsswitch.conf (when present), the tail, head, base64 and tr that root's PATH finds, each folder"
-    " of that PATH ({path}) that exists, every file that Python loads, the locale trees,"
+    " /etc/nsswitch.conf (when present), every tail, head, base64 and tr in a folder of root's PATH"
+    " ({path}), each folder of that PATH that exists, every file that Python loads, the locale trees,"
     " each folder on its import path and every file and folder below that path (except site-packages), and"
     " every folder from / down to each of them, must be"
     " owned by root and not writable by group or others. /tmp must be a root-owned folder with mode 1777."
-    " Links count only below / and outside the import path."
+    " Links count only below / and outside the import path. Each of those four tools must be in at least one"
+    " of the folders, and no entry may be a dangling link."
+)
+NO_ACCOUNT = (
+    "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
+    " {app}'s root supervisor finds the box user's name and home there. Add a line with seven fields for that uid."
 )
 
 
@@ -1757,6 +1773,9 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
                     image=image, names=", ".join(names), app=APP_NAME, variables=", ".join(sorted(_ROOT_VARIABLES))
                 )
             )
+        uid = _missing_account(probe) if probe is not None else None
+        if uid is not None:
+            raise BoxImageError(NO_ACCOUNT.format(image=image, uid=uid, app=APP_NAME))
         if probe is not None and not _trusted_python(probe):
             raise BoxImageError(
                 UNTRUSTED_PYTHON.format(
@@ -1795,8 +1814,9 @@ def _trusted_python(probe: Any) -> bool:
         ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
         present) resolves to one that group and others cannot write,
         ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
-        missing or one that group and others cannot write, each of
-        ``_ROOT_TOOLS`` that it finds is such a file, and both runs
+        missing or one that group and others cannot write, every entry of
+        ``_ROOT_TOOLS`` in those folders resolves to such a file and each
+        tool has one, both runs find a passwd line for the box user, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
         passes :func:`_walk` with the file type that its tag allows.
     """
@@ -1826,15 +1846,18 @@ def _trusted_python(probe: Any) -> bool:
         entry = _walk(lines, folder)
         if entry is None or (entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022)):
             return False
-    for tool in _ROOT_TOOLS:
-        if not lines or not lines[-1].startswith(f"tool {tool} /"):
-            return False
-        path = lines.pop().removeprefix(f"tool {tool} ")
-        if not _PRINTABLE_PATH.fullmatch(path):
-            return False
-        entry = _walk(lines, path)
-        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
-            return False
+    found = set()
+    for folder in _ROOT_PATH.split(":"):
+        for tool in _ROOT_TOOLS:
+            if not lines or lines[-1] != f"tool {folder}/{tool}":
+                continue
+            lines.pop()
+            entry = _walk(lines, f"{folder}/{tool}")
+            if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+                return False
+            found.add(tool)
+    if found != set(_ROOT_TOOLS):
+        return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
             return False
@@ -1842,6 +1865,9 @@ def _trusted_python(probe: Any) -> bool:
         while lines and not lines[-1].startswith("run "):
             tag, _, path = lines.pop().partition(" ")
             if tag in ("env", "locale") and _VARIABLE_NAME.fullmatch(path):
+                continue
+            if tag == "account" and _ACCOUNT_OK.fullmatch(path):
+                tags.add(tag)
                 continue
             if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
                 return False
@@ -1851,9 +1877,25 @@ def _trusted_python(probe: Any) -> bool:
             if entry != _MISSING and (entry[1] not in _ENTRY_KINDS[tag] or entry[0] & 0o022):
                 return False
             tags.add(tag)
-        if not {"path", "file", "dir"} <= tags:
+        if not {"account", "path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _missing_account(probe: Any) -> str | None:
+    """Return the box uid when a probe run found no ``/etc/passwd`` line for it.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The uid, or ``None`` when no run reported a missing line.
+    """
+    for line in probe.stdout.split("\n"):
+        missing = _ACCOUNT_NONE.fullmatch(line)
+        if missing:
+            return missing.group(1)
+    return None
 
 
 def _root_variables(probe: Any) -> list[str]:

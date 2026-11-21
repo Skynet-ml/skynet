@@ -5565,7 +5565,9 @@ def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_p
         scorer.close()
     assert "DECOY" not in json.dumps(result)
     assert runtime.commands
-    assert all(re.findall(r"\bcd (\S+)", command) == ['"$PWD"/' + WORK_DIR] for command in runtime.commands)
+    targets = [re.findall(r"\bcd (\S+)", command) for command in runtime.commands]
+    assert all(len(found) == 1 and found[0].startswith("/") and found[0].endswith(f"/{WORK_DIR}") for found in targets)
+    assert not any("PWD" in command for command in runtime.commands)
 
 
 @pytest.mark.parametrize("user_image", [True, False])

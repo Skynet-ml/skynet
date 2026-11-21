@@ -324,20 +324,23 @@ def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> s
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
-def absolute_cd(path: str) -> str:
-    """Make a ``cd`` to a box path that the image's ``CDPATH`` cannot send elsewhere.
+def absolute_cd(path: str, root: str) -> str:
+    """Make a ``cd`` to a box path that the image's ``CDPATH`` and ``PWD`` cannot send elsewhere.
 
     ``CDPATH`` applies only to a relative target, so a relative path gets
-    the box's working directory in front (SKY-737).
+    the box's working directory in front. That folder comes from
+    :func:`physical_root`, never from ``$PWD``: bash takes ``PWD`` from the
+    environment when it names the working folder, even through a link that
+    the box user can later point at a decoy (SKY-737).
 
     Args:
         path: The folder, absolute or relative to the box's working directory.
+        root: The box's working directory from :func:`physical_root`.
 
     Returns:
         The ``cd`` command.
     """
-    target = shlex.quote(path) if path.startswith("/") else f'"$PWD"/{shlex.quote(path)}'
-    return f"cd {target}"
+    return f"cd {shlex.quote(path if path.startswith('/') else f'{root}/{path}')}"
 
 
 class RepoSetupError(RuntimeError):
@@ -471,6 +474,32 @@ def box_root(session: SandboxSession) -> str:
         RepoSetupError: When the box cannot report it.
     """
     located = session.run("pwd", timeout_seconds=30)
+    root = located.stdout.strip().splitlines()[-1] if located.ok and located.stdout.strip() else ""
+    if not root.startswith("/"):
+        raise RepoSetupError("The box could not report its working directory.")
+    return root
+
+
+def physical_root(session: SandboxSession, user_image: bool) -> str:
+    """Return a box's working directory as the kernel names it, with no link in it.
+
+    The trusted interpreter asks ``getcwd``, so neither an image ``PWD`` nor
+    a link that the box user owns can change the answer (SKY-737).
+
+    Args:
+        session: The open box.
+        user_image: Whether the box runs a user ``[run]`` image.
+
+    Returns:
+        The absolute directory.
+
+    Raises:
+        RepoSetupError: When the box cannot report it.
+    """
+    located = session.run(
+        f'{_pick_base_python(user_image)}"$p" -I -S -c {shlex.quote("import os; print(os.getcwd())")}',
+        timeout_seconds=30,
+    )
     root = located.stdout.strip().splitlines()[-1] if located.ok and located.stdout.strip() else ""
     if not root.startswith("/"):
         raise RepoSetupError("The box could not report its working directory.")
@@ -645,7 +674,7 @@ class CandidateBox:
         if not self._workspace.watched:
             return None
         with self._lock:
-            before = self._workspace.fingerprint(self.session, WORK_DIR)
+            before = self._workspace.fingerprint(self.session, WORK_DIR, self.root)
             if before is None:
                 return "The protected files could not be checked before the version ran."
             self._stamps = before[1]
@@ -664,7 +693,7 @@ class CandidateBox:
         if not self._workspace.watched:
             return ()
         with self._lock:
-            current = self._workspace.fingerprint(self.session, WORK_DIR)
+            current = self._workspace.fingerprint(self.session, WORK_DIR, self.root)
             before = self._stamps
         if current is None or before is None:
             return ("The protected files could not be checked after the version ran.",)
@@ -699,7 +728,7 @@ class CandidateBox:
                 self._unstamped = True
                 return () if _deliver(self.session, path, text) else None
             if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
-                current = workspace.fingerprint(self.session, WORK_DIR)
+                current = workspace.fingerprint(self.session, WORK_DIR, self.root)
                 if current is None:
                     self._unstamped = True
                     _deliver(self.session, path, text)
@@ -708,7 +737,7 @@ class CandidateBox:
                 # contents can name a change.
                 changes = workspace.changes(current, current[1] if self._unstamped else before)
                 try:
-                    written = _write_answer(self.session, path, text, user_image=workspace.user_run_image)
+                    written = _write_answer(self.session, self.root, path, text, user_image=workspace.user_run_image)
                 except Exception:
                     # A found change must still reach the rule judge.
                     if changes:
@@ -724,7 +753,7 @@ class CandidateBox:
                             return changes
                         raise
                 return changes if changes or written else None
-            current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
+            current = workspace.fingerprint(self.session, WORK_DIR, self.root) if before is not None else None
             changes = (
                 workspace.changes(current, current[1] if self._unstamped else before)
                 if current is not None and before is not None
@@ -740,7 +769,7 @@ class CandidateBox:
                 raise
             if not delivered or current is None or before is None:
                 return changes or None
-            after = workspace.fingerprint(self.session, WORK_DIR)
+            after = workspace.fingerprint(self.session, WORK_DIR, self.root)
             if after is None:
                 return changes or None
             self._stamps = after[1]
@@ -793,11 +822,12 @@ class MetricBox:
         self.box.release(healthy=True)
 
 
-def _write_answer(session: SandboxSession, path: str, text: str, *, user_image: bool = False) -> bool:
+def _write_answer(session: SandboxSession, root: str, path: str, text: str, *, user_image: bool = False) -> bool:
     """Write one relay answer with a box-user command, which moves no protected file's change time.
 
     Args:
         session: The box the answer goes to.
+        root: The box's working directory from :func:`physical_root`.
         path: Where the answer goes, relative to the box.
         text: The answer.
         user_image: Whether the box runs a user ``[run]`` image.
@@ -807,7 +837,7 @@ def _write_answer(session: SandboxSession, path: str, text: str, *, user_image: 
     """
     result = session.run(
         f'{_pick_base_python(user_image, ("APP_ANSWER",))}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)}'
-        f' "$PWD"/{shlex.quote(path)}',
+        f" {shlex.quote(f'{root}/{path}')}",
         env={"APP_ANSWER": text},
         timeout_seconds=_HASH_TIMEOUT_SECONDS,
     )
@@ -1082,12 +1112,13 @@ class RepoWorkspace:
         moved = session.run(f"mv {WORK_DIR} {PREPARED_DIR}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         if not moved.ok:
             raise RepoSetupError(f"The prepared repository could not be kept: {_tail(moved)}")
+        root = physical_root(session, self.user_run_image)
         if self._protected:
-            baseline = self.fingerprint(session, PREPARED_DIR)
+            baseline = self.fingerprint(session, PREPARED_DIR, root)
             if baseline is None:
                 raise RepoSetupError("The repository's protected files could not be fingerprinted.")
             self._protected_baseline = baseline[0]
-        self._prepared_digest = self._digest_prepared(session)
+        self._prepared_digest = self._digest_prepared(session, root)
         if self._prepared_digest is None:
             raise RepoSetupError("The prepared repository could not be fingerprinted.")
 
@@ -1366,7 +1397,8 @@ class RepoWorkspace:
         box = self._open_box(spec, state, "candidate", self._run_grants)
         session = box.box
         try:
-            if self._digest_prepared(session) != self._prepared_digest:
+            root = physical_root(session, self.user_run_image)
+            if self._digest_prepared(session, root) != self._prepared_digest:
                 self._drop_snapshots()
                 lost = state is not None and state.snapshot_id is not None
                 raise (_SnapshotLostError if lost else RepoSetupError)(
@@ -1380,7 +1412,7 @@ class RepoWorkspace:
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
-                return CandidateBox(self, session, box_root(session), box)
+                return CandidateBox(self, session, root, box)
         except BaseException:
             box.release_failed("The candidate box")
             raise
@@ -1472,18 +1504,19 @@ class RepoWorkspace:
             raise RepoSetupError(f"The repository could not be copied for the compose services: {_tail(copied)}")
         start(lines[-1])
 
-    def _digest_prepared(self, session: SandboxSession) -> str | None:
+    def _digest_prepared(self, session: SandboxSession, root: str) -> str | None:
         """Hash the whole prepared tree in a box.
 
         Args:
             session: The box holding the prepared tree.
+            root: The box's working directory from :func:`physical_root`.
 
         Returns:
             The tree's SHA-256 digest, or ``None`` when the hashing command
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f'{absolute_cd(PREPARED_DIR)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f'{absolute_cd(PREPARED_DIR, root)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
             f" {shlex.quote(_HASH_PREPARED)}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
@@ -1491,12 +1524,15 @@ class RepoWorkspace:
         digest = lines[-1] if lines else ""
         return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
-    def fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
+    def fingerprint(
+        self, session: SandboxSession, directory: str, root: str
+    ) -> tuple[dict[str, str], dict[str, str]] | None:
         """Hash every file under the protected paths of one tree in a box.
 
         Args:
             session: The box holding the tree.
             directory: The tree's folder, relative to the box.
+            root: The box's working directory from :func:`physical_root`.
 
         Returns:
             Repository-relative path to digest, and path to inode and change
@@ -1505,7 +1541,7 @@ class RepoWorkspace:
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
         result = session.run(
-            f'{absolute_cd(directory)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f'{absolute_cd(directory, root)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
             f" {shlex.quote(_HASH_PROTECTED)} {paths}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
             # A box-user command's output files belong to the box user, so a

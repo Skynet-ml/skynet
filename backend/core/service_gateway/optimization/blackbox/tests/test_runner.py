@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import http.server
 import io
 import json
 import os
@@ -1386,6 +1387,34 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
         opener.open(urls["ASCENT_SERVICE_BLOCKED_ONE_URL"] + "x")
     assert refused.value.code == 403
     assert b"not listed for the [run] role" in refused.value.read()
+
+
+def test_the_loopback_servers_bind_without_a_host_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service proxy and the metric helpers bind with no ``getfqdn``, an NSS hosts lookup (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+
+    def lookup(name: str = "") -> str:
+        """Fail like a host lookup that the root supervisor must not make.
+
+        Args:
+            name: The host.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError(f"getfqdn({name!r}) ran")
+
+    monkeypatch.setattr(socket, "getfqdn", lookup)
+    url = runner.start_service_proxy(object(), ["judge"])["ASCENT_SERVICE_JUDGE_URL"]  # type: ignore[arg-type]
+    assert url.startswith("http://127.0.0.1:")
+    server = runner._QuietHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    try:
+        assert (server.server_name, server.server_port) == ("127.0.0.1", server.server_address[1])
+    finally:
+        server.server_close()
 
 
 def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> None:

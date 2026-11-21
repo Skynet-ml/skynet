@@ -1602,7 +1602,7 @@ class _Box:
         self.commands.append((command, self.online))
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
-        if command == "pwd":
+        if command == "pwd" or "os.getcwd()" in command:
             return CommandResult(exit_code=0, stdout="/box\n")
         if "pwd -P" in command:
             return CommandResult(exit_code=0, stdout="/box/.app-services\n")
@@ -5900,15 +5900,28 @@ def _walk(path: str, last: str = "755 regular file", modes: dict[str, str] | Non
         The walk's lines.
     """
     modes = {path: last, **(modes or {})}
-    lines = [f"0 {modes.get('/', '755 directory')} /"]
+    lines = [_stat(modes.get("/", "755 directory"), "/")]
     parts = path.split("/")[1:]
     for depth in range(1, len(parts) + 1):
         here = "/" + "/".join(parts[:depth])
         mode = modes.get(here, "755 directory")
         if mode == "none":
             return [*lines, f"none {here}"]
-        lines.append(f"0 {mode} {here}")
+        lines.append(_stat(mode, here))
     return lines
+
+
+def _stat(mode: str, path: str) -> str:
+    """Write the ``stat`` line for a path, owned by root unless the mode starts with a uid.
+
+    Args:
+        mode: ``"<mode> <type>"``, or ``"<uid> <mode> <type>"``.
+        path: The absolute path.
+
+    Returns:
+        The line.
+    """
+    return f"{mode} {path}" if mode.split()[1].isdigit() else f"0 {mode} {path}"
 
 
 def _entry(tag: str, path: str, last: str = "755 regular file", modes: dict[str, str] | None = None) -> list[str]:
@@ -5930,6 +5943,7 @@ def _entry(tag: str, path: str, last: str = "755 regular file", modes: dict[str,
 _PYTHON_FILE = "0 755 regular file /usr/local/bin/python3.12"
 _BASE = [*_walk("/usr/local/bin/python3", "777 symbolic link"), "link python3.12", _PYTHON_FILE]
 _ENTRIES = [
+    "account ok 1000",
     *_entry("path", "/usr/local/lib/python312.zip", "none"),
     *_entry("path", "/usr/local/lib/python3.12", "755 directory"),
     *_entry("file", "/usr/local/lib/libpython3.12.so.1.0"),
@@ -5945,7 +5959,7 @@ def _listing(
     base: list[str] = _BASE,
     programs: dict[str, list[str]] | None = None,
     folders: dict[str, list[str]] | None = None,
-    tools: dict[str, list[str]] | None = None,
+    tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Write the probe's whole standard output.
 
@@ -5956,7 +5970,8 @@ def _listing(
         programs: The walks of root's fixed paths that differ from the defaults, by path. The defaults
             are a root-owned 755 file, and a root-owned 1777 ``/tmp``.
         folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
-        tools: The ``tool`` lines and walks of root's PATH tools that differ from ``/usr/bin/<name>``, by name.
+        tools: The walks of ``folder/tool`` entries that differ from one root-owned file in ``/usr/bin``
+            for each tool, by entry; ``None`` drops an entry.
 
     Returns:
         The probe's standard output.
@@ -5966,8 +5981,11 @@ def _listing(
     fixed = [line for path, walk in walks.items() for line in (f"file {path}", *walk)]
     bins = {folder: _walk(folder, "755 directory") for folder in repo_staging._ROOT_PATH.split(":")}
     fixed += [line for folder, walk in (bins | (folders or {})).items() for line in (f"bin {folder}", *walk)]
-    found = {name: [f"tool {name} /usr/bin/{name}", *_walk(f"/usr/bin/{name}")] for name in repo_staging._ROOT_TOOLS}
-    fixed += [line for lines in (found | (tools or {})).values() for line in lines]
+    found = {f"/usr/bin/{name}": _walk(f"/usr/bin/{name}") for name in repo_staging._ROOT_TOOLS} | (tools or {})
+    for folder in repo_staging._ROOT_PATH.split(":"):
+        for name in repo_staging._ROOT_TOOLS:
+            walk = found.get(f"{folder}/{name}")
+            fixed += [] if walk is None else [f"tool {folder}/{name}", *walk]
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
@@ -6259,6 +6277,22 @@ _LINKED_INTO_WRITABLE = [
 ]
 
 
+def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A box uid that ``/etc/passwd`` does not name stops the run at the image check, not at run time (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount none 1000\n"))
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"has no /etc/passwd line for the box user \(uid 1000\)"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+
+
 @pytest.mark.parametrize(
     "probe",
     [
@@ -6304,12 +6338,25 @@ _LINKED_INTO_WRITABLE = [
         _listing(folders={"/sbin": _walk("/sbin", modes={"/": "775 directory"})}),
         _listing(folders={"/bin": _walk("/bin", "755 regular file")}),
         _TRUSTED_PROBE.replace("bin /usr/local/sbin\n", ""),
-        _listing(tools={"tail": ["tool tail /usr/bin/tail", *_walk("/usr/bin/tail", "1000 755 regular file")]}),
-        _listing(tools={"tr": ["tool tr /usr/bin/tr", *_walk("/usr/bin/tr", "757 regular file")]}),
-        _listing(tools={"head": ["tool head /usr/local/sbin/head", *_walk("/usr/local/sbin/head", "none")]}),
-        _listing(tools={"base64": ["tool base64 base64"]}),
-        _listing(tools={"base64": ["tool head /usr/bin/head", *_walk("/usr/bin/head")]}),
-        _TRUSTED_PROBE.replace("tool tr /usr/bin/tr\n", ""),
+        _listing(tools={"/usr/bin/tail": _walk("/usr/bin/tail", "1000 755 regular file")}),
+        _listing(tools={"/usr/bin/tr": _walk("/usr/bin/tr", "757 regular file")}),
+        _listing(tools={"/usr/local/sbin/head": _walk("/usr/local/sbin/head", "none")}),
+        _listing(
+            tools={
+                "/usr/local/bin/tail": [
+                    *_walk("/usr/local/bin/tail", "777 symbolic link"),
+                    "link /home/box/tail",
+                    *_walk("/home/box/tail", "none", {"/home/box": "1000 755 directory"}),
+                ]
+            }
+        ),
+        _listing(tools={"/usr/local/sbin/tail": _walk("/usr/local/sbin/tail", "1000 1 regular file")}),
+        _listing(tools={"/usr/bin/base64": None}),
+        _listing(tools={"/usr/bin/head": None, "/bin/head": _walk("/bin/head", "755 directory")}),
+        _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", ""),
+        _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", "tool /usr/bin/tr\ntool /usr/bin/tr\n"),
+        _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\n"),
+        _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount ok x\n"),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", modes={"/usr/lib": "777 directory"})]),
         _listing(box=[*_ENTRIES, *_LINKED_INTO_WRITABLE]),
@@ -6375,10 +6422,15 @@ _LINKED_INTO_WRITABLE = [
         "no-usr-local-sbin-walk",
         "user-owned-tail",
         "writable-tr",
-        "head-found-but-missing",
-        "relative-base64",
-        "tool-out-of-order",
+        "dangling-head-in-usr-local-sbin",
+        "A-dangling-tail-link-to-a-box-folder",
+        "B-box-owned-unrunnable-tail-before-usr-bin",
+        "base64-in-no-folder",
+        "head-is-a-folder-in-bin",
         "no-tr-walk",
+        "tr-listed-twice",
+        "no-account-line",
+        "malformed-account-line",
         "R1-stdlib-moved-to-a-writable-folder",
         "R1-stdlib-under-a-writable-folder",
         "R2-link-into-a-writable-folder",
@@ -6469,8 +6521,7 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
                 ]
             },
             tools={
-                "tail": [
-                    "tool tail /bin/tail",
+                "/bin/tail": [
                     *_walk("/bin", "777 symbolic link"),
                     "link usr/bin",
                     "0 755 directory /usr",
@@ -6480,6 +6531,8 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
             },
         ),
         _listing(box=["env LANG", "locale LANG=C.UTF-8", "env LC_ALL", "locale LC_ALL=en_US.utf8", *_ENTRIES]),
+        _listing(tools={"/usr/local/bin/tail": _walk("/usr/local/bin/tail"), "/usr/bin/tail": None}),
+        _listing(tools={"/usr/local/sbin/tr": _walk("/usr/local/sbin/tr", "700 regular file")}),
     ],
     ids=[
         "python-image-layout",
@@ -6493,6 +6546,8 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         "no-usr-local-sbin",
         "merged-usr-bin-link",
         "utf-8-locale",
+        "tail-only-in-usr-local-bin",
+        "root-only-tr-before-usr-bin",
     ],
 )
 def test_a_root_owned_python_chain_passes(probe: str) -> None:
@@ -6855,6 +6910,36 @@ def test_the_path_script_refuses_a_locale_that_does_not_load() -> None:
 
     assert done.returncode != 0
     assert "the image locale does not load" in done.stderr
+
+
+def test_the_path_script_reports_whether_passwd_names_the_box_user(tmp_path: Path) -> None:
+    """The script finds the box uid in ``/etc/passwd`` with the supervisor's rules, and says when it cannot (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    uid = os.getuid()
+    accounts = tmp_path / "passwd"
+    found = []
+    for text in (
+        None,
+        f"box:x:{uid}:{uid}::/home/box:/bin/sh\n",
+        f"box:x:{uid}:{uid}::/home/box:/bin/sh:extra\n:x:{uid}:{uid}::/:/bin/sh\nother:x:{uid + 1}:0::/:/bin/sh\n",
+        b"\xff",
+    ):
+        script = repo_staging._PATH_SCRIPT
+        if text is not None:
+            accounts.write_bytes(text if isinstance(text, bytes) else text.encode())
+            script = script.replace('open("/etc/passwd"', f"open({str(accounts)!r}")
+        done = subprocess.run(
+            [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+        )
+        assert done.returncode == 0, done.stderr
+        found.append([line for line in done.stdout.split("\n") if line.startswith("account ")])
+    assert found == [[f"account ok {uid}"], [f"account ok {uid}"], [f"account none {uid}"], [f"account none {uid}"]]
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:
