@@ -287,7 +287,6 @@
     "repo_gate.secret_host_not_allowed": "يمكن إرسال السر {secret} إلى {allowed} فقط، لكن المستودع يرسله إلى {host}. أضِف {host} إلى المضيفين المسموح بهم للسر {secret} في التشغيل، أو غيّر الرابط.",
     "repo_gate.secret_host_unlisted": "لا يملك السر {secret} أي مضيفين مسموح بهم، لكن المستودع يرسله إلى {host}. أضِف {host} إلى المضيفين المسموح بهم للسر {secret} في التشغيل.",
     "repo_gate.managed_secret_unavailable": "السر {secret} مرتبط بمفتاح من {term.appName}، لكن {term.appName} لا يملك مفتاحًا لـ {host}. اربط السر بـ user، أو استخدم أحد هؤلاء المضيفين الذين لديهم مفتاح من {term.appName}: {known}.",
-    "repo_gate.unknown_connector": "الخدمة {service} في ascent.toml ليست موصّلًا. استخدم أحد هذه الأسماء: {known}.",
     "repo_gate.draft_base_moved": "غيّر وكيل الإعداد ملفات على الالتزام {base}، لكن التشغيل سيبدأ من الالتزام {commit}. تقدّم الفرع، وستلغي الملفات المعدّلة التزاماته الجديدة. أعد إعداد التشغيل ليغيّر الوكيل الملفات على الالتزام الجديد.",
     "optimization.retry_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لإعادة المحاولة.",
     "optimization.retry_wrong_status": "لا يمكن إعادة محاولة سوى عمليات التحسين في حالة 'failed' أو 'cancelled' — هذه في الحالة '{status}'. استنسخها بدلاً من ذلك.",

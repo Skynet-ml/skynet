@@ -287,7 +287,6 @@
     "repo_gate.secret_host_not_allowed": "Le secret {secret} ne peut aller que vers {allowed}, mais le dépôt l’envoie à {host}. Ajoutez {host} aux hôtes autorisés de {secret} dans l’exécution, ou changez l’URL.",
     "repo_gate.secret_host_unlisted": "Le secret {secret} n’a aucun hôte autorisé, mais le dépôt l’envoie à {host}. Ajoutez {host} aux hôtes autorisés de {secret} dans l’exécution.",
     "repo_gate.managed_secret_unavailable": "Le secret {secret} est lié à une clé {term.appName}, mais {term.appName} n’a aucune clé pour {host}. Liez le secret à user, ou utilisez l’un de ces hôtes, qui ont une clé {term.appName} : {known}.",
-    "repo_gate.unknown_connector": "Le service {service} dans ascent.toml n’est pas un connecteur. Utilisez l’un de ces noms : {known}.",
     "repo_gate.draft_base_moved": "L'agent de configuration a modifié des fichiers sur le commit {base}, mais l'exécution partirait du commit {commit}. La branche a avancé, et les fichiers modifiés annuleraient ses nouveaux commits. Configurez à nouveau l'exécution pour que l'agent modifie les fichiers sur le nouveau commit.",
     "optimization.retry_no_payload": "L'optimisation source n'a aucune charge utile enregistrée à réessayer.",
     "optimization.retry_wrong_status": "Seules les optimisations dans l'état 'failed' ou 'cancelled' peuvent être réessayées — celle-ci est dans l'état '{status}'. Clonez-la plutôt.",

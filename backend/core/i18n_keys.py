@@ -326,7 +326,6 @@ class I18nKey(StrEnum):
     REPO_GATE_SECRET_HOST_UNLISTED = 'repo_gate.secret_host_unlisted'
     REPO_GATE_UNENFORCED_CLOUD = 'repo_gate.unenforced_cloud'
     REPO_GATE_UNENFORCED_LOCAL = 'repo_gate.unenforced_local'
-    REPO_GATE_UNKNOWN_CONNECTOR = 'repo_gate.unknown_connector'
     SANDBOX_DOCKER_IMAGE_MISSING = 'sandbox.docker_image_missing'
     SANDBOX_DOCKER_UNAVAILABLE = 'sandbox.docker_unavailable'
     SANDBOX_PROVIDER_UNAVAILABLE = 'sandbox.provider_unavailable'

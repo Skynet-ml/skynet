@@ -287,7 +287,6 @@
     "repo_gate.secret_host_not_allowed": "密钥 {secret} 只能发送到 {allowed}，但仓库将它发送到 {host}。请在运行中将 {host} 添加到 {secret} 的允许主机，或更改该 URL。",
     "repo_gate.secret_host_unlisted": "密钥 {secret} 没有允许的主机，但仓库将它发送到 {host}。请在运行中将 {host} 添加到 {secret} 的允许主机。",
     "repo_gate.managed_secret_unavailable": "密钥 {secret} 绑定到 {term.appName} 密钥，但 {term.appName} 没有 {host} 的密钥。请将该密钥绑定到 user，或使用以下拥有 {term.appName} 密钥的主机之一：{known}。",
-    "repo_gate.unknown_connector": "ascent.toml 中的服务 {service} 不是连接器。请使用以下名称之一：{known}。",
     "repo_gate.draft_base_moved": "设置代理在提交 {base} 上更改了文件，但运行将从提交 {commit} 开始。分支已经前进，更改的文件会撤销它的新提交。请重新设置运行，让代理在新提交上更改文件。",
     "optimization.retry_no_payload": "源优化没有可重试的已保存载荷。",
     "optimization.retry_wrong_status": "只有处于 'failed' 或 'cancelled' 状态的优化才能重试——这个优化处于 '{status}' 状态。请改为克隆它。",

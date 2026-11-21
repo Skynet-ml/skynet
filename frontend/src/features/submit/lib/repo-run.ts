@@ -253,8 +253,9 @@ function modelPrefix(name: string): string | null {
 
 // The server's LITELLM_TO_BYOK_PROVIDER (backend/core/provider_registry.py), the
 // reverse of BYOK_TO_LITELLM_PROVIDER in features/billing/lib/byok.ts. A copy,
-// because the repo-run test loader cannot import a feature's index.
-const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
+// because the repo-run test loader cannot import a feature's index. repo-run.test.ts
+// pins it to byok.ts, and test_provider_registry_parity.py pins byok.ts to the server.
+export const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
   gemini: "google",
   together_ai: "together",
   cohere_chat: "cohere",

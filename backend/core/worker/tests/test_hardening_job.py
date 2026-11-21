@@ -61,10 +61,11 @@ _PAYLOAD = {
 }
 _EXPLOIT = {"label": "exploit", "confidence": 0.95, "reason": "Games the metric."}
 _FAILURE = GateFailure(
-    key="[proposer] tools",
+    key="[run] illegal",
     place="local",
-    reason="ascent.toml sets [proposer] tools.",
+    reason="ascent.toml sets [run] illegal.",
     code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
+    params={"key": "[run] illegal"},
 )
 
 
