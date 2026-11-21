@@ -499,8 +499,8 @@ class EcrRegistry:
     def delete_cache(self, owner: str, scope: str) -> None:
         """Delete the build cache manifest of one scope from the owner's repository.
 
-        The cache layers that only this manifest names become untagged, and
-        the lifecycle rule deletes them after a day.
+        The tag is the manifest's only tag, so ECR deletes the manifest at
+        once and then removes the layers that no other image uses.
 
         Args:
             owner: The owner of the repository.

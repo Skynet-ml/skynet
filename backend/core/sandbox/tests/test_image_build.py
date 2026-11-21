@@ -564,6 +564,27 @@ def test_request_refuses_a_dockerfile_outside_the_context(tmp_path: Path, docker
         _hash(_request(_context(tmp_path), dockerfile=dockerfile))
 
 
+@pytest.mark.parametrize("dockerfile", ["-", "./-", "-f", "--file=x"])
+def test_request_refuses_a_dockerfile_path_that_starts_with_a_dash(tmp_path: Path, dockerfile: str) -> None:
+    """A leading dash is refused, even when a file of that name exists, so buildx never reads stdin."""
+    context = _context(tmp_path)
+    (context / dockerfile.removeprefix("./")).write_text("FROM scratch\n")
+
+    with pytest.raises(ImageBuildError, match="must not start with '-'"):
+        _hash(_request(context, dockerfile=dockerfile))
+
+
+def test_buildspec_passes_the_dockerfile_as_a_relative_path(tmp_path: Path) -> None:
+    """The buildspec names the Dockerfile with a ./ prefix, so it never reads as stdin or an option."""
+    codebuild = FakeCodeBuild([_done()])
+    builder, _ = _builder(codebuild)
+
+    builder.build(_request(_context(tmp_path)))
+
+    command = json.loads(codebuild.started["buildspecOverride"])["phases"]["build"]["commands"][0]
+    assert "--file ./Dockerfile " in command
+
+
 def test_request_refuses_a_dockerfile_under_a_symlinked_folder(tmp_path: Path) -> None:
     """A symlink in any part of the Dockerfile path is refused, so it cannot read outside files."""
     context = _context(tmp_path)

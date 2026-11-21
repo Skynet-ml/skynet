@@ -305,6 +305,9 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
     relative = PurePosixPath(request.dockerfile)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must stay inside the build context")
+    # buildx reads "--file -" as stdin, and a leading "-" reads as an option.
+    if relative.parts[0].startswith("-"):
+        raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must not start with '-'")
     path = context
     for part in relative.parts:
         path = path / part
@@ -547,7 +550,7 @@ def codebuild_buildspec(
         f"--platform {CODEBUILD_PLATFORM}",
         "--provenance=false",
         "--sbom=false",
-        f"--file {shlex.quote(dockerfile)}",
+        f"--file {shlex.quote('./' + dockerfile)}",
         f"--tag {shlex.quote(image_ref)}",
         *(f"--build-arg {shlex.quote(f'{k}={v}')}" for k, v in sorted(build_args.items())),
         f"--cache-from {shlex.quote(f'type=registry,ref={cache_ref}')}",
