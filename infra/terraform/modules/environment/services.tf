@@ -102,11 +102,14 @@ locals {
       MCP_RESOURCE_URL = var.mcp_domain == "" ? "" : "https://${var.mcp_domain}/mcp"
       # Account deletion purges the account's tree packs (SKY-733).
       SKYNET_TREE_BUCKET = aws_s3_bucket.trees.id
+      # Account deletion deletes the account's user image repository (SKY-894).
+      USER_IMAGES_REPOSITORY_PREFIX_URI = local.user_images_prefix_uri
     })
     worker = merge(local.app_common_env, {
-      APP_SERVICE_NAME   = "worker"
-      SERVICE_ROLE       = "worker"
-      SKYNET_TREE_BUCKET = aws_s3_bucket.trees.id
+      APP_SERVICE_NAME                  = "worker"
+      SERVICE_ROLE                      = "worker"
+      SKYNET_TREE_BUCKET                = aws_s3_bucket.trees.id
+      USER_IMAGES_REPOSITORY_PREFIX_URI = local.user_images_prefix_uri
     })
     migrate = merge(local.app_common_env, {
       APP_SERVICE_NAME = "migrate"
