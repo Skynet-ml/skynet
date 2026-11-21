@@ -5568,6 +5568,29 @@ def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_p
     assert all(re.findall(r"\bcd (\S+)", command) == ['"$PWD"/' + WORK_DIR] for command in runtime.commands)
 
 
+@pytest.mark.parametrize("user_image", [True, False])
+def test_the_root_supervisor_falls_back_to_the_path_python3_only_without_a_user_image(
+    tmp_path: Path, user_image: bool
+) -> None:
+    """In a user image the supervisor runs only the base Python, never a ``python3`` that PATH finds (SKY-737).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+        user_image: Whether the workspace runs a user ``[run]`` image.
+    """
+    runtime = _CdpathRuntime(tmp_path / "decoy")
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    scorer._workspace.user_run_image = user_image
+    try:
+        scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert runtime.commands
+    for command in runtime.commands:
+        assert f"p={shlex.quote(repo_scorer._BASE_PYTHON)}" in command
+        assert ("p=python3" in command) is not user_image
+
+
 def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
     """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
 

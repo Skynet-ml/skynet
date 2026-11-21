@@ -1224,6 +1224,13 @@ _MAX_LINK_HOPS = 40
 # wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
 # scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
 _ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
+# Other paths that root uses in a box. The supervisor's ``pwd.getpwuid``
+# reads ``/etc/passwd`` and ``/etc/nsswitch.conf``, which names the NSS
+# modules that glibc loads. ``/tmp`` holds the supervisor's run folder and
+# the Vercel root wrapper's output, so it must be root's, sticky and 1777.
+_ROOT_TMP = "/tmp"
+_OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
+_ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
     "import "
@@ -1235,6 +1242,11 @@ for name in os.environ:
     if not (name.isascii() and name.isprintable()):
         sys.exit("an environment variable name is not printable ASCII")
     print("env", name)
+    if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
+        value = os.environ[name]
+        if not (value.isascii() and value.isprintable()):
+            sys.exit("a locale value is not printable ASCII")
+        print("locale", name + "=" + value)
 for entry in sys.path:
     print("path", entry)
 seen = set()
@@ -1261,7 +1273,8 @@ print("dir", sys.exec_prefix)
 """
 )
 _TRUSTED_PYTHON_PROBE = (
-    f"export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
+    # The box run gets the image's own LC_ALL back, so it maps the locale files that root's runs map.
+    f"g=${{LC_ALL+1}}; h=${{LC_ALL-}}; export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
     "w() {\n"
     "  a=; r=${1#/}; n=0; z=\n"
     '  stat -c "$f" / || exit 1\n'
@@ -1288,14 +1301,15 @@ _TRUSTED_PYTHON_PROBE = (
     '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
     "  done\n"
     "done\n"
-    f'for b in {" ".join(_ROOT_PROGRAMS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
-    '  else o=$("$s" -I -S -c "$y") || exit 1; fi\n'
+    '  elif [ -n "$g" ]; then o=$(LC_ALL="$h" "$s" -I -S -c "$y") || exit 1\n'
+    '  else o=$(/usr/bin/env -u LC_ALL "$s" -I -S -c "$y") || exit 1; fi\n'
     "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
-    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
-    '    printf \'%s\\n\' "$v"; t=${v%% *}; [ "$t" != env ] || continue; w "${v#* }"\n'
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale) continue;; esac; w "${v#* }"\n'
     '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
     '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
     " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
@@ -1338,6 +1352,11 @@ _VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
 #   or a command search takes, how words split, and where ``enable -f``
 #   loads builtins from. The root ``cd`` targets are absolute, so
 #   ``CDPATH`` is refused only to be safe.
+# - ``TMPDIR``, ``TEMP``, ``TMP``: Python's ``tempfile`` reads them even
+#   under ``-I``, so they could put a root folder where the box user writes.
+# - ``LANG``, ``LANGUAGE``, ``LC_*``: refused only when the value is not C,
+#   POSIX or a UTF-8 locale. Another codeset makes glibc load ``gconv``
+#   modules, and a value with ``/`` names a locale folder (``_locale_ok``).
 # ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, and the
 # interactive-only names (``PROMPT_COMMAND``, ``INPUTRC``, ``HISTFILE``) are
 # never read by ``bash -c``, so they stay allowed.
@@ -1360,24 +1379,32 @@ _ROOT_VARIABLES = frozenset(
         "EXECIGNORE",
         "IFS",
         "BASH_LOADABLES_PATH",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
     }
 )
+# A UTF-8 locale name, with no ``/``, so glibc reads it from its own locale files.
+_UTF8_LOCALE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:utf-8|utf8)", re.IGNORECASE)
 ROOT_ENVIRONMENT = (
     "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
     " image environment, and these variables change which code the shell, the system loader or the C library"
     " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
-    " BASH_FUNC_* variable, and {variables}. Images that need LD_LIBRARY_PATH, such as CUDA images, are not"
-    " supported yet."
+    " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
+    " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
+    " are not supported yet."
 )
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
-    " virtual environment. Every program that root runs by path ({programs}), every file that Python loads,"
+    " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
+    " /etc/nsswitch.conf (when present), every file that Python loads,"
     " each folder on its import path and every file and folder below that path (except site-packages), and"
     " every folder from / down to each of them, must be"
-    " owned by root and not writable by group or others. Links count only below / and outside the import path."
+    " owned by root and not writable by group or others. /tmp must be a root-owned folder with mode 1777."
+    " Links count only below / and outside the import path."
 )
 
 
@@ -1740,8 +1767,9 @@ def _trusted_python(probe: Any) -> bool:
     Returns:
         True when ``BASE_PYTHON`` resolves to a root-owned regular file that
         group and others cannot write and others can run, each of
-        ``_ROOT_PROGRAMS`` resolves to one that group and others cannot
-        write, and both runs
+        ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
+        present) resolves to one that group and others cannot write,
+        ``/tmp`` is a root-owned 1777 folder, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
         passes :func:`_walk` with the file type that its tag allows.
     """
@@ -1752,11 +1780,18 @@ def _trusted_python(probe: Any) -> bool:
     python = _walk(lines, BASE_PYTHON)
     if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or not python[0] & 0o001:
         return False
-    for program in _ROOT_PROGRAMS:
-        if not lines or lines.pop() != f"file {program}":
+    for path in _ROOT_PATHS:
+        if not lines or lines.pop() != f"file {path}":
             return False
-        entry = _walk(lines, program)
-        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+        entry = _walk(lines, path)
+        if entry is None or (entry == _MISSING and path not in _OPTIONAL_ROOT_FILES):
+            return False
+        if entry == _MISSING:
+            continue
+        if path == _ROOT_TMP:
+            if entry != (0o1777, "directory"):
+                return False
+        elif entry[1] != "regular file" or entry[0] & 0o022:
             return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
@@ -1764,7 +1799,7 @@ def _trusted_python(probe: Any) -> bool:
         tags = set()
         while lines and not lines[-1].startswith("run "):
             tag, _, path = lines.pop().partition(" ")
-            if tag == "env" and _VARIABLE_NAME.fullmatch(path):
+            if tag in ("env", "locale") and _VARIABLE_NAME.fullmatch(path):
                 continue
             if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
                 return False
@@ -1791,8 +1826,29 @@ def _root_variables(probe: Any) -> list[str]:
     Returns:
         The sorted names, without duplicates.
     """
-    names = {line.removeprefix("env ") for line in probe.stdout.split("\n") if line.startswith("env ")}
-    return sorted(name for name in names if name.startswith(_ROOT_PREFIXES) or name in _ROOT_VARIABLES)
+    lines = probe.stdout.split("\n")
+    names = {line.removeprefix("env ") for line in lines if line.startswith("env ")}
+    found = {name for name in names if name.startswith(_ROOT_PREFIXES) or name in _ROOT_VARIABLES}
+    for line in lines:
+        if line.startswith("locale "):
+            name, _, value = line.removeprefix("locale ").partition("=")
+            if not _locale_ok(name, value):
+                found.add(name)
+    return sorted(found)
+
+
+def _locale_ok(name: str, value: str) -> bool:
+    """Tell whether a locale variable names only C, POSIX or a UTF-8 locale.
+
+    Args:
+        name: ``LANG``, ``LANGUAGE`` or an ``LC_*`` name.
+        value: Its value; ``LANGUAGE`` is a ``:`` list of locales.
+
+    Returns:
+        True when every locale in the value is empty, C, POSIX or a UTF-8 locale.
+    """
+    values = value.split(":") if name == "LANGUAGE" else [value]
+    return all(item in ("", "C", "POSIX") or _UTF8_LOCALE.fullmatch(item) for item in values)
 
 
 def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:

@@ -3442,3 +3442,29 @@ def test_a_python_metric_entry_calls_the_function_it_names() -> None:
     assert load_scorer_from_code(code, entrypoint="score")("x") == 0.0
     with pytest.raises(ScorerError, match="defines no function 'judge'"):
         load_scorer_from_code(code, entrypoint="judge")
+
+
+@pytest.mark.parametrize("name", ["TMPDIR", "TEMP", "TMP"])
+def test_an_image_temp_variable_cannot_move_the_root_run_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The supervisor's run folder is always in /tmp, whatever temp folder the image ENV names (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder, which the image ENV names.
+        monkeypatch: Pytest monkeypatch.
+        name: The temp variable that the image sets.
+    """
+    folders: list[Path] = []
+    monkeypatch.setenv(name, str(tmp_path))
+    monkeypatch.setattr(runner.tempfile, "tempdir", None)
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, switch, run_dir, *_: folders.append(run_dir))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert len(folders) == 1
+    assert folders[0].parent == Path("/tmp")
+    assert folders[0].name.startswith(".app-run-")
+    assert not folders[0].exists()
+    assert list(tmp_path.iterdir()) == []

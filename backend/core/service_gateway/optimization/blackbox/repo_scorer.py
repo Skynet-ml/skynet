@@ -738,8 +738,10 @@ class RepoScorer:
                 forward(stream, data)
 
             with sandbox_log.event_scope(source="run"):
+                # A user image box never falls back to the PATH python3, as in _pick_base_python (SKY-737).
+                fallback = "" if self._workspace.user_run_image else '; [ -x "$p" ] || p=python3'
                 result = candidate.box.run(
-                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    f"p={shlex.quote(_BASE_PYTHON)}{fallback}"
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
                     f'; {absolute_cd(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'

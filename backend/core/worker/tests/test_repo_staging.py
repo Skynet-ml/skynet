@@ -5950,12 +5950,14 @@ def _listing(
         clean: The lines of the run with ``env -i``.
         box: The lines of the run with the box's environment.
         base: The walk of ``BASE_PYTHON``.
-        programs: The walks of root's fixed programs that differ from a root-owned 755 file, by path.
+        programs: The walks of root's fixed paths that differ from the defaults, by path. The defaults
+            are a root-owned 755 file, and a root-owned 1777 ``/tmp``.
 
     Returns:
         The probe's standard output.
     """
-    walks = {path: _walk(path) for path in repo_staging._ROOT_PROGRAMS} | (programs or {})
+    walks = {path: _walk(path) for path in repo_staging._ROOT_PATHS}
+    walks = walks | {"/tmp": _walk("/tmp", "1777 directory")} | (programs or {})
     fixed = [line for path, walk in walks.items() for line in (f"file {path}", *walk)]
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
@@ -6279,6 +6281,15 @@ _LINKED_INTO_WRITABLE = [
         _listing(programs={"/bin/bash": _walk("/bin/bash", modes={"/bin": "777 directory"})}),
         _listing(programs={"/bin/sh": _walk("/bin/sh", "755 directory")}),
         _TRUSTED_PROBE.replace("file /bin/mkdir\n", ""),
+        _listing(programs={"/tmp": _walk("/tmp", "777 directory")}),
+        _listing(programs={"/tmp": _walk("/tmp", "1000 1777 directory")}),
+        _listing(programs={"/tmp": _walk("/tmp", "777 symbolic link")}),
+        _listing(programs={"/tmp": _walk("/tmp", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "666 regular file")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", modes={"/etc": "1000 755 directory"})}),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "664 regular file")}),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "755 directory")}),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", modes={"/usr/lib": "777 directory"})]),
         _listing(box=[*_ENTRIES, *_LINKED_INTO_WRITABLE]),
@@ -6328,6 +6339,15 @@ _LINKED_INTO_WRITABLE = [
         "bash-under-a-writable-folder",
         "sh-is-a-folder",
         "no-mkdir-walk",
+        "tmp-not-sticky",
+        "user-owned-tmp",
+        "tmp-is-a-link",
+        "missing-tmp",
+        "writable-passwd",
+        "missing-passwd",
+        "passwd-in-a-user-owned-etc",
+        "group-writable-nsswitch",
+        "nsswitch-is-a-folder",
         "R1-stdlib-moved-to-a-writable-folder",
         "R1-stdlib-under-a-writable-folder",
         "R2-link-into-a-writable-folder",
@@ -6405,6 +6425,9 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
             ]
         ),
         _listing(box=["env PATH", "env MALLOC_ARENA_MAX", *_ENTRIES]),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "644 regular file")}),
+        _listing(box=["env LANG", "locale LANG=C.UTF-8", "env LC_ALL", "locale LC_ALL=en_US.utf8", *_ENTRIES]),
     ],
     ids=[
         "python-image-layout",
@@ -6413,6 +6436,9 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         "dot-dot-target",
         "linked-top-folder",
         "plain-environment",
+        "no-nsswitch",
+        "read-only-passwd",
+        "utf-8-locale",
     ],
 )
 def test_a_root_owned_python_chain_passes(probe: str) -> None:
@@ -6440,6 +6466,10 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
         (["env BASH_FUNC_cd%%"], "BASH_FUNC_cd%%"),
         (["env SHELLOPTS", "env PS4", "env IFS"], "IFS, PS4, SHELLOPTS"),
         (["env OPENSSL_CONF"], "OPENSSL_CONF"),
+        (["env TMPDIR", "env TEMP", "env TMP"], "TEMP, TMP, TMPDIR"),
+        (["env LANG", "locale LANG=en_US.ISO-8859-1"], "LANG"),
+        (["env LC_CTYPE", "locale LC_CTYPE=/tmp/x.UTF-8", "env LANG", "locale LANG=C.UTF-8"], "LC_CTYPE"),
+        (["env LANGUAGE", "locale LANGUAGE=en_US.UTF-8:de_DE"], "LANGUAGE"),
     ],
     ids=[
         "library-path-with-an-empty-element",
@@ -6451,6 +6481,10 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
         "exported-function",
         "shell-options-and-trace",
         "openssl-config",
+        "temp-folder",
+        "latin-1-lang",
+        "locale-path-in-lc-ctype",
+        "non-utf-8-language-entry",
     ],
 )
 def test_a_run_image_with_root_variables_in_its_env_is_refused(
@@ -6528,6 +6562,7 @@ def _fake_python(root: Path, extra: str = "") -> Path:
         f"printf 'dir %s\\n' {shlex.quote(str(root))}\n"
         f"printf '%s' {shlex.quote(extra)}\n"
         "env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_%]*\\)=.*/env \\1/p'\n"
+        '[ -z "${LC_ALL+1}" ] || printf \'locale LC_ALL=%s\\n\' "$LC_ALL"\n'
     )
     python.chmod(0o755)
     return python
@@ -6683,6 +6718,33 @@ def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: P
     assert repo_staging._root_variables(done) == ["BASH_ENV", "CDPATH", "LD_LIBRARY_PATH"]
 
 
+@pytest.mark.parametrize("locale", ["C.UTF-8", "en_US.ISO-8859-1", None])
+def test_the_box_run_of_the_probe_uses_the_image_locale(tmp_path: Path, locale: str | None) -> None:
+    """The box run gets the image's own ``LC_ALL`` or none, never the probe's ``C`` (SKY-737).
+
+    Root's bash and supervisor run with the image locale, so the box run must
+    map the same locale files, and a non-UTF-8 value must be refused.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        locale: The image's ``LC_ALL``, or None when the image sets none.
+    """
+    python = _fake_python(tmp_path.resolve())
+    env = {name: value for name, value in os.environ.items() if name != "LC_ALL"}
+    env |= {"LC_ALL": locale} if locale is not None else {}
+
+    done = subprocess.run(["/bin/sh", "-c", _shell_probe(python)], capture_output=True, text=True, check=False, env=env)
+
+    assert done.returncode == 0, done.stderr
+    clean, box = done.stdout.split("run box\n")
+    assert "env LC_ALL" not in clean.split("\n")
+    assert ("env LC_ALL" in box.split("\n")) is (locale is not None)
+    assert [line for line in box.split("\n") if line.startswith("locale ")] == (
+        [f"locale LC_ALL={locale}"] if locale is not None else []
+    )
+    assert repo_staging._root_variables(done) == (["LC_ALL"] if locale == "en_US.ISO-8859-1" else [])
+
+
 def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
     """The real interpreter script prints ``env`` lines with names only (SKY-737)."""
     if sys.platform != "linux":
@@ -6693,11 +6755,24 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": "/usr/bin:/bin", "LD_PRELOAD": "", "SECRET_VALUE": "do-not-print", "BASH_FUNC_cd%%": "() { :; }"},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LD_PRELOAD": "",
+            "SECRET_VALUE": "do-not-print",
+            "BASH_FUNC_cd%%": "() { :; }",
+            "LANG": "en_US.ISO-8859-1",
+            "LC_CTYPE": "C.UTF-8",
+        },
     )
 
     assert done.returncode == 0, done.stderr
     assert {"env LD_PRELOAD", "env SECRET_VALUE", "env BASH_FUNC_cd%%"} <= set(done.stdout.split("\n"))
+    assert {"locale LANG=en_US.ISO-8859-1", "locale LC_CTYPE=C.UTF-8"} <= set(done.stdout.split("\n"))
+    assert repo_staging._root_variables(subprocess.CompletedProcess([], 0, done.stdout, "")) == [
+        "BASH_FUNC_cd%%",
+        "LANG",
+        "LD_PRELOAD",
+    ]
     assert "do-not-print" not in done.stdout
     assert "do-not-print" not in done.stdout
 

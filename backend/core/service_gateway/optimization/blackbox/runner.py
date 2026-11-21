@@ -2378,7 +2378,9 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     switch = _entry_user(env)
     # A new folder in sticky /tmp: the box user can rename anything in the
     # call's folder, so a root supervisor must not write or chown there.
-    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
+    # ``dir`` is fixed, as ``-I`` still lets an image ``TMPDIR`` pick a folder
+    # that the box user can write (SKY-737).
+    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-", dir="/tmp"))
     try:
         return _run_entry(
             entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")), payload.get(ASCENT_PACKAGE_PARAM)
