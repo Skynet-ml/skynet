@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import zipfile
@@ -895,20 +896,95 @@ def test_log_tail_keeps_the_last_lines() -> None:
     assert log_tail("a\nb\nc\n", lines=2) == "b\nc"
 
 
-def test_local_builder_reports_a_timeout(tmp_path: Path) -> None:
-    """A local build over the time limit is killed and fails as a timeout, with its log so far."""
+# Well under the 30 seconds a surviving child holds the pipe, with room for a slow start.
+_PROMPT_SECONDS = 15.0
+
+
+class _ReadyPopen(subprocess.Popen):  # type: ignore[type-arg]
+    """Popen whose timed wait starts only after the fake docker signals that it is ready.
+
+    So the time limit never races the fake docker's first output.
+    """
+
+    ready: Path
+    interrupt = False
+    last: _ReadyPopen | None = None
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for the ready file, then wait for the process.
+
+        Args:
+            timeout: The time limit for the process wait.
+
+        Returns:
+            The exit code.
+
+        Raises:
+            KeyboardInterrupt: The test asks for an interrupt in the timed wait.
+        """
+        if timeout is not None:
+            _ReadyPopen.last = self
+            deadline = time.monotonic() + 30
+            while not self.ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if self.interrupt:
+                raise KeyboardInterrupt
+        return super().wait(timeout)
+
+
+def _ready_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, interrupt: bool = False
+) -> LocalDockerImageBuilder:
+    """Return a local builder on a fake docker that prints, signals ready, then hangs with a child on the pipe.
+
+    Args:
+        tmp_path: The pytest temporary directory.
+        monkeypatch: The pytest monkeypatch fixture.
+        interrupt: Raise KeyboardInterrupt from the timed wait.
+
+    Returns:
+        The builder, with a 1-second time limit.
+    """
+    ready = tmp_path / "ready"
     fake = tmp_path / "docker"
-    fake.write_text("#!/bin/sh\necho '#1 building'\nexec sleep 30\n")
+    fake.write_text(f"#!/bin/sh\necho '#1 building'\ntouch '{ready}'\nsleep 30 &\nwait\n")
     fake.chmod(0o755)
-    builder = LocalDockerImageBuilder(
+    popen = type("ReadyPopen", (_ReadyPopen,), {"ready": ready, "interrupt": interrupt})
+    monkeypatch.setattr(image_build.subprocess, "Popen", popen)
+    return LocalDockerImageBuilder(
         docker=os.fspath(fake),
         limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
     )
 
+
+def test_local_builder_reports_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout kills docker's whole process group, with its log so far.
+
+    The fake docker leaves a child that holds the pipe for 30 seconds, so
+    only a group kill ends the build well inside the bound.
+    """
+    builder = _ready_docker(tmp_path, monkeypatch)
+    started = time.monotonic()
+
     with pytest.raises(ImageBuildTimeoutError) as caught:
         builder.build(_request(_context(tmp_path / "ctx")))
 
+    assert time.monotonic() - started < _PROMPT_SECONDS
     assert caught.value.log_tail == "#1 building"
+
+
+def test_local_builder_kills_the_group_on_an_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ctrl-C during a local build kills docker's process group and returns promptly."""
+    builder = _ready_docker(tmp_path, monkeypatch, interrupt=True)
+    started = time.monotonic()
+
+    with pytest.raises(KeyboardInterrupt):
+        builder.build(_request(_context(tmp_path / "ctx")))
+
+    assert time.monotonic() - started < _PROMPT_SECONDS
+    process = _ReadyPopen.last
+    assert process is not None
+    assert process.returncode == -signal.SIGKILL
 
 
 def test_local_docker_streams_one_huge_line_inside_the_cap(tmp_path: Path) -> None:
@@ -1180,7 +1256,7 @@ def test_request_refuses_control_characters(tmp_path: Path, text: str, field: st
     """NUL and other control characters in the Dockerfile path or a build arg value raise ImageBuildError."""
     fields: dict[str, Any] = {"dockerfile": text} if field == "dockerfile" else {"build_args": {"A": text}}
 
-    with pytest.raises(ImageBuildError, match="holds a control character"):
+    with pytest.raises(ImageBuildError, match="holds a control character or a character the buildspec cannot carry"):
         _hash(_request(_context(tmp_path), **fields))
 
 
@@ -1252,7 +1328,8 @@ def test_codebuild_timeout_survives_a_failed_log_read(tmp_path: Path) -> None:
 def test_codebuild_phase_marker_must_be_a_whole_codebuild_line(tmp_path: Path) -> None:
     """A command line that holds "Entering phase FOO" does not end the build phase."""
     lines = [
-        "[Container] 2026/11/20 10:00:01.000000 Running command docker buildx build --build-arg 'A=x Entering phase FOO'",
+        "[Container] 2026/11/20 10:00:01.000000 Running command docker buildx build"
+        " --build-arg 'A=x Entering phase FOO'",
         "#1 output",
     ]
     builder, _ = _builder(FakeCodeBuild([_done("FAILED", digest=None)]), lines=lines)
@@ -1302,21 +1379,3 @@ def test_zip_context_fails_on_a_file_that_vanished(tmp_path: Path, monkeypatch: 
 
     with pytest.raises(ImageBuildError, match="cannot read the build context"):
         image_build._zip_context(context, io.BytesIO(), 10**9)
-
-
-def test_local_timeout_kills_children_that_hold_the_pipe(tmp_path: Path) -> None:
-    """A timeout kills the whole process group, so a child that holds the pipe cannot delay the error."""
-    fake = tmp_path / "docker"
-    fake.write_text("#!/bin/sh\necho '#1 building'\nsleep 30 &\nwait\n")
-    fake.chmod(0o755)
-    builder = LocalDockerImageBuilder(
-        docker=os.fspath(fake),
-        limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
-    )
-    started = time.monotonic()
-
-    with pytest.raises(ImageBuildTimeoutError) as caught:
-        builder.build(_request(_context(tmp_path / "ctx")))
-
-    assert time.monotonic() - started < 4.0
-    assert caught.value.log_tail == "#1 building"

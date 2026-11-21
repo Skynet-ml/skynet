@@ -317,7 +317,8 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
         ImageBuildError: The context or the Dockerfile is missing, any part
             of the Dockerfile path is a symlink, the Dockerfile is outside
             the context, a build arg name is invalid, or the Dockerfile path or
-            a build arg value is not valid UTF-8 or holds a control character.
+            a build arg value is not valid UTF-8 or holds a control character
+            or a character the buildspec cannot carry.
     """
     if not request.context_dir.is_dir():
         raise ImageBuildError(f"build context {request.context_dir} is not a directory")
@@ -402,7 +403,7 @@ def _check_text(text: str, what: str) -> None:
     """
     _utf8(text, what)
     if _UNSAFE_TEXT.search(text):
-        raise ImageBuildError(f"{what} {text!r} holds a control character")
+        raise ImageBuildError(f"{what} {text!r} holds a control character or a character the buildspec cannot carry")
 
 
 def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
@@ -595,9 +596,9 @@ def codebuild_buildspec(
 
     The buildspec is JSON, which YAML also reads, so no value needs YAML
     quoting. Non-ASCII text stays as is, because YAML refuses the surrogate
-    pair escapes that JSON writes for characters above U+FFFF. Every user value goes through ``shlex.quote``. Provenance and
-    SBOM attestations stay off, so the pushed digest is a plain image manifest
-    whose size ECR reports.
+    pair escapes that JSON writes for characters above U+FFFF. Every user
+    value goes through ``shlex.quote``. Provenance and SBOM attestations stay
+    off, so the pushed digest is a plain image manifest whose size ECR reports.
 
     Before BuildKit starts, the buildspec blocks the link-local range for
     containers, so a ``RUN`` step cannot reach the CodeBuild credentials or
@@ -1077,7 +1078,9 @@ class LocalDockerImageBuilder:
             # A thread reads the output while it streams, so the log never
             # holds more than the cap and the pipe never fills.
             # A new session puts docker and its children in one process group,
-            # so a timeout kills them all and the pipe closes.
+            # so a timeout or an interrupt kills them all and the pipe closes.
+            # The session also keeps the terminal's Ctrl-C from docker, so the
+            # builder must kill the group itself on every way out.
             with subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
             ) as process:
@@ -1085,11 +1088,13 @@ class LocalDockerImageBuilder:
                 reader.start()
                 try:
                     returncode = process.wait(timeout=self._limits.timeout_seconds)
-                except subprocess.TimeoutExpired as exc:
+                except BaseException as exc:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                     reader.join(_READER_JOIN_SECONDS)
+                    if not isinstance(exc, subprocess.TimeoutExpired):
+                        raise
                     log = capped.text()
                     raise ImageBuildTimeoutError(
                         f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit",
