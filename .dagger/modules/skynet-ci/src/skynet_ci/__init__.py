@@ -128,14 +128,12 @@ class SkynetCi:
             .with_directory("/src", self.source)
         )
 
-    def _core_shard(self, shard: int) -> Container:
-        """Run one shard of the credential-free core suite.
-
-        Args:
-            shard: The zero-based shard index.
+    def _backend_as_ci_user(self) -> Container:
+        """Return the backend container that runs as the unprivileged ci user.
 
         Returns:
-            The container after pytest ran, with the dispatched nodeid list.
+            The backend container as user ci (uid 1001), who owns /src, with
+            ``HOME`` and ``UV_NO_SYNC`` set.
         """
         return (
             self._backend()
@@ -146,6 +144,19 @@ class SkynetCi:
             .with_user("ci")
             .with_env_variable("HOME", "/home/ci")
             .with_env_variable("UV_NO_SYNC", "1")
+        )
+
+    def _core_shard(self, shard: int) -> Container:
+        """Run one shard of the credential-free core suite.
+
+        Args:
+            shard: The zero-based shard index.
+
+        Returns:
+            The container after pytest ran, with the dispatched nodeid list.
+        """
+        return (
+            self._backend_as_ci_user()
             .with_env_variable("SKYNET_TEST_SHARD", f"{shard}/{CORE_SHARD_COUNT}")
             .with_env_variable("SKYNET_TEST_DISPATCHED_OUT", f"dispatched-{shard}.txt")
             # A failed exec has no output to read and is not cached. ANY accepts
@@ -319,18 +330,14 @@ class SkynetCi:
         # read other processes. setpriv clears the ambient, inheritable and
         # bounding sets and sets no_new_privs, so a setuid binary cannot get
         # root back and pytest runs as a plain unprivileged user, as in a
-        # sandbox.
+        # sandbox. So the no_new_privs prctl test skips here, as expected;
+        # a backend-core shard check runs it without the flag.
         # SKY_REQUIRE_USERNS=1 turns a refused namespace into a failure
         # instead of a skip (SKY-885, SKY-886). No -n: the /proc scan tests
         # read every process, so they must not run beside each other.
         # ReturnType.ANY keeps the output of a failed run, so the error shows it.
         userns_run = (
-            self._backend()
-            .with_exec(["useradd", "--create-home", "--uid", "1001", "ci"])
-            .with_exec(["chown", "-R", "ci:ci", "/src"])
-            .with_user("ci")
-            .with_env_variable("HOME", "/home/ci")
-            .with_env_variable("UV_NO_SYNC", "1")
+            self._backend_as_ci_user()
             .with_env_variable("SKY_REQUIRE_USERNS", "1")
             .with_exec(
                 [
@@ -346,7 +353,7 @@ class SkynetCi:
                     "core/service_gateway/optimization/blackbox/tests/test_sandbox_runtime.py",
                     "core/service_gateway/optimization/blackbox/tests/test_runner.py",
                     "-q",
-                    "-rs",
+                    "-rfEs",
                 ],
                 insecure_root_capabilities=True,
                 expect=ReturnType.ANY,
@@ -357,7 +364,10 @@ class SkynetCi:
             stdout = await userns_run.stdout()
             stderr = await userns_run.stderr()
             raise RuntimeError(
-                f"user namespace tests failed: pytest exit code {exit_code}.\n"
+                f"user namespace tests failed: pytest exit code {exit_code}."
+                " The local engine caches this result. To run the tests again,"
+                " change a file in backend/ or run"
+                " `dagger -c 'engine | local-cache | prune'`.\n"
                 f"{stdout[-8000:]}\n--- stderr ---\n{stderr[-4000:]}"
             )
 
