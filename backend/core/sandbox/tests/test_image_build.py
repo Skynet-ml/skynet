@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from core.sandbox import image_build
 from core.sandbox.image_build import (
@@ -257,17 +258,22 @@ class FakeCodeBuild:
         return {}
 
 
+BUILD_PHASE = "[Container] 2026/11/20 10:00:00.000000 Entering phase BUILD"
+
+
 class FakeLogs:
     """Return a log in two pages, then the same token, like CloudWatch."""
 
-    def __init__(self, lines: list[str], late: list[str] | None = None) -> None:
+    def __init__(self, lines: list[str], late: list[str] | None = None, *, raw: bool = False) -> None:
         """Hold the log lines.
 
         Args:
             lines: The log lines.
             late: Lines that arrive only on the second read at the end.
+            raw: Use the lines as they are. Otherwise a CodeBuild BUILD phase
+                line comes first, so the user log keeps every line.
         """
-        self.lines = lines
+        self.lines = lines if raw else [BUILD_PHASE, *lines]
         self.late = late or []
         self.requests: list[dict[str, Any]] = []
         self.end_reads = 0
@@ -347,6 +353,7 @@ def _builder(
     lines: list[str] | None = None,
     late: list[str] | None = None,
     registry: FakeRegistry | None = None,
+    logs: FakeLogs | None = None,
 ) -> tuple[CodeBuildImageBuilder, FakeS3]:
     """Build a CodeBuild builder on fakes.
 
@@ -358,6 +365,7 @@ def _builder(
         lines: The build log lines.
         late: Log lines that arrive after the build ends.
         registry: The fake registry.
+        logs: The fake CloudWatch Logs client, in place of ``lines`` and ``late``.
 
     Returns:
         The builder and its fake S3.
@@ -366,7 +374,7 @@ def _builder(
     s3 = FakeS3()
     builder = CodeBuildImageBuilder(
         codebuild=codebuild,
-        logs=FakeLogs(lines if lines is not None else [f"line {i}" for i in range(100)], late),
+        logs=logs or FakeLogs(lines if lines is not None else [f"line {i}" for i in range(100)], late),
         s3=s3,
         registry=registry or FakeRegistry({DIGEST: 5_000} if sizes is None else sizes),  # type: ignore[arg-type]
         project_name="skynet-staging-image-build",
@@ -905,27 +913,33 @@ def test_cap_log_cuts_one_very_long_line() -> None:
     assert len(cap_log("x" * 1000, limit=100)) <= 100
 
 
-def test_local_builder_reports_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A local build over the time limit fails as a timeout, with its log so far."""
-
-    def _slow(*args: Any, **kwargs: Any) -> None:
-        """Raise the timeout that subprocess raises.
-
-        Args:
-            *args: The command.
-            **kwargs: The options.
-        """
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"], output=b"#1 building\n")
-
-    monkeypatch.setattr(subprocess, "run", _slow)
+def test_local_builder_reports_a_timeout(tmp_path: Path) -> None:
+    """A local build over the time limit is killed and fails as a timeout, with its log so far."""
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\necho '#1 building'\nexec sleep 30\n")
+    fake.chmod(0o755)
     builder = LocalDockerImageBuilder(
-        limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9)
+        docker=os.fspath(fake),
+        limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
     )
 
     with pytest.raises(ImageBuildTimeoutError) as caught:
-        builder.build(_request(_context(tmp_path)))
+        builder.build(_request(_context(tmp_path / "ctx")))
 
     assert caught.value.log_tail == "#1 building"
+
+
+def test_local_docker_streams_one_huge_line_inside_the_cap(tmp_path: Path) -> None:
+    """Output with no newline is read in bounded pieces, so the log stays inside the cap."""
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nhead -c 5000000 /dev/zero | tr '\\0' x\nexit 1\n")
+    fake.chmod(0o755)
+
+    with pytest.raises(ImageBuildError, match="exited with code 1") as caught:
+        LocalDockerImageBuilder(docker=os.fspath(fake), limits=LIMITS).build(_request(_context(tmp_path / "ctx")))
+
+    assert len(caught.value.log) <= MAX_LOG_CHARS + 100
+    assert "x" * 1000 in caught.value.log
 
 
 def _docker_ready() -> bool:
@@ -991,3 +1005,169 @@ def test_local_docker_caps_its_log_and_passes_the_platform(tmp_path: Path) -> No
     assert len(caught.value.log) <= MAX_LOG_CHARS + 100
     assert "--platform linux/amd64" in caught.value.log.splitlines()[0]
     assert "log lines cut ...]" in caught.value.log
+
+
+def _client_error(operation: str) -> ClientError:
+    """Return a botocore client error.
+
+    Args:
+        operation: The AWS operation name.
+
+    Returns:
+        The error.
+    """
+    return ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, operation)
+
+
+def test_codebuild_stops_the_build_when_a_status_read_fails(tmp_path: Path) -> None:
+    """A failed status read stops the build and raises ImageBuildError with the AWS code."""
+    codebuild = FakeCodeBuild([RUNNING])
+    builder, _ = _builder(codebuild)
+
+    def _fail(ids: list[str]) -> dict[str, Any]:
+        """Fail like a throttled status read.
+
+        Args:
+            ids: The build ids.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise _client_error("BatchGetBuilds")
+
+    codebuild.batch_get_builds = _fail  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildError, match=r"lost track of image build proj:1 \(ThrottlingException\)"):
+        builder.build(_request(_context(tmp_path)))
+
+    assert codebuild.stopped == ["proj:1"]
+
+
+def test_codebuild_stops_the_build_when_a_log_read_fails_even_if_the_stop_fails(tmp_path: Path) -> None:
+    """A failed log read stops the build; a failed stop still gives ImageBuildError."""
+    codebuild = FakeCodeBuild([_done()])
+    logs = FakeLogs([])
+    builder, _ = _builder(codebuild, logs=logs)
+    stops: list[str] = []
+
+    def _fail_logs(**kwargs: Any) -> dict[str, Any]:
+        """Fail like a lost connection.
+
+        Args:
+            **kwargs: The request.
+
+        Raises:
+            EndpointConnectionError: Always.
+        """
+        raise EndpointConnectionError(endpoint_url="https://logs.example")
+
+    def _fail_stop(id: str) -> dict[str, Any]:
+        """Record the stop, then fail.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: Always.
+        """
+        stops.append(id)
+        raise _client_error("StopBuild")
+
+    logs.get_log_events = _fail_logs  # type: ignore[method-assign]
+    codebuild.stop_build = _fail_stop  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildError, match=r"\(EndpointConnectionError\)$"):
+        builder.build(_request(_context(tmp_path)))
+
+    assert stops == ["proj:1"]
+
+
+def test_codebuild_wraps_a_failed_upload_and_a_failed_start(tmp_path: Path) -> None:
+    """A failed upload or start raises ImageBuildError, and no build starts after a failed upload."""
+    codebuild = FakeCodeBuild([_done()])
+    builder, s3 = _builder(codebuild)
+
+    def _fail_upload(handle: Any, bucket: str, key: str) -> None:
+        """Fail like a refused upload.
+
+        Args:
+            handle: The open file.
+            bucket: The bucket.
+            key: The key.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise _client_error("PutObject")
+
+    s3.upload_fileobj = _fail_upload  # type: ignore[method-assign]
+    with pytest.raises(ImageBuildError, match="cannot upload the build context"):
+        builder.build(_request(_context(tmp_path)))
+    assert codebuild.started == {}
+
+    codebuild2 = FakeCodeBuild([_done()])
+    builder2, _ = _builder(codebuild2)
+
+    def _fail_start(**kwargs: Any) -> dict[str, Any]:
+        """Fail like a refused start.
+
+        Args:
+            **kwargs: The request.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise _client_error("StartBuild")
+
+    codebuild2.start_build = _fail_start  # type: ignore[method-assign]
+    with pytest.raises(ImageBuildError, match="cannot start the image build"):
+        builder2.build(_request(_context(tmp_path / "second")))
+
+
+def test_codebuild_user_log_keeps_only_build_output_with_no_infrastructure_details(tmp_path: Path) -> None:
+    """The user log drops CodeBuild lines and other phases, and hides the role, registry and account."""
+    helper = base64.b64encode(f"ROLE = {PUSH_ROLE!r}".encode()).decode()
+    lines = [
+        "[Container] 2026/11/20 10:00:00.000000 Entering phase PRE_BUILD",
+        "[Container] 2026/11/20 10:00:00.000001 Running command iptables -I DOCKER-USER -d 169.254.0.0/16 -j DROP",
+        f"[Container] 2026/11/20 10:00:00.000002 Running command echo {helper} | base64 -d > /usr/local/bin/x",
+        f"pre-build output for {PUSH_ROLE}",
+        BUILD_PHASE,
+        f"[Container] 2026/11/20 10:00:01.000000 Running command docker buildx build --tag {REPO}:abc .",
+        "#5 [2/2] RUN echo hi",
+        f"#9 naming to {REPO}:abc done",
+        "#9 role check " + PUSH_ROLE,
+        "[Container] 2026/11/20 10:00:09.000000 Entering phase POST_BUILD",
+        f"post-build output for {SERVER}",
+    ]
+    builder, _ = _builder(FakeCodeBuild([_done("FAILED", digest=None)]), logs=FakeLogs(lines, raw=True))
+
+    with pytest.raises(ImageBuildError) as caught:
+        builder.build(_request(_context(tmp_path)))
+
+    log = caught.value.log
+    assert log.splitlines() == [
+        "#5 [2/2] RUN echo hi",
+        f"#9 naming to <registry>/{PREFIX}/{OWNER}:abc done",
+        "#9 role check <push-role>",
+    ]
+    assert "123456789012" not in log
+    assert "iptables" not in log
+    assert helper not in log
+
+
+@pytest.mark.parametrize(
+    "request_fields",
+    [{"dockerfile": "Docker\ud800file"}, {"build_args": {"A": "\ud800"}}],
+)
+def test_request_refuses_text_that_is_not_utf8(tmp_path: Path, request_fields: dict[str, Any]) -> None:
+    """A lone surrogate in the Dockerfile path or a build arg value raises ImageBuildError."""
+    with pytest.raises(ImageBuildError, match="not valid UTF-8"):
+        _hash(_request(_context(tmp_path), **request_fields))
+
+
+@pytest.mark.parametrize("name", ["FOO\n", "\nFOO", "FOO\nBAR"])
+def test_request_refuses_a_build_arg_name_with_a_newline(tmp_path: Path, name: str) -> None:
+    """A build arg name with a newline, also at the end, is refused."""
+    with pytest.raises(ImageBuildError, match="build arg name"):
+        _hash(_request(_context(tmp_path), build_args={name: "1"}))

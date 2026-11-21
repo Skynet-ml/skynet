@@ -393,3 +393,17 @@ def test_delete_cache_ignores_a_missing_cache_and_raises_on_another_failure() ->
         _registry(fake, URI).delete_cache("u1", "default")
     with pytest.raises(ImageRegistryError, match="valid image tag"):
         _registry(FakeEcr(), URI).delete_cache("u1", "x" * 128)
+
+
+def test_validation_refuses_a_trailing_newline() -> None:
+    """An owner, digest, tag or URI that ends in a newline is refused."""
+    registry = _registry(FakeEcr(), URI)
+
+    with pytest.raises(ImageRegistryError, match="not a valid image owner"):
+        registry.push_reference("alice\n", "abc")
+    with pytest.raises(ImageRegistryError, match="not an image digest"):
+        require_digest(DIGEST + "\n")
+    with pytest.raises(ImageRegistryError, match="valid image tag"):
+        registry.push_reference("alice", "abc\n")
+    with pytest.raises(ImageRegistryError, match="ECR repository prefix URI"):
+        _registry(FakeEcr(), URI + "\n")

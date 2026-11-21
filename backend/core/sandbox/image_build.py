@@ -14,6 +14,7 @@ a later part can reuse a finished image when the hash matches.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import math
@@ -23,6 +24,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -35,6 +37,15 @@ from typing import IO, Any, Protocol
 from core.config import settings
 
 from .image_registry import EcrRegistry, ImageRegistryError
+
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:
+    BotoCoreError = None
+    ClientError = None
+
+# Without botocore the names above are None, and except takes no None entry.
+_AWS_ERRORS = tuple(kind for kind in (BotoCoreError, ClientError) if kind is not None)
 
 _HASH_VERSION = b"skynet-image-input-v2"
 _BUILD_ARG_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -51,6 +62,14 @@ _QUEUE_TIMEOUT_MINUTES = 60
 _QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
 # CloudWatch can deliver the last log events a few seconds after the build ends.
 _LOG_SETTLE_SECONDS = 5.0
+# CodeBuild writes its own agent lines with this prefix, and marks each phase.
+_CODEBUILD_LINE = "[Container] "
+_CODEBUILD_PHASE = re.compile(r"Entering phase (\w+)")
+# The user log keeps only the build phase: the other phases run Skynet's own
+# setup (firewall rules, the credential helper with its role and policy).
+_USER_LOG_PHASE = "BUILD"
+# After a kill, the reader thread ends when the pipe closes.
+_READER_JOIN_SECONDS = 5.0
 LOCAL_IMAGE_NAME = "skynet-user-image"
 CODEBUILD_PLATFORM = "linux/amd64"
 # BuildKit from the ECR Public mirror of moby/buildkit:buildx-stable-1, pinned
@@ -302,6 +321,10 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
     if not request.context_dir.is_dir():
         raise ImageBuildError(f"build context {request.context_dir} is not a directory")
     context = request.context_dir.resolve(strict=True)
+    # Check text before any file call, which raises a raw error on a lone surrogate.
+    _utf8(request.dockerfile, "Dockerfile path")
+    for name, value in request.build_args.items():
+        _utf8(value, f"build arg {name} value")
     relative = PurePosixPath(request.dockerfile)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must stay inside the build context")
@@ -320,7 +343,7 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
     if not resolved.is_relative_to(context) or not resolved.is_file():
         raise ImageBuildError(f"Dockerfile {request.dockerfile!r} is not a regular file in the build context")
     for name in request.build_args:
-        if not _BUILD_ARG_NAME.match(name):
+        if not _BUILD_ARG_NAME.fullmatch(name):
             raise ImageBuildError(f"build arg name {name!r} is not valid")
     return _Dockerfile(path=resolved, relative=relative.as_posix())
 
@@ -347,22 +370,22 @@ def _walk_error(exc: OSError) -> None:
 
 
 def _utf8(text: str, what: str) -> bytes:
-    """Encode a context path or link target as UTF-8.
+    """Encode a build input as UTF-8.
 
     Args:
-        text: The path or target, as ``os`` decoded it.
+        text: The input, for example a path as ``os`` decoded it.
         what: What the text is, for the error.
 
     Returns:
         The UTF-8 bytes.
 
     Raises:
-        ImageBuildError: The name is not valid UTF-8.
+        ImageBuildError: The text is not valid UTF-8 (it holds a lone surrogate).
     """
     try:
         return text.encode()
     except UnicodeEncodeError as exc:
-        raise ImageBuildError(f"build context {what} {text!r} is not valid UTF-8") from exc
+        raise ImageBuildError(f"{what} {text!r} is not valid UTF-8") from exc
 
 
 def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
@@ -391,7 +414,7 @@ def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
         for name in dirs + files:
             path = base / name
             relative = path.relative_to(root_dir).as_posix()
-            _utf8(relative, "path")
+            _utf8(relative, "build context path")
             info = path.lstat()
             if not (stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 continue
@@ -447,14 +470,14 @@ def compute_input_hash(
     put(_HASH_VERSION)
     put(builder.encode())
     put(platform.encode())
-    put(dockerfile.relative.encode())
+    put(_utf8(dockerfile.relative, "Dockerfile path"))
     put(dockerfile.path.read_bytes())
     for entry in _context_entries(request.context_dir, max_context_bytes):
         put(entry.relative.encode())
         mode = entry.info.st_mode
         if stat.S_ISLNK(mode):
             put(b"link")
-            put(_utf8(str(entry.path.readlink()), "symlink target"))
+            put(_utf8(str(entry.path.readlink()), "build context symlink target"))
             continue
         put(b"dir" if stat.S_ISDIR(mode) else b"file")
         put((mode & 0o7777).to_bytes(2, "big"))
@@ -466,7 +489,7 @@ def compute_input_hash(
                 digest.update(chunk)
     for name in sorted(request.build_args):
         put(name.encode())
-        put(request.build_args[name].encode())
+        put(_utf8(request.build_args[name], f"build arg {name} value"))
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -691,27 +714,39 @@ class CodeBuildImageBuilder:
         with tempfile.TemporaryFile() as archive:
             _zip_context(request.context_dir, archive, self._limits.max_context_bytes)
             archive.seek(0)
-            self._s3.upload_fileobj(archive, self._bucket, key)
+            try:
+                self._s3.upload_fileobj(archive, self._bucket, key)
+            except _AWS_ERRORS as exc:
+                raise ImageBuildError(f"cannot upload the build context ({_aws_error(exc)})") from exc
 
         timeout_minutes = max(_MIN_TIMEOUT_MINUTES, math.ceil(self._limits.timeout_seconds / 60))
-        started = self._codebuild.start_build(
-            projectName=self._project,
-            sourceTypeOverride="S3",
-            sourceLocationOverride=f"{self._bucket}/{key}",
-            buildspecOverride=codebuild_buildspec(
-                image_ref=image_ref,
-                cache_ref=cache_ref,
-                dockerfile=dockerfile.relative,
-                build_args=request.build_args,
-                push_role_arn=self._push_role,
-                session_policy=session_policy,
-            ),
-            timeoutInMinutesOverride=timeout_minutes,
-            queuedTimeoutInMinutesOverride=_QUEUE_TIMEOUT_MINUTES,
-        )
+        try:
+            started = self._codebuild.start_build(
+                projectName=self._project,
+                sourceTypeOverride="S3",
+                sourceLocationOverride=f"{self._bucket}/{key}",
+                buildspecOverride=codebuild_buildspec(
+                    image_ref=image_ref,
+                    cache_ref=cache_ref,
+                    dockerfile=dockerfile.relative,
+                    build_args=request.build_args,
+                    push_role_arn=self._push_role,
+                    session_policy=session_policy,
+                ),
+                timeoutInMinutesOverride=timeout_minutes,
+                queuedTimeoutInMinutesOverride=_QUEUE_TIMEOUT_MINUTES,
+            )
+        except _AWS_ERRORS as exc:
+            raise ImageBuildError(f"cannot start the image build ({_aws_error(exc)})") from exc
         build_id = started["build"]["id"]
-        build = self._wait(build_id)
-        log = self._read_log(build, settle=True)
+        try:
+            build = self._wait(build_id)
+            log = self._read_log(build, settle=True)
+        except _AWS_ERRORS as exc:
+            # Without status reads the worker cannot follow the build, so it
+            # stops the build instead of leaving it to run and push.
+            self._stop(build_id)
+            raise ImageBuildError(f"lost track of image build {build_id} ({_aws_error(exc)})") from exc
         tail = log_tail(log)
         status = build.get("buildStatus")
         if status == "TIMED_OUT":
@@ -772,6 +807,7 @@ class CodeBuildImageBuilder:
         Raises:
             ImageBuildTimeoutError: The build was still running at the time
                 limit, or still queued at the queue limit.
+            BotoCoreError: A status or log read failed (or ClientError).
         """
         queue_deadline = self._clock() + _QUEUE_TIMEOUT_MINUTES * 60
         run_deadline: float | None = None
@@ -783,18 +819,46 @@ class CodeBuildImageBuilder:
             if run_deadline is None and build.get("currentPhase") not in _QUEUED_PHASES:
                 run_deadline = now + self._limits.timeout_seconds
             if run_deadline is None and now >= queue_deadline:
-                self._codebuild.stop_build(id=build_id)
+                self._stop(build_id)
                 raise ImageBuildTimeoutError(
                     f"image build waited longer than the {_QUEUE_TIMEOUT_MINUTES}-minute queue limit"
                 )
             if run_deadline is not None and now >= run_deadline:
-                self._codebuild.stop_build(id=build_id)
+                self._stop(build_id)
                 log = self._read_log(build)
                 raise ImageBuildTimeoutError(self._timeout_message(), log=log, log_tail=log_tail(log))
             self._sleep(self._poll)
 
+    def _stop(self, build_id: str) -> None:
+        """Stop a build, best effort.
+
+        Args:
+            build_id: The CodeBuild build id.
+        """
+        # The caller already reports a failure; a failed stop must not hide it.
+        with contextlib.suppress(*_AWS_ERRORS):
+            self._codebuild.stop_build(id=build_id)
+
+    def _user_line(self, line: str) -> str:
+        """Hide the push role, the registry host and the account id in a log line.
+
+        Args:
+            line: One build-phase log line.
+
+        Returns:
+            The line with those values replaced by placeholders.
+        """
+        server = self._registry.server
+        account = server.split(".", 1)[0]
+        line = line.replace(self._push_role, "<push-role>").replace(server, "<registry>")
+        return line.replace(account, "<account>") if account.isdigit() else line
+
     def _read_log(self, build: Mapping[str, Any], *, settle: bool = False) -> str:
-        """Read the CloudWatch log of a build, inside the log size limit.
+        """Read the build-phase output from the CloudWatch log, inside the log size limit.
+
+        The user log drops CodeBuild's own lines (which echo each command
+        Skynet runs) and the output of every phase but the build phase, and
+        hides the push role, the registry host and the account id.
 
         Args:
             build: The build description.
@@ -804,17 +868,26 @@ class CodeBuildImageBuilder:
         Returns:
             The log lines in order, with the middle cut when the log is too
             long. Empty when the build has no log stream yet.
+
+        Raises:
+            BotoCoreError: A log read failed (or ClientError).
         """
         logs = build.get("logs") or {}
         group, stream = logs.get("groupName"), logs.get("streamName")
         if not group or not stream:
             return ""
         capped = _CappedLog()
+        phase = ""
         kwargs: dict[str, Any] = {"logGroupName": group, "logStreamName": stream, "startFromHead": True}
         while True:
             page = self._logs.get_log_events(**kwargs)
             for event in page.get("events", []):
-                capped.add(event["message"].rstrip("\n"))
+                line = event["message"].rstrip("\n")
+                if line.startswith(_CODEBUILD_LINE):
+                    if found := _CODEBUILD_PHASE.search(line):
+                        phase = found.group(1)
+                elif phase == _USER_LOG_PHASE:
+                    capped.add(self._user_line(line))
             token = page.get("nextForwardToken")
             # CloudWatch returns the same forward token when no page is left.
             if token and token != kwargs.get("nextToken"):
@@ -824,6 +897,31 @@ class CodeBuildImageBuilder:
                 return capped.text()
             settle = False
             self._sleep(_LOG_SETTLE_SECONDS)
+
+
+def _aws_error(exc: BaseException) -> str:
+    """Return a short, safe name for a boto3 or botocore error.
+
+    Args:
+        exc: The error.
+
+    Returns:
+        The AWS error code of a client error, else the error class name.
+    """
+    response = getattr(exc, "response", None)
+    code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+    return code or type(exc).__name__
+
+
+def _read_capped(stream: IO[bytes], capped: _CappedLog) -> None:
+    """Read a process output stream into a capped log, a bounded piece at a time.
+
+    Args:
+        stream: The binary output stream.
+        capped: The log that keeps the head and the tail.
+    """
+    while piece := stream.readline(_READ_CHUNK):
+        capped.add(piece.decode(errors="replace").rstrip("\n"))
 
 
 def _size_message(size_bytes: int, limits: BuildLimits) -> str:
@@ -906,26 +1004,30 @@ class LocalDockerImageBuilder:
                 *(arg for k, v in sorted(request.build_args.items()) for arg in ("--build-arg", f"{k}={v}")),
                 str(request.context_dir),
             ]
-            try:
-                done = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    timeout=self._limits.timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                log = cap_log((exc.stdout or b"").decode(errors="replace"))
-                raise ImageBuildTimeoutError(
-                    f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit",
-                    log=log,
-                    log_tail=log_tail(log),
-                ) from exc
-            log = cap_log(done.stdout.decode(errors="replace"))
+            capped = _CappedLog()
+            # A thread reads the output while it streams, so the log never
+            # holds more than the cap and the pipe never fills.
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+                reader = threading.Thread(target=_read_capped, args=(process.stdout, capped), daemon=True)
+                reader.start()
+                try:
+                    returncode = process.wait(timeout=self._limits.timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    process.kill()
+                    process.wait()
+                    reader.join(_READER_JOIN_SECONDS)
+                    log = capped.text()
+                    raise ImageBuildTimeoutError(
+                        f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit",
+                        log=log,
+                        log_tail=log_tail(log),
+                    ) from exc
+                reader.join(_READER_JOIN_SECONDS)
+            log = capped.text()
             tail = log_tail(log)
             image_id = iidfile.read_text().strip() if iidfile.exists() else ""
-        if done.returncode != 0 or not image_id:
-            raise ImageBuildError(f"docker build exited with code {done.returncode}", log=log, log_tail=tail)
+        if returncode != 0 or not image_id:
+            raise ImageBuildError(f"docker build exited with code {returncode}", log=log, log_tail=tail)
         size_bytes = self._image_size(image_id)
         if size_bytes > self._limits.max_size_bytes:
             raise ImageTooLargeError(_size_message(size_bytes, self._limits), log=log, log_tail=tail)
