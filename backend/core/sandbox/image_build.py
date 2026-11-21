@@ -17,6 +17,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -47,6 +48,8 @@ except ImportError:
 
 # Without botocore the names above are None, and except takes no None entry.
 _AWS_ERRORS = tuple(kind for kind in (BotoCoreError, ClientError) if kind is not None)
+
+logger = logging.getLogger(__name__)
 
 _HASH_VERSION = b"skynet-image-input-v2"
 _BUILD_ARG_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -317,7 +320,8 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
         ImageBuildError: The context or the Dockerfile is missing, any part
             of the Dockerfile path is a symlink, the Dockerfile is outside
             the context, a build arg name is invalid, or the Dockerfile path or
-            a build arg value is not valid UTF-8 or holds a control character.
+            a build arg value is not valid UTF-8 or holds a control character
+            or a character the buildspec cannot carry.
     """
     if not request.context_dir.is_dir():
         raise ImageBuildError(f"build context {request.context_dir} is not a directory")
@@ -402,7 +406,7 @@ def _check_text(text: str, what: str) -> None:
     """
     _utf8(text, what)
     if _UNSAFE_TEXT.search(text):
-        raise ImageBuildError(f"{what} {text!r} holds a control character")
+        raise ImageBuildError(f"{what} {text!r} holds a control character or a character the buildspec cannot carry")
 
 
 def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
@@ -595,9 +599,9 @@ def codebuild_buildspec(
 
     The buildspec is JSON, which YAML also reads, so no value needs YAML
     quoting. Non-ASCII text stays as is, because YAML refuses the surrogate
-    pair escapes that JSON writes for characters above U+FFFF. Every user value goes through ``shlex.quote``. Provenance and
-    SBOM attestations stay off, so the pushed digest is a plain image manifest
-    whose size ECR reports.
+    pair escapes that JSON writes for characters above U+FFFF. Every user
+    value goes through ``shlex.quote``. Provenance and SBOM attestations stay
+    off, so the pushed digest is a plain image manifest whose size ECR reports.
 
     Before BuildKit starts, the buildspec blocks the link-local range for
     containers, so a ``RUN`` step cannot reach the CodeBuild credentials or
@@ -993,6 +997,37 @@ def _read_capped(stream: IO[bytes], capped: _CappedLog) -> None:
         capped.add(piece.decode(errors="replace").rstrip("\n"))
 
 
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """Kill every process in docker's process group.
+
+    An empty group raises ProcessLookupError. macOS raises PermissionError
+    when the group holds only zombies. Both mean that nothing is left to kill.
+
+    Args:
+        process: The docker process, which leads its own process group.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def _release_output(process: subprocess.Popen[bytes], reader: threading.Thread) -> None:
+    """Join the output reader for a bounded time, and detach the pipe if it still reads.
+
+    The builder kills docker's group before this call on every path, so only
+    a process outside the group (one that called setsid) can still hold the
+    pipe. Closing the pipe would then block until that process exits, so the
+    builder leaves the pipe to the daemon reader, which ends at EOF.
+
+    Args:
+        process: The docker process, already waited for.
+        reader: The thread that reads its output.
+    """
+    reader.join(_READER_JOIN_SECONDS)
+    if reader.is_alive():
+        logger.warning("docker process %s left a process that holds its output open; the log may be short", process.pid)
+        process.stdout = None
+
+
 def _size_message(size_bytes: int, limits: BuildLimits) -> str:
     """Return the error text for an image over the size limit.
 
@@ -1077,7 +1112,9 @@ class LocalDockerImageBuilder:
             # A thread reads the output while it streams, so the log never
             # holds more than the cap and the pipe never fills.
             # A new session puts docker and its children in one process group,
-            # so a timeout kills them all and the pipe closes.
+            # so a timeout or an interrupt kills them all and the pipe closes.
+            # The session also keeps the terminal's Ctrl-C from docker, so the
+            # builder must kill the group itself on every way out.
             with subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
             ) as process:
@@ -1085,18 +1122,22 @@ class LocalDockerImageBuilder:
                 reader.start()
                 try:
                     returncode = process.wait(timeout=self._limits.timeout_seconds)
-                except subprocess.TimeoutExpired as exc:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                except BaseException as exc:
+                    _kill_group(process)
                     process.wait()
-                    reader.join(_READER_JOIN_SECONDS)
+                    _release_output(process, reader)
+                    if not isinstance(exc, subprocess.TimeoutExpired):
+                        raise
                     log = capped.text()
                     raise ImageBuildTimeoutError(
                         f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit",
                         log=log,
                         log_tail=log_tail(log),
                     ) from exc
-                reader.join(_READER_JOIN_SECONDS)
+                # A child that docker left in its group can hold the pipe open
+                # after a normal exit, so kill the group here too.
+                _kill_group(process)
+                _release_output(process, reader)
             log = capped.text()
             tail = log_tail(log)
             image_id = iidfile.read_text().strip() if iidfile.exists() else ""
