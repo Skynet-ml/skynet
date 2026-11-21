@@ -19,8 +19,9 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-The only outside call deletes the account's whole repository from the user
-image registry, as the last step before the caller's commit. With a registry,
+The registry call deletes the account's whole repository from the user image
+registry. It runs after every main-database statement and before the step log
+shard purge, because neither has a rollback and images can be rebuilt. With a registry,
 the deletion refuses while a run of the account is not finished, or while a
 worker still holds a live lease on it (SKY-891). Known gap: Vercel keeps its
 own copy of each of the account's images that a Vercel box started from.
@@ -30,7 +31,10 @@ worker's copy cache. Known gap: an expired lease does not prove that the run's
 CodeBuild image build ended. A worker that was killed after a cancel cannot
 stop its build, which can then push after the repository delete. SKY-896
 (account deletion stops an orphaned CodeBuild image build after a hard-killed
-worker) tracks the fix.
+worker) tracks the fix. Known gap: the active-run check covers only the runs
+that exist when the deletion reads them. A run that the user submits during the
+deletion is not locked out, so its image build can push after the repository
+delete and make the repository again.
 
 The tree purge here only locks, marks and plans the account's step log packs;
 the router deletes the unused packs from the tree bucket after the commit

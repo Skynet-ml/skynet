@@ -790,7 +790,7 @@ def test_a_run_in_progress_does_not_block_the_deletion_without_a_registry(
         assert session.get(UserModel, _EMAIL) is None
 
 
-def test_the_registry_delete_is_the_last_step_before_the_commit(
+def test_the_registry_delete_runs_after_the_main_rows_and_before_the_shard_purge(
     harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The repository delete runs after the wallet closure and the user row delete, before the shard purge (SKY-891).
