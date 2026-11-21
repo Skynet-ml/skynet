@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "No se pudo conectar con Hugging Face. Inténtelo de nuevo en unos instantes.",
     "connectors.reconnect_required": "Ya no se puede leer su vínculo con {provider}. Desconecte y vuelva a conectar.",
     "connectors.vault_not_configured": "El almacén de credenciales no está configurado en esta instalación, por lo que no se pueden vincular conectores.",
+    "accounts.deletion_runs_active": "Tu cuenta no se eliminó: algunas de tus optimizaciones siguen en ejecución. Cancélalas o espera a que terminen y vuelve a intentarlo.",
     "accounts.deletion_storage_unavailable": "Tu cuenta no se eliminó: no se pudieron borrar ahora sus datos de ejecución almacenados. Inténtalo de nuevo en unos minutos.",
     "accounts.email_delivery_unavailable": "La entrega de correo electrónico no está configurada en este servidor.",
     "accounts.email_not_verified": "Verifica tu correo electrónico antes de iniciar sesión.",

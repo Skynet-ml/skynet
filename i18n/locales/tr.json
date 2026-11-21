@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "Hugging Face'e ulaşılamadı. Kısa süre sonra yeniden deneyin.",
     "connectors.reconnect_required": "{provider} bağlantınız artık okunamıyor. Bağlantıyı kesip yeniden bağlanın.",
     "connectors.vault_not_configured": "Bu kurulumda kimlik bilgisi kasası yapılandırılmamış, bu nedenle bağlayıcılar bağlanamıyor.",
+    "accounts.deletion_runs_active": "Hesabınız silinmedi: bazı optimizasyonlarınız hâlâ çalışıyor. Bunları iptal edin veya bitmelerini bekleyin, ardından yeniden deneyin.",
     "accounts.deletion_storage_unavailable": "Hesabınız silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
     "accounts.email_delivery_unavailable": "Bu sunucuda e-posta teslimatı yapılandırılmamış.",
     "accounts.email_not_verified": "Lütfen giriş yapmadan önce e-posta adresinizi doğrulayın.",

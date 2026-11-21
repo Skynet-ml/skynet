@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import io
+import itertools
 import json
+import logging
 import os
 import re
 import shlex
@@ -14,10 +17,16 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -32,7 +41,7 @@ from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy
+from core.billing.operation_pricing import ChargePolicy, image_build_usd
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
@@ -49,8 +58,15 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
-from core.sandbox.image_build import BuildResult, ImageBuildError, LocalDockerImageBuilder
-from core.sandbox.image_registry import ImageRegistryError
+from core.sandbox import image_build, image_registry
+from core.sandbox.image_build import (
+    BuildResult,
+    CodeBuildImageBuilder,
+    ImageBuildCancelledError,
+    ImageBuildError,
+    LocalDockerImageBuilder,
+)
+from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, RegistryCredentials
 from core.sandbox.providers import vercel
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import repo_workspace, runner
@@ -78,6 +94,7 @@ from core.service_gateway.optimization.blackbox.sandbox import (
     LocalSubprocessSession,
     SandboxSpec,
 )
+from core.service_gateway.optimization.blackbox.sandbox_contract import UserImage
 from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
@@ -113,6 +130,20 @@ def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
         return run(self, command, **options)
 
     monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+
+
+# The autouse fixture below replaces the read, so its test calls the real one.
+_LOCAL_IMAGE_USER = repo_staging._local_image_user
+
+
+@pytest.fixture(autouse=True)
+def _local_images_have_a_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each image outside the registry a non-root USER, so no test needs local Docker (SKY-891).
+
+    Args:
+        monkeypatch: Restores the local USER read after the test.
+    """
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: ("1000",))
 
 
 def _payload(commit: str | None) -> dict[str, Any]:
@@ -5773,20 +5804,24 @@ class _FakeBuilder:
         self.fail = fail
         self.requests: list[Any] = []
 
-    def build(self, request: Any) -> BuildResult:
-        """Return a built image, or fail like a broken Dockerfile.
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Return a built image, fail like a broken Dockerfile, or stop on a cancel.
 
         Args:
             request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
 
         Returns:
             The fixed built image.
 
         Raises:
             ImageBuildError: When the builder fails.
+            ImageBuildCancelledError: When ``cancelled`` answers true.
         """
         self.requests.append(request)
         assert (request.context_dir / request.dockerfile).is_file()
+        if cancelled is not None and cancelled():
+            raise ImageBuildCancelledError("image build stopped: the run was cancelled")
         if self.fail:
             raise ImageBuildError("The build failed.", log="step 2 failed\n", log_tail="step 2 failed")
         return BuildResult(
@@ -5840,14 +5875,59 @@ class _ImageStore:
 class _FakeRegistry:
     """Hold a set of digests, like the user image registry."""
 
-    def __init__(self, held: set[str]) -> None:
+    def __init__(self, held: set[str], users: tuple[str, ...] | None = ("1000",)) -> None:
         """Hold ``held``.
 
         Args:
             held: The digests the registry still holds.
+            users: The USER of each platform image; ``None`` fails the read.
         """
         self.held = held
+        self.users = users
         self.checks: list[tuple[str, str]] = []
+        self.pulls: list[str] = []
+        self.user_reads: list[tuple[str, str]] = []
+
+    def image_users(self, owner: str, digest: str) -> tuple[str, ...]:
+        """Return the fixed USER values and record the read.
+
+        Args:
+            owner: The registry repository's owner.
+            digest: The image digest.
+
+        Returns:
+            The USER of each platform image.
+
+        Raises:
+            ImageRegistryError: When ``users`` is ``None``.
+        """
+        self.user_reads.append((owner, digest))
+        if self.users is None:
+            raise ImageRegistryError("unreadable")
+        return self.users
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the owner's repository, which holds the built image.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            The repository of :data:`_BUILT_IMAGE`.
+        """
+        return "registry.example/u"
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return fake credentials and record the owner they are for.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            Fake credentials.
+        """
+        self.pulls.append(owner)
+        return RegistryCredentials(server="registry.example", username="AWS", password="pull-token")
 
     def check_digest(self, owner: str, digest: str) -> None:
         """Fail for a digest the registry does not hold.
@@ -5998,15 +6078,17 @@ _TRUSTED_PROBE = _listing()
 class _CheckSession:
     """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n") -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
+            uid_probe: What the metric role's box uid probe prints.
         """
         self.ok = ok
         self.probe = probe
+        self.uid_probe = uid_probe
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
@@ -6020,6 +6102,8 @@ class _CheckSession:
             The report, with exit code 1 when the image fails.
         """
         self.commands.append(command)
+        if command.endswith(shlex.quote(repo_staging._BOX_UID_PROBE)):
+            return CommandResult(exit_code=0, stdout=self.uid_probe)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -6036,15 +6120,19 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(
+        self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n"
+    ) -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
+            uid_probe: What the metric role's box uid probe prints.
         """
         self.check_ok = check_ok
         self.probe = probe
+        self.uid_probe = uid_probe
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -6060,7 +6148,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe))
+            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid_probe))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6136,8 +6224,14 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
     assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
     assert budget.charges[0]["provider_usd"] >= 0
     assert [check.commands for check in runtime.checks] == [
-        ["ascent check --image --role candidate", repo_staging._TRUSTED_PYTHON_PROBE],
-        ["ascent check --image --role metric"],
+        [
+            "ascent check --image --role candidate",
+            repo_staging._TRUSTED_PYTHON_PROBE,
+        ],
+        [
+            "ascent check --image --role metric",
+            f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}",
+        ],
     ]
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
     assert all(spec.network_disabled for spec in checks)
@@ -6145,6 +6239,13 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
     work = [spec for spec in runtime.specs if not spec.operation_key.startswith("image-check:")]
     assert work
     assert {spec.image for spec in work} == {_BUILT_IMAGE}
+    # Each check box and each work box starts with its own repository and fresh pull access (SKY-891).
+    for spec in runtime.specs:
+        assert spec.user_image is not None
+        assert spec.user_image.reference == _BUILT_IMAGE
+        assert spec.user_image.repository == "registry.example/u"
+        assert spec.user_image.credentials is not None
+        assert spec.user_image.credentials() == ("AWS", "pull-token")
     assert staged.box_images["metric"]["python"] == sys.executable
     assert staged.box_images["run"]["source"] == "dockerfile"
 
@@ -6181,6 +6282,335 @@ def test_a_failed_build_is_charged_kept_and_stops_the_run(monkeypatch: pytest.Mo
     assert [(build["image"], build["log"]) for build in store.builds] == [(None, "step 2 failed\n")]
     assert len(budget.charges) == 1
     assert runtime.specs == []
+
+
+def test_a_cancelled_build_is_charged_keeps_no_record_and_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build that the run's cancel stopped is charged, saves no failed build, and opens no box (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget, runtime = _ImageStore(), _FakeBudget(), _ImageRuntime()
+    try:
+        with pytest.raises(ImageBuildCancelledError):
+            _prepare(staged, runtime, store=store, budget=budget, cancelled=lambda: True)
+    finally:
+        staged.cleanup()
+    assert store.builds == []
+    assert len(budget.charges) == 1
+    assert runtime.specs == []
+
+
+class _SlowBuilder(_FakeBuilder):
+    """Build like the fake, but let more time pass than the build's time limit."""
+
+    def __init__(self, clock: list[float], *, fail: bool = False) -> None:
+        """Keep the offset that the build moves the clock by.
+
+        Args:
+            clock: The one offset that the patched monotonic clock adds.
+            fail: Whether each build fails.
+        """
+        super().__init__(fail=fail)
+        self._clock = clock
+
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Move the clock past the time limit, then build as the fake does.
+
+        Args:
+            request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
+
+        Returns:
+            What the fake builder returns.
+        """
+        self._clock[0] += image_build.BuildLimits.from_settings().timeout_seconds + 600
+        return super().build(request, cancelled=cancelled)
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["built", "cancelled"])
+def test_a_build_that_runs_past_its_reservation_settles_at_the_reserved_limit(
+    monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    """The settled minutes never pass the reserved time limit, also after a cancel's stop wait (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        cancel: Whether the run is cancelled during the build.
+    """
+    offset = [0.0]
+    monotonic = time.monotonic
+    monkeypatch.setattr(repo_staging.time, "monotonic", lambda: monotonic() + offset[0])
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    budget = _FakeBudget()
+    try:
+        with pytest.raises(ImageBuildCancelledError) if cancel else contextlib.nullcontext():
+            _prepare(
+                staged,
+                _ImageRuntime(),
+                builder=_SlowBuilder(offset),
+                budget=budget,
+                registry=_FakeRegistry({"sha256:" + "b" * 64}),
+                cancelled=lambda: cancel,
+            )
+    finally:
+        staged.cleanup()
+    limit = image_build.BuildLimits.from_settings().timeout_seconds
+    assert [charge["provider_usd"] for charge in budget.charges] == [image_build_usd("codebuild", limit)]
+
+
+class _CancelledBeforeStart(_FakeBuilder):
+    """Stop on a cancel before any paid build starts."""
+
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Raise the cancel that the builder raises before it starts a build.
+
+        Args:
+            request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
+
+        Raises:
+            ImageBuildCancelledError: Always, with no started build.
+        """
+        raise ImageBuildCancelledError("image build not started: the run was cancelled", started=False)
+
+
+def test_a_build_cancelled_before_it_started_costs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel before CodeBuild started the build settles at zero and keeps no record (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget = _ImageStore(), _FakeBudget()
+    try:
+        with pytest.raises(ImageBuildCancelledError):
+            _prepare(staged, _ImageRuntime(), builder=_CancelledBeforeStart(), store=store, budget=budget)
+    finally:
+        staged.cleanup()
+    assert [charge["provider_usd"] for charge in budget.charges] == [Decimal(0)]
+    assert store.builds == []
+
+
+class _StartRecorder:
+    """Stand in for S3, CodeBuild and the registry, and record each upload and build start."""
+
+    def __init__(self) -> None:
+        """Start with no uploads and no starts."""
+        self.calls: list[str] = []
+
+    def push_reference(self, owner: str, tag: str) -> str:
+        """Return a push reference.
+
+        Args:
+            owner: The image owner.
+            tag: The image tag.
+
+        Returns:
+            The reference.
+        """
+        return f"registry/{owner}:{tag}"
+
+    def cache_reference(self, owner: str, scope: str) -> str:
+        """Return a cache reference.
+
+        Args:
+            owner: The image owner.
+            scope: The cache scope.
+
+        Returns:
+            The reference.
+        """
+        return f"registry/{owner}:cache-{scope}"
+
+    def push_session_policy(self, owner: str) -> dict[str, Any]:
+        """Return an empty session policy.
+
+        Args:
+            owner: The image owner.
+
+        Returns:
+            The policy.
+        """
+        return {}
+
+    def upload_fileobj(self, archive: Any, bucket: str, key: str) -> None:
+        """Record an upload.
+
+        Args:
+            archive: The context archive.
+            bucket: The bucket.
+            key: The object key.
+        """
+        self.calls.append("upload")
+
+    def start_build(self, **kwargs: Any) -> dict[str, Any]:
+        """Record a build start.
+
+        Args:
+            **kwargs: The start arguments.
+
+        Returns:
+            A started build.
+        """
+        self.calls.append("start")
+        return {"build": {"id": "build-1"}}
+
+
+@pytest.mark.parametrize(
+    ("answers", "calls"), [([True], []), ([False, True], ["upload"])], ids=["before-upload", "before-start"]
+)
+def test_a_cancel_before_codebuild_starts_the_build_starts_no_build(
+    tmp_path: Path, answers: list[bool], calls: list[str]
+) -> None:
+    """A cancel during the context zip or upload raises before CodeBuild starts a paid build (SKY-891).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        answers: The cancel check's answers, in order.
+        calls: The uploads and starts that must happen before the cancel.
+    """
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    aws = _StartRecorder()
+    builder = CodeBuildImageBuilder(
+        codebuild=aws,
+        logs=None,
+        s3=aws,
+        registry=aws,  # type: ignore[arg-type]
+        project_name="images",
+        source_bucket="bucket",
+        push_role_arn="arn:aws:iam::123456789012:role/push",
+        limits=image_build.BuildLimits(timeout_seconds=600, max_size_bytes=1, max_context_bytes=1_000_000),
+        sleep=lambda _seconds: None,
+        clock=lambda: 0.0,
+    )
+    request = image_build.BuildRequest(context_dir=tmp_path, owner=image_registry.image_owner("alice"))
+    replies = iter(answers)
+
+    with pytest.raises(ImageBuildCancelledError, match="not started") as raised:
+        builder.build(request, cancelled=lambda: next(replies))
+
+    assert raised.value.started is False
+    assert aws.calls == calls
+
+
+class _RunningCodeBuild:
+    """Answer status reads like CodeBuild, and record each stop."""
+
+    def __init__(self, *, polls_after_stop: int | None = 1, failed_stops: int = 0) -> None:
+        """Start with no status reads and no stops.
+
+        Args:
+            polls_after_stop: The status reads after the first good stop that
+                still see the build run, or ``None`` for a build that never ends.
+            failed_stops: How many stop calls fail first.
+        """
+        self.reads = 0
+        self.stopped: list[str] = []
+        self._polls_after_stop = polls_after_stop
+        self._failed_stops = failed_stops
+        self._reads_after_stop = 0
+
+    def batch_get_builds(self, ids: list[str]) -> dict[str, Any]:
+        """Return the build, which ends some reads after a good stop.
+
+        Args:
+            ids: The build ids.
+
+        Returns:
+            One build.
+        """
+        self.reads += 1
+        complete = False
+        if self.stopped:
+            complete = self._polls_after_stop is not None and self._reads_after_stop >= self._polls_after_stop
+            self._reads_after_stop += 1
+        return {"builds": [{"id": ids[0], "buildComplete": complete, "currentPhase": "BUILD"}]}
+
+    def stop_build(self, id: str) -> None:
+        """Record a stop, or fail while failed stops are left.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: While failed stops are left.
+        """
+        if self._failed_stops:
+            self._failed_stops -= 1
+            raise ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "StopBuild")
+        self.stopped.append(id)
+
+
+def _codebuild_builder(codebuild: _RunningCodeBuild, clock: Callable[[], float] = lambda: 0.0) -> Any:
+    """Return a CodeBuild builder over a fake CodeBuild client, with no sleep.
+
+    Args:
+        codebuild: The fake CodeBuild client.
+        clock: The builder's clock.
+
+    Returns:
+        The builder.
+    """
+    return CodeBuildImageBuilder(
+        codebuild=codebuild,
+        logs=None,
+        s3=None,
+        registry=None,  # type: ignore[arg-type]
+        project_name="images",
+        source_bucket="bucket",
+        push_role_arn="arn:aws:iam::123456789012:role/push",
+        limits=image_build.BuildLimits(timeout_seconds=600, max_size_bytes=1, max_context_bytes=1),
+        sleep=lambda _seconds: None,
+        clock=clock,
+    )
+
+
+def test_the_codebuild_wait_stops_the_build_and_waits_until_it_ends_when_the_run_is_cancelled() -> None:
+    """A cancel stops the CodeBuild build and raises only once CodeBuild says the build ended (SKY-891)."""
+    codebuild = _RunningCodeBuild(polls_after_stop=2)
+    answers = iter([False, True])
+
+    with pytest.raises(ImageBuildCancelledError, match="build-1 stopped"):
+        _codebuild_builder(codebuild)._wait("build-1", lambda: next(answers))
+
+    assert codebuild.stopped == ["build-1"]
+    assert codebuild.reads == 5
+
+
+def test_a_failed_stop_of_a_cancelled_build_is_logged_and_tried_again(caplog: pytest.LogCaptureFixture) -> None:
+    """A StopBuild error is logged at error level with the build id, and the next poll stops again (SKY-891).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    codebuild = _RunningCodeBuild(failed_stops=1)
+
+    with caplog.at_level(logging.ERROR, logger=image_build.__name__), pytest.raises(ImageBuildCancelledError):
+        _codebuild_builder(codebuild)._wait("build-1", lambda: True)
+
+    assert codebuild.stopped == ["build-1"]
+    assert "cannot stop the cancelled image build build-1" in caplog.text
+
+
+def test_a_cancelled_build_that_does_not_end_raises_at_the_stop_deadline(caplog: pytest.LogCaptureFixture) -> None:
+    """A cancelled build still running at the stop deadline is logged with its id, and the cancel raises (SKY-891).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    codebuild = _RunningCodeBuild(polls_after_stop=None)
+    ticks = itertools.count(0.0, 60.0)
+
+    with (
+        caplog.at_level(logging.ERROR, logger=image_build.__name__),
+        pytest.raises(ImageBuildCancelledError, match="build-1 did not end"),
+    ):
+        _codebuild_builder(codebuild, clock=lambda: next(ticks))._wait("build-1", lambda: True)
+
+    assert codebuild.stopped == ["build-1"]
+    assert "cancelled image build build-1 did not end" in caplog.text
 
 
 def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7250,3 +7680,553 @@ def test_a_hidden_path_that_is_a_link_stops_the_candidate_image_build(tmp_path: 
         repo_staging.BoxImageError, match=r"hidden scoring path 'box/score\.py' is, holds or lies inside"
     ):
         _context_build(tmp_path, "run", links={"box/score.py": (tarfile.SYMTYPE, "../secret.txt")}, hidden_file=False)
+
+
+_ECR_PREFIX = "123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/user-images-staging"
+
+
+def _ecr_registry() -> EcrRegistry:
+    """Return a real ECR registry whose clients are never called.
+
+    Returns:
+        The registry.
+    """
+    return EcrRegistry(object(), _ECR_PREFIX, sts=object(), pull_role_arn="arn:aws:iam::1:role/pull", ecr_for=dict)
+
+
+def test_a_user_image_in_the_own_repository_gets_only_that_repository_and_its_pull_access() -> None:
+    """An image in the owner's repository gets the repository and a fresh token source (SKY-891)."""
+    registry = _ecr_registry()
+    own = registry.pinned_reference(image_registry.image_owner("alice"), "sha256:" + "b" * 64)
+
+    image = repo_staging._user_image(registry, "alice", "run", own)
+
+    assert image.reference == own
+    assert image.repository == registry.repository_uri(image_registry.image_owner("alice"))
+    assert image.credentials is not None
+
+
+def test_a_public_user_image_gets_no_registry_credentials() -> None:
+    """An image from another registry pulls with no credentials, so no token leaves the user's repository."""
+    image = repo_staging._user_image(_ecr_registry(), "alice", "metric", _METRIC_IMAGE)
+
+    assert image == UserImage(_METRIC_IMAGE)
+    assert image.credentials is None
+
+
+@pytest.mark.parametrize("path", ["skynet/user-images-staging/{other}", "skynet/other-images"])
+def test_an_image_in_another_repository_of_the_user_image_registry_is_refused(path: str) -> None:
+    """A user ``image =`` in another user's repository, or any other repository there, is refused (SKY-891).
+
+    Args:
+        path: The repository path of the image in the registry.
+    """
+    other = path.format(other=image_registry.image_owner("bob"))
+    reference = f"{_ECR_PREFIX.split('/', 1)[0]}/{other}@sha256:" + "d" * 64
+
+    with pytest.raises(repo_staging.BoxImageError, match="not in your own image repository"):
+        repo_staging._user_image(_ecr_registry(), "alice", "run", reference)
+
+
+def test_a_run_image_in_another_users_repository_stops_before_any_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[run] image`` that names another user's repository fails before a check box opens (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    other = "registry.example/someone-else@sha256:" + "d" * 64
+    run = 'entry = "src/app.py:run"\n'
+    tree = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].replace('dockerfile = "box/Dockerfile"\n', "", 1)}
+    tree["ascent.toml"] = tree["ascent.toml"].replace(run, f'{run}image = "{other}"\n')
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, registry = _ImageRuntime(), _FakeRegistry(set())
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="not in your own image repository"):
+            _prepare(staged, runtime, registry=registry)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+    assert registry.pulls == []
+
+
+def test_a_metric_image_in_another_users_repository_stops_before_the_paid_run_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad ``[metric] image`` is refused before the ``[run]`` build and its check box are paid (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    other = "registry.example/someone-else@sha256:" + "d" * 64
+    tree = {
+        **_BOX_TREE,
+        "ascent.toml": _BOX_TREE["ascent.toml"].replace(
+            '[metric]\ndockerfile = "box/Dockerfile"\n', f'[metric]\nimage = "{other}"\n'
+        ),
+    }
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, registry, builder, budget = _ImageRuntime(), _FakeRegistry(set()), _FakeBuilder(), _FakeBudget()
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\].*not in your own image repository"):
+            _prepare(staged, runtime, builder=builder, budget=budget, registry=registry)
+    finally:
+        staged.cleanup()
+    assert builder.requests == []
+    assert budget.charges == []
+    assert runtime.specs == []
+
+
+class _CopyingImageRuntime(_ImageRuntime):
+    """Record boxes like ``_ImageRuntime``, for a provider that copies each user image (Vercel)."""
+
+    copies_user_images = True
+
+
+_PUBLIC_IMAGE = "docker.io/library/python@sha256:" + "c" * 64
+
+
+@pytest.mark.parametrize("has_registry", [True, False])
+def test_a_copying_runtime_refuses_a_public_image_before_any_paid_work(
+    monkeypatch: pytest.MonkeyPatch, has_registry: bool
+) -> None:
+    """Vercel starts no image outside the owner's repository, so it stops before the paid build (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        has_registry: Whether the deployment has a user image registry.
+    """
+    tree = {
+        **_BOX_TREE,
+        "ascent.toml": _BOX_TREE["ascent.toml"].replace(
+            '[metric]\ndockerfile = "box/Dockerfile"\n', f'[metric]\nimage = "{_PUBLIC_IMAGE}"\n'
+        ),
+    }
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, builder, budget = _CopyingImageRuntime(), _FakeBuilder(), _FakeBudget()
+    registry = _FakeRegistry(set()) if has_registry else None
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\].*cannot start a public image"):
+            _prepare(staged, runtime, builder=builder, budget=budget, registry=registry)
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[run\].*cannot start a public image"):
+            _prepare(staged, runtime, builder=None, registry=registry, pinned={"run": {"image": _PUBLIC_IMAGE}})
+    finally:
+        staged.cleanup()
+    assert builder.requests == []
+    assert budget.charges == []
+    assert runtime.specs == []
+
+
+def test_a_pulling_runtime_still_starts_a_public_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docker pulls a public image itself, so it keeps working with no repository or token (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    try:
+        staged = _prepare(
+            staged,
+            _ImageRuntime(),
+            builder=None,
+            registry=_FakeRegistry(set()),
+            pinned={"run": {"image": _PUBLIC_IMAGE}},
+        )
+    finally:
+        staged.cleanup()
+    image = staged.box_user_images["run"]
+    assert (image.reference, image.repository, image.credentials) == (_PUBLIC_IMAGE, None, None)
+
+
+def test_a_resume_gives_each_pinned_box_its_pull_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resume checks nothing again, but each box still gets its repository and a fresh token (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime, registry = _ImageRuntime(), _FakeRegistry(set())
+    pinned = {role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64} for role in ("run", "metric")}
+    try:
+        staged = _prepare(staged, runtime, builder=None, registry=registry, pinned=pinned)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+    assert {role: image.repository for role, image in staged.box_user_images.items()} == {
+        "run": "registry.example/u",
+        "metric": "registry.example/u",
+    }
+    assert staged.box_user_images["run"].credentials() == ("AWS", "pull-token")
+    assert registry.pulls == [image_registry.image_owner("alice")]
+
+
+class _HourTokenRegistry(_FakeRegistry):
+    """Give a new one-hour token at each pull, like AssumeRole and GetAuthorizationToken."""
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return a new token and record the owner it is for.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            A token with a new password and an hour left.
+        """
+        self.pulls.append(owner)
+        return RegistryCredentials(
+            server="registry.example",
+            username="AWS",
+            password=f"token-{len(self.pulls)}",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+
+def test_every_box_of_a_run_shares_one_pull_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both roles and a second prepare of the run use one token, so Vercel copies each image once (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    registry = _HourTokenRegistry(set())
+    pinned = {role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64} for role in ("run", "metric")}
+    try:
+        first = _prepare(staged, _ImageRuntime(), builder=None, registry=registry, pinned=pinned)
+        again = _prepare(first, _ImageRuntime(), builder=None, registry=registry, pinned=pinned)
+    finally:
+        staged.cleanup()
+    tokens = {image.credentials() for prepared in (first, again) for image in prepared.box_user_images.values()}
+    assert tokens == {("AWS", "token-1")}
+    assert registry.pulls == [image_registry.image_owner("alice")]
+
+
+def test_a_run_never_reuses_pull_access_of_another_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Access from an earlier prepare is reused only for the owner's own repository (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    staged.cleanup()
+
+    def foreign() -> tuple[str, str]:
+        """Return another repository's token.
+
+        Returns:
+            The token.
+        """
+        return "AWS", "foreign"
+
+    earlier = dataclasses.replace(
+        staged,
+        box_user_images={"run": UserImage(_BUILT_IMAGE, repository="registry.example/v", credentials=foreign)},
+    )
+    registry = _HourTokenRegistry(set())
+    access = repo_staging._run_pull_access(earlier, registry, "alice")
+    assert access is not None
+    assert access is not foreign
+    assert access() == ("AWS", "token-1")
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(_TRUSTED_PROBE.replace("account ok 1000\n", "account ok 0\n"), id="both-runs"),
+        pytest.param(
+            _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount ok 0\n"), id="box-run-only"
+        ),
+    ],
+)
+def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
+    """A probe that reports uid 0 for the box user refuses the run image (SKY-891).
+
+    The trusted-Python probe already prints the box uid, so the check runs no second probe.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        probe: What the trusted interpreter probe prints.
+    """
+    assert probe != _TRUSTED_PROBE
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(probe=probe)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"runs the box as root \(uid 0\)"):
+            _prepare(staged, runtime, registry=_FakeRegistry(set()))
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def _check(role: str, runtime: Any, registry: Any = None, repository: str | None = "registry.example/u") -> Any:
+    """Check :data:`_BUILT_IMAGE` in one role, as ``prepare_box_images`` does.
+
+    Args:
+        role: ``run`` or ``metric``.
+        runtime: The runtime that opens the check box.
+        registry: The user image registry.
+        repository: The owner's repository that holds the image, or ``None`` for an image elsewhere.
+
+    Returns:
+        The trusted Python path for the metric role; ``None`` for the run role.
+    """
+    user_image = UserImage(_BUILT_IMAGE, repository=repository, credentials=None)
+    return repo_staging._check_box_image(
+        runtime, user_image, role, owner_id="job-1", registry=registry, username="alice"
+    )
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize("users", [("",), ("root",), ("0",), ("0:0",), ("0:1000",), ("root:root",), ("1000", "0")])
+def test_an_image_whose_own_user_is_root_is_refused_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """The registry reads the image's USER, and root in any platform image refuses the image (SKY-891).
+
+    Args:
+        role: ``run`` or ``metric``.
+        users: The USER of each platform image.
+    """
+    registry = _FakeRegistry(set(), users=users)
+
+    with pytest.raises(repo_staging.BoxImageError, match=rf"\[{role}\] image .* sets no USER, or sets root"):
+        _check(role, _ImageRuntime(), registry)
+    assert registry.user_reads == [(image_registry.image_owner("alice"), "sha256:" + "b" * 64)]
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize("users", [("1000",), ("1000:1000",), ("1000:1000", "1001")])
+def test_an_image_with_a_numeric_non_root_user_passes_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """A numeric non-root USER in each platform image passes (SKY-891).
+
+    Args:
+        role: ``run`` or ``metric``.
+        users: The USER of each platform image.
+    """
+    registry = _FakeRegistry(set(), users=users)
+
+    assert _check(role, _ImageRuntime(), registry) == (sys.executable if role == "metric" else None)
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize("users", [("admin",), ("app:app",), ("1000:wheel",), ("1000", "app"), ("\u0660",), (" 1000",)])
+def test_an_image_whose_user_is_a_name_is_refused_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """A USER name refuses the image, because the image's own /etc/passwd could map it to uid 0 (SKY-891).
+
+    The box reports its uid with the image's own programs, so an image can lie
+    there. Only the numeric USER read outside the box is trusted.
+
+    Args:
+        role: ``run`` or ``metric``.
+        users: The USER of each platform image.
+    """
+    registry = _FakeRegistry(set(), users=users)
+
+    with pytest.raises(repo_staging.BoxImageError, match=rf"\[{role}\] image .* sets its USER by name.*`USER 1000`"):
+        _check(role, _ImageRuntime(), registry)
+
+
+@pytest.mark.parametrize(
+    ("user", "numeric"),
+    [
+        ("1000", True),
+        ("1000:1000", True),
+        ("1000:0", True),
+        ("0", True),
+        ("admin", False),
+        ("1000:wheel", False),
+        ("1000:", False),
+        (":1000", False),
+        ("1000:1000:1", False),
+        ("\u0660", False),
+        ("1000\n", False),
+        ("", False),
+    ],
+)
+def test_a_numeric_image_user_is_ascii_digits_with_an_optional_gid(user: str, numeric: bool) -> None:
+    """Only ``<uid>`` or ``<uid>:<gid>`` in ASCII digits is numeric; :func:`_root_user` refuses uid 0 (SKY-891).
+
+    Args:
+        user: The image config ``User``.
+        numeric: Whether it is numeric.
+    """
+    assert (repo_staging._NUMERIC_USER.fullmatch(user) is not None) is numeric
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_an_image_whose_user_cannot_be_read_is_refused(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """A USER that the registry or local Docker cannot read refuses the image (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        role: ``run`` or ``metric``.
+    """
+    with pytest.raises(repo_staging.BoxImageError, match="could not read the USER"):
+        _check(role, _ImageRuntime(), _FakeRegistry(set(), users=None))
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: None)
+    with pytest.raises(repo_staging.BoxImageError, match="could not read the USER"):
+        _check(role, _ImageRuntime(), None, repository=None)
+
+
+def test_an_image_outside_the_registry_has_its_user_read_from_local_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image outside the owner's repository has its USER read from local Docker (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    read: list[str] = []
+    monkeypatch.setattr(repo_staging, "_local_image_user", lambda image: read.append(image) or ("root",))
+
+    with pytest.raises(repo_staging.BoxImageError, match="sets no USER, or sets root"):
+        _check("run", _ImageRuntime(), _FakeRegistry(set()), repository=None)
+    assert read == [_BUILT_IMAGE]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "user"),
+    [(0, '"1000"\n', ("1000",)), (0, '""\n', ("",)), (1, "", None), (0, "null\n", None), (0, "{", None)],
+)
+def test_the_local_user_read_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, user: tuple[str, ...] | None
+) -> None:
+    """Local Docker gives the USER as JSON, and any other answer reads as no USER (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        returncode: The exit code of ``docker image inspect``.
+        stdout: What it prints.
+        user: The USER the read returns.
+    """
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        """Answer ``docker image inspect`` with the fixed result."""
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(repo_staging.subprocess, "run", run)
+
+    assert _LOCAL_IMAGE_USER("img@sha256:" + "a" * 64) == user
+    assert calls == [["docker", "image", "inspect", "--format", "{{json .Config.User}}", "img@sha256:" + "a" * 64]]
+
+
+@pytest.mark.parametrize(
+    ("user", "root"),
+    [
+        ("", True),
+        ("root", True),
+        ("0", True),
+        ("00", True),
+        ("0:0", True),
+        ("root:wheel", True),
+        ("1000", False),
+        ("1000:0", False),
+        ("app", False),
+        ("\u0660", False),
+        ("rootless", False),
+    ],
+)
+def test_a_root_image_user_is_none_root_or_uid_0(user: str, root: bool) -> None:
+    """No USER, ``root`` or uid 0 runs as root with any group; the numeric check refuses other names (SKY-891).
+
+    Args:
+        user: The image config ``User``.
+        root: Whether it runs as root.
+    """
+    assert repo_staging._root_user(user) is root
+
+
+@pytest.mark.parametrize("uid_probe", ["account ok 0\n", "", "account none 1000\n"])
+def test_a_metric_image_whose_box_user_is_root_is_refused(uid_probe: str) -> None:
+    """The metric check runs the image's Python for the box uid, and uid 0 or no uid refuses it (SKY-891).
+
+    Args:
+        uid_probe: What the uid probe prints.
+    """
+    runtime = _ImageRuntime(uid_probe=uid_probe)
+
+    with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\] image .* runs the box as root \(uid 0\)"):
+        _check("metric", runtime, _FakeRegistry(set()))
+    assert runtime.checks[0].commands[-1] == (
+        f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "root"),
+    [
+        ("run clean\naccount ok 1000\nrun box\naccount ok 1000\n", False),
+        ("run clean\naccount ok 1000\nrun box\naccount ok 0\n", True),
+        ("run clean\naccount ok 00\n", True),
+        ("run clean\naccount ok \u00b2\n", True),
+        ("run clean\naccount ok \u0661\n", True),
+        ("run clean\naccount none 1000\n", True),
+        ("", True),
+    ],
+)
+def test_the_box_uid_takes_only_ascii_digits(stdout: str, root: bool) -> None:
+    """Only an ``account ok`` line with ASCII digits and no uid 0 passes, so "²" never counts as a uid (SKY-891).
+
+    Args:
+        stdout: What the probe prints.
+        root: Whether the check treats the box user as root.
+    """
+    assert repo_staging._root_box_user(CommandResult(exit_code=0, stdout=stdout)) is root
+
+
+def test_a_cloud_deployment_builds_dockerfiles_on_codebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the registry and CodeBuild settings, a cloud Dockerfile gets the CodeBuild builder (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    clients: list[tuple[str, str | None]] = []
+
+    def client(name: str, region_name: str | None = None, **_: Any) -> str:
+        """Record each boto3 client the factories make."""
+        clients.append((name, region_name))
+        return f"{name}-client"
+
+    fake_boto3 = SimpleNamespace(client=client)
+    monkeypatch.setattr(image_registry, "boto3", fake_boto3)
+    monkeypatch.setattr(image_build, "boto3", fake_boto3)
+    config = SimpleNamespace(
+        local_mode=False,
+        user_images_repository_prefix_uri=_ECR_PREFIX,
+        image_pull_role_arn="arn:aws:iam::123456789012:role/pull",
+        image_build_project="skynet-staging-image-build",
+        image_build_source_bucket="skynet-staging-image-build-source",
+        image_build_push_role_arn="arn:aws:iam::123456789012:role/push",
+    )
+
+    builder = repo_staging.image_builder(config)
+
+    assert isinstance(builder, CodeBuildImageBuilder)
+    assert {name for name, _ in clients} == {"ecr", "sts", "codebuild", "logs", "s3"}
+    assert {region for _, region in clients} == {"us-east-2"}
+
+
+@pytest.mark.parametrize(
+    "unset",
+    ["user_images_repository_prefix_uri", "image_pull_role_arn", "image_build_project", "image_build_source_bucket"],
+)
+def test_a_cloud_deployment_without_every_build_setting_has_no_builder(
+    monkeypatch: pytest.MonkeyPatch, unset: str
+) -> None:
+    """A cloud deployment that misses one registry or build setting keeps the clear Dockerfile error.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        unset: The setting that is not set.
+    """
+    fake_boto3 = SimpleNamespace(client=lambda name, **_: f"{name}-client")
+    monkeypatch.setattr(image_registry, "boto3", fake_boto3)
+    monkeypatch.setattr(image_build, "boto3", fake_boto3)
+    config = SimpleNamespace(
+        local_mode=False,
+        user_images_repository_prefix_uri=_ECR_PREFIX,
+        image_pull_role_arn="arn:aws:iam::123456789012:role/pull",
+        image_build_project="skynet-staging-image-build",
+        image_build_source_bucket="skynet-staging-image-build-source",
+        image_build_push_role_arn="arn:aws:iam::123456789012:role/push",
+    )
+    setattr(config, unset, None)
+
+    assert repo_staging.image_builder(config) is None
+    assert isinstance(repo_staging.image_builder(SimpleNamespace(local_mode=True)), LocalDockerImageBuilder)

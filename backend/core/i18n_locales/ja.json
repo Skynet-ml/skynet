@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "Hugging Face に接続できませんでした。しばらくしてからもう一度お試しください。",
     "connectors.reconnect_required": "{provider} の連携情報を読み取れなくなりました。連携を解除してから再度連携してください。",
     "connectors.vault_not_configured": "このデプロイでは認証情報ボールトが設定されていないため、コネクタを連携できません。",
+    "accounts.deletion_runs_active": "アカウントは削除されませんでした。実行中の最適化がまだあります。キャンセルするか完了するまで待ってから、もう一度お試しください。",
     "accounts.deletion_storage_unavailable": "アカウントは削除されませんでした。保存された実行データを今は削除できませんでした。数分後にもう一度お試しください。",
     "accounts.email_delivery_unavailable": "このサーバーではメール送信が設定されていません。",
     "accounts.email_not_verified": "サインインする前にメールアドレスを認証してください。",

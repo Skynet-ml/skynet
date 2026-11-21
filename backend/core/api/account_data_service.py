@@ -19,13 +19,28 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-This module makes no outside call. The tree purge here only locks, marks and
-plans the account's step log packs; the router deletes the unused packs from
-the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
-OpenRouter, or any other provider; severing the local link is the whole of
-the operation.
-Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
-to a follow-up.
+The registry call deletes the account's whole repository from the user image
+registry. It runs after every main-database statement and before the step log
+shard purge, because neither has a rollback and images can be rebuilt. With a registry,
+the deletion refuses while a run of the account is not finished, or while a
+worker still holds a live lease on it (SKY-891). Known gap: Vercel keeps its
+own copy of each of the account's images that a Vercel box started from.
+Neither the Vercel Sandbox SDK nor the image copier has a call that deletes a
+copy, so this deletion leaves those copies in Vercel's registry and in each
+worker's copy cache. Known gap: an expired lease does not prove that the run's
+CodeBuild image build ended. A worker that was killed after a cancel cannot
+stop its build, which can then push after the repository delete. SKY-896
+(account deletion stops an orphaned CodeBuild image build after a hard-killed
+worker) tracks the fix. Known gap: the active-run check covers only the runs
+that exist when the deletion reads them. A run that the user submits during the
+deletion is not locked out, so its image build can push after the repository
+delete and make the repository again.
+
+The tree purge here only locks, marks and plans the account's step log packs;
+the router deletes the unused packs from the tree bucket after the commit
+(SKY-733). Nothing here calls Stripe, OpenRouter, or any other provider;
+severing the local link is the whole of the operation. Deprovisioning the
+upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
 """
 
 from __future__ import annotations
@@ -33,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +60,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
 from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
@@ -94,6 +111,7 @@ from ..storage.models import (
     WebAuthnChallengeModel,
     WebAuthnCredentialModel,
 )
+from .routers.constants import TERMINAL_STATUSES
 
 EXPORT_FORMAT = "skynet-account-export/v2"
 
@@ -518,7 +536,20 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
     }
 
 
-def delete_account(session: Session, username: str) -> AccountDeletionSummary:
+class AccountRunsActiveError(Exception):
+    """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
+
+    A run in progress can still push to the user image registry after the
+    repository delete. The registry then makes the repository again, and the
+    pushed layers outlive the account with no row that names them. A cancelled
+    run counts as in progress while its worker holds a live lease, because the
+    worker stops its image build only later.
+    """
+
+
+def delete_account(
+    session: Session, username: str, *, registry_for: Callable[[], ImageRegistry | None] | None = None
+) -> AccountDeletionSummary:
     """Purge everything owned by ``username`` within the given session.
 
     Runs entirely inside the caller's transaction (the caller commits), so a
@@ -535,12 +566,22 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.
+        registry_for: Return the user image registry, or ``None`` when this
+            deployment has none. ``None`` reads the deployment's settings, which
+            need only the repository prefix, since deletes use no pull role.
+            It is called once, before any row is deleted.
 
     Returns:
         Counts of hard-deleted and anonymized rows. The summary also holds the
         tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
+        AccountRunsActiveError: The deployment has a user image registry and
+            one of the account's runs is not in a terminal status, or a worker
+            still holds a live lease on it; nothing is deleted.
+        ImageRegistryError: The user image registry refused to delete the
+            account's repository, or its settings are set but not usable;
+            nothing in the main database or the step log shards is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -572,10 +613,28 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
+    registry = (registry_for or (lambda: image_registry(pull=False)))()
     job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
     # The job locks, then the run rows and budgets, in the same order as a run delete and a resume;
     # another order deadlocks with a concurrent delete or resume of one of these runs (SKY-733).
     deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
+    # Read after the job locks, so a worker that changes a status commits first. Nothing
+    # cancels the runs here: a running build could push again after the repository delete.
+    # A cancel marks the run first and its worker stops the build later, so a run whose worker
+    # still holds a live lease also blocks. An expired lease only means that the worker stopped
+    # renewing it: a hard-killed worker can leave its CodeBuild build running (SKY-896).
+    if registry is not None and job_ids:
+        active = session.scalar(
+            select(JobModel.optimization_id)
+            .where(JobModel.optimization_id.in_(job_ids))
+            .where(
+                JobModel.status.not_in([status.value for status in TERMINAL_STATUSES])
+                | (JobModel.claimed_by.is_not(None) & (JobModel.lease_expires_at > datetime.now(UTC)))
+            )
+            .limit(1)
+        )
+        if active is not None:
+            raise AccountRunsActiveError
     if job_ids:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
@@ -735,10 +794,21 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(UserModel).where(UserModel.email == username))
 
+    # The registry has no rollback, so its delete runs after every main-database statement. It runs
+    # before the shard purge: a refused delete then rolls the main database back and leaves every
+    # shard row, so the account loses nothing that a rebuild cannot restore. The whole repository goes
+    # with every image and tag, the build cache included, because its layers hold the user's source; a
+    # build can push and then stop before it records a row. A deployment with no registry makes no
+    # call (SKY-891).
+    # Known gap: Vercel keeps its copy of each image that a Vercel box started from. The Vercel
+    # Sandbox SDK has no call that deletes a copied image, so the copies stay in Vercel's registry.
+    if registry is not None:
+        registry.delete_repository(image_owner(username))
+
     # The other step log shards commit here, as the last step before the caller's main commit, so every
     # main-database statement above already ran when they commit. The databases have no two-phase commit:
     # a main commit that still fails leaves the shard rows deleted and the account in place, and a retry
-    # deletes it. purge_user ran every check that can fail the deletion before this point.
+    # deletes it. purge_user and the registry delete ran every other check that can fail the deletion.
     deleted += tree_purge.purge_user_shards(trees)
 
     return AccountDeletionSummary(deleted_rows=deleted, anonymized_rows=anonymized, trees=trees)

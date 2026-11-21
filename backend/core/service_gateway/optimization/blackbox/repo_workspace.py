@@ -66,7 +66,7 @@ from .repo_tree import (
     patch_violations,
     strip_archive,
 )
-from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec, UserImage
 from .tree_sandbox import BoxSession, TreeSandbox
 
 logger = logging.getLogger(__name__)
@@ -871,6 +871,20 @@ def _deliver(session: SandboxSession, path: str, text: str) -> bool:
     return True
 
 
+def _as_user_image(image: str | UserImage | None) -> UserImage | None:
+    """Return a box's user image, with a plain reference as an image that needs no registry access.
+
+    Args:
+        image: The user image, its reference, or ``None`` (or empty) for none.
+
+    Returns:
+        The user image, or ``None`` for a box on the runtime's default image.
+    """
+    if isinstance(image, str):
+        return UserImage(image) if image else None
+    return image
+
+
 class RepoWorkspace:
     """Prepare a repository once, then open a fresh candidate box and metric box for each evaluation.
 
@@ -895,8 +909,8 @@ class RepoWorkspace:
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
         metric_setup: str | None = None,
-        run_image: str | None = None,
-        metric_image: str | None = None,
+        run_image: str | UserImage | None = None,
+        metric_image: str | UserImage | None = None,
         metric_python: str | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
@@ -922,9 +936,10 @@ class RepoWorkspace:
             metric_setup: The ``[metric] setup`` command, run once in the metric
                 setup box with the metric files; ``None`` builds nothing.
             run_image: The checked ``[run]`` user image of the setup and candidate
-                boxes; ``None`` keeps ``spec.image`` (SKY-737).
-            metric_image: The checked ``[metric]`` user image of the metric boxes;
-                ``None`` keeps ``spec.image``.
+                boxes, with the registry access each box start needs (SKY-891);
+                a plain reference has none. ``None`` keeps ``spec.image`` (SKY-737).
+            metric_image: The checked ``[metric]`` user image of the metric boxes,
+                in the same form; ``None`` keeps ``spec.image``.
             metric_python: The trusted interpreter that ``ascent check --image
                 --role metric`` reported for ``metric_image``; ``None`` uses ``python3``.
         """
@@ -941,9 +956,13 @@ class RepoWorkspace:
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
         self._metric_setup = (metric_setup or "").strip() or None
-        self._run_image = run_image or spec.image
-        self.user_run_image = bool(run_image)
-        self._metric_image = metric_image or spec.image
+        # Each box start passes its own role's user image to the runtime, which
+        # pulls or copies it; a box with none keeps ``spec.image``.
+        self._run_user_image = _as_user_image(run_image)
+        self._metric_user_image = _as_user_image(metric_image)
+        self._run_image = self._run_user_image.reference if self._run_user_image else spec.image
+        self.user_run_image = self._run_user_image is not None
+        self._metric_image = self._metric_user_image.reference if self._metric_user_image else spec.image
         self.metric_python = metric_python or "python3"
         self._secrets = dict(secrets)
         self._failure: BaseException | None = None
@@ -1062,6 +1081,7 @@ class RepoWorkspace:
             replace(
                 self._spec,
                 image=self._run_image,
+                user_image=self._run_user_image,
                 operation_key=self._next_key("setup"),
                 services=(),
                 snapshot_id=None,
@@ -1140,6 +1160,7 @@ class RepoWorkspace:
         spec = replace(
             self._spec,
             image=self._metric_image,
+            user_image=self._metric_user_image,
             operation_key=self._next_key("metric-setup"),
             services=(),
             snapshot_id=None,
@@ -1333,6 +1354,7 @@ class RepoWorkspace:
         return replace(
             self._spec,
             image=self._metric_image if kind == "metric" else self._run_image,
+            user_image=self._metric_user_image if kind == "metric" else self._run_user_image,
             operation_key=key,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),

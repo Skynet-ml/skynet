@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "Não foi possível contactar o Hugging Face. Tente novamente dentro de momentos.",
     "connectors.reconnect_required": "A sua ligação ao {provider} já não pode ser lida. Desligue e volte a ligar.",
     "connectors.vault_not_configured": "O cofre de credenciais não está configurado nesta instalação, pelo que não é possível associar conectores.",
+    "accounts.deletion_runs_active": "A sua conta não foi eliminada: algumas das suas otimizações ainda estão em execução. Cancele-as ou aguarde que terminem e, depois, tente novamente.",
     "accounts.deletion_storage_unavailable": "A sua conta não foi eliminada: não foi possível remover agora os dados de execução guardados. Tente novamente dentro de alguns minutos.",
     "accounts.email_delivery_unavailable": "O envio de emails não está configurado neste servidor.",
     "accounts.email_not_verified": "Verifique o seu email antes de iniciar sessão.",

@@ -55,7 +55,8 @@ from ..repo_workspace import (
     redact,
 )
 from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
-from ..sandbox_broker import ParentSandboxSession
+from ..sandbox_broker import ParentSandboxSession, SandboxBroker
+from ..sandbox_contract import UserImage
 from ..sandbox_runtime import AsyncBridgeSession
 from ..tree_sandbox import BoxSession
 
@@ -1711,7 +1712,81 @@ def test_a_workspace_without_user_images_keeps_the_default_image_and_python3(tmp
     finally:
         space.close()
     assert {box.spec.image for box in runtime.boxes} == {_ONLINE.image}
+    assert {box.spec.user_image for box in runtime.boxes} == {None}
+    assert not space.user_run_image
     assert space.metric_python == "python3"
+
+
+def test_each_box_start_passes_its_role_user_image_with_its_registry_access(tmp_path: Path) -> None:
+    """Each box start gives the runtime its own role's user image and pull access (SKY-891)."""
+    runtime = _Runtime()
+    run = UserImage(
+        "registry.example/u/a@sha256:" + "a" * 64, repository="registry.example/u/a", credentials=lambda: ("AWS", "t")
+    )
+    space, _ = _scoring_space(tmp_path, runtime, run_image=run, metric_image="metric@sha256:" + "b" * 64)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    setup, candidate, metric_box = runtime.boxes
+    assert setup.spec.user_image is candidate.spec.user_image is run
+    assert setup.spec.image == candidate.spec.image == run.reference
+    # A plain reference is an image with no registry access, such as a public image.
+    assert metric_box.spec.user_image == UserImage("metric@sha256:" + "b" * 64)
+    assert metric_box.spec.user_image.credentials is None
+    assert metric_box.spec.image == "metric@sha256:" + "b" * 64
+
+
+class _ImageRuntime:
+    """Record each spec that reaches the provider runtime, without a box."""
+
+    injects_headers = False
+
+    def __init__(self, *, accepts: bool) -> None:
+        """Start with no spec.
+
+        Args:
+            accepts: Whether this runtime can start a user image.
+        """
+        self.accepts_user_images = accepts
+        self.copies_user_images = accepts
+        self.specs: list[SandboxSpec] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Record the spec.
+
+        Args:
+            spec: The provider spec.
+
+        Returns:
+            A stand-in session.
+        """
+        self.specs.append(spec)
+        return SimpleNamespace(close=lambda: None)
+
+
+@pytest.mark.parametrize("accepts", [True, False])
+def test_the_workspace_box_start_reaches_the_provider_with_its_user_image(accepts: bool) -> None:
+    """The parent runtime passes the box's user image to the provider, and says if the provider takes one (SKY-891).
+
+    Args:
+        accepts: Whether the provider runtime can start a user image.
+    """
+    runtime = _ImageRuntime(accepts=accepts)
+    broker = SandboxBroker(runtime, image="skynet@sha256:" + "c" * 64, max_lifetime_seconds=120)
+    parent = broker.parent_runtime(())
+    image = UserImage("registry.example/u/a@sha256:" + "a" * 64, repository="registry.example/u/a")
+
+    assert parent.accepts_user_images is accepts
+    assert parent.copies_user_images is accepts
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-1", user_image=image))
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="op:candidate-2"))
+    broker.close()
+
+    with_image, without_image = runtime.specs
+    assert (with_image.image, with_image.user_image) == (image.reference, image)
+    assert (without_image.image, without_image.user_image) == ("skynet@sha256:" + "c" * 64, None)
 
 
 def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(

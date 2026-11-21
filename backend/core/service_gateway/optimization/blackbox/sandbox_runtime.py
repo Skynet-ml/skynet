@@ -57,6 +57,7 @@ from .sandbox_contract import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
+    UserImage,
     _pump,
 )
 from .sandbox_log import logged_command
@@ -613,13 +614,18 @@ class AsyncBridgeSession:
 class AsyncBridgeRuntime:
     """Open sandboxes of one async ``core.sandbox`` provider through the sync bridge (SKY-419)."""
 
-    def __init__(self, provider: str, *, image: str | None = None, docker_bin: str | None = None) -> None:
+    def __init__(
+        self, provider: str, *, image: str | None = None, docker_bin: str | None = None, copy_image: Any = None
+    ) -> None:
         """Bind the runtime to a provider and check that this build can load it.
 
         Args:
             provider: A provider name from ``core.sandbox.factory.PROVIDERS``.
             image: The default image of a provider that takes one (Docker).
             docker_bin: The Docker CLI path of the Docker provider.
+            copy_image: Copies a user image into the registry of a provider
+                that starts only from its own (Vercel); ``None`` when there is
+                no copier, so that provider refuses user images.
 
         Raises:
             SandboxFatalError: The provider is unknown, missing from this
@@ -630,7 +636,14 @@ class AsyncBridgeRuntime:
         self._capabilities = provider_class.capabilities
         # No capability flag names compose services, so the constructor says
         # whether this provider can start them.
-        self._runs_services = "services" in inspect.signature(provider_class).parameters
+        parameters = inspect.signature(provider_class).parameters
+        self._runs_services = "services" in parameters
+        # The same check for user images (SKY-891): a provider that takes a
+        # source image copies it into its own registry, so it needs a copier;
+        # a provider that takes only pull credentials pulls the image itself.
+        self._copies_user_images = "source_image" in parameters
+        self._pulls_user_images = "pull_credentials" in parameters
+        self._copy_image = copy_image
         self.injects_headers = self._capabilities.injects_headers
         # The warm box lease reads this to refuse a GPU step before it claims a box (SKY-804).
         self.gpu_types = self._capabilities.gpu_types
@@ -645,6 +658,58 @@ class AsyncBridgeRuntime:
             True when the provider supports after-setup snapshots.
         """
         return self._capabilities.snapshots
+
+    @property
+    def copies_user_images(self) -> bool:
+        """Return whether this provider copies a user image into its own registry (SKY-891).
+
+        Returns:
+            True for a provider that starts a box from its own copy, which
+            needs the owner's image repository.
+        """
+        return self._copies_user_images
+
+    @property
+    def accepts_user_images(self) -> bool:
+        """Return whether a box of this provider can start from a spec's user image (SKY-891).
+
+        Returns:
+            True for a provider that pulls the image itself, or for one that
+            copies it into its own registry when this runtime has a copier.
+        """
+        if self._copies_user_images:
+            return self._copy_image is not None
+        return self._pulls_user_images
+
+    def _user_image_options(self, image: UserImage) -> dict[str, Any]:
+        """Return the provider options that start one box from a user image.
+
+        Args:
+            image: The box's user image.
+
+        Returns:
+            The fresh pull credentials, and for a copying provider the source
+            image, the owner's repository and the copier.
+
+        Raises:
+            ServiceError: The runtime cannot start a user image, or the
+                registry gave no pull credentials.
+        """
+        if not self.accepts_user_images:
+            raise ServiceError(f"The {self._capabilities.name} sandbox cannot start a box from a user image.")
+        try:
+            credentials = image.credentials() if image.credentials is not None else None
+        except Exception as error:
+            # Only the type: a registry message can echo a token.
+            raise ServiceError(
+                f"Could not get the pull credentials of the image {image.reference}: {type(error).__name__}."
+            ) from None
+        options: dict[str, Any] = {"pull_credentials": credentials}
+        if self._copies_user_images:
+            options.update(
+                source_image=image.reference, user_image_repository=image.repository, copy_image=self._copy_image
+            )
+        return options
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Create and start a sandbox per ``spec``.
@@ -678,6 +743,8 @@ class AsyncBridgeRuntime:
             extra["services"] = tuple(spec.services)
         if spec.snapshot_id is not None and self._capabilities.snapshots:
             extra["snapshot_id"] = spec.snapshot_id
+        if spec.user_image is not None:
+            extra.update(self._user_image_options(spec.user_image))
         with _bridge_errors():
             environment = create_environment(self.provider, _async_spec(spec), **self._options, **extra)
             return AsyncBridgeSession(open_session(environment))

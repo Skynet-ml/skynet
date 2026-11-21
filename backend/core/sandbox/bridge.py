@@ -5,7 +5,8 @@ runtime itself. This module returns the run's chosen provider, or the
 deployment default (Docker in local mode, Vercel everywhere else), through the
 SBX-11 sync bridge. It also lists the providers a run may choose (SKY-606).
 The Vercel provider reserves and settles each usage slice against the run's
-budget.
+budget, and the copy of a user image into its registry is reserved before the
+copy and settled on the run too (SKY-891).
 
 ``core.sandbox.__init__`` never imports this module, because this module
 imports the blackbox runtimes, which import ``core.sandbox``.
@@ -13,14 +14,23 @@ imports the blackbox runtimes, which import ``core.sandbox``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import contextvars
+import threading
+import time
+import uuid
 from typing import Any
 
+from ..billing.operation_pricing import ChargePolicy, image_copy_usd, operation_quote
+from ..billing.runtime import PaidResult
 from ..config import Settings
 from ..service_gateway.optimization.blackbox.sandbox import docker_sandbox_unavailable_reason
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime
 from ..service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeRuntime, current_sandbox_runtime
 from .errors import SandboxFatalError
 from .factory import PROVIDERS, preflight
+from .image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from .metering import USAGE_ADAPTERS
 
 # A fallback English label; the UI shows its own translated name when it has one.
@@ -31,6 +41,146 @@ _LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
 # the run record. Vercel enforces the allowlist at its edge; its box runs the
 # proxy in record-only mode, so its record is cooperative (SKY-634).
 _EGRESS_RECORDING_PROVIDERS = frozenset({"docker", "podman", "vercel"})
+# The longest copy the reservation covers. The Vercel provider ends a longer
+# copy with the same limit.
+COPY_RESERVE_SECONDS = COPY_TIMEOUT_SECONDS
+
+
+def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
+    """Wrap an image copier so each copy is reserved first and settled on the run (SKY-891).
+
+    The provider calls the copier once for each new copy, never for a copy
+    it reuses, so only a real copy is charged. A failed copy is charged for
+    its started minutes too, and its error goes on after the settlement.
+
+    Args:
+        copy_image: Copies a user image into the provider's registry.
+        budget: The run's budget runtime.
+
+    Returns:
+        A copier with the same contract that runs the copy under the budget.
+    """
+    policy = ChargePolicy("sandbox")
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Reserve the copy's time limit, copy once, then settle the started minutes.
+
+        Args:
+            source_image: The user image, pinned by digest.
+            pull_credentials: The (username, password) that read the source image.
+
+        Returns:
+            The copy's reference.
+
+        Raises:
+            BudgetError: The run cannot fund the copy, so no copy starts.
+        """
+        loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        # The stop check and the store of the future happen under one lock, so a
+        # cancel between them cannot miss the copy.
+        guard = threading.Lock()
+        running: dict[str, Any] = {}
+        quote = operation_quote(
+            {"image_copy": source_image},
+            image_copy_usd(COPY_RESERVE_SECONDS),
+            policy,
+            {"provider": "image-copy", "timeout_seconds": COPY_RESERVE_SECONDS},
+        )
+
+        def dispatch() -> PaidResult[str | BaseException]:
+            """Run the copy on the provider's event loop and charge its started minutes.
+
+            Returns:
+                The copy's reference, or the error that ended it, with the
+                cost of its started minutes. A copy that a cancel stopped
+                before it started costs nothing.
+            """
+            started = time.monotonic()
+            value: str | BaseException
+            with guard:
+                future = None
+                if not stop.is_set():
+                    future = asyncio.run_coroutine_threadsafe(copy_image(source_image, pull_credentials), loop)
+                    running["future"] = future
+            if future is None:
+                value = asyncio.CancelledError()
+                seconds = 0.0
+            else:
+                try:
+                    value = future.result()
+                except BaseException as error:
+                    value = error
+                seconds = time.monotonic() - started
+            # The copy timeout starts before the reservation, and a cancel takes
+            # time too, so the measured time can pass the reserved limit. The
+            # settlement must stay inside the reservation.
+            return PaidResult(
+                value=value,
+                provider_usd=image_copy_usd(min(seconds, COPY_RESERVE_SECONDS)),
+                evidence={"provider": "image-copy", "seconds": round(seconds, 3)},
+            )
+
+        settling = loop.create_future()
+
+        def resolve(outcome: Any, error: BaseException | None) -> None:
+            """Pass the settlement's outcome to the waiting copy, on the event loop.
+
+            Args:
+                outcome: What ``budget.execute`` returned.
+                error: What ``budget.execute`` raised, or ``None``.
+            """
+            if settling.done():
+                return
+            if isinstance(error, asyncio.CancelledError):
+                settling.cancel()
+            elif error is not None:
+                settling.set_exception(error)
+            else:
+                settling.set_result(outcome)
+
+        def settle() -> None:
+            """Reserve, copy and settle in this thread, then hand the outcome to the loop."""
+            outcome: Any = None
+            error: BaseException | None = None
+            try:
+                # Each copy is a new cost, so each one has its own operation key.
+                outcome = budget.execute(
+                    quote,
+                    policy,
+                    dispatch,
+                    operation_key=f"image-copy:{uuid.uuid4().hex}",
+                    cost_kind="sandbox",
+                )
+            except BaseException as caught:
+                error = caught
+            # A closed loop has no copy left to wait for the outcome.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(resolve, outcome, error)
+
+        # A copy can block for up to an hour, so it gets its own thread: in the
+        # default pool it would hold a worker that the usage settlements need.
+        threading.Thread(
+            target=contextvars.copy_context().run, args=(settle,), name="image-copy-settle", daemon=True
+        ).start()
+        try:
+            outcome = await asyncio.shield(settling)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled: stop the copy and wait for the
+            # settlement, so the reservation never stays open.
+            with guard:
+                stop.set()
+                if "future" in running:
+                    running["future"].cancel()
+            while not settling.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(settling)
+            raise
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return copy
 
 
 class ProtectedBridgeRuntime(AsyncBridgeRuntime):
@@ -44,6 +194,7 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
         image: str | None = None,
         docker_bin: str | None = None,
         recorder: Any = None,
+        copy_image: ImageCopier | None = None,
     ) -> None:
         """Bind the runtime to a provider and the run's budget.
 
@@ -55,12 +206,16 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
             docker_bin: The Docker CLI path of the Docker provider.
             recorder: The run's call recorder. A provider with an egress proxy
                 writes each proxy request into it; other providers ignore it.
+            copy_image: Copies a user image into the registry of a provider
+                that starts only from its own (Vercel). A billable provider
+                runs each copy under ``budget``. ``None`` makes that provider
+                refuse user images.
 
         Raises:
             SandboxFatalError: The provider is unknown, missing from this
                 build, or not allowed in production.
         """
-        super().__init__(provider, image=image, docker_bin=docker_bin)
+        super().__init__(provider, image=image, docker_bin=docker_bin, copy_image=copy_image)
         self.protected = True
         # Credentials stay in the control plane, so no box gets injected headers.
         self.injects_headers = False
@@ -68,6 +223,8 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
         self.billable = self._capabilities.billable
         if self.billable:
             self._options["budget"] = budget
+            if copy_image is not None:
+                self._copy_image = metered_copier(copy_image, budget)
         if recorder is not None and provider in _EGRESS_RECORDING_PROVIDERS:
             self._options["recorder"] = recorder
 

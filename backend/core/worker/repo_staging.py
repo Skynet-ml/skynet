@@ -19,9 +19,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -80,12 +82,15 @@ from ..sandbox.image_build import (
     BuildRequest,
     BuildResult,
     CodeBuildImageBuilder,
+    ImageBuildCancelledError,
     ImageBuilder,
     ImageBuildError,
     LocalDockerImageBuilder,
+    codebuild_builder,
     compute_input_hash,
 )
-from ..sandbox.image_registry import ImageRegistry, ImageRegistryError
+from ..sandbox.image_registry import ImageRegistry, ImageRegistryError, RegistryCredentials, image_owner, image_registry
+from ..sandbox.providers.docker import in_repository, registry_host
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import loop_tools, runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
@@ -139,7 +144,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     describe_model_call,
     run_log_emitter,
 )
-from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec, UserImage
 from ..service_gateway.optimization.blackbox.sandbox_scorer import RUNNER_SOURCE, ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
@@ -243,6 +248,9 @@ class StagedRepository:
     box_sources: Mapping[str, tuple[str, str]] = field(default_factory=dict)
     # Each box's checked image, by role, from :func:`prepare_box_images`; empty for Skynet's image.
     box_images: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Each box's start access to its image, by role: the reference, the owner's
+    # repository and fresh pull credentials. Never pinned, as it holds a token source (SKY-891).
+    box_user_images: Mapping[str, UserImage] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -1174,6 +1182,33 @@ USER_IMAGES_UNSUPPORTED = (
 DOCKERFILE_UNSUPPORTED = (
     "This deployment cannot build a Dockerfile yet. Set [{role}] image to an image pinned by its digest instead."
 )
+OTHER_REPOSITORY_IMAGE = (
+    "The [{role}] image '{image}' is in {app}'s registry, but not in your own image repository."
+    " Use an image that {app} built from your Dockerfile, or an image from another registry."
+)
+COPIED_IMAGE_OUTSIDE_REPOSITORY = (
+    "The [{role}] image '{image}' is not in your own image repository. This deployment starts each box"
+    " from a copy of an image that {app} built from your Dockerfile, so it cannot start a public image or"
+    " an image from another registry. Use dockerfile in [{role}] in ascent.toml."
+)
+ROOT_BOX_USER = (
+    "The [{role}] image '{image}' runs the box as root (uid 0), or its check reported no box uid. A root box user"
+    " could replace the Python and the standard library that {app} checks the protected files with. Set a non-root USER in the image."
+)
+ROOT_IMAGE_USER = (
+    "The [{role}] image '{image}' sets no USER, or sets root (uid 0) as its USER, so its boxes run as root."
+    " A root box user could replace the Python and the standard library that {app} checks the protected files with."
+    " Set a non-root USER in the image."
+)
+NAMED_IMAGE_USER = (
+    "The [{role}] image '{image}' sets its USER by name. {app} cannot confirm outside the box that a name"
+    " is not root (uid 0), because the image's own /etc/passwd maps the name to a uid."
+    " Set a numeric non-root USER in the image, for example `USER 1000` or `USER 1000:1000`."
+)
+UNREADABLE_IMAGE_USER = (
+    "{app} could not read the USER of the [{role}] image '{image}', so it cannot confirm that its boxes do not run"
+    " as root. Try again, or use an image that {app} built from your Dockerfile."
+)
 
 
 def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
@@ -1480,6 +1515,12 @@ _TRUSTED_PYTHON_PROBE = (
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
 _ACCOUNT_OK = re.compile(r"ok [0-9]+")
 _ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
+# Only ASCII digits: ``str.isdigit`` would also take digits such as "²".
+_BOX_UID = re.compile(r"account ok ([0-9]+)")
+# An image USER as ``<uid>`` or ``<uid>:<gid>``, in ASCII digits only.
+_NUMERIC_USER = re.compile(r"[0-9]+(?::[0-9]+)?")
+# The metric role runs no trusted-Python probe, so this gives its box uid (SKY-891).
+_BOX_UID_PROBE = 'import os; print("account ok", os.getuid())'
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 # The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
 # An ``absent`` path is a CPython build or venv landmark, and it must be missing.
@@ -1610,22 +1651,122 @@ def image_builder(config: Any = settings) -> ImageBuilder | None:
         config: The app settings.
 
     Returns:
-        Local Docker in local mode; ``None`` on a cloud deployment, which has
-        no CodeBuild project setting yet, so a Dockerfile there fails clearly.
+        Local Docker in local mode; on a cloud deployment the CodeBuild
+        builder when its settings and the user image registry are set, else
+        ``None``, so a Dockerfile there fails clearly (SKY-891).
     """
-    return LocalDockerImageBuilder() if config.local_mode else None
+    if config.local_mode:
+        return LocalDockerImageBuilder()
+    return codebuild_builder(image_registry(config), config)
 
 
-def _image_owner(username: str) -> str:
-    """Name the registry repository of one user's images.
+# A box start can take minutes after it reads the token, so a token with less left is renewed.
+_CREDENTIALS_MARGIN = timedelta(minutes=15)
+
+
+def _pull_access(registry: ImageRegistry, owner: str) -> Callable[[], tuple[str, str]]:
+    """Return a callable that gives one token for the owner's repository while it has time left (SKY-891).
+
+    The callable reuses one token while it has more than
+    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one,
+    so the boxes of a run do not ask STS for a new token at each start.
 
     Args:
+        registry: The user image registry.
+        owner: The registry repository's owner.
+
+    Returns:
+        The callable, which returns the token's (username, password).
+    """
+    lock = threading.Lock()
+    cached: list[RegistryCredentials] = []
+
+    def credentials() -> tuple[str, str]:
+        """Return a token that pulls only from the owner's repository and has time left."""
+        # Boxes open on several threads, so the lock makes them share one token.
+        with lock:
+            token = cached[0] if cached else None
+            if token is None or token.expires_at is None or token.expires_at - datetime.now(UTC) <= _CREDENTIALS_MARGIN:
+                token = registry.pull_credentials(owner)
+                cached[:] = [token]
+            return token.username, token.password
+
+    return credentials
+
+
+def _user_image(
+    registry: ImageRegistry | None,
+    username: str,
+    role: str,
+    image: str,
+    *,
+    copies: bool = False,
+    credentials: Callable[[], tuple[str, str]] | None = None,
+) -> UserImage:
+    """Give one box the access its start needs to its user image (SKY-891).
+
+    Pull credentials reach only the owner's own repository: an image there
+    gets a :func:`_pull_access` callable. An image from another registry
+    gets none, and a provider that copies images cannot start it, because
+    its copy needs the owner's repository.
+
+    Args:
+        registry: The user image registry, or ``None`` when local Docker keeps the images.
+        username: The run's owner.
+        role: ``run`` or ``metric``.
+        image: The box image reference.
+        copies: Whether the runtime starts each box from a copy of the image (Vercel).
+        credentials: The run's shared pull access to the owner's repository, so each box
+            of the run uses one token; ``None`` makes new access for this box only.
+
+    Returns:
+        The reference, with the owner's repository and its pull credentials for an image there.
+
+    Raises:
+        BoxImageError: The image is in the user image registry, but in another repository, or
+            the runtime copies images and the image is not in the owner's repository.
+    """
+    outside = BoxImageError(COPIED_IMAGE_OUTSIDE_REPOSITORY.format(role=role, image=image, app=APP_NAME))
+    if registry is None:
+        if copies:
+            raise outside
+        return UserImage(image)
+    owner = image_owner(username)
+    repository = registry.repository_uri(owner)
+    if not in_repository(image, repository):
+        if registry_host(image) == registry_host(repository):
+            raise BoxImageError(OTHER_REPOSITORY_IMAGE.format(role=role, image=image, app=APP_NAME))
+        if copies:
+            raise outside
+        return UserImage(image)
+    return UserImage(image, repository=repository, credentials=credentials or _pull_access(registry, owner))
+
+
+def _run_pull_access(
+    staged: StagedRepository, registry: ImageRegistry | None, username: str
+) -> Callable[[], tuple[str, str]] | None:
+    """Return the one pull access that every box of the run shares (SKY-891).
+
+    Each role and each prepare of one run share one token, so the run asks
+    STS for one token and not one for each role. A second prepare of the run (after a parallel start pinned first) keeps
+    the access of the first, but only when it is for the same owner's repository.
+
+    Args:
+        staged: The staged tree, with the box access of an earlier prepare.
+        registry: The user image registry, or ``None`` when local Docker keeps the images.
         username: The run's owner.
 
     Returns:
-        A short lowercase name that the registry accepts and that hides the username.
+        The shared access, or ``None`` when there is no registry.
     """
-    return "u" + hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+    if registry is None:
+        return None
+    owner = image_owner(username)
+    repository = registry.repository_uri(owner)
+    for user_image in staged.box_user_images.values():
+        if user_image.repository == repository and user_image.credentials is not None:
+            return user_image.credentials
+    return _pull_access(registry, owner)
 
 
 def _digest(image: str) -> str:
@@ -1651,6 +1792,7 @@ def prepare_box_images(
     budget: Any = None,
     registry: ImageRegistry | None = None,
     pinned: Mapping[str, Mapping[str, Any]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> StagedRepository:
     """Build or pin each user box image once, then check it before the first candidate (SKY-737).
 
@@ -1669,26 +1811,47 @@ def prepare_box_images(
         builder: The Dockerfile builder, or ``None`` when this deployment has none.
         store: The job store, which keeps each build and its log.
         budget: The run's budget runtime, which reserves and settles the build; ``None`` runs it free.
-        registry: The registry that must still hold a reused build, or ``None`` to skip that check.
+        registry: The user image registry: it must still hold a reused build, and it gives each box in
+            the owner's repository its pull access. ``None`` skips the check and pulls with no credentials.
         pinned: The images the run pinned at its start, for a resume.
+        cancelled: Tells whether the run was cancelled, so a running build stops before it pushes.
 
     Returns:
-        ``staged`` with ``box_images`` and, for a metric image, record facts that cover its digest.
+        ``staged`` with ``box_images``, the start access of each box in ``box_user_images``, and, for a
+        metric image, record facts that cover its digest.
 
     Raises:
-        BoxImageError: When the runtime cannot start a user image, a build fails, or a check fails.
+        BoxImageError: When the runtime cannot start a user image, an image is in another user's
+            repository, a copying runtime gets an image outside the owner's repository, a build
+            fails, or a check fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped a build.
     """
     if not staged.box_sources:
         return staged
+    # Vercel copies each image into its own registry, keyed by the owner's repository, so it
+    # starts no public image and no image from another registry (SKY-891).
+    copies = bool(getattr(runtime, "copies_user_images", False))
+    access = _run_pull_access(staged, registry, username)
     if pinned:
         images = {role: dict(record) for role, record in pinned.items()}
+        # A resume checks nothing again, but its boxes still need the pull access of today's registry.
+        user_images = {
+            role: _user_image(registry, username, role, record["image"], copies=copies, credentials=access)
+            for role, record in images.items()
+        }
     else:
         # A runtime that ignores the spec's image would run Skynet's image in its place, with no sign.
-        # A runtime that sets ``accepts_user_images`` must not run the box user as uid 0: the
-        # trusted-Python probe checks only for root ownership, so it cannot guard against a root box user.
+        # A runtime that sets ``accepts_user_images`` starts the box as the image's USER, so
+        # :func:`_check_box_image` refuses a root USER in each role (SKY-891).
         if not getattr(runtime, "accepts_user_images", False):
             raise BoxImageError(USER_IMAGES_UNSUPPORTED)
         images = {}
+        # A refused image reference must stop the run before any paid build or check box.
+        user_images = {
+            role: _user_image(registry, username, role, value, copies=copies, credentials=access)
+            for role, (kind, value) in staged.box_sources.items()
+            if kind == "image"
+        }
         for role, (kind, value) in staged.box_sources.items():
             if kind == "image":
                 record: dict[str, Any] = {
@@ -1709,15 +1872,22 @@ def prepare_box_images(
                     store=store,
                     budget=budget,
                     registry=registry,
+                    cancelled=cancelled,
                 )
-            python = _check_box_image(runtime, record["image"], role, owner_id=owner_id)
+            if role not in user_images:
+                user_images[role] = _user_image(
+                    registry, username, role, record["image"], copies=copies, credentials=access
+                )
+            python = _check_box_image(
+                runtime, user_images[role], role, owner_id=owner_id, registry=registry, username=username
+            )
             if python is not None:
                 record["python"] = python
             images[role] = record
     facts = staged.record_facts
     if "metric" in images and staged.record_inputs:
         facts = _record_facts(staged.snapshot.archive, **staged.record_inputs, metric_image=images["metric"]["digest"])
-    return replace(staged, box_images=images, record_facts=facts)
+    return replace(staged, box_images=images, box_user_images=user_images, record_facts=facts)
 
 
 def _dockerfile_image(
@@ -1731,6 +1901,7 @@ def _dockerfile_image(
     store: Any,
     budget: Any,
     registry: ImageRegistry | None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Reuse or build the image of one box's Dockerfile from the staged start commit.
 
@@ -1744,12 +1915,14 @@ def _dockerfile_image(
         store: The job store.
         budget: The run's budget runtime, or ``None``.
         registry: The registry that must still hold a reused build, or ``None``.
+        cancelled: Tells whether the run was cancelled, or ``None``.
 
     Returns:
         The box's image record: image, digest, source, input hash and build log reference.
 
     Raises:
         BoxImageError: When there is no builder, the context is invalid, or the build fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped the build; it keeps no build record.
     """
     if builder is None:
         raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
@@ -1764,7 +1937,7 @@ def _dockerfile_image(
             )
         archive = strip_archive(archive, staged.hidden_paths, staged.workdir / "image-context-run.tgz")
     context = extract_folder(archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}")
-    request = BuildRequest(context_dir=context, owner=_image_owner(username), dockerfile=posixpath.basename(dockerfile))
+    request = BuildRequest(context_dir=context, owner=image_owner(username), dockerfile=posixpath.basename(dockerfile))
     kind = builder.kind
     try:
         input_hash = compute_input_hash(
@@ -1784,16 +1957,27 @@ def _dockerfile_image(
     limits = BuildLimits.from_settings()
 
     def build() -> PaidResult[BuildResult | ImageBuildError]:
-        """Run the build once and charge its started minutes, also for a failed build."""
+        """Run the build once and charge its started minutes, also for a failed build.
+
+        Returns:
+            The build result or its error, with the charge of its started minutes up
+            to the reserved limit. A build that a cancel stopped before it started
+            costs nothing.
+        """
         started = time.monotonic()
         try:
-            value: BuildResult | ImageBuildError = builder.build(request)
+            value: BuildResult | ImageBuildError = builder.build(request, cancelled=cancelled)
         except ImageBuildError as error:
             value = error
         seconds = time.monotonic() - started
+        # The measured time also holds the upload, the queue, the log wait and a cancel's stop
+        # wait, so it can pass the reserved limit; the settlement must stay inside the reservation.
+        charged = min(seconds, limits.timeout_seconds)
+        if isinstance(value, ImageBuildCancelledError) and not value.started:
+            charged = 0.0
         return PaidResult(
             value=value,
-            provider_usd=image_build_usd(kind, seconds),
+            provider_usd=image_build_usd(kind, charged),
             evidence={"builder": kind, "input_hash": input_hash, "seconds": round(seconds, 3)},
         )
 
@@ -1810,6 +1994,8 @@ def _dockerfile_image(
         outcome = budget.execute(
             quote, policy, build, operation_key=f"image-build:{owner_id}:{role}", cost_kind="sandbox"
         )
+    if isinstance(outcome, ImageBuildCancelledError):
+        raise outcome
     if isinstance(outcome, ImageBuildError):
         store.save_image_build(username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log)
         tail = outcome.log_tail.strip()
@@ -1866,14 +2052,31 @@ def _local_image_exists(image: str) -> bool:
     return result.returncode == 0
 
 
-def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> str | None:
+def _check_box_image(
+    runtime: Any,
+    user_image: UserImage,
+    role: str,
+    *,
+    owner_id: str,
+    registry: ImageRegistry | None,
+    username: str,
+) -> str | None:
     """Run ``ascent check --image`` in an offline box of the image.
+
+    The run role also needs a trusted interpreter and standard library. Both
+    roles need a box user that is not root, on every runtime: a root box user
+    could change the checked files after the check (SKY-891). The image's
+    own USER, read outside the box, must be a numeric non-root uid: the box
+    runs the image's own interpreter, so the uid that the box reports is only
+    a second check.
 
     Args:
         runtime: The parent's metered sandbox runtime.
-        image: The box image to check.
+        user_image: The box image to check, with the access its start needs.
         role: ``run`` or ``metric``.
         owner_id: Job identity naming the check operation.
+        registry: The user image registry, which reads the USER of an image in the owner's repository.
+        username: The run's owner.
 
     Returns:
         The trusted absolute Python path for the metric role; ``None`` for the run role.
@@ -1881,6 +2084,7 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
     Raises:
         BoxImageError: When the check fails or reports no usable result.
     """
+    image = user_image.reference
     check_role = _CHECK_ROLES[role]
     session = runtime.open(
         SandboxSpec(
@@ -1889,18 +2093,29 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
             network_disabled=True,
             operation_key=f"image-check:{owner_id}:{role}",
             private=role == "metric",
+            user_image=user_image,
         )
     )
     try:
         result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
         probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
+        report = _check_report(result.stdout)
+        python = report.get("python") if report is not None else None
+        absolute = isinstance(python, str) and python.startswith("/")
+        # The image's own python reports the uid, so an image can lie here; only the
+        # numeric USER read outside the box below protects against a root box user.
+        uid_probe = (
+            session.run(
+                f"{shlex.quote(python)} -I -S -c {shlex.quote(_BOX_UID_PROBE)}", timeout_seconds=_CHECK_TIMEOUT_SECONDS
+            )
+            if check_role == "metric" and absolute
+            else probe
+        )
     finally:
         with contextlib.suppress(Exception):
             session.close()
-    report = _check_report(result.stdout)
-    python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
-    if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
+    if passed and (check_role != "metric" or absolute):
         names = _root_variables(probe) if probe is not None else []
         if names:
             raise BoxImageError(
@@ -1921,6 +2136,9 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
                     path=_ROOT_PATH,
                 )
             )
+        if uid_probe is None or _root_box_user(uid_probe):
+            raise BoxImageError(ROOT_BOX_USER.format(role=role, image=image, app=APP_NAME))
+        _check_image_user(registry, user_image, role, username)
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -1932,6 +2150,90 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
         f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
         f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
     )
+
+
+def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, role: str, username: str) -> None:
+    """Refuse an image whose own USER is not a numeric non-root uid, read outside the box (SKY-891).
+
+    The registry reads the config of an image in the owner's repository, for
+    each platform. Any other image must be in local Docker, which the check
+    box's start pulled it into. A USER that cannot be read refuses the image.
+    A USER name refuses the image too: the image's own ``/etc/passwd`` could
+    map it to uid 0, and only the image's own programs can read that file.
+
+    Args:
+        registry: The user image registry, or ``None`` when local Docker keeps the images.
+        user_image: The checked box image.
+        role: ``run`` or ``metric``.
+        username: The run's owner.
+
+    Raises:
+        BoxImageError: When the USER is root, a name, or cannot be read.
+    """
+    image = user_image.reference
+    if registry is not None and user_image.repository is not None:
+        try:
+            users: tuple[str, ...] | None = registry.image_users(image_owner(username), _digest(image))
+        except ImageRegistryError:
+            users = None
+    else:
+        users = _local_image_user(image)
+    if not users:
+        raise BoxImageError(UNREADABLE_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+    if any(_root_user(user) for user in users):
+        raise BoxImageError(ROOT_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+    if not all(_NUMERIC_USER.fullmatch(user) for user in users):
+        raise BoxImageError(NAMED_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+
+
+def _local_image_user(image: str) -> tuple[str, ...] | None:
+    """Read an image's USER from local Docker.
+
+    Args:
+        image: The image id or reference.
+
+    Returns:
+        The USER, or ``None`` when Docker cannot read it.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.User}}", image],
+            capture_output=True,
+            text=True,
+            timeout=_INSPECT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        user = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return (user,) if isinstance(user, str) else None
+
+
+def _root_user(user: str) -> bool:
+    """Tell whether an image USER runs as root: no user, ``root`` or uid 0, with any group.
+
+    Args:
+        user: The image config ``User``, as ``name``, ``uid``, ``name:group`` or ``uid:gid``.
+
+    Returns:
+        True for root. Any other user name gives False here, and
+        :func:`_check_image_user` refuses it as a name.
+    """
+    name = user.split(":", 1)[0]
+    return name in ("", "root") or (name.isascii() and name.isdigit() and int(name) == 0)
+
+
+def _root_box_user(probe: Any) -> bool:
+    """Tell whether the probe's box user is root, or the probe reports no box uid (SKY-891).
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        True when no ``account ok <uid>`` line is there or any of them has uid 0.
+    """
+    uids = [int(match.group(1)) for line in probe.stdout.split("\n") if (match := _BOX_UID.fullmatch(line))]
+    return not uids or 0 in uids
 
 
 def _trusted_python(probe: Any) -> bool:
@@ -2244,8 +2546,8 @@ def bind_repo_scorer(
             metric_hosts=staged.metric_hosts,
             metric_vcpus=staged.metric_vcpus,
             metric_setup=staged.metric_setup,
-            run_image=(staged.box_images.get("run") or {}).get("image"),
-            metric_image=(staged.box_images.get("metric") or {}).get("image"),
+            run_image=staged.box_user_images.get("run") or (staged.box_images.get("run") or {}).get("image"),
+            metric_image=staged.box_user_images.get("metric") or (staged.box_images.get("metric") or {}).get("image"),
             metric_python=(staged.box_images.get("metric") or {}).get("python"),
         ),
         str(scorer_spec.get("metric_code") or ""),

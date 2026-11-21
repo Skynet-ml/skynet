@@ -21,10 +21,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...sandbox.image_registry import ImageRegistryError
 from ...service_gateway.agents.attachment_sandbox import stop_chat_runner
 from ...storage.models import AgentConversationModel, UserModel
 from ...storage.tree_purge import TreePurgeError, delete_unused_packs
-from ..account_data_service import delete_account, export_account
+from ..account_data_service import AccountRunsActiveError, delete_account, export_account
 from ..account_export_formats import ExportFormat, render_export
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -106,9 +107,7 @@ def create_account_data_router(*, job_store) -> APIRouter:
         response_model=AccountDeletionResult,
         summary="Irreversibly delete the caller's account and all its data",
     )
-    def delete_my_account(
-        body: DeleteAccountRequest, user: AuthenticatedUserDep
-    ) -> AccountDeletionResult:
+    def delete_my_account(body: DeleteAccountRequest, user: AuthenticatedUserDep) -> AccountDeletionResult:
         """Permanently delete the caller's account and everything it owns.
 
         Local (email/password) accounts must re-confirm with their current
@@ -126,6 +125,11 @@ def create_account_data_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 401 (``accounts.invalid_credentials``) when a local
                 account's confirmation password is missing or does not match.
+            DomainError: 409 (``accounts.deletion_runs_active``) when the
+                deployment has a user image registry and one of the account's
+                runs is not finished, or a worker still holds a live lease on
+                it, because its build could push after the repository delete
+                (SKY-891). Nothing is deleted.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
                 the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
                 is not set or the bucket client cannot be built (for example,
@@ -133,8 +137,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 keeps moving the account's packs for ``PACK_LOCK_TRIES``
                 tries; a retry can succeed. Also when a step log shard fails,
                 or one of the account's runs records a shard that this pod's
-                ``STEP_LOG_SHARDS`` does not have. The main database rows
-                stay, so the account is not deleted.
+                ``STEP_LOG_SHARDS`` does not have. Also when the user image
+                registry refuses to delete the account's repository, or its
+                settings are set but not usable (SKY-891). The main database
+                rows stay, so the account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking
@@ -147,8 +153,13 @@ def create_account_data_router(*, job_store) -> APIRouter:
             ).all()
             try:
                 summary = delete_account(session, user.username)
+            except AccountRunsActiveError as exc:
+                raise DomainError("accounts.deletion_runs_active", status=409) from exc
             except TreePurgeError as exc:
                 logger.exception("Account deletion stopped: the tree packs of the account were not deleted")
+                raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
+            except ImageRegistryError as exc:
+                logger.exception("Account deletion stopped: the user images of the account were not deleted")
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
             session.commit()
         # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.
@@ -161,8 +172,6 @@ def create_account_data_router(*, job_store) -> APIRouter:
             # The account is gone, so the answer stays a success. The packs keep their rows, which no row
             # points at, and the compactor deletes them in its next pass.
             logger.exception("The account is deleted, but its unused tree packs are not; the compactor deletes them")
-        return AccountDeletionResult(
-            deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows
-        )
+        return AccountDeletionResult(deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows)
 
     return router

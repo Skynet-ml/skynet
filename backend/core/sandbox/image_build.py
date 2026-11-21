@@ -34,11 +34,16 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, Protocol
+from typing import IO, Any, NoReturn, Protocol
 
 from core.config import settings
 
 from .image_registry import EcrRegistry, ImageRegistryError
+
+try:
+    import boto3
+except ImportError:
+    boto3 = None
 
 try:
     from botocore.exceptions import BotoCoreError, ClientError
@@ -64,6 +69,8 @@ _MIN_TIMEOUT_MINUTES = 5
 MAX_TIMEOUT_MINUTES = 480
 _QUEUE_TIMEOUT_MINUTES = 60
 _QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
+# StopBuild only starts the stop, so a cancel waits this long for the build to end.
+_STOP_WAIT_SECONDS = 300.0
 # CloudWatch can deliver the last log events a few seconds after the build ends.
 _LOG_SETTLE_SECONDS = 5.0
 # CodeBuild writes its own agent lines with this prefix, and marks each phase.
@@ -144,6 +151,25 @@ class ImageTooLargeError(ImageBuildError):
     """Report an image larger than the size limit."""
 
 
+class ImageBuildCancelledError(ImageBuildError):
+    """Report a build that the builder stopped because its run was cancelled."""
+
+    def __init__(self, message: str, *, started: bool = True) -> None:
+        """Keep the message and whether a paid build started.
+
+        Args:
+            message: What stopped.
+            started: Whether the provider started a build before the cancel.
+        """
+        super().__init__(message)
+        self.started = started
+
+
+# Every build of one owner shares this cache. It is in the owner's repository, so account deletion
+# removes it with the repository (SKY-891).
+DEFAULT_CACHE_SCOPE = "default"
+
+
 @dataclass(frozen=True)
 class BuildRequest:
     """Describe one image build.
@@ -163,7 +189,7 @@ class BuildRequest:
     owner: str
     dockerfile: str = "Dockerfile"
     build_args: Mapping[str, str] = field(default_factory=dict)
-    cache_scope: str = "default"
+    cache_scope: str = DEFAULT_CACHE_SCOPE
 
 
 @dataclass(frozen=True)
@@ -181,11 +207,12 @@ class BuildResult:
 class ImageBuilder(Protocol):
     """Build a Dockerfile with its build context into an image."""
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image that the request describes.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Tells whether the run was cancelled, so the builder stops the build.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -738,11 +765,14 @@ class CodeBuildImageBuilder:
         self._sleep = sleep
         self._clock = clock
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image on CodeBuild and push it to the owner's repository.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Tells whether the run was cancelled. The builder calls
+                it before the upload, before the build starts and on each
+                status poll. A true answer stops the build before it pushes.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -753,6 +783,7 @@ class CodeBuildImageBuilder:
             ImageBuildTimeoutError: The build ran longer than the time limit,
                 or waited longer than the queue limit.
             ImageTooLargeError: The pushed image is larger than the size limit.
+            ImageBuildCancelledError: ``cancelled`` answered true before or while the build ran.
         """
         dockerfile = _check_request(request)
         input_hash = compute_input_hash(
@@ -771,6 +802,7 @@ class CodeBuildImageBuilder:
         except ImageRegistryError as exc:
             raise ImageBuildError(str(exc)) from exc
         key = f"{self._prefix}{request.owner}/{_hex(input_hash)}/{token}.zip"
+        _raise_if_cancelled_before_start(cancelled)
         with tempfile.TemporaryFile() as archive:
             _zip_context(request.context_dir, archive, self._limits.max_context_bytes)
             archive.seek(0)
@@ -780,6 +812,7 @@ class CodeBuildImageBuilder:
                 raise ImageBuildError(f"cannot upload the build context ({_aws_error(exc)})") from exc
 
         timeout_minutes = max(_MIN_TIMEOUT_MINUTES, math.ceil(self._limits.timeout_seconds / 60))
+        _raise_if_cancelled_before_start(cancelled)
         try:
             started = self._codebuild.start_build(
                 projectName=self._project,
@@ -802,7 +835,7 @@ class CodeBuildImageBuilder:
         # A build the worker cannot follow must not run on and push, so every
         # failure here stops it. _wait stops the build before its own errors.
         try:
-            build = self._wait(build_id)
+            build = self._wait(build_id, cancelled)
             log = self._read_log(build, settle=True)
         except ImageBuildError:
             raise
@@ -857,14 +890,15 @@ class CodeBuildImageBuilder:
         """
         return f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit"
 
-    def _wait(self, build_id: str) -> dict[str, Any]:
-        """Poll the build until it ends, or stop it at a time limit.
+    def _wait(self, build_id: str, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """Poll the build until it ends, or stop it at a time limit or a cancel.
 
         The time limit counts from the first poll that sees the build out of
         the queue. Queue time has its own limit.
 
         Args:
             build_id: The CodeBuild build id.
+            cancelled: Tells whether the run was cancelled, or ``None``.
 
         Returns:
             The final build description.
@@ -872,6 +906,8 @@ class CodeBuildImageBuilder:
         Raises:
             ImageBuildTimeoutError: The build was still running at the time
                 limit, or still queued at the queue limit.
+            ImageBuildCancelledError: ``cancelled`` answered true. The build
+                ended, or it did not end inside the stop wait.
             ImageBuildError: CodeBuild does not know the build.
             BotoCoreError: A status read failed (or ClientError).
         """
@@ -885,6 +921,9 @@ class CodeBuildImageBuilder:
             build = builds[0]
             if build.get("buildComplete"):
                 return build
+            # A cancelled run's account can be deleted next, so the build must not push after it.
+            if cancelled is not None and cancelled():
+                self._stop_cancelled(build_id)
             now = self._clock()
             if run_deadline is None and build.get("currentPhase") not in _QUEUED_PHASES:
                 run_deadline = now + self._limits.timeout_seconds
@@ -911,6 +950,52 @@ class CodeBuildImageBuilder:
         # The caller already reports a failure; a failed stop must not hide it.
         with contextlib.suppress(*_AWS_ERRORS):
             self._codebuild.stop_build(id=build_id)
+
+    def _stop_cancelled(self, build_id: str) -> NoReturn:
+        """Stop the build of a cancelled run and wait until CodeBuild says it ended (SKY-891).
+
+        StopBuild only starts the stop, so the build could still push after
+        the worker releases the run. The worker keeps its lease while it waits
+        here, so an account deletion still waits too. A failed stop is retried
+        on each poll.
+
+        Args:
+            build_id: The CodeBuild build id.
+
+        Raises:
+            ImageBuildCancelledError: Always: after the build ended, or when
+                it did not end inside ``_STOP_WAIT_SECONDS``.
+        """
+        deadline = self._clock() + _STOP_WAIT_SECONDS
+        stopped = False
+        while True:
+            # The log keeps only the AWS error code: a raw boto message can name the roles.
+            failure = ""
+            if not stopped:
+                try:
+                    self._codebuild.stop_build(id=build_id)
+                    stopped = True
+                except _AWS_ERRORS as exc:
+                    failure = _aws_error(exc)
+                if failure:
+                    logger.error("cannot stop the cancelled image build %s (%s)", build_id, failure)
+            builds: list[dict[str, Any]] | None = None
+            try:
+                builds = self._codebuild.batch_get_builds(ids=[build_id]).get("builds") or []
+            except _AWS_ERRORS as exc:
+                failure = _aws_error(exc)
+            if builds is None:
+                logger.error("cannot read the cancelled image build %s (%s)", build_id, failure)
+            if builds is not None and (not builds or builds[0].get("buildComplete")):
+                raise ImageBuildCancelledError(f"image build {build_id} stopped: the run was cancelled")
+            if self._clock() >= deadline:
+                logger.error(
+                    "cancelled image build %s did not end within %g seconds of the stop",
+                    build_id,
+                    _STOP_WAIT_SECONDS,
+                )
+                raise ImageBuildCancelledError(f"image build {build_id} did not end after the run was cancelled")
+            self._sleep(self._poll)
 
     def _user_line(self, line: str) -> str:
         """Hide the push role, the registry host and the account id in a log line.
@@ -970,6 +1055,53 @@ class CodeBuildImageBuilder:
                 return capped.text()
             settle = False
             self._sleep(_LOG_SETTLE_SECONDS)
+
+
+def codebuild_builder(registry: EcrRegistry | None, config: Any = settings) -> CodeBuildImageBuilder | None:
+    """Return the CodeBuild builder of this deployment, or ``None`` when it is not set up (SKY-891).
+
+    Args:
+        registry: The user image registry the builds push to, or ``None``.
+        config: The app settings.
+
+    Returns:
+        A builder with the worker's AWS credentials in the registry's Region
+        when the registry, the project, the source bucket and the push role
+        are all set; ``None`` otherwise.
+
+    Raises:
+        ImageBuildError: The settings are set but boto3 is missing.
+    """
+    project = config.image_build_project
+    bucket = config.image_build_source_bucket
+    push_role = config.image_build_push_role_arn
+    if registry is None or not project or not bucket or not push_role:
+        return None
+    if boto3 is None:
+        raise ImageBuildError("the CodeBuild image builder needs boto3")
+    region = registry.region
+    return CodeBuildImageBuilder(
+        codebuild=boto3.client("codebuild", region_name=region),
+        logs=boto3.client("logs", region_name=region),
+        s3=boto3.client("s3", region_name=region),
+        registry=registry,
+        project_name=project,
+        source_bucket=bucket,
+        push_role_arn=push_role,
+    )
+
+
+def _raise_if_cancelled_before_start(cancelled: Callable[[], bool] | None) -> None:
+    """Stop a build whose run was cancelled before CodeBuild started it (SKY-891).
+
+    Args:
+        cancelled: Tells whether the run was cancelled, or ``None``.
+
+    Raises:
+        ImageBuildCancelledError: ``cancelled`` answered true. No build started.
+    """
+    if cancelled is not None and cancelled():
+        raise ImageBuildCancelledError("image build not started: the run was cancelled", started=False)
 
 
 def _aws_error(exc: BaseException) -> str:
@@ -1070,11 +1202,13 @@ class LocalDockerImageBuilder:
         self._limits = limits or BuildLimits.from_settings()
         self._platform = platform
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image with ``docker build``.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Not used: a local build pushes to no registry, so a
+                cancel does not need to stop it.
 
         Returns:
             The local image id, its size, the input hash and the log.
