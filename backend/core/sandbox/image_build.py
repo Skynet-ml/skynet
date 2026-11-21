@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import tempfile
@@ -64,7 +65,12 @@ _QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
 _LOG_SETTLE_SECONDS = 5.0
 # CodeBuild writes its own agent lines with this prefix, and marks each phase.
 _CODEBUILD_LINE = "[Container] "
-_CODEBUILD_PHASE = re.compile(r"Entering phase (\w+)")
+# Anchored, so a command line that holds the words (in a build arg) is no marker.
+_CODEBUILD_PHASE = re.compile(r"\[Container\] \S+ \S+ Entering phase (\w+)")
+# The buildspec is JSON read as YAML, with non-ASCII text kept as is. YAML
+# refuses raw control characters and noncharacters, and reads U+2028/U+2029
+# as line breaks, so user text that goes into it must not hold them.
+_UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
 # The user log keeps only the build phase: the other phases run Skynet's own
 # setup (firewall rules, the credential helper with its role and policy).
 _USER_LOG_PHASE = "BUILD"
@@ -249,6 +255,8 @@ class _CappedLog:
         self._tail: deque[str] = deque()
         self._tail_size = 0
         self._cut = 0
+        # The local builder adds lines from a reader thread.
+        self._lock = threading.Lock()
 
     def add(self, line: str) -> None:
         """Add one line, cutting lines from the middle when the log is full.
@@ -257,6 +265,15 @@ class _CappedLog:
             line: The line, with no newline.
         """
         line = line[: self._half]
+        with self._lock:
+            self._add(line)
+
+    def _add(self, line: str) -> None:
+        """Add one cut line, with the lock held.
+
+        Args:
+            line: The line, at most half the limit long.
+        """
         if not self._tail and self._head_size + len(line) + 1 <= self._half:
             self._head.append(line)
             self._head_size += len(line) + 1
@@ -273,26 +290,9 @@ class _CappedLog:
         Returns:
             The head, the cut marker when lines were cut, and the tail.
         """
-        marker = [f"[... {self._cut} log lines cut ...]"] if self._cut else []
-        return "\n".join([*self._head, *marker, *self._tail])
-
-
-def cap_log(log: str, limit: int = MAX_LOG_CHARS) -> str:
-    """Return the log inside the size limit, keeping its head and tail.
-
-    Args:
-        log: The full log.
-        limit: The most characters to keep.
-
-    Returns:
-        The log, or its head and tail with a cut marker between them.
-    """
-    if len(log) <= limit:
-        return log
-    capped = _CappedLog(limit)
-    for line in log.splitlines():
-        capped.add(line)
-    return capped.text()
+        with self._lock:
+            marker = [f"[... {self._cut} log lines cut ...]"] if self._cut else []
+            return "\n".join([*self._head, *marker, *self._tail])
 
 
 @dataclass(frozen=True)
@@ -316,15 +316,16 @@ def _check_request(request: BuildRequest) -> _Dockerfile:
     Raises:
         ImageBuildError: The context or the Dockerfile is missing, any part
             of the Dockerfile path is a symlink, the Dockerfile is outside
-            the context, or a build arg name is invalid.
+            the context, a build arg name is invalid, or the Dockerfile path or
+            a build arg value is not valid UTF-8 or holds a control character.
     """
     if not request.context_dir.is_dir():
         raise ImageBuildError(f"build context {request.context_dir} is not a directory")
     context = request.context_dir.resolve(strict=True)
     # Check text before any file call, which raises a raw error on a lone surrogate.
-    _utf8(request.dockerfile, "Dockerfile path")
+    _check_text(request.dockerfile, "Dockerfile path")
     for name, value in request.build_args.items():
-        _utf8(value, f"build arg {name} value")
+        _check_text(value, f"build arg {name} value")
     relative = PurePosixPath(request.dockerfile)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must stay inside the build context")
@@ -388,6 +389,22 @@ def _utf8(text: str, what: str) -> bytes:
         raise ImageBuildError(f"{what} {text!r} is not valid UTF-8") from exc
 
 
+def _check_text(text: str, what: str) -> None:
+    """Refuse text that the buildspec or the docker command cannot carry.
+
+    Args:
+        text: The Dockerfile path or a build arg value.
+        what: What the text is, for the error.
+
+    Raises:
+        ImageBuildError: The text is not valid UTF-8, or holds a control
+            character (NUL too) or a character YAML does not accept.
+    """
+    _utf8(text, what)
+    if _UNSAFE_TEXT.search(text):
+        raise ImageBuildError(f"{what} {text!r} holds a control character")
+
+
 def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
     """Return every folder, file and symlink of the context, sorted by path.
 
@@ -415,7 +432,10 @@ def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
             path = base / name
             relative = path.relative_to(root_dir).as_posix()
             _utf8(relative, "build context path")
-            info = path.lstat()
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise ImageBuildError(f"cannot read the build context: {exc}") from exc
             if not (stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 continue
             if stat.S_ISREG(info.st_mode):
@@ -451,11 +471,43 @@ def compute_input_hash(
         ``sha256:<64 hex>`` over the build inputs.
 
     Raises:
-        ImageBuildError: The request is invalid or the context is too large.
+        ImageBuildError: The request is invalid, or the context is too large
+            or cannot be read.
     """
     dockerfile = _check_request(request)
     if max_context_bytes is None:
         max_context_bytes = BuildLimits.from_settings().max_context_bytes
+    try:
+        return _hash_inputs(
+            request, dockerfile, builder=builder, platform=platform, max_context_bytes=max_context_bytes
+        )
+    except OSError as exc:
+        raise ImageBuildError(f"cannot read the build context: {exc}") from exc
+
+
+def _hash_inputs(
+    request: BuildRequest,
+    dockerfile: _Dockerfile,
+    *,
+    builder: str,
+    platform: str,
+    max_context_bytes: int,
+) -> str:
+    """Hash the checked build inputs.
+
+    Args:
+        request: The build request.
+        dockerfile: The checked Dockerfile path.
+        builder: The builder kind.
+        platform: The target platform.
+        max_context_bytes: The context size limit.
+
+    Returns:
+        ``sha256:<64 hex>`` over the build inputs.
+
+    Raises:
+        OSError: A context file cannot be read.
+    """
     digest = hashlib.sha256()
 
     def put(data: bytes) -> None:
@@ -507,12 +559,15 @@ def _zip_context(context_dir: Path, target: IO[bytes], max_bytes: int) -> None:
     # strict_timestamps=False stores a pre-1980 mtime as 1980 instead of raising.
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
         for entry in _context_entries(context_dir, max_bytes):
-            if stat.S_ISLNK(entry.info.st_mode):
-                info = zipfile.ZipInfo(entry.relative)
-                info.external_attr = (stat.S_IFLNK | 0o777) << 16
-                archive.writestr(info, str(entry.path.readlink()))
-            else:
-                archive.write(entry.path, entry.relative)
+            try:
+                if stat.S_ISLNK(entry.info.st_mode):
+                    info = zipfile.ZipInfo(entry.relative)
+                    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(info, str(entry.path.readlink()))
+                else:
+                    archive.write(entry.path, entry.relative)
+            except OSError as exc:
+                raise ImageBuildError(f"cannot read the build context: {exc}") from exc
 
 
 def _hex(input_hash: str) -> str:
@@ -539,7 +594,8 @@ def codebuild_buildspec(
     """Return the CodeBuild buildspec that builds and pushes one image.
 
     The buildspec is JSON, which YAML also reads, so no value needs YAML
-    quoting. Every user value goes through ``shlex.quote``. Provenance and
+    quoting. Non-ASCII text stays as is, because YAML refuses the surrogate
+    pair escapes that JSON writes for characters above U+FFFF. Every user value goes through ``shlex.quote``. Provenance and
     SBOM attestations stay off, so the pushed digest is a plain image manifest
     whose size ECR reports.
 
@@ -617,7 +673,7 @@ def codebuild_buildspec(
             },
         },
     }
-    return json.dumps(spec, indent=2)
+    return json.dumps(spec, indent=2, ensure_ascii=False)
 
 
 class CodeBuildImageBuilder:
@@ -739,14 +795,19 @@ class CodeBuildImageBuilder:
         except _AWS_ERRORS as exc:
             raise ImageBuildError(f"cannot start the image build ({_aws_error(exc)})") from exc
         build_id = started["build"]["id"]
+        # A build the worker cannot follow must not run on and push, so every
+        # failure here stops it. _wait stops the build before its own errors.
         try:
             build = self._wait(build_id)
             log = self._read_log(build, settle=True)
-        except _AWS_ERRORS as exc:
-            # Without status reads the worker cannot follow the build, so it
-            # stops the build instead of leaving it to run and push.
+        except ImageBuildError:
+            raise
+        except Exception as exc:
             self._stop(build_id)
             raise ImageBuildError(f"lost track of image build {build_id} ({_aws_error(exc)})") from exc
+        except BaseException:
+            self._stop(build_id)
+            raise
         tail = log_tail(log)
         status = build.get("buildStatus")
         if status == "TIMED_OUT":
@@ -807,12 +868,17 @@ class CodeBuildImageBuilder:
         Raises:
             ImageBuildTimeoutError: The build was still running at the time
                 limit, or still queued at the queue limit.
-            BotoCoreError: A status or log read failed (or ClientError).
+            ImageBuildError: CodeBuild does not know the build.
+            BotoCoreError: A status read failed (or ClientError).
         """
         queue_deadline = self._clock() + _QUEUE_TIMEOUT_MINUTES * 60
         run_deadline: float | None = None
         while True:
-            build = self._codebuild.batch_get_builds(ids=[build_id])["builds"][0]
+            builds = self._codebuild.batch_get_builds(ids=[build_id]).get("builds") or []
+            if not builds:
+                self._stop(build_id)
+                raise ImageBuildError(f"CodeBuild does not know image build {build_id}")
+            build = builds[0]
             if build.get("buildComplete"):
                 return build
             now = self._clock()
@@ -825,7 +891,10 @@ class CodeBuildImageBuilder:
                 )
             if run_deadline is not None and now >= run_deadline:
                 self._stop(build_id)
-                log = self._read_log(build)
+                log = ""
+                # A failed log read must not hide the timeout.
+                with contextlib.suppress(*_AWS_ERRORS):
+                    log = self._read_log(build)
                 raise ImageBuildTimeoutError(self._timeout_message(), log=log, log_tail=log_tail(log))
             self._sleep(self._poll)
 
@@ -884,7 +953,7 @@ class CodeBuildImageBuilder:
             for event in page.get("events", []):
                 line = event["message"].rstrip("\n")
                 if line.startswith(_CODEBUILD_LINE):
-                    if found := _CODEBUILD_PHASE.search(line):
+                    if found := _CODEBUILD_PHASE.fullmatch(line):
                         phase = found.group(1)
                 elif phase == _USER_LOG_PHASE:
                     capped.add(self._user_line(line))
@@ -1007,13 +1076,18 @@ class LocalDockerImageBuilder:
             capped = _CappedLog()
             # A thread reads the output while it streams, so the log never
             # holds more than the cap and the pipe never fills.
-            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+            # A new session puts docker and its children in one process group,
+            # so a timeout kills them all and the pipe closes.
+            with subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+            ) as process:
                 reader = threading.Thread(target=_read_capped, args=(process.stdout, capped), daemon=True)
                 reader.start()
                 try:
                     returncode = process.wait(timeout=self._limits.timeout_seconds)
                 except subprocess.TimeoutExpired as exc:
-                    process.kill()
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                     reader.join(_READER_JOIN_SECONDS)
                     log = capped.text()

@@ -13,11 +13,13 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 from core.sandbox import image_build
@@ -31,7 +33,6 @@ from core.sandbox.image_build import (
     ImageBuildTimeoutError,
     ImageTooLargeError,
     LocalDockerImageBuilder,
-    cap_log,
     compute_input_hash,
     log_tail,
 )
@@ -894,25 +895,6 @@ def test_log_tail_keeps_the_last_lines() -> None:
     assert log_tail("a\nb\nc\n", lines=2) == "b\nc"
 
 
-def test_cap_log_keeps_the_head_and_the_tail() -> None:
-    """A log over the limit keeps its first and last lines and marks the cut."""
-    log = "\n".join(f"line {i:03}" for i in range(100))
-
-    capped = cap_log(log, limit=100)
-
-    lines = capped.splitlines()
-    assert lines[0] == "line 000"
-    assert lines[-1] == "line 099"
-    assert any(line.startswith("[... ") and line.endswith(" log lines cut ...]") for line in lines)
-    assert len(capped) <= 100 + 40
-    assert cap_log("short", limit=100) == "short"
-
-
-def test_cap_log_cuts_one_very_long_line() -> None:
-    """A single line longer than the limit cannot pass the cap."""
-    assert len(cap_log("x" * 1000, limit=100)) <= 100
-
-
 def test_local_builder_reports_a_timeout(tmp_path: Path) -> None:
     """A local build over the time limit is killed and fails as a timeout, with its log so far."""
     fake = tmp_path / "docker"
@@ -1171,3 +1153,170 @@ def test_request_refuses_a_build_arg_name_with_a_newline(tmp_path: Path, name: s
     """A build arg name with a newline, also at the end, is refused."""
     with pytest.raises(ImageBuildError, match="build arg name"):
         _hash(_request(_context(tmp_path), build_args={name: "1"}))
+
+
+# CodeBuild's C loader is the closest to CodeBuild's own strict parser.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def test_buildspec_keeps_characters_above_the_bmp_as_valid_yaml(tmp_path: Path) -> None:
+    """An emoji in a build arg and in the Dockerfile path stays valid YAML and keeps its value."""
+    context = _context(tmp_path)
+    (context / "Docker\U0001f600file").write_text("FROM scratch\n")
+    codebuild = FakeCodeBuild([_done()])
+    builder, _ = _builder(codebuild)
+
+    builder.build(_request(context, dockerfile="Docker\U0001f600file", build_args={"A": "hi \U0001f600"}))
+
+    spec = yaml.load(codebuild.started["buildspecOverride"], Loader=_YAML_LOADER)
+    command = spec["phases"]["build"]["commands"][0]
+    assert "--file './Docker\U0001f600file'" in command
+    assert "--build-arg 'A=hi \U0001f600'" in command
+
+
+@pytest.mark.parametrize("text", ["a\x00b", "a\nb", "a\tb", "a\x7fb", "a\x85b", "a\u2028b"])
+@pytest.mark.parametrize("field", ["dockerfile", "build_arg"])
+def test_request_refuses_control_characters(tmp_path: Path, text: str, field: str) -> None:
+    """NUL and other control characters in the Dockerfile path or a build arg value raise ImageBuildError."""
+    fields: dict[str, Any] = {"dockerfile": text} if field == "dockerfile" else {"build_args": {"A": text}}
+
+    with pytest.raises(ImageBuildError, match="holds a control character"):
+        _hash(_request(_context(tmp_path), **fields))
+
+
+def test_codebuild_stops_a_build_that_codebuild_does_not_know(tmp_path: Path) -> None:
+    """An empty builds list raises ImageBuildError and stops the build."""
+    codebuild = FakeCodeBuild([RUNNING])
+    builder, _ = _builder(codebuild)
+    codebuild.batch_get_builds = lambda ids: {"builds": [], "buildsNotFound": ids}  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildError, match="does not know image build proj:1"):
+        builder.build(_request(_context(tmp_path)))
+
+    assert codebuild.stopped == ["proj:1"]
+
+
+@pytest.mark.parametrize("error", [KeyError("builds"), KeyboardInterrupt()])
+def test_codebuild_stops_the_build_on_any_error(tmp_path: Path, error: BaseException) -> None:
+    """Any other error stops the build: a plain error becomes ImageBuildError, an interrupt passes through."""
+    codebuild = FakeCodeBuild([RUNNING])
+    builder, _ = _builder(codebuild)
+
+    def _fail(ids: list[str]) -> dict[str, Any]:
+        """Fail with the test error.
+
+        Args:
+            ids: The build ids.
+
+        Raises:
+            BaseException: Always.
+        """
+        raise error
+
+    codebuild.batch_get_builds = _fail  # type: ignore[method-assign]
+    expected = ImageBuildError if isinstance(error, Exception) else KeyboardInterrupt
+
+    with pytest.raises(expected):
+        builder.build(_request(_context(tmp_path)))
+
+    assert codebuild.stopped == ["proj:1"]
+
+
+def test_codebuild_timeout_survives_a_failed_log_read(tmp_path: Path) -> None:
+    """A log read error at the time limit still gives ImageBuildTimeoutError, with an empty log."""
+    codebuild = FakeCodeBuild([RUNNING])
+    logs = FakeLogs([])
+    limits = BuildLimits(timeout_seconds=600.0, max_size_bytes=LIMITS.max_size_bytes, max_context_bytes=10**9)
+    builder, _ = _builder(codebuild, limits=limits, logs=logs)
+
+    def _fail_logs(**kwargs: Any) -> dict[str, Any]:
+        """Fail like a throttled log read.
+
+        Args:
+            **kwargs: The request.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise _client_error("GetLogEvents")
+
+    logs.get_log_events = _fail_logs  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildTimeoutError, match="10-minute limit") as caught:
+        builder.build(_request(_context(tmp_path)))
+
+    assert caught.value.log == ""
+    assert codebuild.stopped == ["proj:1"]
+
+
+def test_codebuild_phase_marker_must_be_a_whole_codebuild_line(tmp_path: Path) -> None:
+    """A command line that holds "Entering phase FOO" does not end the build phase."""
+    lines = [
+        "[Container] 2026/11/20 10:00:01.000000 Running command docker buildx build --build-arg 'A=x Entering phase FOO'",
+        "#1 output",
+    ]
+    builder, _ = _builder(FakeCodeBuild([_done("FAILED", digest=None)]), lines=lines)
+
+    with pytest.raises(ImageBuildError) as caught:
+        builder.build(_request(_context(tmp_path), build_args={"A": "x Entering phase FOO"}))
+
+    assert caught.value.log == "#1 output"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file")
+def test_input_hash_fails_on_an_unreadable_file(tmp_path: Path) -> None:
+    """A context file that cannot be opened raises ImageBuildError, not OSError."""
+    context = _context(tmp_path)
+    locked = context / "src" / "locked.txt"
+    locked.write_text("x")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ImageBuildError, match="cannot read the build context"):
+            _hash(_request(context))
+    finally:
+        locked.chmod(0o644)
+
+
+def test_zip_context_fails_on_a_file_that_vanished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file deleted between the walk and the zip raises ImageBuildError, not OSError."""
+    context = _context(tmp_path)
+    gone = context / "src" / "gone.txt"
+    gone.write_text("x")
+    walk = image_build._context_entries
+
+    def _walk_then_delete(context_dir: Path, max_bytes: int) -> list[Any]:
+        """Walk the context, then delete one file.
+
+        Args:
+            context_dir: The build context.
+            max_bytes: The size limit.
+
+        Returns:
+            The entries from the real walk.
+        """
+        entries = walk(context_dir, max_bytes)
+        gone.unlink()
+        return entries
+
+    monkeypatch.setattr(image_build, "_context_entries", _walk_then_delete)
+
+    with pytest.raises(ImageBuildError, match="cannot read the build context"):
+        image_build._zip_context(context, io.BytesIO(), 10**9)
+
+
+def test_local_timeout_kills_children_that_hold_the_pipe(tmp_path: Path) -> None:
+    """A timeout kills the whole process group, so a child that holds the pipe cannot delay the error."""
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\necho '#1 building'\nsleep 30 &\nwait\n")
+    fake.chmod(0o755)
+    builder = LocalDockerImageBuilder(
+        docker=os.fspath(fake),
+        limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ImageBuildTimeoutError) as caught:
+        builder.build(_request(_context(tmp_path / "ctx")))
+
+    assert time.monotonic() - started < 4.0
+    assert caught.value.log_tail == "#1 building"
