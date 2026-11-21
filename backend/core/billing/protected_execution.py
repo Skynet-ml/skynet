@@ -10,6 +10,7 @@ from typing import Any
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from ..sandbox.bridge import protected_runtime, protected_unavailable_reason, provider_offered
 from ..sandbox.factory import load_provider
+from ..sandbox.providers.docker import in_repository
 from ..sandbox.snapshots import SnapshotCache
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from ..service_gateway.optimization.blackbox.sandbox_contract import JOB_TAG
@@ -38,6 +39,23 @@ def _immutable(settings: Settings, image: str) -> bool:
     """
     pattern = _LOCAL_IMAGE if settings.local_mode else _IMMUTABLE_IMAGE
     return bool(pattern.fullmatch(image))
+
+
+def trusted_user_image(image: str, repository: str) -> bool:
+    """Check that ``image`` is a user image of the owner, pinned by its registry digest.
+
+    Args:
+        image: Image reference to check.
+        repository: The owner's own image repository in the registry
+            (SKY-888), for example ``registry.example.com/users/alice``.
+
+    Returns:
+        Whether the reference is a strict ``[host/]path@sha256:<64 hex>``
+        whose name is ``repository`` or lies under it. A mutable tag fails,
+        because its content can change after the run is priced. A reference
+        on another host or under another owner's repository fails too.
+    """
+    return in_repository(image, repository)
 
 
 def protected_image(settings: Settings) -> str | None:
@@ -147,6 +165,8 @@ def bind_protected_sandbox(
     parent_hosts: tuple[str, ...] = (),
     image: str | None = None,
     provider: str | None = None,
+    source_image: str | None = None,
+    user_image_repository: str | None = None,
 ) -> dict[str, Any]:
     """Keep provider credentials, fixed resource profiles, and metering in the parent.
 
@@ -161,10 +181,15 @@ def bind_protected_sandbox(
             full lifetime.
         parent_hosts: Package registries the parent's own repository scoring
             box may reach during setup; empty when the run opens no such box.
-        image: The immutable image the run is pinned to; the deployment's
-            current image when None.
+        image: The deployment's own immutable image the run is pinned to;
+            the deployment's current image when None.
         provider: The sandbox provider the run chose; the deployment
             default when None.
+        source_image: The user's image the run starts from (SKY-889), pinned
+            by registry digest, instead of a deployment image. Never set
+            together with ``image``.
+        user_image_repository: The owner's image repository (SKY-888). A
+            ``source_image`` needs it and must lie under it.
 
     Returns:
         Non-secret deployment identity usable in setup evidence; its
@@ -179,7 +204,17 @@ def bind_protected_sandbox(
     # The deployment may drop a provider between the run's submission and its start.
     if not provider_offered(settings, provider):
         raise UnpricedOperationError(f"The sandbox provider {provider!r} is not offered on this deployment.")
-    if image is None:
+    if source_image is not None:
+        # Fail closed: a user image with no owner repository could name
+        # another owner's image, or reuse another owner's copy.
+        if user_image_repository is None:
+            raise UnpricedOperationError("The run's user image needs the owner's image repository.")
+        if image is not None:
+            raise UnpricedOperationError("The run names both a deployment image and a user image.")
+        if not trusted_user_image(source_image, user_image_repository):
+            raise UnpricedOperationError("The run's user image is not pinned by digest in the owner's repository.")
+        image = source_image
+    elif image is None:
         image = protected_image(settings)
     elif not _immutable(settings, image):
         raise UnpricedOperationError("The run's pinned sandbox image is not an immutable reference.")

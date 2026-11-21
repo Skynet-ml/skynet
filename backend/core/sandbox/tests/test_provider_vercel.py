@@ -33,11 +33,11 @@ from core.exceptions import DETERMINISTIC_FAILURE
 from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
-from core.sandbox.errors import SandboxInfraError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError
 from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
 from core.sandbox.pacing import SYSTEM_CLOCK
 from core.sandbox.providers import vercel
-from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_confirmed
+from core.sandbox.providers.vercel import ImageCopyError, VercelEnvironment, box_name, policy_confirmed
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.services import ComposeService, ServicesTooLargeError
 from core.sandbox.telemetry import use_output_sink
@@ -681,6 +681,7 @@ def make_env(
     clock: FakeClock | None = None,
     services: tuple[ComposeService, ...] = (),
     recorder: CallRecorder | None = None,
+    options: dict[str, Any] | None = None,
     **spec_fields: Any,
 ) -> VercelEnvironment:
     """Make a provider wired to the fakes.
@@ -693,13 +694,15 @@ def make_env(
         clock: The fake clock.
         services: The compose services.
         recorder: The run's call recorder, or ``None``.
-        spec_fields: Other spec fields.
+        options: Other provider keyword arguments.
+        spec_fields: Other spec fields; the image defaults to ``python:3.12``.
 
     Returns:
         The provider.
     """
     spec_fields.setdefault("operation_key", "op-1")
-    spec = SandboxSpec(lifetime_seconds=lifetime, image="python:3.12", **spec_fields)
+    spec_fields.setdefault("image", "python:3.12")
+    spec = SandboxSpec(lifetime_seconds=lifetime, **spec_fields)
     budget = SimpleNamespace(budget_id="budget-1", generation=3) if protected else None
 
     def usage_factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
@@ -735,6 +738,7 @@ def make_env(
         clock=clock or FakeClock(),
         services=services,
         recorder=recorder,
+        **(options or {}),
     )
 
 
@@ -3236,3 +3240,370 @@ async def test_a_box_without_a_recorder_starts_no_proxy(client: FakeClient, log:
     assert box.current_session.scripts == []
     assert box.create_calls[-1]["env"] is None
     await env.stop()
+
+
+_USER_IMAGE = "ghcr.io/acme/repo@sha256:" + "c" * 64
+_VCR_IMAGE = "vcr.vercel.com/team/project/repo@sha256:" + "d" * 64
+_OWNER_REPOSITORY = "ghcr.io/acme"
+
+
+class FakeCopier:
+    """Stand in for the copy into Vercel's registry, and log each call."""
+
+    def __init__(self, log: list[str], result: str = _VCR_IMAGE, error: BaseException | None = None) -> None:
+        """Plan the copy's answer.
+
+        Args:
+            log: The shared call log.
+            result: The reference the copy returns.
+            error: An error the copy raises instead, or ``None``.
+        """
+        self.log = log
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, tuple[str, str] | None]] = []
+
+    async def __call__(self, source: str, credentials: tuple[str, str] | None) -> str:
+        """Record the copy, then return the planned reference or raise.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The planned reference.
+        """
+        self.calls.append((source, credentials))
+        self.log.append("copy")
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def fresh_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no kept image copies, so one test's copy never serves another.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(vercel, "_COPIED", {})
+    monkeypatch.setattr(vercel, "_COPYING", {})
+
+
+class HangingCopier(FakeCopier):
+    """Stand in for a copy that never ends until it is cancelled."""
+
+    def __init__(self, log: list[str]) -> None:
+        """Prepare the event that tells the test the copy began.
+
+        Args:
+            log: The shared call log.
+        """
+        super().__init__(log)
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    async def __call__(self, source: str, credentials: tuple[str, str] | None) -> str:
+        """Record the copy, then wait until a cancel.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            Never returns.
+        """
+        self.calls.append((source, credentials))
+        self.log.append("copy")
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.stopped.set()
+        raise AssertionError("unreachable")
+
+
+def _user_env(client: FakeClient, log: list[str], copier: Any, **options: Any) -> VercelEnvironment:
+    """Make a protected provider that starts from the user image.
+
+    Args:
+        client: The fake client.
+        log: The shared call log.
+        copier: The image copier.
+        **options: Other provider keyword arguments.
+
+    Returns:
+        The provider.
+    """
+    options.setdefault("user_image_repository", _OWNER_REPOSITORY)
+    return make_env(client, log, image=None, options={"source_image": _USER_IMAGE, "copy_image": copier, **options})
+
+
+async def test_a_user_image_is_copied_before_the_box_is_reserved_and_created(
+    client: FakeClient, log: list[str]
+) -> None:
+    """Check that the copy runs first, gets the credentials, and the box starts and is priced from the copy."""
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier, pull_credentials=("reader", "secret"))
+    await env.start()
+    assert copier.calls == [(_USER_IMAGE, ("reader", "secret"))]
+    assert log.index("copy") < log.index("reserve") < log.index("create")
+    (created,) = client.create_kwargs
+    assert created["image"] == _VCR_IMAGE
+    assert env.usage.request["image"] == _VCR_IMAGE
+    await env.stop()
+
+
+async def test_a_failed_copy_raises_a_clear_error_and_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a failed copy names the image, hides the copier's message, and reserves nothing."""
+    copier = FakeCopier(log, error=RuntimeError("denied for reader:secret"))
+    env = _user_env(client, log, copier, pull_credentials=("reader", "secret"))
+    with pytest.raises(ImageCopyError, match="Could not copy the image") as raised:
+        await env.start()
+    assert _USER_IMAGE in str(raised.value)
+    assert "secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert isinstance(raised.value, SandboxInfraError)
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+
+
+async def test_a_copy_without_a_digest_reference_is_refused(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that returns a mutable tag never boots."""
+    env = _user_env(client, log, FakeCopier(log, result="vcr.vercel.com/team/project/repo:latest"))
+    with pytest.raises(ImageCopyError, match="not pinned by digest"):
+        await env.start()
+    assert client.create_kwargs == []
+
+
+@pytest.mark.parametrize("image", ["ghcr.io/acme/repo:latest", "ghcr.io/acme/repo", "sha256:" + "c" * 64])
+def test_a_user_image_must_be_pinned_by_a_registry_digest(client: FakeClient, log: list[str], image: str) -> None:
+    """Check that a tag, a bare name or a local id is refused before any call."""
+    with pytest.raises(SandboxSpecError, match="pinned by digest"):
+        make_env(client, log, options={"source_image": image, "copy_image": FakeCopier(log)})
+    assert log == []
+
+
+def test_a_user_image_needs_a_copier(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image with no copier fails at setup with a clear error."""
+    with pytest.raises(SandboxFatalError, match="needs an image copier"):
+        make_env(
+            client,
+            log,
+            image=None,
+            options={"source_image": _USER_IMAGE, "user_image_repository": _OWNER_REPOSITORY},
+        )
+
+
+def test_a_user_image_must_match_the_spec_image(client: FakeClient, log: list[str]) -> None:
+    """Check that a spec that names another image cannot hide which image the box runs."""
+    with pytest.raises(SandboxSpecError, match="other than the user image"):
+        make_env(
+            client,
+            log,
+            options={
+                "source_image": _USER_IMAGE,
+                "copy_image": FakeCopier(log),
+                "user_image_repository": _OWNER_REPOSITORY,
+            },
+        )
+
+
+async def test_a_box_from_a_snapshot_skips_the_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that a snapshot box starts from the snapshot and copies nothing."""
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier)
+    env.snapshot_id = "snap-1"
+    await env.start()
+    assert copier.calls == []
+    (created,) = client.create_kwargs
+    assert created["image"] is None
+    await env.stop()
+
+
+async def test_a_box_without_a_user_image_starts_as_before(client: FakeClient, log: list[str]) -> None:
+    """Check that a box with no user image never copies and starts from the spec image."""
+    env = make_env(client, log)
+    await env.start()
+    assert "copy" not in log
+    (created,) = client.create_kwargs
+    assert created["image"] == "python:3.12"
+    assert env.usage.request["image"] == "python:3.12"
+    await env.stop()
+
+
+async def test_two_boxes_from_one_user_image_copy_it_once(client: FakeClient, log: list[str]) -> None:
+    """Check that a second box reuses the first copy, so the copy runs once for each digest."""
+    copier = FakeCopier(log)
+    first = _user_env(client, log, copier)
+    await first.start()
+    await first.stop()
+    second = _user_env(client, log, copier)
+    await second.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE, _VCR_IMAGE]
+    await second.stop()
+
+
+async def test_boxes_that_start_together_wait_for_one_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that concurrent starts from one user image share one copy."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def copier(source: str, credentials: tuple[str, str] | None) -> str:
+        """Count the copy and wait until the test releases it.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        del credentials
+        calls.append(source)
+        started.set()
+        await release.wait()
+        return _VCR_IMAGE
+
+    envs = [_user_env(client, log, copier) for _ in range(3)]
+    starts = [asyncio.ensure_future(env.start()) for env in envs]
+    await started.wait()
+    release.set()
+    await asyncio.gather(*starts)
+    assert calls == [_USER_IMAGE]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE] * 3
+    assert vercel._COPYING == {}
+    for env in envs:
+        await env.stop()
+
+
+async def test_a_failed_copy_is_not_kept(client: FakeClient, log: list[str]) -> None:
+    """Check that a box after a failed copy tries the copy again."""
+    with pytest.raises(ImageCopyError):
+        await _user_env(client, log, FakeCopier(log, error=RuntimeError("busy"))).start()
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier)
+    await env.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    await env.stop()
+
+
+async def test_a_copy_past_its_timeout_fails_and_creates_no_box(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a copy that runs past ``COPY_TIMEOUT`` raises a clear error and reserves nothing."""
+    monkeypatch.setattr(vercel, "COPY_TIMEOUT", 0.05)
+    with pytest.raises(ImageCopyError, match="TimeoutError"):
+        await _user_env(client, log, HangingCopier(log)).start()
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPIED == {}
+
+
+async def test_a_cancel_during_the_copy_stops_it_and_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel during the copy reaches the caller, ends the copy, and keeps nothing."""
+    copier = HangingCopier(log)
+    start = asyncio.ensure_future(_user_env(client, log, copier).start())
+    await copier.started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    await asyncio.sleep(0)
+    await asyncio.wait_for(copier.stopped.wait(), 1)
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPYING == {}
+    assert vercel._COPIED == {}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"pull_credentials": ("other", "token")},
+        {"pull_credentials": None},
+        {"pull_credentials": ("reader", "secret"), "user_image_repository": "ghcr.io/acme/repo"},
+    ],
+)
+async def test_another_owner_or_other_credentials_never_reuse_a_copy(
+    client: FakeClient, log: list[str], options: dict[str, Any]
+) -> None:
+    """Check that the same digest with other credentials, no credentials or another owner copies again."""
+    first = FakeCopier(log)
+    env = _user_env(client, log, first, pull_credentials=("reader", "secret"))
+    await env.start()
+    await env.stop()
+    second = FakeCopier(log)
+    other = _user_env(client, log, second, **options)
+    await other.start()
+    assert first.calls == [(_USER_IMAGE, ("reader", "secret"))]
+    assert second.calls == [(_USER_IMAGE, options["pull_credentials"])]
+    await other.stop()
+
+
+def test_the_copy_cache_never_holds_the_secret(client: FakeClient, log: list[str]) -> None:
+    """Check that the cache key holds a keyed hash of the credentials, never the password."""
+    tag = vercel._credentials_tag(("reader", "secret"))
+    assert "secret" not in tag
+    assert len(tag) == 64
+    assert tag != vercel._credentials_tag(("reader", "other"))
+    assert vercel._credentials_tag(None) == ""
+
+
+def test_a_user_image_needs_the_owners_repository(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image with no owner repository fails closed before any call."""
+    with pytest.raises(SandboxSpecError, match="needs the owner's image repository"):
+        make_env(client, log, image=None, options={"source_image": _USER_IMAGE, "copy_image": FakeCopier(log)})
+    assert log == []
+
+
+def test_a_user_image_outside_the_owners_repository_is_refused(client: FakeClient, log: list[str]) -> None:
+    """Check that a user image under another owner's repository is refused before any call."""
+    with pytest.raises(SandboxSpecError, match="not in the owner's image repository"):
+        _user_env(client, log, FakeCopier(log), user_image_repository="ghcr.io/other")
+    assert log == []
+
+
+async def test_a_cancel_of_one_waiter_keeps_the_copy_for_the_other(client: FakeClient, log: list[str]) -> None:
+    """Check that a second box still gets the copy after the first box's start is cancelled."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def copier(source: str, credentials: tuple[str, str] | None) -> str:
+        """Count the copy and wait until the test releases it.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        del credentials
+        calls.append(source)
+        started.set()
+        await release.wait()
+        return _VCR_IMAGE
+
+    first = asyncio.ensure_future(_user_env(client, log, copier).start())
+    await started.wait()
+    second_env = _user_env(client, log, copier)
+    second = asyncio.ensure_future(second_env.start())
+    (copy,) = vercel._COPYING.values()
+    for _ in range(100):
+        if copy.waiters == 2:
+            break
+        await asyncio.sleep(0)
+    assert copy.waiters == 2
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    await second
+    assert calls == [_USER_IMAGE]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE]
+    assert vercel._COPYING == {}
+    await second_env.stop()

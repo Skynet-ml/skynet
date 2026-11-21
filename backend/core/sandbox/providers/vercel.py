@@ -30,6 +30,10 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   unrecorded, and code in the box can write to the log. Rows carry
   ``egress_record.VERCEL_SOURCE``. Plain HTTP is not routed, so it goes out
   unrecorded too.
+- A box can start from a user image in a neutral OCI registry (SKY-889).
+  Vercel Sandbox starts only from its own registry, so the box first copies
+  the image there through an injected copier, and then starts from the
+  digest that the copier returns.
 """
 
 from __future__ import annotations
@@ -39,9 +43,14 @@ import base64
 import codecs
 import contextlib
 import dataclasses
+import functools
+import hashlib
+import hmac
+import json
 import logging
 import math
 import posixpath
+import secrets
 import shlex
 import subprocess
 import time
@@ -81,6 +90,7 @@ from ..snapshots import (
     snapshot_hold_retention,
 )
 from ..telemetry import BoxTimings, current_output_sink
+from .docker import digest_image, in_repository
 
 try:
     import httpx2
@@ -130,6 +140,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CREATE_TIMEOUT = 120.0
+# A user image can be up to 20 GB (SKY-737), so its copy gets a long limit.
+COPY_TIMEOUT = 3600.0
 KILL_GRACE = 30.0
 KILL_AFTER_MAX = 18_000.0
 CANCEL_GRACE = 10.0
@@ -210,6 +222,92 @@ _PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
 ClientFactory = Callable[[ResponseCapture | None], Any]
 UsageFactory = Callable[..., Any]
+# Copies a source image, with optional (username, password) pull credentials,
+# into Vercel's registry and returns the copy's ``name@sha256:<digest>``.
+ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
+
+
+class ImageCopyError(SandboxInfraError):
+    """Report that a user image did not reach Vercel's registry."""
+
+
+@dataclasses.dataclass
+class _Copy:
+    """One running image copy and the number of boxes that wait for it."""
+
+    task: asyncio.Task[str]
+    waiters: int = 0
+
+
+# The digest pins the content, so each process copies one source image into
+# one Vercel project once for each owner and credentials, and later boxes
+# reuse that copy. The key holds the owner's repository and a keyed hash of
+# the pull credentials, so a box that did not prove the same read access never
+# reuses a private copy. A failed or cancelled copy is not kept. Tasks are
+# kept for each event loop, because a task cannot be awaited from another loop.
+_CopyKey = tuple[str, str, str, str, str]
+_CREDENTIALS_KEY = secrets.token_bytes(32)
+_COPIED: dict[_CopyKey, str] = {}
+_COPYING: dict[tuple[_CopyKey, asyncio.AbstractEventLoop], _Copy] = {}
+
+
+async def _copy_image_once(copy_image: ImageCopier, source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+    """Copy one user image into Vercel's registry.
+
+    Args:
+        copy_image: The image copier.
+        source_image: The user image, pinned by digest.
+        pull_credentials: The (username, password) that read the source image.
+
+    Returns:
+        The copy's reference, pinned by digest.
+
+    Raises:
+        ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+            returned no digest reference.
+    """
+    try:
+        async with asyncio.timeout(COPY_TIMEOUT):
+            copied = await copy_image(source_image, pull_credentials)
+    except Exception as error:
+        # Only the type: a copier's message can echo the pull credentials.
+        raise ImageCopyError(
+            f"Could not copy the image {source_image} into Vercel's registry: {type(error).__name__}."
+        ) from None
+    if not digest_image(copied):
+        raise ImageCopyError(f"The copy of {source_image} in Vercel's registry is not pinned by digest.")
+    return copied
+
+
+def _credentials_tag(pull_credentials: tuple[str, str] | None) -> str:
+    """Return a keyed hash of the pull credentials, never the secret itself.
+
+    Args:
+        pull_credentials: The (username, password), or ``None``.
+
+    Returns:
+        An HMAC-SHA256 hex digest under a random key of this process, or an
+        empty string for no credentials.
+    """
+    if pull_credentials is None:
+        return ""
+    message = json.dumps(list(pull_credentials)).encode()
+    return hmac.new(_CREDENTIALS_KEY, message, hashlib.sha256).hexdigest()
+
+
+def _finish_copy(key: _CopyKey, loop: asyncio.AbstractEventLoop, copy: _Copy, task: asyncio.Task[str]) -> None:
+    """Keep a successful copy, and drop this copy from the running copies.
+
+    Args:
+        key: The copy's cache key.
+        loop: The event loop of the copy task.
+        copy: The running copy that ended.
+        task: The copy task, which is done.
+    """
+    if _COPYING.get((key, loop)) is copy:
+        del _COPYING[(key, loop)]
+    if not task.cancelled() and task.exception() is None:
+        _COPIED[key] = task.result()
 
 
 def _error_types(*names: str) -> tuple[type[BaseException], ...]:
@@ -505,6 +603,10 @@ class VercelEnvironment(SandboxEnvironment):
         snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
         services: Sequence[ComposeService] = (),
         recorder: CallRecorder | None = None,
+        source_image: str | None = None,
+        pull_credentials: tuple[str, str] | None = None,
+        copy_image: ImageCopier | None = None,
+        user_image_repository: str | None = None,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -523,11 +625,35 @@ class VercelEnvironment(SandboxEnvironment):
                 their size; ``start_services`` starts them.
             recorder: Writes each request of the in-box egress proxy into the
                 run record, or ``None`` for no proxy.
+            source_image: A user image in a neutral OCI registry, pinned by
+                digest. The box copies it into Vercel's registry before it
+                starts. ``None`` starts the box from the spec or default image.
+            pull_credentials: The (username, password) that read the source
+                image, or ``None`` for a public image.
+            copy_image: Copies the source image into Vercel's registry.
+            user_image_repository: The owner's image repository (SKY-888).
+                A source image needs it and must lie under it.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
-                operation key, or the services do not fit the largest box.
+                operation key, the services do not fit the largest box, or
+                the user image is not pinned by digest, has no owner
+                repository, lies outside it, or differs from the spec image.
+            SandboxFatalError: A user image comes with no image copier.
         """
+        if source_image is not None:
+            if not digest_image(source_image):
+                raise SandboxSpecError("A user image must be pinned by digest: name@sha256:<64 hex>.")
+            # Fail closed: the copy cache is keyed by owner, so a user image
+            # with no owner could reuse another owner's copy.
+            if user_image_repository is None:
+                raise SandboxSpecError("A user image needs the owner's image repository.")
+            if not in_repository(source_image, user_image_repository):
+                raise SandboxSpecError("The user image is not in the owner's image repository.")
+            if spec.image not in (None, source_image):
+                raise SandboxSpecError("The spec names an image other than the user image.")
+            if copy_image is None:
+                raise SandboxFatalError("The Vercel sandbox needs an image copier to start from a user image.")
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Vercel sandbox needs an operation key.")
@@ -572,6 +698,11 @@ class VercelEnvironment(SandboxEnvironment):
         self._egress_log: str | None = None
         self._egress_rows = 0
         self._proxy_env: dict[str, str] = {}
+        self._source_image = source_image
+        self._pull_credentials = pull_credentials
+        self._copy_image = copy_image
+        self._user_image_repository = user_image_repository
+        self._copied_image: str | None = None
 
     @property
     def usage(self) -> Any | None:
@@ -686,9 +817,56 @@ class VercelEnvironment(SandboxEnvironment):
         """Return the image of the box.
 
         Returns:
-            The spec image, or the configured default.
+            The copy of the user image, else the spec image, else the
+            configured default.
         """
-        return self.spec.image or settings.vercel_sandbox_image
+        return self._copied_image or self.spec.image or settings.vercel_sandbox_image
+
+    async def _copy_source_image(self) -> str:
+        """Return the copy of the user image in Vercel's registry, and copy it once.
+
+        Boxes of the same owner and credentials that start at the same time
+        wait for one copy. Each waiter is shielded: a cancel of one waiter
+        does not stop the copy while another box still waits for it. The copy
+        is cancelled only when its last waiter leaves.
+
+        Returns:
+            The copy's reference, pinned by digest.
+
+        Raises:
+            ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+                returned no digest reference.
+        """
+        assert self._source_image is not None
+        assert self._copy_image is not None
+        assert self._user_image_repository is not None
+        key = (
+            self._source_image,
+            self._user_image_repository,
+            _credentials_tag(self._pull_credentials),
+            str(settings.vercel_team_id),
+            str(settings.vercel_project_id),
+        )
+        copied = _COPIED.get(key)
+        if copied is not None:
+            return copied
+        loop = asyncio.get_running_loop()
+        copy = _COPYING.get((key, loop))
+        if copy is None:
+            task = loop.create_task(_copy_image_once(self._copy_image, self._source_image, self._pull_credentials))
+            copy = _Copy(task)
+            _COPYING[(key, loop)] = copy
+            task.add_done_callback(functools.partial(_finish_copy, key, loop, copy))
+        copy.waiters += 1
+        try:
+            return await asyncio.shield(copy.task)
+        finally:
+            copy.waiters -= 1
+            if copy.waiters == 0 and not copy.task.done():
+                # A later box starts a new copy instead of joining this one.
+                if _COPYING.get((key, loop)) is copy:
+                    del _COPYING[(key, loop)]
+                copy.task.cancel()
 
     def _sdk_policy(self, policy: NetworkPolicy, *, update: bool) -> Any | None:
         """Build the SDK network policy of one Skynet policy.
@@ -864,7 +1042,11 @@ class VercelEnvironment(SandboxEnvironment):
             logger.warning("Could not record the egress requests of %s: %s", self.name, type(error).__name__)
 
     async def _start(self) -> None:
-        """Make the client, then wait for capacity, reserve and create the box."""
+        """Copy a user image, make the client, then wait for capacity, reserve and create the box."""
+        # A snapshot already holds the image's files, so its box needs no copy.
+        if self._source_image is not None and self.snapshot_id is None and self._copied_image is None:
+            with self.timings.phase("copy"):
+                self._copied_image = await self._copy_source_image()
         with self.timings.phase("create"):
             if self._client is None:
                 self._client = self._client_factory(self._capture)

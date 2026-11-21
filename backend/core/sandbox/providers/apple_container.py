@@ -8,7 +8,10 @@ Adapted from Harbor 0.25.0 (Apache-2.0), apple_container.py. Changes:
 - No retries. The Skynet error policy retries at the trial level, so a failed
   start raises once.
 - No image build. Harbor builds the task image with ``container build``;
-  this provider boots an image that the spec or the caller names.
+  this provider boots an image that the spec or the caller names. A user
+  image from a neutral registry is pulled like any other (SKY-889). With
+  pull credentials, the box first runs ``container registry login``, which
+  keeps them in the macOS Keychain, as a manual login does.
 - No host mounts. Harbor mounts log directories into the container; files
   here move only through ``upload_files`` and ``download_file``.
 - The container carries a job label for ``stop_job_sandboxes``, and its idle
@@ -48,6 +51,7 @@ from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecErro
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..resources import ResourceMode, SandboxSpec
+from .docker import registry_host
 
 logger = logging.getLogger(__name__)
 
@@ -460,7 +464,14 @@ class AppleContainerEnvironment(SandboxEnvironment):
     poll_seconds: ClassVar[float] = 0.5
     late_run_seconds: ClassVar[float] = 15.0
 
-    def __init__(self, spec: SandboxSpec, *, image: str | None = None, container_bin: str | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        image: str | None = None,
+        container_bin: str | None = None,
+        pull_credentials: tuple[str, str] | None = None,
+    ) -> None:
         """Check the spec and choose the image.
 
         Args:
@@ -469,6 +480,8 @@ class AppleContainerEnvironment(SandboxEnvironment):
                 be able to pull it; no image is built.
             container_bin: The ``container`` CLI path; the default is
                 ``default_container_bin``.
+            pull_credentials: The (username, password) that read the image's
+                registry, or ``None`` for a public image or an earlier login.
 
         Raises:
             SandboxSpecError: The spec breaks a provider rule or names no image.
@@ -478,6 +491,7 @@ class AppleContainerEnvironment(SandboxEnvironment):
         if not self._image:
             raise SandboxSpecError("The Apple container sandbox needs an image in the spec or the provider.")
         self._bin = container_bin or self.default_container_bin
+        self._pull_credentials = pull_credentials
         self._name: str | None = None
         self._stopped = False
 
@@ -545,7 +559,8 @@ class AppleContainerEnvironment(SandboxEnvironment):
         Raises:
             RuntimeError: The sandbox was already started.
             SandboxFatalError: The container system service is not running.
-            SandboxInfraError: The CLI could not pull the image or refused the container.
+            SandboxInfraError: The CLI could not log in to the registry, could
+                not pull the image, or refused the container.
             StartTimeoutError: No command ran within ``ready_seconds``.
             asyncio.CancelledError: The task was cancelled. A cancel during the
                 pull kills it at once. A cancel during ``run`` waits for the CLI
@@ -553,6 +568,18 @@ class AppleContainerEnvironment(SandboxEnvironment):
         """
         if self._name is not None:
             raise RuntimeError("The Apple container sandbox was already started.")
+        if self._pull_credentials is not None:
+            username, password = self._pull_credentials
+            # The password goes over stdin, so ``ps`` never shows it. A login
+            # creates no container, so a cancel can kill it at once.
+            login = await _cli(
+                self._bin,
+                ["registry", "login", "--username", username, "--password-stdin", registry_host(str(self._image))],
+                stdin=password.encode(),
+                kill_on_cancel=True,
+            )
+            if login.returncode != 0:
+                raise _service_error(f"The container CLI could not log in to pull the image {self._image}", login)
         # A pull creates no container, so a cancel can kill it at once.
         pulled = await _cli(
             self._bin,
