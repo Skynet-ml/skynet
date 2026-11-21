@@ -67,7 +67,7 @@ import type { ColumnRole } from "@/shared/ui/column-role-row";
 import { SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 
 import { emptyModelConfig } from "../constants";
-import { restoreSavedLimit } from "../lib/budget-limit";
+import { limitCleared as isLimitCleared, restoreSavedLimit } from "../lib/budget-limit";
 import { cloneToSlices } from "../lib/clone-payload";
 import {
   aggregateTokenSource,
@@ -182,6 +182,8 @@ export interface WizardV2Shell extends WizardV2Context {
   retryHostedCatalog: () => void;
   /** The sandbox providers of the server in `runSource`. */
   sandboxProviders: SandboxProviders;
+  /** The user cleared a capped run's spending limit (`limitCleared`). */
+  limitCleared: boolean;
 }
 
 type HostedCatalogState = "ready" | "loading" | "failed";
@@ -525,13 +527,25 @@ export function WizardV2Provider({
   // that, Guided's flow must not flash the step in and out.
   const optimizerBlocked =
     Boolean(mode) && computeStepIssue(state, "optimizer", optimizerCatalog) !== null;
-  const steps = useMemo(() => wizardSteps(state, optimizerBlocked), [state, optimizerBlocked]);
+  const baseSteps = useMemo(() => wizardSteps(state, optimizerBlocked), [state, optimizerBlocked]);
+  // A cleared limit fails the hardening Start and the run with `budget.invalid`,
+  // so Guided keeps its Optimizer step, where the limit is set, until it is fixed (SKY-450).
+  const [limitSeen, setLimitSeen] = useState(false);
+  if (!limitSeen && budget.maxCostCents != null) setLimitSeen(true);
+  const limitCleared = isLimitCleared(
+    { uncapped: budget.budgetUncapped, limit: budget.maxCostCents },
+    limitSeen,
+    baseSteps,
+    state.furthestStep,
+  );
+  const holdOptimizer = optimizerBlocked || limitCleared;
+  const steps = useMemo(() => wizardSteps(state, holdOptimizer), [state, holdOptimizer]);
   // Until the account's level loads it reads as the Guided placeholder, and
   // applying that would move a reopened Standard setup off the Optimizer step
   // Guided skips; the real level arriving next never moves it back.
   // Reads the blocked flag of the render the level changed in.
   useEffect(() => {
-    if (levelLoaded) dispatch({ type: "level", level, optimizerBlocked });
+    if (levelLoaded) dispatch({ type: "level", level, optimizerBlocked: holdOptimizer });
   }, [level, levelLoaded]);
 
   // The tracker drops repeats, so a re-render or a level change on the same
@@ -1235,6 +1249,7 @@ export function WizardV2Provider({
     hostedBlock,
     retryHostedCatalog,
     sandboxProviders,
+    limitCleared,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
