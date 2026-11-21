@@ -51,6 +51,7 @@ from core.storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     GepaCheckpointModel,
+    ImageBuildModel,
     JobModel,
     OptimizationShareGrantModel,
     ProgressEventModel,
@@ -465,6 +466,114 @@ def test_requeue_for_rerun_missing_id_returns_false(store: SQLiteJobStore) -> No
         store: Disposable job store.
     """
     assert store.requeue_for_rerun("ghost") is False
+
+
+def test_requeue_for_rerun_clears_the_pinned_box_images(store: SQLiteJobStore) -> None:
+    """A from-scratch rerun drops the box images, so it builds or pins them again (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.create_job("rr1")
+    store.pin_box_images("rr1", {"run": {"image": "registry/run@sha256:" + "a" * 64}})
+    store.update_job("rr1", status="failed")
+
+    assert store.requeue_for_rerun("rr1") is True
+
+    assert store.get_job("rr1")["box_images"] is None
+
+
+def test_pin_box_images_keeps_the_first_pin(store: SQLiteJobStore) -> None:
+    """A second start of the same run gets the images the first start pinned (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    first = {"run": {"image": "registry/run@sha256:" + "a" * 64}}
+    second = {"run": {"image": "registry/run@sha256:" + "b" * 64}}
+    store.create_job("pin1")
+
+    assert store.pin_box_images("pin1", first) == first
+    assert store.pin_box_images("pin1", second) == first
+    assert store.get_job("pin1")["box_images"] == first
+
+
+def test_pin_box_images_for_a_missing_run_raises(store: SQLiteJobStore) -> None:
+    """Pinning images for an unknown run raises KeyError.
+
+    Args:
+        store: Disposable job store.
+    """
+    with pytest.raises(KeyError):
+        store.pin_box_images("ghost", {"run": {"image": "x"}})
+
+
+def test_save_image_build_stores_the_row(store: SQLiteJobStore) -> None:
+    """A saved build returns its row id, and the row holds every field (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    build_id = store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image="registry/run@sha256:" + "a" * 64, size_bytes=42, log="ok"
+    )
+
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, build_id)
+        assert row is not None
+        assert (row.username, row.input_hash, row.builder, row.image, row.size_bytes, row.log) == (
+            "alice",
+            "sha256:in",
+            "codebuild",
+            "registry/run@sha256:" + "a" * 64,
+            42,
+            "ok",
+        )
+    finally:
+        session.close()
+
+
+def test_find_image_build_returns_the_newest_finished_build(store: SQLiteJobStore) -> None:
+    """The lookup skips a failed build, another user and another hash, and picks the newest (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    old_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image="img-old", size_bytes=1, log="")
+    new_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image="img-new", size_bytes=2, log="")
+    failed_id = store.save_image_build("alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="x")
+    store.save_image_build("bob", "sha256:in", builder="codebuild", image="img-bob", size_bytes=3, log="")
+    store.save_image_build("alice", "sha256:other", builder="codebuild", image="img-other", size_bytes=4, log="")
+    # Explicit times, because rows saved in one test can share a clock tick.
+    session = store._get_session()
+    try:
+        for row_id, day in ((old_id, 1), (new_id, 2), (failed_id, 3)):
+            row = session.get(ImageBuildModel, row_id)
+            assert row is not None
+            row.created_at = datetime(2026, 1, day, tzinfo=UTC)
+        session.commit()
+    finally:
+        session.close()
+
+    assert store.find_image_build("alice", "sha256:in") == {
+        "id": new_id,
+        "image": "img-new",
+        "builder": "codebuild",
+        "size_bytes": 2,
+    }
+    assert store.find_image_build("carol", "sha256:in") is None
+
+
+def test_find_image_build_ignores_only_failed_builds(store: SQLiteJobStore) -> None:
+    """A hash with only a failed build has no reusable image (SKY-737).
+
+    Args:
+        store: Disposable job store.
+    """
+    store.save_image_build("alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="fail")
+
+    assert store.find_image_build("alice", "sha256:in") is None
 
 
 def test_get_jobs_status_by_ids_returns_map(store: SQLiteJobStore) -> None:

@@ -5887,7 +5887,12 @@ class _FakeBudget:
         return paid.value
 
 
-_TRUSTED_PROBE = "0 755 symbolic link\n0 755 directory\n0 755 regular file\n0 755 directory\n"
+# What the probe prints in ``python:3.12-slim``, where python3 links to python3.12.
+_FOLDERS = "0 755 directory /\n0 755 directory /usr\n0 755 directory /usr/local\n0 755 directory /usr/local/bin\n"
+_TRUSTED_PROBE = (
+    f"{_FOLDERS}0 777 symbolic link /usr/local/bin/python3\nlink python3.12\n"
+    f"{_FOLDERS}0 755 regular file /usr/local/bin/python3.12\n"
+)
 
 
 class _CheckSession:
@@ -6149,17 +6154,82 @@ def test_a_reused_build_with_no_registry_and_no_local_docker_builds_again(monkey
     assert len(builder.requests) == 2
 
 
+def _probe(*hops: tuple[str, str, str | None], folders: dict[str, str] | None = None) -> str:
+    """Write the listing the probe prints for a chain of hops.
+
+    Args:
+        hops: Each hop as ``(path, "mode type", link target or None)``.
+        folders: Folder modes that differ from 755, by folder path.
+
+    Returns:
+        The probe's standard output.
+    """
+    lines: list[str] = []
+    for path, entry, link in hops:
+        parts = path.split("/")[1:]
+        for depth in range(len(parts)):
+            folder = "/" + "/".join(parts[:depth])
+            lines.append(f"0 {(folders or {}).get(folder, '755 directory')} {folder}")
+        lines.append(f"0 {entry} {path}")
+        if link is not None:
+            lines.append(f"link {link}")
+    return "\n".join(lines) + "\n"
+
+
+_LINK = ("/usr/local/bin/python3", "777 symbolic link", "python3.12")
+_FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
+
+
 @pytest.mark.parametrize(
     "probe",
     [
         "",
-        "0 755 regular file\n0 755 directory\n",
-        "1000 755 regular file\n0 755 directory\n0 755 regular file\n0 755 directory\n",
-        "0 755 symbolic link\n0 775 directory\n0 755 regular file\n0 755 directory\n",
-        "0 755 symbolic link\n0 755 directory\n0 757 regular file\n0 755 directory\n",
-        "0 755 symbolic link\n0 755 directory\n0 755 regular file\n1000 755 directory\n",
+        _FOLDERS,
+        _TRUSTED_PROBE.replace("0 755 regular file", "1000 755 regular file"),
+        _probe(_LINK, _FILE, folders={"/usr/local": "775 directory"}),
+        _probe(_LINK, _FILE, folders={"/usr": "757 directory"}),
+        _probe(_LINK, _FILE, folders={"/": "1777 directory"}),
+        _probe(_LINK, ("/usr/local/bin/python3.12", "757 regular file", None)),
+        _probe(_LINK, ("/usr/local/bin/python3.12", "750 regular file", None)),
+        _TRUSTED_PROBE.replace("0 755 directory /usr/local\n", "1000 755 directory /usr/local\n"),
+        _probe(
+            ("/usr/local/bin/python3", "777 symbolic link", "/opt/py/python3"),
+            ("/opt/py/python3", "777 symbolic link", "/usr/bin/python3.12"),
+            ("/usr/bin/python3.12", "755 regular file", None),
+            folders={"/opt/py": "777 directory"},
+        ),
+        _probe(
+            ("/usr/local/bin/python3", "777 symbolic link", "/opt/py/python3"),
+            ("/opt/py/python3", "777 symbolic link", "/usr/bin/python3.12"),
+            ("/usr/bin/python3.12", "755 regular file", None),
+            folders={"/opt": "777 directory"},
+        ),
+        _probe(("/usr/local/bin/python3", "777 symbolic link", "../lib/python3"), _FILE),
+        _probe(("/usr/local/bin/python3", "755 regular file", None), folders={"/usr/local/bin": "755 symbolic link"}),
+        _probe(("/usr/local/bin/python3", "755 directory", None)),
+        _probe(_LINK),
+        _probe(_LINK, ("/usr/local/bin/python3.12", "755 regular file", None), _FILE),
+        _probe(*[("/usr/local/bin/python3", "777 symbolic link", "python3")] * 40),
     ],
-    ids=["missing", "short", "user-owned", "group-writable-folder", "other-writable-target", "user-owned-folder"],
+    ids=[
+        "missing",
+        "short",
+        "user-owned-file",
+        "group-writable-folder",
+        "writable-ancestor-folder",
+        "sticky-writable-root",
+        "other-writable-file",
+        "not-executable-by-others",
+        "user-owned-ancestor-folder",
+        "middle-link-in-a-writable-folder",
+        "middle-link-under-a-writable-ancestor",
+        "dot-dot-target",
+        "linked-folder",
+        "not-a-file",
+        "chain-cut-short",
+        "extra-lines",
+        "link-loop-hits-the-cap",
+    ],
 )
 def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
     """A ``[run]`` image whose base interpreter the box user could replace stops the run (SKY-737).
@@ -6179,35 +6249,59 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
     assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
 
 
-def test_a_trusted_python_link_with_mode_777_passes() -> None:
-    """A root-owned link passes with its own 777 mode, since its folder guards it (SKY-737)."""
-    listing = "0 777 symbolic link\n0 755 directory\n0 755 regular file\n0 755 directory\n"
-    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=listing))
-    assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=listing))
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _TRUSTED_PROBE,
+        _probe(("/usr/local/bin/python3", "755 regular file", None)),
+        _probe(
+            ("/usr/local/bin/python3", "777 symbolic link", "/opt/py/python3"),
+            ("/opt/py/python3", "777 symbolic link", "/usr/bin/python3.12"),
+            ("/usr/bin/python3.12", "755 regular file", None),
+        ),
+    ],
+    ids=["python-image-layout", "plain-file", "two-absolute-links"],
+)
+def test_a_root_owned_python_chain_passes(probe: str) -> None:
+    """A root-owned chain under root-owned folders passes; a failed probe never does (SKY-737).
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
+    assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
 
 
-def test_the_trusted_python_probe_reads_a_real_tree(tmp_path: Path) -> None:
-    """The probe prints owner, mode and type for the path, its target and both folders (SKY-737).
+def test_the_trusted_python_probe_walks_a_real_link_chain(tmp_path: Path) -> None:
+    """The probe lists every folder from ``/`` and every hop of a two-link chain, then stops (SKY-737).
 
     Args:
         tmp_path: Pytest temporary folder.
     """
     if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
         pytest.skip("this stat has no -c option, unlike the box images")
-    target = tmp_path / "real" / "python3.12"
-    target.parent.mkdir()
+    root = tmp_path.resolve()
+    (root / "bin").mkdir()
+    (root / "real").mkdir()
+    target = root / "real" / "python3.12"
     target.write_text("#!/bin/sh\n")
     target.chmod(0o755)
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "bin" / "python3").symlink_to(target)
-    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(
-        shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(tmp_path / "bin" / "python3"))
-    )
+    (root / "real" / "python3").symlink_to("python3.12")
+    (root / "bin" / "python3").symlink_to(root / "real" / "python3")
+    start = str(root / "bin" / "python3")
+    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(start))
+
     done = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
-    lines = done.stdout.splitlines()
+
     assert done.returncode == 0, done.stderr
-    assert [line.split(" ", 2)[2] for line in lines] == ["symbolic link", "directory", "regular file", "directory"]
-    assert {line.split(" ", 1)[0] for line in lines} == {str(os.getuid())}
+    names = [line.split(" ", 3)[3] if not line.startswith("link ") else line for line in done.stdout.splitlines()]
+    hops = [start, str(root / "real" / "python3"), str(target)]
+    expected: list[str] = []
+    for hop, link in zip(hops, [f"link {root / 'real' / 'python3'}", "link python3.12", None], strict=True):
+        parts = hop.split("/")[1:]
+        expected += ["/" + "/".join(parts[:depth]) for depth in range(len(parts))] + [hop]
+        expected += [link] if link else []
+    assert names == expected
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:

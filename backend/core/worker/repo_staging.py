@@ -1168,16 +1168,32 @@ DOCKERFILE_UNSUPPORTED = (
 
 # The candidate box hashes the protected files with BASE_PYTHON and never
 # falls back to PATH in a user image, so the image must hold it where the box
-# user cannot replace it. ``stat`` prints, for the path, its folder, its
-# resolved target and the target's folder: owner uid, octal mode and file type.
+# user cannot replace it. A writable folder anywhere above a path, or a link
+# on the way to the file, would let the box user swap it after the check. The
+# probe walks the link chain with plain ``readlink``, as ``namei`` and
+# ``readlink -f`` hide the hops. For each hop it prints ``stat`` (owner uid,
+# octal mode, type, name) of ``/``, every folder down to the hop and the hop
+# itself, then ``link <target>`` for a link. ``_trusted_python`` judges it.
+_MAX_LINK_HOPS = 40
 _TRUSTED_PYTHON_PROBE = (
-    f'p={shlex.quote(BASE_PYTHON)}; t=$(readlink -f "$p") && [ -f "$t" ] && [ -x "$t" ]'
-    ' && stat -c "%u %a %F" "$p" "${p%/*}" "$t" "${t%/*}"'
+    f"f='%u %a %F %n'; p={shlex.quote(BASE_PYTHON)}; n=0\n"
+    f"while [ $n -lt {_MAX_LINK_HOPS} ]; do n=$((n+1))\n"
+    '  stat -c "$f" / || exit 1\n'
+    "  a=; r=${p#/}\n"
+    '  while [ "${r#*/}" != "$r" ]; do a=$a/${r%%/*}; r=${r#*/}; stat -c "$f" "$a" || exit 1; done\n'
+    '  stat -c "$f" "$p" || exit 1\n'
+    '  [ -h "$p" ] || exit 0\n'
+    '  l=$(readlink "$p") || exit 1\n'
+    "  printf 'link %s\\n' \"$l\"\n"
+    "  case $l in /*) p=$l;; *) p=${p%/*}/$l;; esac\n"
+    "done\n"
+    "exit 1"
 )
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
-    " The image must hold it as an executable file or a link to one. It, its target and both folders must be"
-    " owned by root and not writable by group or others."
+    " The image must hold it as an executable regular file, or as a chain of links to one. That file, each"
+    " link and every folder from / down to each of them must be owned by root and not writable by group or"
+    " others. A folder on the way must not be a link."
 )
 
 
@@ -1518,24 +1534,62 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
 def _trusted_python(probe: Any) -> bool:
     """Tell whether the image's base interpreter is out of the box user's reach.
 
+    The listing must follow the exact walk that the probe makes from
+    ``BASE_PYTHON``, so a missing tool, a short listing or any odd line refuses.
+
     Args:
         probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
 
     Returns:
-        True when the path, its folder, its target and the target's folder are
-        all owned by root, and none but a link is writable by group or others.
+        True when every folder from ``/`` down to each hop is a root-owned
+        folder that group and others cannot write, each link is root-owned,
+        and the chain ends within the hop cap at a root-owned executable
+        regular file that group and others cannot write.
     """
-    lines = probe.stdout.strip().splitlines() if probe.ok else []
-    if len(lines) != 4:
+    if not probe.ok:
         return False
-    for line in lines:
-        parts = line.split(" ", 2)
-        if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]):
+    lines = probe.stdout.splitlines()[::-1]
+    path = BASE_PYTHON
+    for _ in range(_MAX_LINK_HOPS):
+        parts = path.split("/")[1:]
+        # The probe and this walk join paths the same way only with no "." or "..".
+        if not path.startswith("/") or any(part in ("", ".", "..") for part in parts):
             return False
+        for depth in range(len(parts)):
+            entry = _stat_entry(lines.pop() if lines else "", "/" + "/".join(parts[:depth]))
+            if entry is None or entry[1] != "directory" or entry[0] & 0o022:
+                return False
+        entry = _stat_entry(lines.pop() if lines else "", path)
+        if entry is None:
+            return False
+        mode, kind = entry
+        if kind == "regular file":
+            return not lines and not mode & 0o022 and bool(mode & 0o001)
         # A link's own mode is always 777 and grants nothing; its folder guards it.
-        if parts[2] != "symbolic link" and int(parts[1], 8) & 0o022:
+        if kind != "symbolic link" or not lines or not lines[-1].startswith("link "):
             return False
-    return True
+        target = lines.pop().removeprefix("link ")
+        path = target if target.startswith("/") else posixpath.join(posixpath.dirname(path), target)
+    return False
+
+
+def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
+    """Read one ``stat -c '%u %a %F %n'`` line for the path the walk expects.
+
+    Args:
+        line: The probe's line.
+        name: The path the line must name.
+
+    Returns:
+        The octal mode and the file type, or None when the line names another
+        path, is malformed, or the owner is not root.
+    """
+    if not line.endswith(" " + name):
+        return None
+    parts = line[: -len(name) - 1].split(" ", 2)
+    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]):
+        return None
+    return int(parts[1], 8), parts[2]
 
 
 def _check_report(stdout: str) -> dict[str, Any] | None:
