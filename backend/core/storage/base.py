@@ -34,6 +34,7 @@ class JobRecord(TypedDict, total=False):
     attempts: int
     code_version: str | None
     sandbox_image: str | None
+    box_images: dict[str, Any] | None
     progress_count: int
     log_count: int
     stored_bytes: int
