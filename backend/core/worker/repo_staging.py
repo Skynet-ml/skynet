@@ -1160,6 +1160,8 @@ def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway:
 _CHECK_ROLES = {"run": "candidate", "metric": "metric"}
 # ``ascent check --image`` ends in about 24 seconds; the rest covers the box start.
 _CHECK_TIMEOUT_SECONDS = 120.0
+# ``docker image inspect`` reads only the local image store.
+_INSPECT_TIMEOUT_SECONDS = 10.0
 _CHECK_LIFETIME_SECONDS = 600.0
 _CHECK_OUTPUT_CHARS = 4_000
 USER_IMAGES_UNSUPPORTED = (
@@ -1177,11 +1179,6 @@ ROOT_BOX_USER = (
     "The [run] image '{image}' runs the box as root (uid 0), or `id -u` failed in it. A root box user could replace the Python and the"
     " standard library that {app} checks the protected files with. Set a non-root USER in the image."
 )
-UNTRUSTED_STDLIB = (
-    "The [run] image '{image}' has a Python standard library that the box user can change: {detail}. {app}"
-    " hashes the protected files with it. Every folder of the standard library, and every folder from / down to"
-    " it, must be owned by root and not writable by group or others, with no link that leaves it."
-)
 
 
 # The candidate box hashes the protected files with BASE_PYTHON and never
@@ -1195,6 +1192,12 @@ UNTRUSTED_STDLIB = (
 # A newline in a name or target could forge a listing line, so the probe stops
 # at any byte outside printable ASCII. ``$(...)`` drops trailing newlines, so
 # the ``x`` keeps them and the probe sees the target the kernel follows.
+# The hash scripts run with ``-I -S``, so they import only the standard
+# library and load libpython. Under the prefix above the file's last ``bin``
+# folder, the probe prints ``stat`` of ``lib`` and of each ``python3*`` and
+# ``libpython*`` entry in it. It fails when any file or folder below them,
+# except ``site-packages`` and ``dist-packages``, is not root's or is group or
+# other writable, or when a link entry resolves outside ``lib``.
 _MAX_LINK_HOPS = 40
 _TRUSTED_PYTHON_PROBE = (
     f"export LC_ALL=C; f='%u %a %F %n'; p={shlex.quote(BASE_PYTHON)}; n=0\n"
@@ -1204,7 +1207,22 @@ _TRUSTED_PYTHON_PROBE = (
     "  a=; r=${p#/}\n"
     '  while [ "${r#*/}" != "$r" ]; do a=$a/${r%%/*}; r=${r#*/}; stat -c "$f" "$a" || exit 1; done\n'
     '  stat -c "$f" "$p" || exit 1\n'
-    '  [ -h "$p" ] || exit 0\n'
+    '  if [ ! -h "$p" ]; then\n'
+    "    case $p in */bin/*) ;; *) exit 1;; esac\n"
+    "    d=${p%/bin/*}/lib\n"
+    '    stat -c "$f" "$d" || exit 1\n'
+    '    for e in "$d"/python3* "$d"/libpython*; do\n'
+    '      [ -e "$e" ] || [ -h "$e" ] || continue\n'
+    "      case $e in *[![:print:]]*) exit 1;; esac\n"
+    '      stat -c "$f" "$e" || exit 1\n'
+    '      if [ -h "$e" ]; then r=$(readlink -f "$e") || exit 1\n'
+    '        case $r in *[![:print:]]*) exit 1;; "$d"/*) ;; *) exit 1;; esac; fi\n'
+    '      o=$(find -L "$e" \\( -path "$e/site-packages" -o -path "$e/dist-packages" \\) -prune'
+    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 \\) -print) || exit 1\n"
+    '      [ -z "$o" ] || exit 1\n'
+    "    done\n"
+    "    exit 0\n"
+    "  fi\n"
     '  l=$(readlink "$p" && echo x) || exit 1\n'
     "  l=${l%?x}\n"
     "  case $l in *[![:print:]]*|'') exit 1;; esac\n"
@@ -1216,50 +1234,15 @@ _TRUSTED_PYTHON_PROBE = (
 # An absolute path of printable ASCII only, as the probe allows.
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
+_STDLIB_ENTRY = re.compile(r"python3[^/]*|libpython[^/]*")
 _BOX_UID_PROBE = "id -u"
-# The candidate box hashes with ``BASE_PYTHON -I -S``, which loads only the
-# standard library, so a box user who can change a stdlib file can change the
-# hashes. The probe runs only after the interpreter passed its own probe. It
-# walks the stdlib and platstdlib folders of that interpreter with ``lstat``
-# and refuses a folder on the way that is a link, not root-owned or writable
-# by group or others; an entry that is not root-owned or (except a link) is
-# writable by group or others; and a link that leads out of the checked
-# folders. Third-party packages are not part of ``-S``, so their folders are
-# skipped. It prints ``ok`` last, or one line that names the first problem.
-_STDLIB_SCRIPT = """
-import os, stat, sys, sysconfig
-roots = sorted({os.path.normpath(sysconfig.get_path(k)) for k in ("stdlib", "platstdlib")})
-def bad(path, why):
-    print("bad " + ascii(path) + " " + why); sys.exit(0)
-def inside(path):
-    return any(path == r or path.startswith(r + "/") for r in roots)
-for root in roots:
-    if not root.startswith("/") or not root.isprintable():
-        bad(root, "is not a plain absolute path")
-    walk = "/"
-    for part in root.split("/")[1:]:
-        walk = os.path.join(walk, part)
-        st = os.lstat(walk)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
-            bad(walk, "is a link, not root-owned or writable by group or others")
-    for top, dirs, files in os.walk(root, onerror=lambda e: bad(e.filename, "cannot be read")):
-        dirs[:] = [d for d in dirs if d not in ("site-packages", "dist-packages")]
-        for name in dirs + files:
-            path = os.path.join(top, name)
-            st = os.lstat(path)
-            link = stat.S_ISLNK(st.st_mode)
-            if st.st_uid != 0 or (not link and st.st_mode & 0o022):
-                bad(path, "is not root-owned or writable by group or others")
-            if link and not inside(os.path.realpath(path)):
-                bad(path, "is a link that leads out of the standard library")
-print("ok")
-"""
-_STDLIB_PROBE = f"{shlex.quote(BASE_PYTHON)} -I -S -c {shlex.quote(_STDLIB_SCRIPT)}"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one. That file, each"
     " link and every folder from / down to each of them must be owned by root and not writable by group or"
-    " others. A folder on the way must not be a link."
+    " others. A folder on the way must not be a link. Its standard library (lib/python3.X) and the"
+    " libpython files next to it must also be owned by root and not writable by group or others,"
+    " except site-packages."
 )
 
 
@@ -1399,6 +1382,8 @@ def prepare_box_images(
         user_images = {role: _user_image(registry, username, role, record["image"]) for role, record in images.items()}
     else:
         # A runtime that ignores the spec's image would run Skynet's image in its place, with no sign.
+        # A runtime that sets ``accepts_user_images`` must not run the box user as uid 0: the
+        # trusted-Python probe checks only for root ownership, so it cannot guard against a root box user.
         if not getattr(runtime, "accepts_user_images", False):
             raise BoxImageError(USER_IMAGES_UNSUPPORTED)
         images = {}
@@ -1574,7 +1559,7 @@ def _local_image_exists(image: str) -> bool:
     """
     try:
         result = subprocess.run(
-            ["docker", "image", "inspect", image], capture_output=True, timeout=_CHECK_TIMEOUT_SECONDS, check=False
+            ["docker", "image", "inspect", image], capture_output=True, timeout=_INSPECT_TIMEOUT_SECONDS, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -1619,7 +1604,6 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
             for name, command in (
                 ("python", _TRUSTED_PYTHON_PROBE),
                 ("uid", _BOX_UID_PROBE),
-                ("stdlib", _STDLIB_PROBE),
             ):
                 probes[name] = session.run(command, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
     finally:
@@ -1645,11 +1629,11 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
 
 
 def _check_run_probes(image: str, probes: Mapping[str, Any]) -> None:
-    """Refuse a run image whose interpreter, box user or standard library fails its probe.
+    """Refuse a run image whose interpreter, standard library or box user fails its probe.
 
     Args:
         image: The box image reference.
-        probes: The results of the interpreter, uid and stdlib probes, by name.
+        probes: The results of the interpreter and uid probes, by name.
 
     Raises:
         BoxImageError: When a probe fails or prints an unexpected result.
@@ -1660,11 +1644,6 @@ def _check_run_probes(image: str, probes: Mapping[str, Any]) -> None:
     # Only a clean non-zero number passes: a failed or odd probe refuses too.
     if not uid.ok or not uid.stdout.strip().isdigit() or int(uid.stdout.strip()) == 0:
         raise BoxImageError(ROOT_BOX_USER.format(image=image, app=APP_NAME))
-    stdlib = probes["stdlib"]
-    last = stdlib.stdout.strip().rsplit("\n", 1)[-1] if stdlib.stdout.strip() else ""
-    if not stdlib.ok or last != "ok":
-        detail = last.removeprefix("bad ") if last.startswith("bad ") else "the check did not finish"
-        raise BoxImageError(UNTRUSTED_STDLIB.format(image=image, detail=detail[:_CHECK_OUTPUT_CHARS], app=APP_NAME))
 
 
 def _trusted_python(probe: Any) -> bool:
@@ -1679,8 +1658,9 @@ def _trusted_python(probe: Any) -> bool:
     Returns:
         True when every folder from ``/`` down to each hop is a root-owned
         folder that group and others cannot write, each link is root-owned,
-        and the chain ends within the hop cap at a root-owned executable
-        regular file that group and others cannot write.
+        the chain ends within the hop cap at a root-owned executable regular
+        file that group and others cannot write, and its standard library
+        passes :func:`_trusted_stdlib`.
     """
     if not probe.ok:
         return False
@@ -1701,13 +1681,49 @@ def _trusted_python(probe: Any) -> bool:
             return False
         mode, kind = entry
         if kind == "regular file":
-            return not lines and not mode & 0o022 and bool(mode & 0o001)
+            return not mode & 0o022 and bool(mode & 0o001) and _trusted_stdlib(lines, path)
         # A link's own mode is always 777 and grants nothing; its folder guards it.
         if kind != "symbolic link" or not lines or not lines[-1].startswith("link "):
             return False
         target = lines.pop().removeprefix("link ")
         path = target if target.startswith("/") else posixpath.join(posixpath.dirname(path), target)
     return False
+
+
+def _trusted_stdlib(lines: list[str], python: str) -> bool:
+    """Tell whether the listing's rest shows a standard library out of the box user's reach.
+
+    The probe exits 0 only when ``find`` found nothing writable below the
+    entries, so this checks the entries that it listed.
+
+    Args:
+        lines: The probe's lines after the interpreter, last line first.
+        python: The interpreter file that the link chain ends at.
+
+    Returns:
+        True when ``lib`` under the interpreter's prefix is a root-owned folder
+        that group and others cannot write, and every line after it is a
+        root-owned ``python3*`` or ``libpython*`` entry of it, with at least
+        one ``python3.X`` folder. Group and others must not write any entry
+        but a link, whose target the probe checks.
+    """
+    prefix, bin_folder, _ = python.rpartition("/bin/")
+    lib = prefix + "/lib"
+    entry = _stat_entry(lines.pop() if lines else "", lib)
+    if not bin_folder or entry is None or entry[1] != "directory" or entry[0] & 0o022:
+        return False
+    stdlib = False
+    while lines:
+        line = lines.pop()
+        base = line.rsplit("/", 1)[-1]
+        entry = _stat_entry(line, f"{lib}/{base}")
+        if entry is None or not _STDLIB_ENTRY.fullmatch(base) or not _PRINTABLE_PATH.fullmatch(f"{lib}/{base}"):
+            return False
+        mode, kind = entry
+        if kind != "symbolic link" and mode & 0o022:
+            return False
+        stdlib = stdlib or (kind == "directory" and re.fullmatch(r"python3\.\d+", base) is not None)
+    return stdlib
 
 
 def _stat_entry(line: str, name: str) -> tuple[int, str] | None:

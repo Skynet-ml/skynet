@@ -10,10 +10,8 @@ import os
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
-import sysconfig
 import tarfile
 import threading
 from pathlib import Path
@@ -5918,28 +5916,52 @@ class _FakeBudget:
 
 # What the probe prints in ``python:3.12-slim``, where python3 links to python3.12.
 _FOLDERS = "0 755 directory /\n0 755 directory /usr\n0 755 directory /usr/local\n0 755 directory /usr/local/bin\n"
+_PYTHON_FILE = "0 755 regular file /usr/local/bin/python3.12"
+_STDLIB_ENTRIES = {
+    "libpython3.12.so": "777 symbolic link",
+    "libpython3.12.so.1.0": "755 regular file",
+    "libpython3.so": "755 regular file",
+    "python3.12": "755 directory",
+}
+
+
+def _stdlib(
+    prefix: str = "/usr/local", entries: dict[str, str | None] | None = None, lib: str = "755 directory"
+) -> str:
+    """Write the listing the probe prints for the standard library under a prefix.
+
+    Args:
+        prefix: The interpreter's prefix.
+        entries: Entry modes that differ from ``python:3.12-slim``, by name; None drops the entry.
+        lib: The mode and type of the prefix's ``lib`` folder.
+
+    Returns:
+        The listing lines, each ending in a newline.
+    """
+    listed = {**_STDLIB_ENTRIES, **(entries or {})}
+    lines = [f"0 {lib} {prefix}/lib"] + [f"0 {mode} {prefix}/lib/{name}" for name, mode in listed.items() if mode]
+    return "\n".join(lines) + "\n"
+
+
 _TRUSTED_PROBE = (
-    f"{_FOLDERS}0 777 symbolic link /usr/local/bin/python3\nlink python3.12\n"
-    f"{_FOLDERS}0 755 regular file /usr/local/bin/python3.12\n"
+    f"{_FOLDERS}0 777 symbolic link /usr/local/bin/python3\nlink python3.12\n{_FOLDERS}{_PYTHON_FILE}\n{_stdlib()}"
 )
 
 
 class _CheckSession:
     """Answer ``ascent check --image`` with a fixed report, and each run probe with a fixed output."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid: str = "1000\n", stdlib: str = "ok\n") -> None:
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid: str = "1000\n") -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
             uid: What ``id -u`` prints.
-            stdlib: What the stdlib probe prints.
         """
         self.ok = ok
         self.probe = probe
         self.uid = uid
-        self.stdlib = stdlib
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
@@ -5955,8 +5977,6 @@ class _CheckSession:
         self.commands.append(command)
         if command == repo_staging._BOX_UID_PROBE:
             return CommandResult(exit_code=0, stdout=self.uid)
-        if command == repo_staging._STDLIB_PROBE:
-            return CommandResult(exit_code=0, stdout=self.stdlib)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -5973,21 +5993,17 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(
-        self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid: str = "1000\n", stdlib: str = "ok\n"
-    ) -> None:
+    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid: str = "1000\n") -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
             uid: What ``id -u`` prints in each check box.
-            stdlib: What the stdlib probe prints in each check box.
         """
         self.check_ok = check_ok
         self.probe = probe
         self.uid = uid
-        self.stdlib = stdlib
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -6003,7 +6019,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid, self.stdlib))
+            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6083,7 +6099,6 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
             "ascent check --image --role candidate",
             repo_staging._TRUSTED_PYTHON_PROBE,
             repo_staging._BOX_UID_PROBE,
-            repo_staging._STDLIB_PROBE,
         ],
         ["ascent check --image --role metric"],
     ]
@@ -6212,6 +6227,9 @@ def test_a_reused_build_with_no_registry_and_no_local_docker_builds_again(monkey
 def _probe(*hops: tuple[str, str, str | None], folders: dict[str, str] | None = None) -> str:
     """Write the listing the probe prints for a chain of hops.
 
+    A chain that ends at a regular file in a ``bin`` folder gets the
+    ``python:3.12-slim`` standard library under that file's prefix.
+
     Args:
         hops: Each hop as ``(path, "mode type", link target or None)``.
         folders: Folder modes that differ from 755, by folder path.
@@ -6228,7 +6246,9 @@ def _probe(*hops: tuple[str, str, str | None], folders: dict[str, str] | None = 
         lines.append(f"0 {entry} {path}")
         if link is not None:
             lines.append(f"link {link}")
-    return "\n".join(lines) + "\n"
+    path, entry, _ = hops[-1] if hops else ("", "", None)
+    stdlib = _stdlib(path.rpartition("/bin/")[0]) if entry.endswith("regular file") and "/bin/" in path else ""
+    return "\n".join(lines) + "\n" + stdlib
 
 
 _LINK = ("/usr/local/bin/python3", "777 symbolic link", "python3.12")
@@ -6240,7 +6260,7 @@ _FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
     [
         "",
         _FOLDERS,
-        _TRUSTED_PROBE.replace("0 755 regular file", "1000 755 regular file"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "1000 755 regular file /usr/local/bin/python3.12"),
         _probe(_LINK, _FILE, folders={"/usr/local": "775 directory"}),
         _probe(_LINK, _FILE, folders={"/usr": "757 directory"}),
         _probe(_LINK, _FILE, folders={"/": "1777 directory"}),
@@ -6268,9 +6288,25 @@ _FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
         _TRUSTED_PROBE.replace("link python3.12", "link python3.12\x01"),
         _TRUSTED_PROBE.replace("\n", "\x0b"),
         _TRUSTED_PROBE.replace("link python3.12\n", "link python3.12\x1c"),
-        _TRUSTED_PROBE.replace("0 755 regular file", "0 755 regular file extra"),
-        _TRUSTED_PROBE.replace("0 755 regular file", "0 755 socket"),
-        _TRUSTED_PROBE.replace("0 755 regular file", "00 755 regular file"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, f"{_PYTHON_FILE} extra"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "0 755 socket /usr/local/bin/python3.12"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "00 755 regular file /usr/local/bin/python3.12"),
+        _TRUSTED_PROBE.replace(_stdlib(), ""),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(entries={"python3.12": None})),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(entries={"python3.12": "775 directory"})),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(entries={"python3.12": "777 symbolic link"})),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(entries={"libpython3.12.so.1.0": "757 regular file"})),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(lib="757 directory")),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(lib="777 symbolic link")),
+        _TRUSTED_PROBE.replace(
+            "0 755 directory /usr/local/lib/python3.12", "1000 755 directory /usr/local/lib/python3.12"
+        ),
+        _TRUSTED_PROBE.replace(_stdlib(), _stdlib(entries={"pkgconfig": "755 directory"})),
+        _TRUSTED_PROBE + "0 755 directory /opt/lib/python3.12\n",
+        _probe(
+            ("/usr/local/bin/python3", "777 symbolic link", "/opt/python3"), ("/opt/python3", "755 regular file", None)
+        )
+        + _stdlib("/opt"),
     ],
     ids=[
         "missing",
@@ -6296,6 +6332,17 @@ _FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
         "unknown-file-type",
         "special-file",
         "malformed-uid",
+        "no-stdlib-listing",
+        "missing-stdlib-folder",
+        "writable-stdlib-folder",
+        "linked-stdlib-folder",
+        "writable-libpython",
+        "writable-lib-folder",
+        "linked-lib-folder",
+        "user-owned-stdlib-folder",
+        "unknown-lib-entry",
+        "stdlib-entry-outside-the-prefix",
+        "interpreter-outside-a-bin-folder",
     ],
 )
 def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
@@ -6330,7 +6377,10 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
     ids=["python-image-layout", "plain-file", "two-absolute-links"],
 )
 def test_a_root_owned_python_chain_passes(probe: str) -> None:
-    """A root-owned chain under root-owned folders passes; a failed probe never does (SKY-737).
+    """A root-owned chain and standard library under root-owned folders pass; a failed probe never does (SKY-737).
+
+    The probe exits 1 when ``find`` sees a writable file below the standard
+    library, so only its exit code tells that case apart.
 
     Args:
         probe: What the trusted interpreter probe prints.
@@ -6339,36 +6389,123 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
     assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
 
 
+def _shell_probe(start: Path) -> str:
+    """Point the probe at a test interpreter that the test's own user owns.
+
+    Args:
+        start: The interpreter path the probe starts at.
+
+    Returns:
+        The probe, with ``find`` taking the test's user in place of root.
+    """
+    if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("this stat has no -c option, unlike the box images")
+    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(start)))
+    return probe.replace("! -user 0", f"! -user {os.getuid()}")
+
+
+def _python_layout(root: Path) -> Path:
+    """Make a ``python:3.12-slim`` shaped interpreter and standard library under a folder.
+
+    Args:
+        root: The folder that becomes the prefix.
+
+    Returns:
+        The interpreter file.
+    """
+    stdlib = root / "lib" / "python3.12"
+    for folder in (root / "bin", root / "lib", stdlib, stdlib / "json", stdlib / "site-packages"):
+        folder.mkdir()
+        folder.chmod(0o755)
+    for path in (stdlib / "hashlib.py", stdlib / "json" / "__init__.py", root / "lib" / "libpython3.12.so.1.0"):
+        path.write_text("x\n")
+        path.chmod(0o644)
+    (root / "lib" / "libpython3.12.so").symlink_to("libpython3.12.so.1.0")
+    python = root / "bin" / "python3.12"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    return python
+
+
 def test_the_trusted_python_probe_walks_a_real_link_chain(tmp_path: Path) -> None:
-    """The probe lists every folder from ``/`` and every hop of a two-link chain, then stops (SKY-737).
+    """The probe lists every folder from ``/``, every hop of a two-link chain and the standard library (SKY-737).
 
     Args:
         tmp_path: Pytest temporary folder.
     """
-    if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
-        pytest.skip("this stat has no -c option, unlike the box images")
     root = tmp_path.resolve()
-    (root / "bin").mkdir()
+    target = _python_layout(root)
     (root / "real").mkdir()
-    target = root / "real" / "python3.12"
-    target.write_text("#!/bin/sh\n")
-    target.chmod(0o755)
-    (root / "real" / "python3").symlink_to("python3.12")
+    (root / "real" / "python3").symlink_to(target)
     (root / "bin" / "python3").symlink_to(root / "real" / "python3")
-    start = str(root / "bin" / "python3")
-    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(start))
+    start = root / "bin" / "python3"
 
-    done = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
+    done = subprocess.run(["/bin/sh", "-c", _shell_probe(start)], capture_output=True, text=True, check=False)
 
     assert done.returncode == 0, done.stderr
     names = [line.split(" ", 3)[3] if not line.startswith("link ") else line for line in done.stdout.splitlines()]
-    hops = [start, str(root / "real" / "python3"), str(target)]
+    hops = [str(start), str(root / "real" / "python3"), str(target)]
     expected: list[str] = []
-    for hop, link in zip(hops, [f"link {root / 'real' / 'python3'}", "link python3.12", None], strict=True):
+    for hop, link in zip(hops, [f"link {root / 'real' / 'python3'}", f"link {target}", None], strict=True):
         parts = hop.split("/")[1:]
         expected += ["/" + "/".join(parts[:depth]) for depth in range(len(parts))] + [hop]
         expected += [link] if link else []
+    lib = root / "lib"
+    expected += [str(lib), str(lib / "python3.12"), str(lib / "libpython3.12.so"), str(lib / "libpython3.12.so.1.0")]
     assert names == expected
+
+
+@pytest.mark.parametrize(
+    ("change", "trusted"),
+    [
+        (None, True),
+        ("lib/python3.12/site-packages", True),
+        ("lib/python3.12/hashlib.py", False),
+        ("lib/python3.12/json", False),
+        ("lib/libpython3.12.so.1.0", False),
+    ],
+    ids=[
+        "python-image-layout",
+        "writable-site-packages",
+        "writable-stdlib-file",
+        "writable-stdlib-folder",
+        "writable-libpython",
+    ],
+)
+def test_the_trusted_python_probe_fails_on_a_writable_standard_library(
+    tmp_path: Path, change: str | None, trusted: bool
+) -> None:
+    """A stdlib file, folder or libpython that others can write fails the probe; ``site-packages`` does not (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        change: The path under the prefix that becomes writable by others.
+        trusted: Whether the probe still passes.
+    """
+    root = tmp_path.resolve()
+    python = _python_layout(root)
+    if change is not None:
+        (root / change).chmod((root / change).stat().st_mode | 0o002)
+
+    done = subprocess.run(["/bin/sh", "-c", _shell_probe(python)], capture_output=True, text=True, check=False)
+
+    assert (done.returncode == 0) is trusted, done.stderr
+
+
+def test_the_trusted_python_probe_fails_on_a_libpython_link_out_of_lib(tmp_path: Path) -> None:
+    """A libpython link that resolves outside ``lib`` fails the probe (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    python = _python_layout(root)
+    (tmp_path / "elsewhere.so").write_text("x\n")
+    (root / "lib" / "libpython3.so").symlink_to(tmp_path / "elsewhere.so")
+
+    done = subprocess.run(["/bin/sh", "-c", _shell_probe(python)], capture_output=True, text=True, check=False)
+
+    assert done.returncode == 1
 
 
 @pytest.mark.parametrize("target", ["python3.12\n0 755 regular file /usr/bin/python3", "python3.12\n", "py\x01"])
@@ -6379,16 +6516,13 @@ def test_the_trusted_python_probe_stops_at_a_link_target_with_a_control_byte(tmp
         tmp_path: Pytest temporary folder.
         target: The link target.
     """
-    if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
-        pytest.skip("this stat has no -c option, unlike the box images")
     root = tmp_path.resolve()
     (root / "python3.12").write_text("#!/bin/sh\n")
     (root / "python3").symlink_to(target)
-    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(
-        shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(root / "python3"))
-    )
 
-    done = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
+    done = subprocess.run(
+        ["/bin/sh", "-c", _shell_probe(root / "python3")], capture_output=True, text=True, check=False
+    )
 
     assert done.returncode == 1
     assert "link " not in done.stdout
@@ -6730,132 +6864,6 @@ def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.Monke
     finally:
         staged.cleanup()
     assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
-
-
-@pytest.mark.parametrize(
-    "stdlib",
-    ["bad '/usr/local/lib/python3.12/os.py' is not root-owned or writable by group or others\n", "", "ok\nextra\n"],
-)
-def test_a_run_image_with_a_writable_stdlib_is_refused(monkeypatch: pytest.MonkeyPatch, stdlib: str) -> None:
-    """A stdlib that the box user can change, or a stdlib probe that does not finish, refuses the image (SKY-891).
-
-    Args:
-        monkeypatch: Pytest monkeypatch.
-        stdlib: What the stdlib probe prints.
-    """
-    _, staged = _stage_with(_BOX_TREE, monkeypatch)
-    runtime = _ImageRuntime(stdlib=stdlib)
-    try:
-        with pytest.raises(repo_staging.BoxImageError, match="standard library that the box user can change"):
-            _prepare(staged, runtime, registry=_FakeRegistry(set()))
-    finally:
-        staged.cleanup()
-    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
-
-
-def _run_stdlib_script(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: Path) -> str:
-    """Run the stdlib probe's script in this process on a fake standard library.
-
-    Every entry reports uid 0, and every folder above ``root`` reports a
-    root-owned ``755`` folder, so the result depends only on the modes and
-    links under ``root``.
-
-    Args:
-        monkeypatch: Pytest monkeypatch.
-        capsys: Pytest output capture.
-        root: The fake standard library.
-
-    Returns:
-        What the script printed.
-    """
-    real_lstat = os.lstat
-
-    def lstat(path: Any) -> os.stat_result:
-        """Report root ownership, and a plain folder for each folder above ``root``."""
-        found = real_lstat(path)
-        name = os.fspath(path)
-        mode = found.st_mode if name == str(root) or name.startswith(f"{root}/") else stat.S_IFDIR | 0o755
-        return os.stat_result((mode, found.st_ino, found.st_dev, found.st_nlink, 0, 0, found.st_size, 0, 0, 0))
-
-    monkeypatch.setattr(os, "lstat", lstat)
-    monkeypatch.setattr(sysconfig, "get_path", lambda key: str(root))
-    try:
-        exec(repo_staging._STDLIB_SCRIPT, {})
-    except SystemExit:
-        pass
-    finally:
-        monkeypatch.undo()
-    return capsys.readouterr().out
-
-
-def _fake_stdlib(tmp_path: Path) -> Path:
-    """Make a small standard library that the probe accepts.
-
-    Args:
-        tmp_path: Pytest temporary folder.
-
-    Returns:
-        Its root folder.
-    """
-    root = tmp_path.resolve() / "lib" / "python3.12"
-    (root / "encodings").mkdir(parents=True)
-    (root / "site-packages").mkdir()
-    for name in ("os.py", "encodings/__init__.py"):
-        (root / name).write_text("")
-    for path in (root, root / "encodings", root / "site-packages"):
-        path.chmod(0o755)
-    for name in ("os.py", "encodings/__init__.py"):
-        (root / name).chmod(0o644)
-    (root / "os2.py").symlink_to("os.py")
-    return root
-
-
-def test_the_stdlib_probe_accepts_a_root_owned_stdlib(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A stdlib with no writable entry passes, and a writable file in site-packages does not count (SKY-891).
-
-    Args:
-        tmp_path: Pytest temporary folder.
-        monkeypatch: Pytest monkeypatch.
-        capsys: Pytest output capture.
-    """
-    root = _fake_stdlib(tmp_path)
-    (root / "site-packages" / "user.py").write_text("")
-    (root / "site-packages" / "user.py").chmod(0o666)
-
-    assert _run_stdlib_script(monkeypatch, capsys, root) == "ok\n"
-
-
-@pytest.mark.parametrize("change", ["file", "folder", "link"])
-def test_the_stdlib_probe_refuses_a_stdlib_the_box_user_can_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], change: str
-) -> None:
-    """A group or other writable file or folder, or a link out of the stdlib, fails the probe (SKY-891).
-
-    Args:
-        tmp_path: Pytest temporary folder.
-        monkeypatch: Pytest monkeypatch.
-        capsys: Pytest output capture.
-        change: What the fake stdlib gets wrong.
-    """
-    root = _fake_stdlib(tmp_path)
-    if change == "file":
-        (root / "encodings" / "__init__.py").chmod(0o666)
-        name = root / "encodings" / "__init__.py"
-    elif change == "folder":
-        (root / "encodings").chmod(0o777)
-        name = root / "encodings"
-    else:
-        (tmp_path / "outside").mkdir()
-        (root / "json").symlink_to(tmp_path.resolve() / "outside")
-        name = root / "json"
-
-    out = _run_stdlib_script(monkeypatch, capsys, root)
-    (root / "encodings").chmod(0o755)
-
-    assert out.startswith(f"bad {str(name)!a} ")
-    assert "ok" not in out.splitlines()
 
 
 def test_a_cloud_deployment_builds_dockerfiles_on_codebuild(monkeypatch: pytest.MonkeyPatch) -> None:
