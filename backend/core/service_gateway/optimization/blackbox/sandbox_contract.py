@@ -79,7 +79,7 @@ class SandboxSpec:
     # The box's GPU type, such as ``a100``, from a ``gpu:<type>`` grant. Only the Modal
     # provider starts such a box; every other runtime refuses the spec (SKY-804).
     gpu: str | None = None
-    # The user image of this box (SKY-737). A runtime that cannot start it
+    # The user image of this box (SKY-891). A runtime that cannot start it
     # refuses the spec, so a box never runs Skynet's image in its place.
     user_image: UserImage | None = None
 

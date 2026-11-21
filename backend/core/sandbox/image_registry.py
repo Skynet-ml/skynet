@@ -261,16 +261,18 @@ def image_owner(username: str) -> str:
     return "u" + hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
 
 
-def image_registry(config: Any = settings) -> EcrRegistry | None:
+def image_registry(config: Any = settings, *, pull: bool = True) -> EcrRegistry | None:
     """Return the user image registry of this deployment (SKY-891).
 
     Args:
         config: The app settings.
+        pull: Whether the caller needs pull credentials. A caller that only
+            deletes images uses the worker's own ECR client, so it needs no pull role.
 
     Returns:
         An ECR registry with the worker's AWS credentials when the repository
-        prefix and the pull role are set; ``None`` otherwise, for example in
-        local mode, where local Docker keeps the images.
+        prefix is set and, when ``pull`` is true, the pull role too; ``None``
+        otherwise, for example in local mode, where local Docker keeps the images.
 
     Raises:
         ImageRegistryError: The settings are set but boto3 is missing, or the
@@ -278,7 +280,7 @@ def image_registry(config: Any = settings) -> EcrRegistry | None:
     """
     prefix = config.user_images_repository_prefix_uri
     role = config.image_pull_role_arn
-    if not prefix or not role:
+    if not prefix or (pull and not role):
         return None
     if boto3 is None:
         raise ImageRegistryError("the user image registry needs boto3")
@@ -520,9 +522,11 @@ class EcrRegistry:
             The user name, password, server and expiry of the token.
 
         Raises:
-            ImageRegistryError: The owner is invalid, or ECR returns no token
-                or a token in an unknown form.
+            ImageRegistryError: The registry has no pull role, the owner is
+                invalid, or ECR returns no token or a token in an unknown form.
         """
+        if not self._pull_role:
+            raise ImageRegistryError("the user image registry has no pull role")
         policy = self.pull_session_policy(owner)
         session = self._sts.assume_role(
             RoleArn=self._pull_role,

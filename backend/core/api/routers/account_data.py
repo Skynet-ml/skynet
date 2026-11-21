@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...sandbox.image_registry import ImageRegistryError
 from ...service_gateway.agents.attachment_sandbox import stop_chat_runner
 from ...storage.models import AgentConversationModel, UserModel
 from ...storage.tree_purge import TreePurgeError, delete_unused_packs
@@ -106,9 +107,7 @@ def create_account_data_router(*, job_store) -> APIRouter:
         response_model=AccountDeletionResult,
         summary="Irreversibly delete the caller's account and all its data",
     )
-    def delete_my_account(
-        body: DeleteAccountRequest, user: AuthenticatedUserDep
-    ) -> AccountDeletionResult:
+    def delete_my_account(body: DeleteAccountRequest, user: AuthenticatedUserDep) -> AccountDeletionResult:
         """Permanently delete the caller's account and everything it owns.
 
         Local (email/password) accounts must re-confirm with their current
@@ -133,8 +132,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 keeps moving the account's packs for ``PACK_LOCK_TRIES``
                 tries; a retry can succeed. Also when a step log shard fails,
                 or one of the account's runs records a shard that this pod's
-                ``STEP_LOG_SHARDS`` does not have. The main database rows
-                stay, so the account is not deleted.
+                ``STEP_LOG_SHARDS`` does not have. Also when the user image
+                registry refuses a delete, its settings are invalid, or it is
+                not set up for an account with registry builds (SKY-891). The
+                main database rows stay, so the account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking
@@ -150,6 +151,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
             except TreePurgeError as exc:
                 logger.exception("Account deletion stopped: the tree packs of the account were not deleted")
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
+            except ImageRegistryError as exc:
+                logger.exception("Account deletion stopped: the user images of the account were not deleted")
+                raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
             session.commit()
         # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.
         # They stop before the pack delete, so a failed pack delete cannot leave them running.
@@ -161,8 +165,6 @@ def create_account_data_router(*, job_store) -> APIRouter:
             # The account is gone, so the answer stays a success. The packs keep their rows, which no row
             # points at, and the compactor deletes them in its next pass.
             logger.exception("The account is deleted, but its unused tree packs are not; the compactor deletes them")
-        return AccountDeletionResult(
-            deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows
-        )
+        return AccountDeletionResult(deleted_rows=summary.deleted_rows, anonymized_rows=summary.anonymized_rows)
 
     return router

@@ -149,6 +149,10 @@ class ImageTooLargeError(ImageBuildError):
     """Report an image larger than the size limit."""
 
 
+# Every build uses this scope today, so account deletion deletes its cache tag (SKY-891).
+DEFAULT_CACHE_SCOPE = "default"
+
+
 @dataclass(frozen=True)
 class BuildRequest:
     """Describe one image build.
@@ -168,7 +172,7 @@ class BuildRequest:
     owner: str
     dockerfile: str = "Dockerfile"
     build_args: Mapping[str, str] = field(default_factory=dict)
-    cache_scope: str = "default"
+    cache_scope: str = DEFAULT_CACHE_SCOPE
 
 
 @dataclass(frozen=True)

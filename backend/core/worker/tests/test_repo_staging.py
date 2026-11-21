@@ -6925,6 +6925,33 @@ def test_a_run_image_in_another_users_repository_stops_before_any_box(monkeypatc
     assert registry.pulls == []
 
 
+def test_a_metric_image_in_another_users_repository_stops_before_the_paid_run_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad ``[metric] image`` is refused before the ``[run]`` build and its check box are paid (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    other = "registry.example/someone-else@sha256:" + "d" * 64
+    tree = {
+        **_BOX_TREE,
+        "ascent.toml": _BOX_TREE["ascent.toml"].replace(
+            '[metric]\ndockerfile = "box/Dockerfile"\n', f'[metric]\nimage = "{other}"\n'
+        ),
+    }
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, registry, builder, budget = _ImageRuntime(), _FakeRegistry(set()), _FakeBuilder(), _FakeBudget()
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"\[metric\].*not in your own image repository"):
+            _prepare(staged, runtime, builder=builder, budget=budget, registry=registry)
+    finally:
+        staged.cleanup()
+    assert builder.requests == []
+    assert budget.charges == []
+    assert runtime.specs == []
+
+
 def test_a_resume_gives_each_pinned_box_its_pull_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """A resume checks nothing again, but each box still gets its repository and a fresh token (SKY-891).
 

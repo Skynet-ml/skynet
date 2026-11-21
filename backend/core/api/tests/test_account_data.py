@@ -17,7 +17,7 @@ import runpy
 import threading
 import time
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -502,6 +502,7 @@ class _FakeImageRegistry:
         """
         self.refuse = refuse
         self.deleted: list[tuple[str, str]] = []
+        self.caches: list[tuple[str, str]] = []
 
     def repository_uri(self, owner: str) -> str:
         """Return the owner's repository.
@@ -527,6 +528,15 @@ class _FakeImageRegistry:
         if self.refuse:
             raise ImageRegistryError("refused")
         self.deleted.append((owner, digest))
+
+    def delete_cache(self, owner: str, scope: str) -> None:
+        """Record one cache delete; a cache that is already gone counts as deleted too.
+
+        Args:
+            owner: The registry repository's owner.
+            scope: The cache name inside the owner's repository.
+        """
+        self.caches.append((owner, scope))
 
 
 def _seed_image_builds(engine: Engine) -> None:
@@ -555,12 +565,78 @@ def test_delete_removes_the_account_images_from_the_registry(
     """
     _seed_image_builds(harness.engine)
     registry = _FakeImageRegistry()
-    monkeypatch.setattr(account_data_service, "image_registry", lambda: registry)
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
 
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
 
     assert resp.status_code == 200
     assert registry.deleted == [(image_owner(_EMAIL), "sha256:" + "a" * 64)]
+    # The build cache holds layers of the user's source, so it goes too.
+    assert registry.caches == [(image_owner(_EMAIL), "default")]
+
+
+def _bad_prefix_registry(**_: Any) -> None:
+    """Fail as ``image_registry`` does when its prefix setting is not an ECR prefix URI.
+
+    Args:
+        **_: The factory's options.
+
+    Raises:
+        ImageRegistryError: Always.
+    """
+    raise ImageRegistryError("not an ECR repository prefix URI")
+
+
+@pytest.mark.parametrize(
+    "image_registry",
+    [
+        pytest.param(lambda **_: _FakeImageRegistry(refuse=True), id="refused-delete"),
+        pytest.param(lambda **_: None, id="registry-not-set-up"),
+        pytest.param(_bad_prefix_registry, id="bad-prefix"),
+    ],
+)
+def test_an_image_registry_failure_answers_503_and_keeps_the_account(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, image_registry: Callable[..., Any]
+) -> None:
+    """A refused delete, a missing registry or a bad prefix is a 503, and the account stays (SKY-891).
+
+    The account has CodeBuild builds, so a deployment with no registry fails
+    closed: a skip would leave the images with no row that names them.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+        image_registry: The registry factory under test.
+    """
+    _seed_image_builds(harness.engine)
+    monkeypatch.setattr(account_data_service, "image_registry", image_registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "accounts.deletion_storage_unavailable"
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+        assert session.scalars(select(ImageBuildModel).where(ImageBuildModel.username == _EMAIL)).all()
+
+
+def test_local_builds_need_no_registry(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An account with only local Docker builds deletes with no registry (SKY-891).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    with Session(harness.engine) as session:
+        session.add(
+            ImageBuildModel(username=_EMAIL, input_hash="h3", builder="local-docker", image="sha256:" + "c" * 64)
+        )
+        session.commit()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: None)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
 
 
 def test_a_refused_registry_delete_keeps_the_account(harness: SimpleNamespace) -> None:

@@ -78,6 +78,9 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
         """
         loop = asyncio.get_running_loop()
         stop = threading.Event()
+        # The stop check and the store of the future happen under one lock, so a
+        # cancel between them cannot miss the copy.
+        guard = threading.Lock()
         running: dict[str, Any] = {}
         quote = operation_quote(
             {"image_copy": source_image},
@@ -90,11 +93,14 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
             """Run the copy on the provider's event loop and charge its started minutes."""
             started = time.monotonic()
             value: str | BaseException
-            if stop.is_set():
+            with guard:
+                future = None
+                if not stop.is_set():
+                    future = asyncio.run_coroutine_threadsafe(copy_image(source_image, pull_credentials), loop)
+                    running["future"] = future
+            if future is None:
                 value = asyncio.CancelledError()
             else:
-                future = asyncio.run_coroutine_threadsafe(copy_image(source_image, pull_credentials), loop)
-                running["future"] = future
                 try:
                     value = future.result()
                 except BaseException as error:
@@ -122,9 +128,10 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
         except asyncio.CancelledError:
             # The thread cannot be cancelled: stop the copy and wait for the
             # settlement, so the reservation never stays open.
-            stop.set()
-            if "future" in running:
-                running["future"].cancel()
+            with guard:
+                stop.set()
+                if "future" in running:
+                    running["future"].cancel()
             while not settling.done():
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(settling)

@@ -500,3 +500,20 @@ def test_image_registry_refuses_a_bad_prefix_or_a_missing_boto3(monkeypatch: pyt
     monkeypatch.setattr(image_registry_module, "boto3", None)
     with pytest.raises(ImageRegistryError, match="needs boto3"):
         image_registry(SimpleNamespace(user_images_repository_prefix_uri=URI, image_pull_role_arn=PULL_ROLE))
+
+
+def test_a_delete_only_registry_needs_no_pull_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Account deletion gets a registry from the prefix alone, and it refuses to pull (SKY-891).
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setattr(image_registry_module, "boto3", _FakeBoto3())
+    config = SimpleNamespace(user_images_repository_prefix_uri=URI, image_pull_role_arn="")
+
+    assert image_registry(config) is None
+    registry = image_registry(config, pull=False)
+
+    assert isinstance(registry, EcrRegistry)
+    with pytest.raises(ImageRegistryError, match="no pull role"):
+        registry.pull_credentials("user-7")

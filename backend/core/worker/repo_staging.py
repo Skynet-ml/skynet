@@ -19,9 +19,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +88,7 @@ from ..sandbox.image_build import (
     codebuild_builder,
     compute_input_hash,
 )
-from ..sandbox.image_registry import ImageRegistry, ImageRegistryError, image_owner, image_registry
+from ..sandbox.image_registry import ImageRegistry, ImageRegistryError, RegistryCredentials, image_owner, image_registry
 from ..sandbox.providers.docker import in_repository, registry_host
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import loop_tools, runner, sandbox_log
@@ -1370,12 +1372,19 @@ def image_builder(config: Any = settings) -> ImageBuilder | None:
     return codebuild_builder(image_registry(config), config)
 
 
+# A box start can take minutes after it reads the token, so a token with less left is renewed.
+_CREDENTIALS_MARGIN = timedelta(minutes=15)
+
+
 def _user_image(registry: ImageRegistry | None, username: str, role: str, image: str) -> UserImage:
     """Give one box the access its start needs to its user image (SKY-891).
 
     Pull credentials reach only the owner's own repository: an image there
-    gets a callable that asks the registry for a fresh token at each box
-    start, and an image from another registry gets none.
+    gets a callable that reuses one token while it has more than
+    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one.
+    The Vercel copy cache keys on the credentials, so a new token at each
+    box start would copy the image again for each box. An image from
+    another registry gets none.
 
     Args:
         registry: The user image registry, or ``None`` when local Docker keeps the images.
@@ -1398,10 +1407,18 @@ def _user_image(registry: ImageRegistry | None, username: str, role: str, image:
             raise BoxImageError(OTHER_REPOSITORY_IMAGE.format(role=role, image=image, app=APP_NAME))
         return UserImage(image)
 
+    lock = threading.Lock()
+    cached: list[RegistryCredentials] = []
+
     def credentials() -> tuple[str, str]:
-        """Return a fresh token that pulls only from the owner's repository."""
-        token = registry.pull_credentials(owner)
-        return token.username, token.password
+        """Return a token that pulls only from the owner's repository and has time left."""
+        # Boxes open on several threads, so the lock makes them share one token.
+        with lock:
+            token = cached[0] if cached else None
+            if token is None or token.expires_at is None or token.expires_at - datetime.now(UTC) <= _CREDENTIALS_MARGIN:
+                token = registry.pull_credentials(owner)
+                cached[:] = [token]
+            return token.username, token.password
 
     return UserImage(image, repository=repository, credentials=credentials)
 
@@ -1472,7 +1489,12 @@ def prepare_box_images(
         if not getattr(runtime, "accepts_user_images", False):
             raise BoxImageError(USER_IMAGES_UNSUPPORTED)
         images = {}
-        user_images = {}
+        # A refused image reference must stop the run before any paid build or check box.
+        user_images = {
+            role: _user_image(registry, username, role, value)
+            for role, (kind, value) in staged.box_sources.items()
+            if kind == "image"
+        }
         for role, (kind, value) in staged.box_sources.items():
             if kind == "image":
                 record: dict[str, Any] = {
@@ -1494,7 +1516,8 @@ def prepare_box_images(
                     budget=budget,
                     registry=registry,
                 )
-            user_images[role] = _user_image(registry, username, role, record["image"])
+            if role not in user_images:
+                user_images[role] = _user_image(registry, username, role, record["image"])
             python = _check_box_image(runtime, user_images[role], role, owner_id=owner_id)
             if python is not None:
                 record["python"] = python

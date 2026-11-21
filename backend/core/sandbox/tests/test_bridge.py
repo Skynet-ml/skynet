@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -21,12 +23,14 @@ from core.exceptions import ServiceError
 from core.sandbox import bridge
 from core.sandbox.errors import SandboxFatalError
 from core.sandbox.factory import PROVIDERS, ProviderEntry
+from core.sandbox.image_registry import RegistryCredentials
 from core.sandbox.metering import USAGE_ADAPTERS
 from core.sandbox.providers import vercel as vercel_provider
 from core.sandbox.providers.vercel import VercelEnvironment
-from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
+from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeCopier, FakeUsage, make_env, readback
 from core.service_gateway.optimization.blackbox import sandbox_runtime
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec, UserImage
+from core.worker import repo_staging
 
 _DIGEST = "registry.example/skynet@sha256:" + "a" * 64
 _LOCAL_IMAGE = "sha256:" + "c" * 64
@@ -868,3 +872,107 @@ def test_image_copy_usd_charges_each_started_minute(seconds: float, usd: str) ->
         usd: The expected charge.
     """
     assert image_copy_usd(seconds) == Decimal(usd)
+
+
+class _TokenRegistry:
+    """Hand out one-hour pull tokens and count them, like the user image registry (SKY-891)."""
+
+    def __init__(self, left: timedelta = timedelta(hours=1)) -> None:
+        """Start with no tokens.
+
+        Args:
+            left: The time each new token has before it ends.
+        """
+        self.left = left
+        self.pulls = 0
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the owner's repository.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            The repository of :data:`_USER_IMAGE`.
+        """
+        return "registry.example/users/u1"
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return a new token each call, as AssumeRole and GetAuthorizationToken do.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            A token with a new password.
+        """
+        self.pulls += 1
+        return RegistryCredentials(
+            server="registry.example",
+            username="AWS",
+            password=f"token-{self.pulls}",
+            expires_at=datetime.now(UTC) + self.left,
+        )
+
+
+def test_two_vercel_boxes_of_one_user_image_get_one_token_and_one_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box starts reuse one pull token, so the copy cache hits and the image is copied once (SKY-891).
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setattr(vercel_provider, "_COPIED", {})
+    monkeypatch.setattr(vercel_provider, "_COPYING", {})
+    registry = _TokenRegistry()
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    log: list[str] = []
+    client, copier = FakeClient(log), FakeCopier(log)
+
+    async def start_two_boxes() -> None:
+        """Start and stop two boxes from the user image, as two box opens do."""
+        for _ in range(2):
+            env = make_env(
+                client,
+                log,
+                image=None,
+                options={
+                    "source_image": image.reference,
+                    "copy_image": copier,
+                    "user_image_repository": image.repository,
+                    "pull_credentials": image.credentials(),
+                },
+            )
+            await env.start()
+            await env.stop()
+
+    asyncio.run(start_two_boxes())
+
+    assert registry.pulls == 1
+    assert copier.calls == [(_USER_IMAGE, ("AWS", "token-1"))]
+
+
+def test_boxes_on_many_threads_share_one_pull_token() -> None:
+    """Boxes that open on several threads at once ask the registry for one token (SKY-891)."""
+    registry = _TokenRegistry()
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    assert image.credentials is not None
+    tokens: list[tuple[str, str]] = []
+    threads = [threading.Thread(target=lambda: tokens.append(image.credentials())) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert registry.pulls == 1
+    assert set(tokens) == {("AWS", "token-1")}
+
+
+def test_a_pull_token_near_its_end_is_renewed() -> None:
+    """A token with 15 minutes or less left is replaced, so a box start never pulls with a dying token (SKY-891)."""
+    registry = _TokenRegistry(left=timedelta(minutes=15))
+    image = repo_staging._user_image(registry, "alice", "run", _USER_IMAGE)
+    assert image.credentials is not None
+
+    assert image.credentials() == ("AWS", "token-1")
+    assert image.credentials() == ("AWS", "token-2")
+    assert registry.pulls == 2
