@@ -83,6 +83,7 @@ from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PA
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
+from ..sandbox.image_build import ImageBuildCancelledError
 from ..sandbox.image_registry import image_registry
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway.embedding_pipeline import embed_finished_job
@@ -1047,17 +1048,24 @@ class BackgroundWorker:
                         # before it pays for either; a resume keeps the images it pinned (SKY-737).
                         if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
                             user_image_registry = image_registry(settings)
-                            staged_repository = prepare_box_images(
-                                staged_repository,
-                                owner_id=optimization_id,
-                                username=execution_payload.username,
-                                runtime=budget_gateway.parent_sandbox_runtime(),
-                                builder=image_builder(settings),
-                                store=self._job_store,
-                                budget=budget_gateway.runtime,
-                                registry=user_image_registry,
-                                pinned=job_data.get("box_images"),
-                            )
+                            try:
+                                staged_repository = prepare_box_images(
+                                    staged_repository,
+                                    owner_id=optimization_id,
+                                    username=execution_payload.username,
+                                    runtime=budget_gateway.parent_sandbox_runtime(),
+                                    builder=image_builder(settings),
+                                    store=self._job_store,
+                                    budget=budget_gateway.runtime,
+                                    registry=user_image_registry,
+                                    pinned=job_data.get("box_images"),
+                                    cancelled=lambda: self._build_cancelled(cancel_event, optimization_id),
+                                )
+                            except ImageBuildCancelledError:
+                                # A stop for a worker shutdown releases the run for a restart; a user
+                                # cancel or pause keeps the status that the endpoint wrote.
+                                self._raise_if_interrupted(cancel_event, optimization_id)
+                                raise CancellationError() from None
                             pinned_images = self._job_store.pin_box_images(
                                 optimization_id, dict(staged_repository.box_images)
                             )
@@ -2014,6 +2022,27 @@ class BackgroundWorker:
         if snapshot.uncapped:
             return
         run_watcher.observe_spend(float(snapshot.setup_spent_cents + snapshot.run_spent_cents), snapshot.total_cents)
+
+    def _build_cancelled(self, cancel_event: threading.Event | None, optimization_id: str) -> bool:
+        """Tell an image build whether its run must stop (SKY-891).
+
+        A cancel on another pod only changes the stored status, and the build
+        blocks the job thread, so the build itself asks the store too.
+
+        Args:
+            cancel_event: The run's cooperative cancel flag, or ``None``.
+            optimization_id: ID of the run that owns the build.
+
+        Returns:
+            True when the flag is set or the stored status is cancelled or paused.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        try:
+            self._raise_if_store_cancelled(optimization_id)
+        except CancellationError:
+            return True
+        return False
 
     def _raise_if_store_cancelled(self, optimization_id: str) -> None:
         """Raise ``CancellationError`` when a peer pod has cancelled/paused the job.

@@ -52,7 +52,13 @@ from core.models.blackbox import (
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox import image_build, image_registry
-from core.sandbox.image_build import BuildResult, CodeBuildImageBuilder, ImageBuildError, LocalDockerImageBuilder
+from core.sandbox.image_build import (
+    BuildResult,
+    CodeBuildImageBuilder,
+    ImageBuildCancelledError,
+    ImageBuildError,
+    LocalDockerImageBuilder,
+)
 from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, RegistryCredentials
 from core.sandbox.providers import vercel
 from core.sandbox.services import ComposeService
@@ -5791,20 +5797,24 @@ class _FakeBuilder:
         self.fail = fail
         self.requests: list[Any] = []
 
-    def build(self, request: Any) -> BuildResult:
-        """Return a built image, or fail like a broken Dockerfile.
+    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+        """Return a built image, fail like a broken Dockerfile, or stop on a cancel.
 
         Args:
             request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
 
         Returns:
             The fixed built image.
 
         Raises:
             ImageBuildError: When the builder fails.
+            ImageBuildCancelledError: When ``cancelled`` answers true.
         """
         self.requests.append(request)
         assert (request.context_dir / request.dockerfile).is_file()
+        if cancelled is not None and cancelled():
+            raise ImageBuildCancelledError("image build stopped: the run was cancelled")
         if self.fail:
             raise ImageBuildError("The build failed.", log="step 2 failed\n", log_tail="step 2 failed")
         return BuildResult(
@@ -6265,6 +6275,77 @@ def test_a_failed_build_is_charged_kept_and_stops_the_run(monkeypatch: pytest.Mo
     assert [(build["image"], build["log"]) for build in store.builds] == [(None, "step 2 failed\n")]
     assert len(budget.charges) == 1
     assert runtime.specs == []
+
+
+def test_a_cancelled_build_is_charged_keeps_no_record_and_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build that the run's cancel stopped is charged, saves no failed build, and opens no box (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget, runtime = _ImageStore(), _FakeBudget(), _ImageRuntime()
+    try:
+        with pytest.raises(ImageBuildCancelledError):
+            _prepare(staged, runtime, store=store, budget=budget, cancelled=lambda: True)
+    finally:
+        staged.cleanup()
+    assert store.builds == []
+    assert len(budget.charges) == 1
+    assert runtime.specs == []
+
+
+class _RunningCodeBuild:
+    """Answer each status read with a build that still runs, and record each stop."""
+
+    def __init__(self) -> None:
+        """Start with no status reads and no stops."""
+        self.reads = 0
+        self.stopped: list[str] = []
+
+    def batch_get_builds(self, ids: list[str]) -> dict[str, Any]:
+        """Return the build in its build phase.
+
+        Args:
+            ids: The build ids.
+
+        Returns:
+            One build that is not complete.
+        """
+        self.reads += 1
+        return {"builds": [{"id": ids[0], "buildComplete": False, "currentPhase": "BUILD"}]}
+
+    def stop_build(self, id: str) -> None:
+        """Record a stop.
+
+        Args:
+            id: The build id.
+        """
+        self.stopped.append(id)
+
+
+def test_the_codebuild_wait_stops_the_build_when_the_run_is_cancelled() -> None:
+    """A cancel seen in the status poll stops the CodeBuild build before it can push (SKY-891)."""
+    codebuild = _RunningCodeBuild()
+    answers = iter([False, True])
+    builder = CodeBuildImageBuilder(
+        codebuild=codebuild,
+        logs=None,
+        s3=None,
+        registry=None,  # type: ignore[arg-type]
+        project_name="images",
+        source_bucket="bucket",
+        push_role_arn="arn:aws:iam::123456789012:role/push",
+        limits=image_build.BuildLimits(timeout_seconds=600, max_size_bytes=1, max_context_bytes=1),
+        sleep=lambda _seconds: None,
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(ImageBuildCancelledError, match="build-1 stopped"):
+        builder._wait("build-1", lambda: next(answers))
+
+    assert codebuild.reads == 2
+    assert codebuild.stopped == ["build-1"]
 
 
 def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.MonkeyPatch) -> None:

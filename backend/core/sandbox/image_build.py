@@ -149,6 +149,10 @@ class ImageTooLargeError(ImageBuildError):
     """Report an image larger than the size limit."""
 
 
+class ImageBuildCancelledError(ImageBuildError):
+    """Report a build that the builder stopped because its run was cancelled."""
+
+
 # Every build of one owner shares this cache. It is in the owner's repository, so account deletion
 # removes it with the repository (SKY-891).
 DEFAULT_CACHE_SCOPE = "default"
@@ -191,11 +195,12 @@ class BuildResult:
 class ImageBuilder(Protocol):
     """Build a Dockerfile with its build context into an image."""
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image that the request describes.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Tells whether the run was cancelled, so the builder stops the build.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -748,11 +753,13 @@ class CodeBuildImageBuilder:
         self._sleep = sleep
         self._clock = clock
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image on CodeBuild and push it to the owner's repository.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Tells whether the run was cancelled. Each status poll
+                calls it, and a true answer stops the build before it pushes.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -763,6 +770,7 @@ class CodeBuildImageBuilder:
             ImageBuildTimeoutError: The build ran longer than the time limit,
                 or waited longer than the queue limit.
             ImageTooLargeError: The pushed image is larger than the size limit.
+            ImageBuildCancelledError: ``cancelled`` answered true while the build ran.
         """
         dockerfile = _check_request(request)
         input_hash = compute_input_hash(
@@ -812,7 +820,7 @@ class CodeBuildImageBuilder:
         # A build the worker cannot follow must not run on and push, so every
         # failure here stops it. _wait stops the build before its own errors.
         try:
-            build = self._wait(build_id)
+            build = self._wait(build_id, cancelled)
             log = self._read_log(build, settle=True)
         except ImageBuildError:
             raise
@@ -867,14 +875,15 @@ class CodeBuildImageBuilder:
         """
         return f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit"
 
-    def _wait(self, build_id: str) -> dict[str, Any]:
-        """Poll the build until it ends, or stop it at a time limit.
+    def _wait(self, build_id: str, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """Poll the build until it ends, or stop it at a time limit or a cancel.
 
         The time limit counts from the first poll that sees the build out of
         the queue. Queue time has its own limit.
 
         Args:
             build_id: The CodeBuild build id.
+            cancelled: Tells whether the run was cancelled, or ``None``.
 
         Returns:
             The final build description.
@@ -882,6 +891,7 @@ class CodeBuildImageBuilder:
         Raises:
             ImageBuildTimeoutError: The build was still running at the time
                 limit, or still queued at the queue limit.
+            ImageBuildCancelledError: ``cancelled`` answered true.
             ImageBuildError: CodeBuild does not know the build.
             BotoCoreError: A status read failed (or ClientError).
         """
@@ -895,6 +905,10 @@ class CodeBuildImageBuilder:
             build = builds[0]
             if build.get("buildComplete"):
                 return build
+            # A cancelled run's account can be deleted next, so the build must not push after it.
+            if cancelled is not None and cancelled():
+                self._stop(build_id)
+                raise ImageBuildCancelledError(f"image build {build_id} stopped: the run was cancelled")
             now = self._clock()
             if run_deadline is None and build.get("currentPhase") not in _QUEUED_PHASES:
                 run_deadline = now + self._limits.timeout_seconds
@@ -1114,11 +1128,13 @@ class LocalDockerImageBuilder:
         self._limits = limits or BuildLimits.from_settings()
         self._platform = platform
 
-    def build(self, request: BuildRequest) -> BuildResult:
+    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
         """Build the image with ``docker build``.
 
         Args:
             request: The Dockerfile, the build context and the build args.
+            cancelled: Not used: a local build pushes to no registry, so a
+                cancel does not need to stop it.
 
         Returns:
             The local image id, its size, the input hash and the log.

@@ -127,8 +127,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 account's confirmation password is missing or does not match.
             DomainError: 409 (``accounts.deletion_runs_active``) when the
                 deployment has a user image registry and one of the account's
-                runs is not finished, because its build could push after the
-                repository delete (SKY-891). Nothing is deleted.
+                runs is not finished, or a worker still holds a live lease on
+                it, because its build could push after the repository delete
+                (SKY-891). Nothing is deleted.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
                 the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
                 is not set or the bucket client cannot be built (for example,

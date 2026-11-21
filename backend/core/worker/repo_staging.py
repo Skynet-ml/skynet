@@ -82,6 +82,7 @@ from ..sandbox.image_build import (
     BuildRequest,
     BuildResult,
     CodeBuildImageBuilder,
+    ImageBuildCancelledError,
     ImageBuilder,
     ImageBuildError,
     LocalDockerImageBuilder,
@@ -1791,6 +1792,7 @@ def prepare_box_images(
     budget: Any = None,
     registry: ImageRegistry | None = None,
     pinned: Mapping[str, Mapping[str, Any]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> StagedRepository:
     """Build or pin each user box image once, then check it before the first candidate (SKY-737).
 
@@ -1812,6 +1814,7 @@ def prepare_box_images(
         registry: The user image registry: it must still hold a reused build, and it gives each box in
             the owner's repository its pull access. ``None`` skips the check and pulls with no credentials.
         pinned: The images the run pinned at its start, for a resume.
+        cancelled: Tells whether the run was cancelled, so a running build stops before it pushes.
 
     Returns:
         ``staged`` with ``box_images``, the start access of each box in ``box_user_images``, and, for a
@@ -1821,6 +1824,7 @@ def prepare_box_images(
         BoxImageError: When the runtime cannot start a user image, an image is in another user's
             repository, a copying runtime gets an image outside the owner's repository, a build
             fails, or a check fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped a build.
     """
     if not staged.box_sources:
         return staged
@@ -1868,6 +1872,7 @@ def prepare_box_images(
                     store=store,
                     budget=budget,
                     registry=registry,
+                    cancelled=cancelled,
                 )
             if role not in user_images:
                 user_images[role] = _user_image(
@@ -1896,6 +1901,7 @@ def _dockerfile_image(
     store: Any,
     budget: Any,
     registry: ImageRegistry | None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Reuse or build the image of one box's Dockerfile from the staged start commit.
 
@@ -1909,12 +1915,14 @@ def _dockerfile_image(
         store: The job store.
         budget: The run's budget runtime, or ``None``.
         registry: The registry that must still hold a reused build, or ``None``.
+        cancelled: Tells whether the run was cancelled, or ``None``.
 
     Returns:
         The box's image record: image, digest, source, input hash and build log reference.
 
     Raises:
         BoxImageError: When there is no builder, the context is invalid, or the build fails.
+        ImageBuildCancelledError: When ``cancelled`` stopped the build; it keeps no build record.
     """
     if builder is None:
         raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
@@ -1952,7 +1960,7 @@ def _dockerfile_image(
         """Run the build once and charge its started minutes, also for a failed build."""
         started = time.monotonic()
         try:
-            value: BuildResult | ImageBuildError = builder.build(request)
+            value: BuildResult | ImageBuildError = builder.build(request, cancelled=cancelled)
         except ImageBuildError as error:
             value = error
         seconds = time.monotonic() - started
@@ -1975,6 +1983,8 @@ def _dockerfile_image(
         outcome = budget.execute(
             quote, policy, build, operation_key=f"image-build:{owner_id}:{role}", cost_kind="sandbox"
         )
+    if isinstance(outcome, ImageBuildCancelledError):
+        raise outcome
     if isinstance(outcome, ImageBuildError):
         store.save_image_build(username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log)
         tail = outcome.log_tail.strip()

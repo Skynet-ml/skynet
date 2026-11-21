@@ -1253,6 +1253,52 @@ def test_a_repository_run_builds_again_when_its_reused_local_image_is_gone(
     assert store.get_job("repo-hardened")["box_images"] == published[-1].box_images
 
 
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_a_cancel_during_the_image_build_stops_the_build_and_keeps_the_run_cancelled(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """A cancel that lands while the build runs reaches the builder, and the run ends cancelled (SKY-891).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+    seen: list[bool] = []
+
+    class _CancelledMidBuild(_LocalBuilder):
+        """Take the user's cancel while the build runs."""
+
+        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+            """Cancel the run, then build as the fake does.
+
+            Args:
+                request: The build request.
+                cancelled: The engine's cancel check.
+
+            Returns:
+                What the fake builder returns.
+            """
+            store.update_job("repo-hardened", status="cancelled")
+            worker._cancel_events["repo-hardened"].set()
+            seen.append(cancelled())
+            return super().build(request, cancelled=cancelled)
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"image_builder": lambda settings: _CancelledMidBuild(), "add_run_record": MagicMock()},
+    )
+
+    assert seen == [True]
+    publish.assert_not_called()
+    assert store.get_job("repo-hardened")["status"] == "cancelled"
+    assert store.image_builds == []
+
+
 def test_a_resumed_repository_run_boots_from_its_pinned_box_images(
     worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
 ) -> None:

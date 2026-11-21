@@ -752,7 +752,8 @@ class EcrRegistry:
 
         Raises:
             ImageRegistryError: The manifest is not an image manifest, or the
-                config is too large, does not match its digest, or has a ``User`` that is not a string.
+                config is too large, does not match its digest, has a ``config``
+                that is not an object, or has a ``User`` that is not a string.
         """
         if media_type not in _IMAGE_MANIFEST_TYPES:
             raise ImageRegistryError(f"{name} has a manifest of the unknown type {media_type!r}")
@@ -766,7 +767,10 @@ class EcrRegistry:
         if "sha256:" + hashlib.sha256(blob).hexdigest() != config_digest:
             raise ImageRegistryError(f"{name} config {config_digest} does not match its digest")
         config = json.loads(blob)
-        user = ((config.get("config") if isinstance(config, dict) else None) or {}).get("User") or ""
+        image_config = (config.get("config") if isinstance(config, dict) else None) or {}
+        if not isinstance(image_config, dict):
+            raise ImageRegistryError(f"{name} config {config_digest} has a config that is not an object")
+        user = image_config.get("User") or ""
         if not isinstance(user, str):
             raise ImageRegistryError(f"{name} config {config_digest} has a User that is not a string")
         return user

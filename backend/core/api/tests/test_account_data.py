@@ -686,6 +686,67 @@ def test_finished_runs_allow_the_deletion_with_a_registry(
     assert registry.repositories == [image_owner(_EMAIL)]
 
 
+def test_a_cancelled_run_whose_worker_holds_its_lease_refuses_the_deletion(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run with a live worker lease answers 409, because its image build may still push (SKY-891).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    with Session(harness.engine) as session:
+        session.add(
+            JobModel(
+                optimization_id="job-stopping",
+                username=_EMAIL,
+                status="cancelled",
+                claimed_by="worker-pod",
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+            )
+        )
+        session.commit()
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "accounts.deletion_runs_active"
+    assert registry.repositories == []
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+
+
+def test_a_cancelled_run_with_an_expired_worker_lease_allows_the_deletion(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run whose worker lease ran out has no live build, so it does not block the deletion (SKY-891).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    with Session(harness.engine) as session:
+        session.add(
+            JobModel(
+                optimization_id="job-orphan",
+                username=_EMAIL,
+                status="cancelled",
+                claimed_by="dead-pod",
+                lease_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        session.commit()
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert registry.repositories == [image_owner(_EMAIL)]
+
+
 def test_another_account_run_in_progress_does_not_block_the_deletion(
     harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -763,6 +763,21 @@ def test_image_users_refuses_a_config_that_does_not_match_its_digest() -> None:
         _manifest_registry(ecr).image_users("user-7", DIGEST)
 
 
+@pytest.mark.parametrize("inner", [["User", "0"], "root", 7], ids=["list", "string", "number"])
+def test_image_users_refuses_a_config_section_that_is_not_an_object(inner: Any) -> None:
+    """A config whose ``config`` is not a JSON object is an ImageRegistryError, not a crash (SKY-891).
+
+    Args:
+        inner: The value of the config's ``config`` key.
+    """
+    blob = json.dumps({"architecture": "amd64", "os": "linux", "config": inner}).encode()
+    config_digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+    ecr = FakeManifestEcr({DIGEST: (_OCI_MANIFEST, {"config": {"digest": config_digest}})}, {config_digest: blob})
+
+    with pytest.raises(ImageRegistryError, match="config that is not an object"):
+        _manifest_registry(ecr).image_users("user-7", DIGEST)
+
+
 @pytest.mark.parametrize(
     "manifests",
     [

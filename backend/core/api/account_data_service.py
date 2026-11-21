@@ -21,17 +21,18 @@ Two deliberate exceptions to "hard delete everything":
 
 The only outside call deletes the account's whole repository from the user
 image registry, as the last step before the caller's commit. With a registry,
-the deletion refuses while a run of the account is not finished (SKY-891).
-Known gap: Vercel keeps its own copy of each of the account's images that a
-Vercel box started from. Neither the Vercel Sandbox SDK nor the image copier
-has a call that deletes a copy, so this deletion leaves those copies in
-Vercel's registry and in each worker's copy cache. The tree purge here
-only locks, marks and plans the account's step log packs; the router deletes
-the unused packs from the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
-OpenRouter, or any other provider; severing the local link is the whole of
-the operation.
-Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
-to a follow-up.
+the deletion refuses while a run of the account is not finished, or while a
+worker still holds a live lease on it (SKY-891). Known gap: Vercel keeps its
+own copy of each of the account's images that a Vercel box started from.
+Neither the Vercel Sandbox SDK nor the image copier has a call that deletes a
+copy, so this deletion leaves those copies in Vercel's registry and in each
+worker's copy cache.
+
+The tree purge here only locks, marks and plans the account's step log packs;
+the router deletes the unused packs from the tree bucket after the commit
+(SKY-733). Nothing here calls Stripe, OpenRouter, or any other provider;
+severing the local link is the whole of the operation. Deprovisioning the
+upstream Stripe customer or OpenRouter runtime key is left to a follow-up.
 """
 
 from __future__ import annotations
@@ -531,7 +532,8 @@ class AccountRunsActiveError(Exception):
     """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
 
     A run in progress can still push to the user image registry after the
-    repository delete. The registry then makes the repository again, and the
+    repository delete. A cancelled run counts as in progress while its worker
+    holds a live lease, because the worker stops its image build only later. The registry then makes the repository again, and the
     pushed layers outlive the account with no row that names them.
     """
 
@@ -566,8 +568,8 @@ def delete_account(
 
     Raises:
         AccountRunsActiveError: The deployment has a user image registry and
-            one of the account's runs is not in a terminal status; nothing is
-            deleted.
+            one of the account's runs is not in a terminal status, or a worker
+            still holds a live lease on it; nothing is deleted.
         ImageRegistryError: The user image registry refused to delete the
             account's repository, or its settings are set but not usable;
             nothing in the main database is deleted.
@@ -609,11 +611,16 @@ def delete_account(
     deleted += tree_purge.delete_run_rows(session, job_ids, JobEmbeddingModel.user_id == username)
     # Read after the job locks, so a worker that changes a status commits first. Nothing
     # cancels the runs here: a running build could push again after the repository delete.
+    # A cancel marks the run first and its worker stops the build later, so a run whose worker
+    # still holds a live lease also blocks; an expired lease means that worker is gone.
     if registry is not None and job_ids:
         active = session.scalar(
             select(JobModel.optimization_id)
             .where(JobModel.optimization_id.in_(job_ids))
-            .where(JobModel.status.not_in([status.value for status in TERMINAL_STATUSES]))
+            .where(
+                JobModel.status.not_in([status.value for status in TERMINAL_STATUSES])
+                | (JobModel.claimed_by.is_not(None) & (JobModel.lease_expires_at > datetime.now(UTC)))
+            )
             .limit(1)
         )
         if active is not None:
