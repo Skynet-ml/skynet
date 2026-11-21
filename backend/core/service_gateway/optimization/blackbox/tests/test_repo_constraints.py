@@ -1767,3 +1767,52 @@ def test_a_started_hardening_pass_rereads_the_older_forms(tmp_path: Path) -> Non
     assert started.metric.files == ("scoring",)
     with pytest.raises(ConstraintsError, match=r"must be written 'scoring'"):
         hardening_runner._trusted_constraints(tmp_path, require_version=True)
+
+
+def _edit(path: str) -> str:
+    """Write a one-line ``git diff`` of ``path``.
+
+    Args:
+        path: The edited file.
+
+    Returns:
+        The patch.
+    """
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+def test_a_candidate_cannot_edit_the_dockerfile_or_its_context(tmp_path: Path) -> None:
+    """The Dockerfile and its protected folder refuse a candidate patch; other code stays editable (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    constraints = _read(
+        tmp_path,
+        b'version = 1\n[paths]\neditable = ["bot"]\nprotected = ["bot/box"]\n\n'
+        b'[run]\nentry = "bot/app.py:main"\ndockerfile = "bot/box/Dockerfile"\n',
+        {"bot/app.py": b"", "bot/box/Dockerfile": b"FROM python:3.12\n", "bot/box/requirements.txt": b"x\n"},
+    )
+    assert constraints is not None
+
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    assert constraints.run_role.dockerfile == "bot/box/Dockerfile"
+    assert "bot/box/Dockerfile" in environment.protected_paths
+    for path in ("bot/box/Dockerfile", "bot/box/requirements.txt"):
+        assert patch_violations(_edit(path), environment.editable_paths, (), environment.protected_paths)
+    assert not patch_violations(_edit("bot/app.py"), environment.editable_paths, (), environment.protected_paths)
+
+
+def test_a_dockerfile_context_that_a_version_can_edit_is_refused(tmp_path: Path) -> None:
+    """An editable path inside the build context fails the parse, so no image builds from edited files (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    with pytest.raises(ConstraintsError, match="build context"):
+        _read(
+            tmp_path,
+            b'version = 1\n[paths]\neditable = ["bot"]\n\n[run]\nentry = "bot/app.py:main"\ndockerfile = "bot/Dockerfile"\n',
+            {"bot/app.py": b"", "bot/Dockerfile": b"FROM python:3.12\n"},
+        )

@@ -297,18 +297,52 @@ print(sha.hexdigest())
 """
 
 
-def _pick_base_python() -> str:
+def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> str:
     """Set ``p`` in a box command to the base interpreter.
 
-    It falls back to ``python3`` from PATH only where no base interpreter
-    exists, such as the local test runtime. The box user cannot remove the
-    root-owned one in the image, so the fallback never runs there.
+    In Skynet's image it falls back to ``python3`` from PATH only where no
+    base interpreter exists, such as the local test runtime. The box user
+    cannot remove the root-owned one in the image, so the fallback never runs
+    there. A user image gives no such promise, so its box never falls back:
+    its image check proved the base interpreter root-owned (SKY-737). The
+    image's environment can name loader paths, such as ``LD_LIBRARY_PATH``,
+    so a user image box starts the interpreter with an empty environment, as
+    the image check ran it. That environment holds only ``OPENSSL_CONF=/dev/null``:
+    ``hashlib`` loads OpenSSL, whose image config can name an engine library in
+    a folder that the box user writes (SKY-737).
+
+    Args:
+        user_image: Whether the box runs a user ``[run]`` image.
+        keep: Names of the environment variables that the script reads, kept in a user image box.
 
     Returns:
-        A shell prefix that sets ``p`` and ends in ``&& ``. It keeps one
-        ``&&`` chain, so a failed ``cd`` before it still stops the hash.
+        A shell prefix that sets ``p`` and ends in ``&& ``, or in a user image
+        box in ``/usr/bin/env -i``, ``OPENSSL_CONF`` and the kept variables, so ``"$p"`` follows
+        it. It keeps one ``&&`` chain, so a failed ``cd`` before it still stops the hash.
     """
+    if user_image:
+        kept = "".join(f' {name}="${name}"' for name in keep)
+        return f"p={shlex.quote(BASE_PYTHON)} && /usr/bin/env -i OPENSSL_CONF=/dev/null{kept} "
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
+
+
+def absolute_cd(path: str, root: str) -> str:
+    """Make a ``cd`` to a box path that the image's ``CDPATH`` and ``PWD`` cannot send elsewhere.
+
+    ``CDPATH`` applies only to a relative target, so a relative path gets
+    the box's working directory in front. That folder comes from
+    :func:`physical_root`, never from ``$PWD``: bash takes ``PWD`` from the
+    environment when it names the working folder, even through a link that
+    the box user can later point at a decoy (SKY-737).
+
+    Args:
+        path: The folder, absolute or relative to the box's working directory.
+        root: The box's working directory from :func:`physical_root`.
+
+    Returns:
+        The ``cd`` command.
+    """
+    return f"cd {shlex.quote(path if path.startswith('/') else f'{root}/{path}')}"
 
 
 class RepoSetupError(RuntimeError):
@@ -448,12 +482,39 @@ def box_root(session: SandboxSession) -> str:
     return root
 
 
-def _install_metric_files(session: SandboxSession, files: str | None) -> None:
+def physical_root(session: SandboxSession, user_image: bool) -> str:
+    """Return a box's working directory as the kernel names it, with no link in it.
+
+    The trusted interpreter asks ``getcwd``, so neither an image ``PWD`` nor
+    a link that the box user owns can change the answer (SKY-737).
+
+    Args:
+        session: The open box.
+        user_image: Whether the box runs a user ``[run]`` image.
+
+    Returns:
+        The absolute directory.
+
+    Raises:
+        RepoSetupError: When the box cannot report it.
+    """
+    located = session.run(
+        f'{_pick_base_python(user_image)}"$p" -I -S -c {shlex.quote("import os; print(os.getcwd())")}',
+        timeout_seconds=30,
+    )
+    root = located.stdout.strip().splitlines()[-1] if located.ok and located.stdout.strip() else ""
+    if not root.startswith("/"):
+        raise RepoSetupError("The box could not report its working directory.")
+    return root
+
+
+def _install_metric_files(session: SandboxSession, files: str | None, python: str = "python3") -> None:
     """Put the packed metric files into ``METRIC_REPO_DIR`` at their repository paths.
 
     Args:
         session: The metric box or the metric setup box.
         files: The base64 tar.gz from :func:`pack_metric_files`; ``None`` only makes the folder.
+        python: The metric box's trusted interpreter.
 
     Raises:
         RepoSetupError: When the files cannot be installed.
@@ -466,7 +527,7 @@ def _install_metric_files(session: SandboxSession, files: str | None) -> None:
     source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
     session.write_files({source: files})
     result = session.run(
-        f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
+        f"cd {METRIC_REPO_DIR} && {shlex.quote(python)} -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
         timeout_seconds=_SETUP_TIMEOUT_SECONDS,
     )
     if not result.ok:
@@ -615,7 +676,7 @@ class CandidateBox:
         if not self._workspace.watched:
             return None
         with self._lock:
-            before = self._workspace.fingerprint(self.session, WORK_DIR)
+            before = self._workspace.fingerprint(self.session, WORK_DIR, self.root)
             if before is None:
                 return "The protected files could not be checked before the version ran."
             self._stamps = before[1]
@@ -634,7 +695,7 @@ class CandidateBox:
         if not self._workspace.watched:
             return ()
         with self._lock:
-            current = self._workspace.fingerprint(self.session, WORK_DIR)
+            current = self._workspace.fingerprint(self.session, WORK_DIR, self.root)
             before = self._stamps
         if current is None or before is None:
             return ("The protected files could not be checked after the version ran.",)
@@ -669,7 +730,7 @@ class CandidateBox:
                 self._unstamped = True
                 return () if _deliver(self.session, path, text) else None
             if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
-                current = workspace.fingerprint(self.session, WORK_DIR)
+                current = workspace.fingerprint(self.session, WORK_DIR, self.root)
                 if current is None:
                     self._unstamped = True
                     _deliver(self.session, path, text)
@@ -678,7 +739,7 @@ class CandidateBox:
                 # contents can name a change.
                 changes = workspace.changes(current, current[1] if self._unstamped else before)
                 try:
-                    written = _write_answer(self.session, path, text)
+                    written = _write_answer(self.session, self.root, path, text, user_image=workspace.user_run_image)
                 except Exception:
                     # A found change must still reach the rule judge.
                     if changes:
@@ -694,7 +755,7 @@ class CandidateBox:
                             return changes
                         raise
                 return changes if changes or written else None
-            current = workspace.fingerprint(self.session, WORK_DIR) if before is not None else None
+            current = workspace.fingerprint(self.session, WORK_DIR, self.root) if before is not None else None
             changes = (
                 workspace.changes(current, current[1] if self._unstamped else before)
                 if current is not None and before is not None
@@ -710,7 +771,7 @@ class CandidateBox:
                 raise
             if not delivered or current is None or before is None:
                 return changes or None
-            after = workspace.fingerprint(self.session, WORK_DIR)
+            after = workspace.fingerprint(self.session, WORK_DIR, self.root)
             if after is None:
                 return changes or None
             self._stamps = after[1]
@@ -756,26 +817,29 @@ class MetricBox:
         """
         # The extract overwrites the metric files and keeps the files a
         # [metric] setup build wrote next to them (SKY-740).
-        _install_metric_files(self.session, self._workspace.metric_files)
+        _install_metric_files(self.session, self._workspace.metric_files, self._workspace.metric_python)
 
     def close(self) -> None:
         """Give the box back to its source once."""
         self.box.release(healthy=True)
 
 
-def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
+def _write_answer(session: SandboxSession, root: str, path: str, text: str, *, user_image: bool = False) -> bool:
     """Write one relay answer with a box-user command, which moves no protected file's change time.
 
     Args:
         session: The box the answer goes to.
+        root: The box's working directory from :func:`physical_root`.
         path: Where the answer goes, relative to the box.
         text: The answer.
+        user_image: Whether the box runs a user ``[run]`` image.
 
     Returns:
         Whether the write succeeded.
     """
     result = session.run(
-        f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
+        f'{_pick_base_python(user_image, ("APP_ANSWER",))}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)}'
+        f" {shlex.quote(f'{root}/{path}')}",
         env={"APP_ANSWER": text},
         timeout_seconds=_HASH_TIMEOUT_SECONDS,
     )
@@ -831,6 +895,9 @@ class RepoWorkspace:
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
         metric_setup: str | None = None,
+        run_image: str | None = None,
+        metric_image: str | None = None,
+        metric_python: str | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -854,6 +921,12 @@ class RepoWorkspace:
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
             metric_setup: The ``[metric] setup`` command, run once in the metric
                 setup box with the metric files; ``None`` builds nothing.
+            run_image: The checked ``[run]`` user image of the setup and candidate
+                boxes; ``None`` keeps ``spec.image`` (SKY-737).
+            metric_image: The checked ``[metric]`` user image of the metric boxes;
+                ``None`` keeps ``spec.image``.
+            metric_python: The trusted interpreter that ``ascent check --image
+                --role metric`` reported for ``metric_image``; ``None`` uses ``python3``.
         """
         self._runtime = runtime
         self._spec = spec
@@ -868,6 +941,10 @@ class RepoWorkspace:
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
         self._metric_setup = (metric_setup or "").strip() or None
+        self._run_image = run_image or spec.image
+        self.user_run_image = bool(run_image)
+        self._metric_image = metric_image or spec.image
+        self.metric_python = metric_python or "python3"
         self._secrets = dict(secrets)
         self._failure: BaseException | None = None
         self._setup_log = ""
@@ -884,13 +961,16 @@ class RepoWorkspace:
         # Each workspace has its own keys, so no other box can reuse its snapshots.
         unique = uuid.uuid4().hex
         self._snapshot_key = snapshot_cache_key(
-            image_digest=spec.image or "",
+            image_digest=self._run_image or "",
             setup_command=self._setup or "",
             install_command="",
             lock_files={"workspace": unique},
         )
         self._metric_snapshot_key = snapshot_cache_key(
-            image_digest=spec.image or "", setup_command="", install_command="", lock_files={"metric": unique}
+            image_digest=self._metric_image or "",
+            setup_command="",
+            install_command="",
+            lock_files={"metric": unique},
         )
         self._snapshots_off = False
         self._opened = 0
@@ -979,7 +1059,13 @@ class RepoWorkspace:
         assert self._folder is not None
         stripped = strip_archive(self._archive, self._hidden, self._folder / "repo.tar.gz")
         session = self._runtime.open(
-            replace(self._spec, operation_key=self._next_key("setup"), services=(), snapshot_id=None)
+            replace(
+                self._spec,
+                image=self._run_image,
+                operation_key=self._next_key("setup"),
+                services=(),
+                snapshot_id=None,
+            )
         )
         try:
             self._unpack_and_setup(session, stripped, on_output)
@@ -1028,12 +1114,13 @@ class RepoWorkspace:
         moved = session.run(f"mv {WORK_DIR} {PREPARED_DIR}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         if not moved.ok:
             raise RepoSetupError(f"The prepared repository could not be kept: {_tail(moved)}")
+        root = physical_root(session, self.user_run_image)
         if self._protected:
-            baseline = self.fingerprint(session, PREPARED_DIR)
+            baseline = self.fingerprint(session, PREPARED_DIR, root)
             if baseline is None:
                 raise RepoSetupError("The repository's protected files could not be fingerprinted.")
             self._protected_baseline = baseline[0]
-        self._prepared_digest = self._digest_prepared(session)
+        self._prepared_digest = self._digest_prepared(session, root)
         if self._prepared_digest is None:
             raise RepoSetupError("The prepared repository could not be fingerprinted.")
 
@@ -1052,6 +1139,7 @@ class RepoWorkspace:
         # spec's own hosts are then empty, and the install would run offline.
         spec = replace(
             self._spec,
+            image=self._metric_image,
             operation_key=self._next_key("metric-setup"),
             services=(),
             snapshot_id=None,
@@ -1065,7 +1153,7 @@ class RepoWorkspace:
             if self._requirements:
                 session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
                 result = session.run(
-                    f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
+                    f"{shlex.quote(self.metric_python)} -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
                     f" -r {METRIC_DIR}/requirements.txt && rm -f {METRIC_DIR}/requirements.txt",
                     env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
                     timeout_seconds=_SETUP_TIMEOUT_SECONDS,
@@ -1093,7 +1181,7 @@ class RepoWorkspace:
                 fails or runs out of time; the error holds the output's last lines.
         """
         assert self._metric_setup is not None
-        _install_metric_files(session, self.metric_files)
+        _install_metric_files(session, self.metric_files, self.metric_python)
         build = session.run(f"cd {METRIC_REPO_DIR} && {self._metric_setup}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         log = redact(_tail(build), self._secrets.values())
         if build.timed_out:
@@ -1244,6 +1332,7 @@ class RepoWorkspace:
             key = self._next_key(kind)
         return replace(
             self._spec,
+            image=self._metric_image if kind == "metric" else self._run_image,
             operation_key=key,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),
@@ -1310,7 +1399,8 @@ class RepoWorkspace:
         box = self._open_box(spec, state, "candidate", self._run_grants)
         session = box.box
         try:
-            if self._digest_prepared(session) != self._prepared_digest:
+            root = physical_root(session, self.user_run_image)
+            if self._digest_prepared(session, root) != self._prepared_digest:
                 self._drop_snapshots()
                 lost = state is not None and state.snapshot_id is not None
                 raise (_SnapshotLostError if lost else RepoSetupError)(
@@ -1324,7 +1414,7 @@ class RepoWorkspace:
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
-                return CandidateBox(self, session, box_root(session), box)
+                return CandidateBox(self, session, root, box)
         except BaseException:
             box.release_failed("The candidate box")
             raise
@@ -1416,30 +1506,35 @@ class RepoWorkspace:
             raise RepoSetupError(f"The repository could not be copied for the compose services: {_tail(copied)}")
         start(lines[-1])
 
-    def _digest_prepared(self, session: SandboxSession) -> str | None:
+    def _digest_prepared(self, session: SandboxSession, root: str) -> str | None:
         """Hash the whole prepared tree in a box.
 
         Args:
             session: The box holding the prepared tree.
+            root: The box's working directory from :func:`physical_root`.
 
         Returns:
             The tree's SHA-256 digest, or ``None`` when the hashing command
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f'cd {PREPARED_DIR} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
+            f'{absolute_cd(PREPARED_DIR, root)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f" {shlex.quote(_HASH_PREPARED)}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         lines = result.stdout.strip().splitlines() if result.ok else []
         digest = lines[-1] if lines else ""
         return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
-    def fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
+    def fingerprint(
+        self, session: SandboxSession, directory: str, root: str
+    ) -> tuple[dict[str, str], dict[str, str]] | None:
         """Hash every file under the protected paths of one tree in a box.
 
         Args:
             session: The box holding the tree.
             directory: The tree's folder, relative to the box.
+            root: The box's working directory from :func:`physical_root`.
 
         Returns:
             Repository-relative path to digest, and path to inode and change
@@ -1448,7 +1543,8 @@ class RepoWorkspace:
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
         result = session.run(
-            f'cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
+            f'{absolute_cd(directory, root)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f" {shlex.quote(_HASH_PROTECTED)} {paths}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
             # A box-user command's output files belong to the box user, so a
             # process that the version leaves running could replace a clean

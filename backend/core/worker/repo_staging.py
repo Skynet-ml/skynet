@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 import hashlib
@@ -18,8 +19,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +33,13 @@ from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_
 from ..api.routers.package_registry import package_registry_for
 from ..billing.host_agent import HOST_AGENT_TOKEN_KEY, _proposer_model_extra
 from ..billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
-from ..billing.operation_pricing import ChargePolicy
+from ..billing.operation_pricing import ChargePolicy, image_build_usd, operation_quote
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     repo_secret_allowed_hosts,
     resolve_repo_secrets,
 )
+from ..billing.runtime import PaidResult
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, proposer_hosts
 from ..brand import APP_NAME
 from ..config import settings
@@ -71,6 +74,18 @@ from ..models.blackbox import (
 )
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
+from ..sandbox.image_build import (
+    CODEBUILD_PLATFORM,
+    BuildLimits,
+    BuildRequest,
+    BuildResult,
+    CodeBuildImageBuilder,
+    ImageBuilder,
+    ImageBuildError,
+    LocalDockerImageBuilder,
+    compute_input_hash,
+)
+from ..sandbox.image_registry import ImageRegistry, ImageRegistryError
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import loop_tools, runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness import mcp_unsupported
@@ -94,7 +109,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
     scorer_only_paths,
 )
-from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
+from ..service_gateway.optimization.blackbox.repo_scorer import _SUPERVISOR_BOOT, RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
@@ -102,13 +117,21 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     REPO_SNAPSHOT_KEY,
     SAFE_GIT,
     drop_paths,
+    extract_folder,
     inside,
     linked_hidden_paths,
     patch_paths,
     patch_violations,
     strip_archive,
 )
-from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
+from ..service_gateway.optimization.blackbox.repo_workspace import (
+    _HASH_PREPARED,
+    _HASH_PROTECTED,
+    _WRITE_ANSWER,
+    BASE_PYTHON,
+    RepoSetupError,
+    RepoWorkspace,
+)
 from ..service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
@@ -117,7 +140,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     run_log_emitter,
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
-from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from ..service_gateway.optimization.blackbox.sandbox_scorer import RUNNER_SOURCE, ScorerGateway, scorer_gateway
 from ..service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY
 from .repo_gate import RepoGateError, check_draft_base, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
@@ -214,6 +237,12 @@ class StagedRepository:
     # The run record's hashes and metric source, taken from the staged tree the
     # run reads, so the run end never reads the repository again (SKY-694).
     record_facts: Mapping[str, Any] = field(default_factory=dict)
+    # The inputs of :func:`_record_facts`, so a metric image can join the metric hash after its build (SKY-737).
+    record_inputs: Mapping[str, Any] = field(default_factory=dict)
+    # Each box's own image in ascent.toml, by role: ("image", reference) or ("dockerfile", path) (SKY-737).
+    box_sources: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    # Each box's checked image, by role, from :func:`prepare_box_images`; empty for Skynet's image.
+    box_images: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -511,21 +540,21 @@ def stage_repository(
         if leaks:
             raise RepoGateError(leaks)
         warnings = tuple(metric_import_warnings(snapshot.archive, metric.files))
-        record_facts = (
-            _record_facts(
-                snapshot.archive,
-                contract_sha256=environment.constraints.sha256,
-                metric_files=metric.files,
-                metric_entry=metric.entry,
-                metric_setup=metric.setup,
-                metric_code=str((result.get("scorer") or {}).get("metric_code") or ""),
-                drafts=drafts,
-                cases_file=cases_file,
-                cases=result.get("cases"),
-            )
+        record_inputs = (
+            {
+                "contract_sha256": environment.constraints.sha256,
+                "metric_files": metric.files,
+                "metric_entry": metric.entry,
+                "metric_setup": metric.setup,
+                "metric_code": str((result.get("scorer") or {}).get("metric_code") or ""),
+                "drafts": drafts,
+                "cases_file": cases_file,
+                "cases": result.get("cases"),
+            }
             if environment.constraints is not None
             else {}
         )
+        record_facts = _record_facts(snapshot.archive, **record_inputs) if record_inputs else {}
         scorer_archive = (
             relay_mcp_archive(
                 snapshot.archive,
@@ -625,6 +654,8 @@ def stage_repository(
         drafts=drafts,
         require_version=require_version,
         record_facts=record_facts,
+        record_inputs=record_inputs,
+        box_sources=_box_sources(environment.constraints),
     )
 
 
@@ -1128,6 +1159,1029 @@ def infer_repo_setup(payload: dict[str, Any], staged: StagedRepository, gateway:
     return command
 
 
+# The role each box's image check runs as, by the ascent.toml section that names the image.
+_CHECK_ROLES = {"run": "candidate", "metric": "metric"}
+# ``ascent check --image`` ends in about 24 seconds; the rest covers the box start.
+_CHECK_TIMEOUT_SECONDS = 120.0
+# ``docker image inspect`` reads only the local image store.
+_INSPECT_TIMEOUT_SECONDS = 10.0
+_CHECK_LIFETIME_SECONDS = 600.0
+_CHECK_OUTPUT_CHARS = 4_000
+USER_IMAGES_UNSUPPORTED = (
+    "This deployment cannot start a box from a user image yet. Remove image and dockerfile"
+    " from [run] and [metric] in ascent.toml to use the default image."
+)
+DOCKERFILE_UNSUPPORTED = (
+    "This deployment cannot build a Dockerfile yet. Set [{role}] image to an image pinned by its digest instead."
+)
+
+
+def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
+    """List the absolute modules that the module body of each source imports.
+
+    Args:
+        sources: Python sources that root runs in a candidate box.
+
+    Returns:
+        The sorted module names, without ``__future__``.
+    """
+    names = set()
+    for source in sources:
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module != "__future__":
+                names.add(node.module)
+    return sorted(names)
+
+
+# The candidate box runs root scripts with BASE_PYTHON and never falls back
+# to PATH in a user image, so the box user must not be able to change any
+# file that the interpreter loads. The check asks the interpreter itself:
+# it runs it as root runs it, with ``-I -S``, imports the modules that the
+# root scripts import, and prints a tagged line for each path that it uses:
+# ``path`` for a ``sys.path`` entry, ``file`` for each file mapped into it or
+# into its shell (``/proc/<pid>/maps``, so libpython, libc and any preloaded
+# library wherever they are) and for the ELF loader that it, root's programs
+# and root's tools name, ``opt`` for a loader file that may be missing, ``lib``
+# for each loader folder (the default ones, those in ``/etc/ld.so.cache`` or
+# ``/etc/ld-musl-*.path``, and the RPATH and RUNPATH of each mapped file and
+# root program), ``absent`` for a path that must not exist
+# (``/etc/ld.so.preload``, and the CPython build and venv landmarks that
+# ``getpath`` looks for next to the interpreter), and ``dir`` for its prefix.
+# Every regular file that the listing names must be readable by others: a
+# root-only file could name a path, such as a preloaded library, that the
+# probe never sees. Each library in a loader folder must be root's and
+# readable by others for the same reason. The hash scripts start it with
+# ``env -i OPENSSL_CONF=/dev/null``, so an image OpenSSL config loads no
+# engine into root, and the supervisor with the box's own environment, so it
+# runs both ways. ``w`` walks one path from ``/``: it
+# prints ``stat`` (owner uid, octal mode, type, name) of ``/`` and of each
+# part, follows each link hop by hop with plain ``readlink``, as ``namei`` and
+# ``readlink -f`` hide the hops, and prints ``link <target>`` after it, or
+# ``none <path>`` for the first part that does not exist. The probe runs as
+# the box user, and a folder that it cannot search hides what is in it from
+# ``[ -e ]``, but not from root, so ``w`` fails the probe instead of printing
+# ``none`` below such a folder. ``_trusted_python``
+# judges the listing. Below each ``sys.path`` folder, except
+# ``site-packages`` and ``dist-packages``, which ``-S`` keeps out of
+# ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
+# group or others can write, or that is a link. In the locale trees a
+# root-owned link may stay, as Debian links ``coreutils.mo`` files there; the
+# interpreter prints a ``file`` line for each one, so its target is checked. A ``pyvenv.cfg`` or ``._pth``
+# file next to the interpreter would move ``sys.path``, so it fails the probe
+# too. ``env`` lines name the variables of each run, without their values,
+# for :func:`_root_variables`. A newline in a name or target could forge a listing line, so the probe
+# stops at any byte outside printable ASCII. ``$(...)`` drops trailing
+# newlines, so the ``x`` keeps them and the probe sees the target the kernel follows.
+_MAX_LINK_HOPS = 40
+# The programs that root runs by absolute path in a box: the Vercel root
+# wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
+# scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
+_ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
+# Other paths that root uses in a box. The supervisor reads ``/etc/passwd``
+# itself; ``/etc/nsswitch.conf`` names the NSS modules that glibc loads for
+# any other lookup. ``/tmp`` holds the supervisor's run folder and
+# the Vercel root wrapper's output, so it must be root's, sticky and 1777.
+_ROOT_TMP = "/tmp"
+_OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
+_ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
+# The PATH of every root script on Vercel (``vercel.ROOT_PATH``, which a test
+# keeps equal). Its root output poll runs ``_ROOT_TOOLS`` by name every 0.5 s,
+# so each folder must be out of the box user's reach. Root's lookup is not the
+# box user's ``command -v``: root takes the first file with any x bit, and a
+# dangling link can get a target later. So every ``folder/tool`` entry that
+# exists or is a link must resolve to a root-owned regular file, and at least
+# one folder must hold each tool. A missing folder may be missing. The probe
+# prints ``tool`` or ``notool`` for each pair, so no pair goes unchecked, and
+# each present folder must let others search it, or the box user's view of
+# it would hide entries that root runs.
+_ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ROOT_TOOLS = ("tail", "head", "base64", "tr")
+_ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
+_PATH_SCRIPT = (
+    r"""import os
+names = [n for n in os.environ if not (n == "OPENSSL_CONF" and os.environ[n] == "/dev/null")]
+os.environ["OPENSSL_CONF"] = "/dev/null"
+import """
+    + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
+    + r"""
+import locale
+if sys.prefix != sys.base_prefix:
+    sys.exit("the interpreter runs in a virtual environment")
+for name in names:
+    if not (name.isascii() and name.isprintable()):
+        sys.exit("an environment variable name is not printable ASCII")
+    print("env", name)
+    if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
+        value = os.environ[name]
+        if not (value.isascii() and value.isprintable()):
+            sys.exit("a locale value is not printable ASCII")
+        print("locale", name + "=" + value)
+for entry in sys.path:
+    print("path", entry)
+for tree in ("/usr/lib/locale", "/usr/share/locale"):
+    print("path", tree)
+    if not os.path.lexists(tree):
+        continue
+    for folder, subfolders, files in os.walk(tree, onerror=lambda error: sys.exit(str(error))):
+        for name in subfolders + files:
+            link = os.path.join(folder, name)
+            if not (link.isascii() and link.isprintable()):
+                sys.exit("a locale file name is not printable ASCII")
+            if os.path.islink(link):
+                print("file", link)
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except locale.Error:
+    sys.exit("the image locale does not load")
+seen = set()
+for pid in ("self", str(os.getppid())):
+    with open(f"/proc/{pid}/maps") as maps:
+        for line in maps:
+            name = line.rstrip("\n").split(None, 5)[5:]
+            if name and name[0].startswith("/") and name[0] not in seen:
+                seen.add(name[0])
+                print("file", name[0])
+with open(sys.executable, "rb") as elf:
+    data = elf.read()
+if data[:6] != b"\x7fELF\x02\x01":
+    sys.exit("the interpreter is not a 64-bit little-endian ELF file")
+start, size, count = (int.from_bytes(data[a:b], "little") for a, b in ((32, 40), (54, 56), (56, 58)))
+for at in range(start, start + size * count, size):
+    if int.from_bytes(data[at : at + 4], "little") == 3:
+        offset, length = (int.from_bytes(data[a:b], "little") for a, b in ((at + 8, at + 16), (at + 32, at + 40)))
+        print("file", data[offset : offset + length].rstrip(b"\0").decode())
+try:
+    with open("/etc/passwd", encoding="utf-8") as accounts:
+        known = any(
+            len(f) == 7 and f[0] and f[2] == str(os.getuid()) for f in (line.rstrip("\n").split(":") for line in accounts)
+        )
+except (OSError, UnicodeDecodeError):
+    known = False
+print("account", "ok" if known else "none", os.getuid())
+print("absent", "/etc/ld.so.preload")
+folders = {"/lib", "/usr/lib", "/lib64", "/usr/lib64", "/usr/local/lib"}
+print("opt", "/etc/ld.so.cache")
+if os.path.lexists("/etc/ld.so.cache"):
+    with open("/etc/ld.so.cache", "rb") as cache:
+        data = cache.read()
+    at = data.find(b"glibc-ld.so.cache1.1")
+    if at < 0:
+        sys.exit("the loader cache has no glibc-ld.so.cache1.1 table")
+    for entry in range(at + 48, at + 48 + 24 * int.from_bytes(data[at + 20 : at + 24], "little"), 24):
+        name = at + int.from_bytes(data[entry + 8 : entry + 12], "little")
+        folders.add(os.path.dirname(data[name : data.index(b"\0", name)].decode("ascii")))
+for name in os.listdir("/etc"):
+    if name.startswith("ld-musl-"):
+        print("opt", "/etc/" + name)
+        with open("/etc/" + name, encoding="ascii") as paths:
+            folders.update(paths.read().replace(":", "\n").split())
+"""
+    + f"programs = {[*_ROOT_PROGRAMS, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + r"""
+for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.lexists(name)}):
+    with open(name, "rb") as elf:
+        data = elf.read()
+    if data[:4] != b"\x7fELF":
+        continue
+    if data[4:6] != b"\x02\x01":
+        sys.exit("a mapped file is not a 64-bit little-endian ELF file")
+    u = lambda a, b: int.from_bytes(data[a:b], "little")
+    start, size, count = u(32, 40), u(54, 56), u(56, 58)
+    heads = [at for at in range(start, start + size * count, size)]
+    for at in heads:
+        if u(at, at + 4) == 3:
+            print("file", data[u(at + 8, at + 16) : u(at + 8, at + 16) + u(at + 32, at + 40)].rstrip(b"\0").decode())
+    loads = [(u(at + 16, at + 24), u(at + 8, at + 16), u(at + 32, at + 40)) for at in heads if u(at, at + 4) == 1]
+    strtab, found = None, []
+    for at in heads:
+        if u(at, at + 4) == 2:
+            for item in range(u(at + 8, at + 16), u(at + 8, at + 16) + u(at + 32, at + 40), 16):
+                tag = u(item, item + 8)
+                if tag == 0:
+                    break
+                if tag == 5:
+                    strtab = u(item + 8, item + 16)
+                if tag in (15, 29):
+                    found.append(u(item + 8, item + 16))
+    if found:
+        base = next(offset + strtab - address for address, offset, length in loads if address <= strtab < address + length)
+        for value in found:
+            for folder in data[base + value : data.index(b"\0", base + value)].decode("ascii").split(":"):
+                folder = folder.replace("${ORIGIN}", "$ORIGIN").replace("$ORIGIN", os.path.dirname(name))
+                if "$" in folder or not folder.startswith("/"):
+                    sys.exit("a library search path is not an absolute folder")
+                folders.add(folder)
+def scan(folder, depth):
+    for item in os.scandir(folder):
+        info = item.stat(follow_symlinks=False)
+        if item.is_symlink():
+            if ".so" in item.name:
+                if not os.path.exists(item.path):
+                    sys.exit("a library link in a loader folder is dangling")
+                links.append(item.path)
+        elif item.is_dir(follow_symlinks=False):
+            if item.name in ("site-packages", "dist-packages"):
+                continue
+            if info.st_uid or info.st_mode & 0o022 or info.st_mode & 0o005 != 0o005:
+                sys.exit("a loader folder is not root's, or others cannot read it")
+            if depth < 4:
+                scan(item.path, depth + 1)
+        elif ".so" in item.name:
+            if info.st_uid or info.st_mode & 0o022 or not info.st_mode & 0o004:
+                sys.exit("a library in a loader folder is not root's, or others cannot read it")
+            checked.add(item.path)
+if not all(folder.startswith("/") for folder in folders):
+    sys.exit("a loader folder is not absolute")
+links, checked = [], set()
+for folder in sorted({os.path.realpath(folder) for folder in folders if os.path.isdir(folder)}):
+    scan(folder, 1)
+for target in sorted({os.path.realpath(link) for link in links} - checked):
+    print("file", target)
+for folder in sorted(folders):
+    print("lib", folder)
+version = f"python{sys.version_info[0]}.{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "")
+packed = f"python{sys.version_info[0]}{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "") + ".zip"
+for start in sorted({os.path.dirname(sys.executable), os.path.dirname(os.path.realpath(sys.executable))}):
+    for name in ("pybuilddir.txt", "Modules/Setup.local", "pyvenv.cfg"):
+        print("absent", start + "/" + name)
+    print("absent", os.path.dirname(start).rstrip("/") + "/pyvenv.cfg")
+    for landmarks, top in (
+        ((f"{sys.platlibdir}/{version}/os.py", f"{sys.platlibdir}/{version}/os.pyc"), sys.prefix),
+        ((f"{sys.platlibdir}/{packed}",), sys.prefix),
+        ((f"{sys.platlibdir}/{version}/lib-dynload",), sys.exec_prefix),
+    ):
+        here = start
+        while not (here == top and any(os.path.lexists(here.rstrip("/") + "/" + name) for name in landmarks)):
+            for name in landmarks:
+                print("absent", here.rstrip("/") + "/" + name)
+            if here == "/":
+                break
+            here = os.path.dirname(here)
+print("dir", sys.prefix)
+print("dir", sys.exec_prefix)
+"""
+)
+_TRUSTED_PYTHON_PROBE = (
+    # The box run gets the image's own LC_ALL back, so it maps the locale files that root's runs map.
+    f"g=${{LC_ALL+1}}; h=${{LC_ALL-}}; export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
+    "w() {\n"
+    "  a=; r=${1#/}; n=0; z=\n"
+    '  stat -c "$f" / || exit 1\n'
+    '  while [ -n "$r" ]; do\n'
+    "    c=${r%%/*}\n"
+    "    case $r in */*) r=${r#*/};; *) r=;; esac\n"
+    "    case $c in ''|.) continue;; ..) a=${a%/*}; continue;; esac\n"
+    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then [ -x "${a:-/}" ] || exit 1; printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
+    '    stat -c "$f" "$a/$c" || exit 1\n'
+    '    if [ -h "$a/$c" ]; then\n'
+    f"      n=$((n+1)); [ $n -le {_MAX_LINK_HOPS} ] || exit 1\n"
+    '      l=$(readlink "$a/$c" && echo x) || exit 1\n'
+    "      l=${l%?x}\n"
+    "      case $l in *[![:print:]]*|'') exit 1;; esac\n"
+    "      printf 'link %s\\n' \"$l\"\n"
+    '      case $l in /*) a=; r=${l#/}${r:+/$r}; stat -c "$f" / || exit 1;; *) r=$l${r:+/$r};; esac\n'
+    "    else a=$a/$c; fi\n"
+    "  done\n"
+    "}\n"
+    'w "$s"\n'
+    '[ -z "$z" ] || exit 1\n'
+    'for d in "${s%/*}" "${a%/*}"; do\n'
+    '  [ -r "$d" ] && [ -x "$d" ] || exit 1\n'
+    '  for e in "$d/pyvenv.cfg" "${d%/*}/pyvenv.cfg" "$d"/*._pth; do\n'
+    '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
+    "  done\n"
+    "done\n"
+    f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi; done\n'
+    f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
+    '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; else printf \'notool %s\\n\' "$b/$t"; fi\n'
+    "done; done\n"
+    "for m in clean box; do\n"
+    "  printf 'run %s\\n' $m\n"
+    '  if [ $m = clean ]; then o=$(/usr/bin/env -i OPENSSL_CONF=/dev/null "$s" -I -S -c "$y") || exit 1\n'
+    '  elif [ -n "$g" ]; then o=$(LC_ALL="$h" "$s" -I -S -c "$y") || exit 1\n'
+    '  else o=$(/usr/bin/env -u LC_ALL "$s" -I -S -c "$y") || exit 1; fi\n'
+    "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'account '?*|'path /'*|'file /'*|'dir /'*|'opt /'*|'lib /'*|'absent /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale|account) continue;; esac; w "${v#* }"\n'
+    '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
+    "      case ${v#* } in /usr/lib/locale|/usr/share/locale)\n"
+    '        q=$(find "$a" \\( ! -user 0 -o ! -type l \\( -perm -020 -o -perm -002 \\) \\) -print) || exit 1;;\n'
+    '      *) q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
+    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1;; esac\n"
+    '      [ -z "$q" ] || exit 1\n'
+    "    fi\n"
+    "  done || exit 1\n"
+    "done"
+)
+# An absolute path of printable ASCII only, as the probe allows.
+_PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
+_ACCOUNT_OK = re.compile(r"ok [0-9]+")
+_ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
+_FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
+# The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
+# An ``absent`` path is a CPython build or venv landmark, and it must be missing.
+_ENTRY_KINDS = {
+    "path": frozenset({"directory", "regular file"}),
+    "file": frozenset({"regular file"}),
+    "opt": frozenset({"regular file"}),
+    "dir": frozenset({"directory"}),
+    "lib": frozenset({"directory"}),
+    "absent": frozenset(),
+}
+_MAY_BE_MISSING = frozenset({"path", "opt", "lib", "absent"})
+_VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
+# Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
+# supervisor with the box's environment, which holds the image ENV. The
+# loader, the shell and libc read these names before ``env -i`` can clear
+# anything, as no root process here is setuid (SKY-737). Each group:
+# - ``LD_*``: the glibc and musl loader search paths, preloads and audit
+#   libraries. An empty ``LD_LIBRARY_PATH`` element means the work folder.
+# - ``GCONV_PATH``, ``LOCPATH``, ``GLIBC_TUNABLES``: iconv modules, locale
+#   files, and how the loader picks libraries and how malloc works.
+# - ``OPENSSL_*``: the root supervisor imports ``ssl``, and OpenSSL loads
+#   its config, providers and engines from these paths.
+# - ``BASH_ENV``, ``ENV``: a file that the shell sources at its start.
+# - ``BASH_FUNC_*``: exported functions (``BASH_FUNC_name%%``), which win
+#   over builtins such as ``cd``.
+# - ``SHELLOPTS``, ``BASHOPTS``, ``POSIXLY_CORRECT``, ``BASH_COMPAT``: shell
+#   options, for example ``xtrace``, which expands ``PS4``.
+# - ``PS4``, ``BASH_XTRACEFD``: the trace prompt runs command substitutions,
+#   and the trace goes to any open file.
+# - ``CDPATH``, ``GLOBIGNORE``, ``EXECIGNORE``, ``IFS``,
+#   ``BASH_LOADABLES_PATH``: which folder ``cd`` picks, which files a glob
+#   or a command search takes, how words split, and where ``enable -f``
+#   loads builtins from. The root ``cd`` targets are absolute, so
+#   ``CDPATH`` is refused only to be safe.
+# - ``TMPDIR``, ``TEMP``, ``TMP``: Python's ``tempfile`` reads them even
+#   under ``-I``, so they could put a root folder where the box user writes.
+# - ``LANG``, ``LANGUAGE``, ``LC_*``: refused only when the value is not C,
+#   POSIX or a UTF-8 locale. Another codeset makes glibc load ``gconv``
+#   modules, and a value with ``/`` names a locale folder (``_locale_ok``).
+# ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, and the
+# interactive-only names (``PROMPT_COMMAND``, ``INPUTRC``, ``HISTFILE``) are
+# never read by ``bash -c``, so they stay allowed.
+_ROOT_PREFIXES = ("LD_", "OPENSSL_", "BASH_FUNC_")
+_ROOT_VARIABLES = frozenset(
+    {
+        "GCONV_PATH",
+        "LOCPATH",
+        "GLIBC_TUNABLES",
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "POSIXLY_CORRECT",
+        "BASH_COMPAT",
+        "PS4",
+        "BASH_XTRACEFD",
+        "CDPATH",
+        "GLOBIGNORE",
+        "EXECIGNORE",
+        "IFS",
+        "BASH_LOADABLES_PATH",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+    }
+)
+# A UTF-8 locale name, with no ``/``, so glibc reads it from its own locale files.
+_UTF8_LOCALE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:utf-8|utf8)", re.IGNORECASE)
+ROOT_ENVIRONMENT = (
+    "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
+    " image environment, and these variables change which code the shell, the system loader or the C library"
+    " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
+    " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
+    " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
+    " are not supported yet."
+)
+_RUN_MODES = ("clean", "box")
+_MISSING = "missing"
+UNTRUSTED_PYTHON = (
+    "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
+    " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
+    " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
+    " /etc/nsswitch.conf (when present), every tail, head, base64 and tr in a folder of root's PATH"
+    " ({path}), each folder of that PATH that exists, every file that Python loads, the locale trees,"
+    " each folder on its import path and every file and folder below that path (except site-packages), and"
+    " every folder from / down to each of them, must be"
+    " owned by root and not writable by group or others. Others must be able to read each of those files,"
+    " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
+    " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
+    " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
+    " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
+    " of the folders, and no entry may be a dangling link."
+)
+NO_ACCOUNT = (
+    "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
+    " {app}'s root supervisor finds the box user's name and home there. Add a line with seven fields for that uid."
+)
+
+
+class BoxImageError(RepoSetupError):
+    """A user box image did not build or failed its check, so no candidate runs (SKY-737)."""
+
+
+def _box_sources(constraints: RepoConstraints | None) -> dict[str, tuple[str, str]]:
+    """Read the user image of the ``[run]`` and ``[metric]`` boxes from ascent.toml.
+
+    Args:
+        constraints: The parsed file, or ``None`` for a repository without one.
+
+    Returns:
+        ``("image", reference)`` or ``("dockerfile", path)`` by role, only for a role that sets one.
+    """
+    if constraints is None:
+        return {}
+    roles = {"run": constraints.run_role, "metric": constraints.metric_role}
+    return {
+        name: ("image", role.image) if role.image else ("dockerfile", role.dockerfile)
+        for name, role in roles.items()
+        if role.image or role.dockerfile
+    }
+
+
+def image_builder(config: Any = settings) -> ImageBuilder | None:
+    """Return the builder of a run's Dockerfiles on this deployment.
+
+    Args:
+        config: The app settings.
+
+    Returns:
+        Local Docker in local mode; ``None`` on a cloud deployment, which has
+        no CodeBuild project setting yet, so a Dockerfile there fails clearly.
+    """
+    return LocalDockerImageBuilder() if config.local_mode else None
+
+
+def _image_owner(username: str) -> str:
+    """Name the registry repository of one user's images.
+
+    Args:
+        username: The run's owner.
+
+    Returns:
+        A short lowercase name that the registry accepts and that hides the username.
+    """
+    return "u" + hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+
+
+def _digest(image: str) -> str:
+    """Return the digest of a pinned reference or a local image id.
+
+    Args:
+        image: ``name@sha256:<hex>`` or ``sha256:<hex>``.
+
+    Returns:
+        The ``sha256:<hex>`` part.
+    """
+    return image.rsplit("@", 1)[-1]
+
+
+def prepare_box_images(
+    staged: StagedRepository,
+    *,
+    owner_id: str,
+    username: str,
+    runtime: Any,
+    builder: ImageBuilder | None,
+    store: Any,
+    budget: Any = None,
+    registry: ImageRegistry | None = None,
+    pinned: Mapping[str, Mapping[str, Any]] | None = None,
+) -> StagedRepository:
+    """Build or pin each user box image once, then check it before the first candidate (SKY-737).
+
+    A ``[run]`` or ``[metric]`` box with ``dockerfile`` builds from the
+    staged start commit, so a candidate edit never reaches its image. A
+    build of the same user's same inputs is reused by its input hash. Each
+    image must pass ``ascent check --image`` in an offline box; the metric
+    check gives the trusted Python path that the scorer runs. A resume uses
+    the images the run pinned at its start and builds and checks nothing.
+
+    Args:
+        staged: The staged tree, with the box sources from ascent.toml.
+        owner_id: Job identity naming the build and check operations.
+        username: The run's owner, whose builds can be reused.
+        runtime: The parent's metered sandbox runtime, which opens the check boxes.
+        builder: The Dockerfile builder, or ``None`` when this deployment has none.
+        store: The job store, which keeps each build and its log.
+        budget: The run's budget runtime, which reserves and settles the build; ``None`` runs it free.
+        registry: The registry that must still hold a reused build, or ``None`` to skip that check.
+        pinned: The images the run pinned at its start, for a resume.
+
+    Returns:
+        ``staged`` with ``box_images`` and, for a metric image, record facts that cover its digest.
+
+    Raises:
+        BoxImageError: When the runtime cannot start a user image, a build fails, or a check fails.
+    """
+    if not staged.box_sources:
+        return staged
+    if pinned:
+        images = {role: dict(record) for role, record in pinned.items()}
+    else:
+        # A runtime that ignores the spec's image would run Skynet's image in its place, with no sign.
+        # A runtime that sets ``accepts_user_images`` must not run the box user as uid 0: the
+        # trusted-Python probe checks only for root ownership, so it cannot guard against a root box user.
+        if not getattr(runtime, "accepts_user_images", False):
+            raise BoxImageError(USER_IMAGES_UNSUPPORTED)
+        images = {}
+        for role, (kind, value) in staged.box_sources.items():
+            if kind == "image":
+                record: dict[str, Any] = {
+                    "image": value,
+                    "digest": _digest(value),
+                    "source": "image",
+                    "input_hash": None,
+                    "build_log": None,
+                }
+            else:
+                record = _dockerfile_image(
+                    staged,
+                    role,
+                    value,
+                    owner_id=owner_id,
+                    username=username,
+                    builder=builder,
+                    store=store,
+                    budget=budget,
+                    registry=registry,
+                )
+            python = _check_box_image(runtime, record["image"], role, owner_id=owner_id)
+            if python is not None:
+                record["python"] = python
+            images[role] = record
+    facts = staged.record_facts
+    if "metric" in images and staged.record_inputs:
+        facts = _record_facts(staged.snapshot.archive, **staged.record_inputs, metric_image=images["metric"]["digest"])
+    return replace(staged, box_images=images, record_facts=facts)
+
+
+def _dockerfile_image(
+    staged: StagedRepository,
+    role: str,
+    dockerfile: str,
+    *,
+    owner_id: str,
+    username: str,
+    builder: ImageBuilder | None,
+    store: Any,
+    budget: Any,
+    registry: ImageRegistry | None,
+) -> dict[str, Any]:
+    """Reuse or build the image of one box's Dockerfile from the staged start commit.
+
+    Args:
+        staged: The staged tree.
+        role: ``run`` or ``metric``.
+        dockerfile: The Dockerfile's repository path; its folder is the build context.
+        owner_id: Job identity naming the build operation.
+        username: The run's owner.
+        builder: The Dockerfile builder, or ``None``.
+        store: The job store.
+        budget: The run's budget runtime, or ``None``.
+        registry: The registry that must still hold a reused build, or ``None``.
+
+    Returns:
+        The box's image record: image, digest, source, input hash and build log reference.
+
+    Raises:
+        BoxImageError: When there is no builder, the context is invalid, or the build fails.
+    """
+    if builder is None:
+        raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
+    archive = staged.snapshot.archive
+    if role == "run":
+        # The candidate image must never hold the hidden scoring files, so its
+        # context comes from the tree with them stripped, as the candidate's own.
+        if linked := linked_hidden_paths(archive, staged.hidden_paths):
+            raise BoxImageError(
+                f"[run] dockerfile '{dockerfile}': the hidden scoring path '{linked[0]}' is, holds or lies inside"
+                " a link."
+            )
+        archive = strip_archive(archive, staged.hidden_paths, staged.workdir / "image-context-run.tgz")
+    context = extract_folder(archive, posixpath.dirname(dockerfile) or ".", staged.workdir / f"image-context-{role}")
+    request = BuildRequest(context_dir=context, owner=_image_owner(username), dockerfile=posixpath.basename(dockerfile))
+    kind = builder.kind
+    try:
+        input_hash = compute_input_hash(
+            request, builder=kind, platform=CODEBUILD_PLATFORM if kind == CodeBuildImageBuilder.kind else ""
+        )
+    except ImageBuildError as error:
+        raise BoxImageError(f"[{role}] dockerfile '{dockerfile}': {error}") from error
+    record = {"source": "dockerfile", "input_hash": input_hash}
+    found = store.find_image_build(username, input_hash)
+    if found is not None and _still_held(registry, kind, request.owner, found["image"]):
+        return {
+            "image": found["image"],
+            "digest": _digest(found["image"]),
+            **record,
+            "build_log": f"image-build:{found['id']}",
+        }
+    limits = BuildLimits.from_settings()
+
+    def build() -> PaidResult[BuildResult | ImageBuildError]:
+        """Run the build once and charge its started minutes, also for a failed build."""
+        started = time.monotonic()
+        try:
+            value: BuildResult | ImageBuildError = builder.build(request)
+        except ImageBuildError as error:
+            value = error
+        seconds = time.monotonic() - started
+        return PaidResult(
+            value=value,
+            provider_usd=image_build_usd(kind, seconds),
+            evidence={"builder": kind, "input_hash": input_hash, "seconds": round(seconds, 3)},
+        )
+
+    if budget is None:
+        outcome = build().value
+    else:
+        policy = ChargePolicy("sandbox")
+        quote = operation_quote(
+            {"builder": kind, "input_hash": input_hash},
+            image_build_usd(kind, limits.timeout_seconds),
+            policy,
+            {"provider": kind, "timeout_seconds": limits.timeout_seconds},
+        )
+        outcome = budget.execute(
+            quote, policy, build, operation_key=f"image-build:{owner_id}:{role}", cost_kind="sandbox"
+        )
+    if isinstance(outcome, ImageBuildError):
+        store.save_image_build(username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log)
+        tail = outcome.log_tail.strip()
+        raise BoxImageError(
+            f"[{role}] dockerfile '{dockerfile}' did not build: {outcome}"
+            + (f"\n\nBuild log tail:\n{tail}" if tail else "")
+        )
+    build_id = store.save_image_build(
+        username, input_hash, builder=kind, image=outcome.image, size_bytes=outcome.size_bytes, log=outcome.log
+    )
+    return {"image": outcome.image, "digest": outcome.digest, **record, "build_log": f"image-build:{build_id}"}
+
+
+def _still_held(registry: ImageRegistry | None, builder: str, owner: str, image: str) -> bool:
+    """Check that a reused build's image still exists where the builder puts it.
+
+    Args:
+        registry: The user image registry, or ``None`` when the builder keeps its images.
+        builder: The kind of the builder in use.
+        owner: The owner of the registry repository.
+        image: The reused build's image.
+
+    Returns:
+        True when the registry holds the digest, or with no registry when
+        local Docker still holds the image id. False for any other builder
+        with no registry, because nothing can confirm its image.
+    """
+    if registry is not None:
+        try:
+            registry.check_digest(owner, _digest(image))
+        except ImageRegistryError:
+            return False
+        return True
+    # ``docker image prune`` removes a local build, and a run that reused
+    # its id would then fail at every box start.
+    return builder == LocalDockerImageBuilder.kind and _local_image_exists(image)
+
+
+def _local_image_exists(image: str) -> bool:
+    """Ask local Docker whether it still holds an image.
+
+    Args:
+        image: The image id or reference.
+
+    Returns:
+        Whether ``docker image inspect`` finds it.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image], capture_output=True, timeout=_INSPECT_TIMEOUT_SECONDS, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> str | None:
+    """Run ``ascent check --image`` in an offline box of the image.
+
+    Args:
+        runtime: The parent's metered sandbox runtime.
+        image: The box image to check.
+        role: ``run`` or ``metric``.
+        owner_id: Job identity naming the check operation.
+
+    Returns:
+        The trusted absolute Python path for the metric role; ``None`` for the run role.
+
+    Raises:
+        BoxImageError: When the check fails or reports no usable result.
+    """
+    check_role = _CHECK_ROLES[role]
+    session = runtime.open(
+        SandboxSpec(
+            lifetime_seconds=_CHECK_LIFETIME_SECONDS,
+            image=image,
+            network_disabled=True,
+            operation_key=f"image-check:{owner_id}:{role}",
+            private=role == "metric",
+        )
+    )
+    try:
+        result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
+    finally:
+        with contextlib.suppress(Exception):
+            session.close()
+    report = _check_report(result.stdout)
+    python = report.get("python") if report is not None else None
+    passed = result.ok and report is not None and report.get("ok") is True
+    if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
+        names = _root_variables(probe) if probe is not None else []
+        if names:
+            raise BoxImageError(
+                ROOT_ENVIRONMENT.format(
+                    image=image, names=", ".join(names), app=APP_NAME, variables=", ".join(sorted(_ROOT_VARIABLES))
+                )
+            )
+        uid = _missing_account(probe) if probe is not None else None
+        if uid is not None:
+            raise BoxImageError(NO_ACCOUNT.format(image=image, uid=uid, app=APP_NAME))
+        if probe is not None and not _trusted_python(probe):
+            raise BoxImageError(
+                UNTRUSTED_PYTHON.format(
+                    image=image,
+                    python=BASE_PYTHON,
+                    app=APP_NAME,
+                    programs=", ".join(_ROOT_PROGRAMS),
+                    path=_ROOT_PATH,
+                )
+            )
+        return python if check_role == "metric" else None
+    failed = [
+        f"- {check.get('name')}: {check.get('message')}"
+        for check in (report or {}).get("checks") or []
+        if isinstance(check, dict) and check.get("ok") is not True
+    ]
+    output = "\n".join(failed) or (result.stdout + result.stderr).strip()[-_CHECK_OUTPUT_CHARS:]
+    raise BoxImageError(
+        f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
+        f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
+    )
+
+
+def _trusted_python(probe: Any) -> bool:
+    """Tell whether every path that the image's base interpreter uses is out of the box user's reach.
+
+    The listing must follow the exact walks that the probe makes, so a
+    missing tool, a short listing or any odd line refuses.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        True when ``BASE_PYTHON`` resolves to a root-owned regular file that
+        group and others cannot write and others can read and run, each of
+        ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
+        present) resolves to one that group and others cannot write and others can read,
+        ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
+        missing or one that group and others cannot write and others can
+        search, the probe reports each folder and tool pair once, every entry of
+        ``_ROOT_TOOLS`` in those folders resolves to such a file and each
+        tool has one, both runs find a passwd line for the box user, and both runs
+        list at least one ``path``, ``file`` and ``dir`` entry, each of which
+        passes :func:`_walk` with the file type that its tag allows, every
+        regular file among them is readable by others, and every ``absent``
+        entry is missing.
+    """
+    if not probe.ok:
+        return False
+    # Only a newline ends a line; ``splitlines`` would also split at other control bytes.
+    lines = probe.stdout.removesuffix("\n").split("\n")[::-1]
+    python = _walk(lines, BASE_PYTHON)
+    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or python[0] & 0o005 != 0o005:
+        return False
+    for path in _ROOT_PATHS:
+        if not lines or lines.pop() != f"file {path}":
+            return False
+        entry = _walk(lines, path)
+        if entry is None or (entry == _MISSING and path not in _OPTIONAL_ROOT_FILES):
+            return False
+        if entry == _MISSING:
+            continue
+        if path == _ROOT_TMP:
+            if entry != (0o1777, "directory"):
+                return False
+        elif not _readable_file(entry):
+            return False
+    for folder in _ROOT_PATH.split(":"):
+        if not lines or lines.pop() != f"bin {folder}":
+            return False
+        entry = _walk(lines, folder)
+        # The box user cannot see into a folder without o+x, but root still runs its tools.
+        if entry is None or (
+            entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022 or not entry[0] & 0o001)
+        ):
+            return False
+    found = set()
+    for folder in _ROOT_PATH.split(":"):
+        for tool in _ROOT_TOOLS:
+            line = lines.pop() if lines else ""
+            if line == f"notool {folder}/{tool}":
+                continue
+            if line != f"tool {folder}/{tool}":
+                return False
+            entry = _walk(lines, f"{folder}/{tool}")
+            if entry in (None, _MISSING) or not _readable_file(entry):
+                return False
+            found.add(tool)
+    if found != set(_ROOT_TOOLS):
+        return False
+    for mode in _RUN_MODES:
+        if not lines or lines.pop() != f"run {mode}":
+            return False
+        tags = set()
+        while lines and not lines[-1].startswith("run "):
+            tag, _, path = lines.pop().partition(" ")
+            if tag in ("env", "locale") and _VARIABLE_NAME.fullmatch(path):
+                continue
+            if tag == "account" and _ACCOUNT_OK.fullmatch(path):
+                tags.add(tag)
+                continue
+            if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
+                return False
+            entry = _walk(lines, path)
+            if entry is None or (entry == _MISSING and tag not in _MAY_BE_MISSING):
+                return False
+            if entry != _MISSING and (entry[1] not in _ENTRY_KINDS[tag] or entry[0] & 0o022):
+                return False
+            # A file that the box user cannot read could name paths, such as an ld.so.preload library, that the probe never sees.
+            if entry != _MISSING and entry[1] == "regular file" and not _readable_file(entry):
+                return False
+            tags.add(tag)
+        if not {"account", "path", "file", "dir"} <= tags:
+            return False
+    return not lines
+
+
+def _readable_file(entry: tuple[int, str]) -> bool:
+    """Tell whether a walked entry is a regular file that group and others cannot write and others can read.
+
+    Args:
+        entry: The mode and file type that :func:`_walk` returned.
+
+    Returns:
+        True for such a file.
+    """
+    return entry[1] == "regular file" and not entry[0] & 0o022 and bool(entry[0] & 0o004)
+
+
+def _missing_account(probe: Any) -> str | None:
+    """Return the box uid when a probe run found no ``/etc/passwd`` line for it.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The uid, or ``None`` when no run reported a missing line.
+    """
+    for line in probe.stdout.split("\n"):
+        missing = _ACCOUNT_NONE.fullmatch(line)
+        if missing:
+            return missing.group(1)
+    return None
+
+
+def _root_variables(probe: Any) -> list[str]:
+    """List the variables in the probe's environments that change what root's shell, loader or libc runs.
+
+    A failed probe still counts: its ``env`` lines come before its walks, and
+    a refusal is the safe answer either way.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The sorted names, without duplicates.
+    """
+    lines = probe.stdout.split("\n")
+    names = {line.removeprefix("env ") for line in lines if line.startswith("env ")}
+    found = {name for name in names if name.startswith(_ROOT_PREFIXES) or name in _ROOT_VARIABLES}
+    for line in lines:
+        if line.startswith("locale "):
+            name, _, value = line.removeprefix("locale ").partition("=")
+            if not _locale_ok(name, value):
+                found.add(name)
+    return sorted(found)
+
+
+def _locale_ok(name: str, value: str) -> bool:
+    """Tell whether a locale variable names only C, POSIX or a UTF-8 locale.
+
+    Args:
+        name: ``LANG``, ``LANGUAGE`` or an ``LC_*`` name.
+        value: Its value; ``LANGUAGE`` is a ``:`` list of locales.
+
+    Returns:
+        True when every locale in the value is empty, C, POSIX or a UTF-8 locale.
+    """
+    values = value.split(":") if name == "LANGUAGE" else [value]
+    return all(item in ("", "C", "POSIX") or _UTF8_LOCALE.fullmatch(item) for item in values)
+
+
+def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:
+    """Follow the probe's walk of one path from ``/``, the way the kernel resolves it.
+
+    Args:
+        lines: The probe's remaining lines, last line first; the walk pops its own.
+        path: The absolute path that the probe walked.
+
+    Returns:
+        The octal mode and the file type of the path's last part,
+        :data:`_MISSING` when a part does not exist, or None when a line is
+        not the one the walk expects, a folder on the way is not a root-owned
+        folder that group and others cannot write, or the links take more
+        than ``_MAX_LINK_HOPS`` hops.
+    """
+    root = _stat_entry(lines.pop() if lines else "", "/")
+    if root is None or root[1] != "directory" or root[0] & 0o022:
+        return None
+    folder, rest, hops, entry = "", path.removeprefix("/"), 0, root
+    while rest:
+        part, _, rest = rest.partition("/")
+        if part in ("", "."):
+            continue
+        if part == "..":
+            folder = folder.rpartition("/")[0]
+            continue
+        here = f"{folder}/{part}"
+        if lines and lines[-1] == f"none {here}":
+            lines.pop()
+            return _MISSING
+        entry = _stat_entry(lines.pop() if lines else "", here)
+        if entry is None:
+            return None
+        if entry[1] == "symbolic link":
+            # A link's own mode is always 777 and grants nothing; its folder guards it.
+            hops += 1
+            if hops > _MAX_LINK_HOPS or not lines or not lines[-1].startswith("link "):
+                return None
+            target = lines.pop().removeprefix("link ")
+            if not target or not _PRINTABLE_PATH.fullmatch("/" + target):
+                return None
+            if target.startswith("/"):
+                root = _stat_entry(lines.pop() if lines else "", "/")
+                if root is None or root[1] != "directory" or root[0] & 0o022:
+                    return None
+                folder, target = "", target.removeprefix("/")
+            rest = f"{target}/{rest}" if rest else target
+            continue
+        if rest and (entry[1] != "directory" or entry[0] & 0o022):
+            return None
+        folder = here
+    return entry
+
+
+def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
+    """Read one ``stat -c '%u %a %F %n'`` line for the path the walk expects.
+
+    Args:
+        line: The probe's line.
+        name: The path the line must name.
+
+    Returns:
+        The octal mode and the file type, or None when the line names another
+        path, is malformed, or the owner is not root.
+    """
+    if not line.endswith(" " + name):
+        return None
+    parts = line[: -len(name) - 1].split(" ", 2)
+    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]) or parts[2] not in _FILE_TYPES:
+        return None
+    return int(parts[1], 8), parts[2]
+
+
+def _check_report(stdout: str) -> dict[str, Any] | None:
+    """Read the JSON report that ``ascent check --image`` prints last.
+
+    Args:
+        stdout: The check's standard output.
+
+    Returns:
+        The report, or ``None`` when the last line is not a JSON object.
+    """
+    lines = stdout.strip().splitlines()
+    try:
+        report = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return report if isinstance(report, dict) else None
+
+
 def bind_repo_scorer(
     payload: dict[str, Any], staged: StagedRepository, gateway: Any, *, owner_id: str, managed_key: str = ""
 ) -> None:
@@ -1190,6 +2244,9 @@ def bind_repo_scorer(
             metric_hosts=staged.metric_hosts,
             metric_vcpus=staged.metric_vcpus,
             metric_setup=staged.metric_setup,
+            run_image=(staged.box_images.get("run") or {}).get("image"),
+            metric_image=(staged.box_images.get("metric") or {}).get("image"),
+            metric_python=(staged.box_images.get("metric") or {}).get("python"),
         ),
         str(scorer_spec.get("metric_code") or ""),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
@@ -1515,6 +2572,8 @@ def improved_patch(result: dict[str, Any]) -> str | None:
 
 # The [metric] setup part's key: archive paths lose their leading "/", so no file can take it (SKY-740).
 _METRIC_SETUP_PART = "/[metric] setup"
+# The same rule keeps the [metric] image part's key free (SKY-737).
+_METRIC_IMAGE_PART = "/[metric] image"
 # The record hashes stream each member in parts of this size, so a large
 # metric file never sits in the worker's memory (SKY-694).
 _HASH_CHUNK = 1 << 20
@@ -1564,6 +2623,7 @@ def _record_facts(
     cases_file: str | None,
     cases: list[Any] | None,
     metric_setup: str | None = None,
+    metric_image: str | None = None,
 ) -> dict[str, Any]:
     """Hash the contract, the metric and the cases the run reads from the staged tree (SKY-694).
 
@@ -1576,6 +2636,9 @@ def _record_facts(
     ``[metric] setup`` command is one more part at the path ``/[metric] setup``,
     which no archive path can take, framed over the command's UTF-8 bytes
     (SKY-740); the record then also holds the command as ``metric_setup``.
+    A ``[metric]`` user image is one more part at the path ``/[metric] image``,
+    framed over the UTF-8 bytes of its digest, so the hash also pins the box
+    that runs the metric (SKY-737).
     ``metric_source`` describes the ``[metric] files`` only: it is
     ``repository`` when the file sets ``[metric] files`` and every one comes
     from the pinned commit, and ``request`` when there are none or a draft
@@ -1598,6 +2661,7 @@ def _record_facts(
         cases_file: The ``[data] cases`` path, or ``None``.
         cases: The request's cases, used when there is no cases file.
         metric_setup: The ``[metric] setup`` command, or ``None``.
+        metric_image: The digest of the ``[metric]`` user image, or ``None`` for Skynet's image.
 
     Returns:
         ``contract_sha256``, ``metric_sha256``, ``metric_source``,
@@ -1620,6 +2684,9 @@ def _record_facts(
     if metric_setup is not None:
         command = metric_setup.encode("utf-8")
         parts[_METRIC_SETUP_PART] = (len(command), hashlib.sha256(command).hexdigest())
+    if metric_image is not None:
+        digest = metric_image.encode("utf-8")
+        parts[_METRIC_IMAGE_PART] = (len(digest), hashlib.sha256(digest).hexdigest())
     metric = hashlib.sha256()
     for path in sorted(parts):
         metric.update(_framed(path, *parts[path]))
@@ -1722,7 +2789,9 @@ def add_run_record(
     sandbox image, and the ``[outcome]`` verdict keys
     with the same absent-key rule as ``details["outcome"]``. ``contract_met``
     is true when no rule failed, also when the file sets no target and no
-    limit. A run with no ``ascent.toml``, a result with no ``details``, a
+    limit. A run with user box images also gets ``boxes``, each box's digest,
+    source, input hash and build log reference, and ``record_version`` 2
+    (SKY-737). A run with no ``ascent.toml``, a result with no ``details``, a
     run with cases whose guest wrote no split positions (an older image), or a
     guest split or verdict of another shape gets no record. A verdict whose
     keys do not match the file's own rules in the staged snapshot also gets
@@ -1768,7 +2837,8 @@ def add_run_record(
     change = drop_paths(best, staged.hidden_paths) if isinstance(best, str) else ""
     baseline, final = result.get("baseline_score"), result.get("best_score")
     details["record"] = {
-        "record_version": 1,
+        # A record with user box images has the boxes key, which version 1 does not have (SKY-737).
+        "record_version": 2 if staged.box_images else 1,
         "base_commit": payload["target"]["repo"]["commit"],
         "change_sha256": hashlib.sha256(change.encode("utf-8")).hexdigest() if change.strip() else None,
         "baseline_score": baseline if _finite_number(baseline) else None,
@@ -1777,6 +2847,16 @@ def add_run_record(
         "seed": payload.get("seed"),
         "split": split,
         "image": image,
+        **(
+            {
+                "boxes": {
+                    role: {key: box.get(key) for key in ("digest", "source", "input_hash", "build_log")}
+                    for role, box in sorted(staged.box_images.items())
+                }
+            }
+            if staged.box_images
+            else {}
+        ),
         **verdict,
         "contract_met": verdict.get("target_reached", True) is True
         and verdict.get("requirements_passed", True) is True,
@@ -1852,6 +2932,11 @@ def _record_block(result: dict[str, Any]) -> str:
         f"- Seed: {record.get('seed')}",
         f"- Split: {split_line}",
         f"- Sandbox image: `{record.get('image')}`",
+        *(
+            f"- [{role}] box image: `{box.get('digest')}` (source: {box.get('source')})"
+            for role, box in (record.get("boxes") or {}).items()
+            if isinstance(box, dict)
+        ),
     ]
     # A guest reason can hold a code fence; the JSON escape keeps it inside the block and parses back the same.
     as_json = json.dumps(record, indent=2, ensure_ascii=False).replace("`", "\\u0060")

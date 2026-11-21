@@ -170,8 +170,8 @@ How to write the run's files:
   - ``[target.<name>]``, one table for each stage: ``entry`` (required), ``vcpus`` (1 or an even number from
     2 to 32, default 2), ``timeout`` (seconds for each ``openascent.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout`` (seconds for each case, default
-    60), ``mcp``, ``network``, ``services``, ``illegal`` and ``vcpus``. A contract needs a ``[run]`` section
-    or at least one ``[target.<name>]`` stage.
+    60), ``mcp``, ``network``, ``services``, ``illegal``, ``vcpus``, ``image`` and ``dockerfile`` (see
+    ``[metric]``). A contract needs a ``[run]`` section or at least one ``[target.<name>]`` stage.
   - ``[metric]``: ``entry`` (``"path.py:function"``, default ``"metric.py:score"``, or a command list),
     ``files`` (a list of paths hidden from the run's optimizer), ``exploits`` (a folder, default
     ``.optimize/exploits``), ``reference`` (one path), ``direction`` (``"maximize"``, the default, or
@@ -179,9 +179,12 @@ How to write the run's files:
     build --release"``, that builds the metric one time, before the first metric call; like a command
     ``entry``, it runs in the folder that holds the ``[metric] files`` paths, with the repository root layout;
     write the build output next to the metric files), ``mcp``, ``network``, ``services``, ``illegal``,
-    ``vcpus`` and ``scores`` (the ``[metric.scores]`` table, see ``[outcome]``). ``[run]`` and ``[metric]``
-    run in separate boxes, so each sets its own ``network`` (hosts besides the relay, default none) and
-    ``vcpus`` (SKY-398).
+    ``vcpus``, ``image``, ``dockerfile`` and ``scores`` (the ``[metric.scores]`` table, see ``[outcome]``).
+    ``[run]`` and ``[metric]`` run in separate boxes, so each sets its own ``network`` (hosts besides the
+    relay, default none) and ``vcpus`` (SKY-398). Each box may also start from its own image: ``image`` (a
+    prebuilt image pinned by digest, ``"name@sha256:<digest>"``) or ``dockerfile`` (the path of a
+    Dockerfile; its folder is the build context), never both. Without either key, the box uses
+    {APP_NAME}'s image. The image must pass ``ascent check --image`` before the run (SKY-737).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
   - ``[sandbox]``: ``compose``, the path of a compose file whose services run beside the metric.
   - ``[services.<name>]``: ``url`` (https, required) and ``headers``, nothing else. One secret may go to one

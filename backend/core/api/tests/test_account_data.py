@@ -55,6 +55,7 @@ from ...storage.models import (
     ExecutionBudgetModel,
     ExecutionOperationModel,
     GepaCheckpointModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -467,6 +468,25 @@ def test_delete_purges_owned_data_and_anonymizes_records(harness: SimpleNamespac
         assert session.get(JobModel, f"job-{_OTHER}") is not None
         assert session.get(NotificationPreferenceModel, _OTHER) is not None
         assert session.scalars(select(WalletLedgerModel).where(WalletLedgerModel.username == _OTHER)).all()
+
+
+def test_delete_removes_only_the_account_image_builds(harness: SimpleNamespace) -> None:
+    """Deletion removes the user's box image builds and their logs, and keeps another user's (SKY-737).
+
+    Args:
+        harness: The test client and its engine.
+    """
+    with Session(harness.engine) as session:
+        for username in (_EMAIL, _OTHER):
+            session.add(ImageBuildModel(username=username, input_hash="sha256:abc", builder="local", log="step 1/2"))
+        session.commit()
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+    assert resp.status_code == 200
+
+    with Session(harness.engine) as session:
+        owners = session.scalars(select(ImageBuildModel.username)).all()
+    assert owners == [_OTHER]
 
 
 def test_delete_oauth_account_needs_no_password(harness: SimpleNamespace) -> None:

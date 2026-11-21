@@ -64,6 +64,7 @@ from ..storage.models import (
     DesktopLinkCodeModel,
     DesktopLinkModel,
     DesktopTokenModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
     McpAuthCodeModel,
@@ -671,6 +672,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
     _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
+    _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))

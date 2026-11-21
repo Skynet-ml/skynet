@@ -102,7 +102,7 @@ dependencies = [
     # call_metric for a command [metric] entry, and repo_constraints reads
     # ascent.toml with its parser (SKY-760). Exact pin, as the standard's
     # behaviour must not move under a run.
-    "openascent==0.4.3",
+    "openascent==0.4.4",
 ]
 
 [project.optional-dependencies]

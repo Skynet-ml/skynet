@@ -40,8 +40,14 @@ setup = ["npm", "ci"]
 # Required, unless a [target.<name>] stage runs the version. The metric scores
 # the output of this entry.
 entry = "bot/run.py:main"
+# Optional. The image of the candidate box, pinned by its digest. Set image or
+# dockerfile, not both. See "Box images: image and dockerfile" below.
+# image = "python@sha256:<64 hex characters>"
 
 [metric]
+# Optional. A Dockerfile that builds the image of the metric box. Its folder is
+# the build context. See "Box images: image and dockerfile" below.
+# dockerfile = "eval/box/Dockerfile"
 # Optional. The files of the metric. No version sees or changes them.
 files = ["eval"]
 # Optional. The metric itself. The default is "metric.py:score", the Python
@@ -398,7 +404,8 @@ shows no JSON block. One line then says that `get_run` returns the record.
 The run writes no record file into the repository. The record holds no secret, no case
 content and no metric code. It has these keys:
 
-- `record_version`: the integer `1`.
+- `record_version`: the integer `1`, or `2` when `[run]` or `[metric]`
+  sets `image` or `dockerfile`.
 - `base_commit`: the full commit SHA that the patch applies to. Staging
   pins this commit.
 - `change_sha256`: the SHA-256 of the reported version's patch text, as
@@ -438,7 +445,10 @@ content and no metric code. It has these keys:
   UTF-8, with all the whitespace at both ends removed, as Python
   `str.strip()` removes it. No file path starts with `/`, so the part cannot
   clash with a file. Sort this part with the file paths in byte order, like
-  any other part.
+  any other part. With a `[metric]` user image, its digest is one more part.
+  Its path is `/[metric] image`, and its bytes are the digest text in UTF-8,
+  for example `sha256:<hex>`. So the hash also pins the box that runs the
+  metric.
 - `metric_setup`: the `[metric] setup` command. The record has this key only
   when the file sets `[metric] setup`. The pull request block shows it as
   "Metric setup".
@@ -459,6 +469,11 @@ content and no metric code. It has these keys:
   puts the one case in every part.
 - `image`: the sandbox image pinned for the run (`name@sha256:<hex>` on
   hosted runs, the Docker image id on local runs), or null.
+- `boxes`: only in a version 2 record. One object for each role (`run`,
+  `metric`) that sets a user image. It holds `digest`, `source` (`image` or
+  `dockerfile`), `input_hash` (the build's input hash, or null for `image`)
+  and `build_log` (`image-build:<id>`, or null for `image`). The pull request
+  block shows one line for each box.
 - `target_reached`, `requirements_passed` and `failed_requirements`: copied from
   `details.outcome`. Each key is there only when `details.outcome` has it.
 - `contract_met`: true when no rule failed. It is also true when the file
@@ -467,9 +482,11 @@ content and no metric code. It has these keys:
 A run from before the record, or a run whose sandbox image writes no split
 positions, has no `record` key.
 
-One limit stays. A hosted run's sandbox image is in a private registry, so
-an outside person cannot pull it. SKY-737 (the contract names its own image
-for the metric) removes this limit later.
+A hosted run's default sandbox image is in a private registry, so an
+outside person cannot pull it. Set `[metric] image` to a public image to let
+another person score with the same metric box. The openascent record schema
+describes version 1 only, so a version 2 record does not validate against it
+yet.
 
 ## Command entries: one call rule
 
@@ -682,6 +699,65 @@ metric would give each version the same score.
 
 The box user can be root. The boxes depend on the microVM boundary between
 boxes, not on file permissions inside a box.
+
+## Box images: `image` and `dockerfile`
+
+By default, every box uses Skynet's sandbox image. `[run]` and `[metric]`
+can each name their own image. The `[run]` image is the image of the setup
+box and of each candidate box. The `[metric]` image is the image of the
+metric setup box and of each metric box. Set one of two keys in a role:
+
+- `image`: an image pinned by its digest, `name@sha256:<64 hex
+  characters>`. A tag alone fails the setup check, because a tag can change
+  during a run.
+- `dockerfile`: the repository path of a Dockerfile. Its folder is the build
+  context. The run builds the image one time, before the first version.
+
+The rules:
+
+- **The image is frozen.** The run builds from the pinned start commit, so
+  no version edit reaches the image. `ascent.toml` protects each Dockerfile
+  automatically. No editable path can overlap the build context, unless a
+  protected path covers that overlap. Protect the folder, or put the
+  Dockerfile in a folder with no editable path. A patch that changes the
+  Dockerfile or a file of its context is rejected.
+- **Each image is checked first.** Before the first version, the run opens
+  one offline box of each image and runs `ascent check --image --role
+  candidate` or `--role metric` in it. A failure stops the run before any
+  version, and the error lists the failed checks. The metric check also
+  gives the absolute path of the image's Python. The metric runs with that
+  Python.
+- **A build is reused.** The run computes an input hash from the Dockerfile,
+  its context and the builder. A later run of the same user with the same
+  inputs uses the same image and builds nothing. A failed build stops the
+  run and shows the end of the build log.
+- **A resumed run keeps its images.** The run pins its images when it
+  starts. A resume uses the pinned images and builds and checks nothing.
+- **A build costs budget.** The run reserves the build's maximum cost first
+  and charges the minutes that the build used, also for a failed build.
+
+A minimal metric image:
+
+```dockerfile
+# eval/box/Dockerfile
+FROM python:3.12-slim
+RUN pip install --no-cache-dir openascent==0.4.4 numpy==2.1.0
+```
+
+```toml
+[paths]
+editable = ["src"]
+
+[metric]
+files = ["eval"]
+dockerfile = "eval/box/Dockerfile"
+```
+
+The image must hold `openascent`, because the check and the metric's runner
+use it. Two limits stay. The sandbox broker does not start a box from a user
+image yet, so a run with these keys stops before its first version with a
+clear error. A hosted run has no Dockerfile builder yet. A hardening run does
+not support a user image yet.
 
 ## The metric: `[metric] entry`
 
@@ -1074,6 +1150,7 @@ catch the failure in the program, as above, and let the metric score it.
 | `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
 | `[metric] setup` | Runs once in the metric setup box, in the folder of the metric files, with package-registry network and no secrets. No version file is in that box. A failure stops the run before the first version. |
 | `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
+| `[run] image`, `[run] dockerfile`, `[metric] image`, `[metric] dockerfile` | The box opens from this image. The run builds a Dockerfile once from the start commit and checks each image with `ascent check --image` before the first version. A failure stops the run. See "Box images: image and dockerfile" above. |
 | `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
 | `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |

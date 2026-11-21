@@ -1201,10 +1201,171 @@ def test_the_check_runs_as_root_unless_the_provider_root_has_no_capability(
     space, _ = _guarded(tmp_path)
     try:
         session = _SudoRecordingSession(**attributes)
-        assert space.fingerprint(session, WORK_DIR) == ({}, {})  # type: ignore[arg-type]
+        assert space.fingerprint(session, WORK_DIR, "/box") == ({}, {})  # type: ignore[arg-type]
         assert session.sudo == [sudo]
     finally:
         space.close()
+
+
+class _CommandRecordingSession(_SudoRecordingSession):
+    """A box that records each command line, and prints an empty fingerprint."""
+
+    def __init__(self) -> None:
+        """Start with no command."""
+        super().__init__()
+        self.commands: list[str] = []
+
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record the command line and print an empty fingerprint.
+
+        Args:
+            command: Shell command line.
+            sudo: The command asks for root.
+            **options: Other run options.
+
+        Returns:
+            A clean result with an empty fingerprint.
+        """
+        self.commands.append(command)
+        return super().run(command, sudo=sudo, **options)
+
+
+@pytest.mark.parametrize("run_image", [None, "registry.example/u@sha256:" + "b" * 64], ids=["skynet", "user"])
+def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: str | None) -> None:
+    """Hash and answer with the base interpreter alone in a user image box, with no PATH fallback (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval"], run_image=run_image)
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    with pytest.raises(RepoSetupError, match="working directory"):
+        repo_workspace.physical_root(session, space.user_run_image)  # type: ignore[arg-type]
+    assert len(session.commands) == 4
+    assert all(f"p={shlex.quote(repo_workspace.BASE_PYTHON)} && " in command for command in session.commands)
+    assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
+    assert all(('"$p" -I -S -c' in command) for command in session.commands)
+    assert all(("/usr/bin/env -i " in command) is (run_image is not None) for command in session.commands)
+    # An image OpenSSL config could load an engine from a box-user folder into root's hashlib.
+    assert all(("env -i OPENSSL_CONF=/dev/null " in command) is (run_image is not None) for command in session.commands)
+
+
+def test_the_root_hash_and_answer_commands_change_folder_only_to_absolute_paths(tmp_path: Path) -> None:
+    """Every ``cd`` and answer path names the box root that the parent holds, never ``$PWD`` (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(
+        archive, _Runtime(), setup=None, protected_paths=["eval"], run_image="registry.example/u@sha256:" + "b" * 64
+    )
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR, "/box")  # type: ignore[arg-type]
+    space.fingerprint(session, "/abs/tree", "/box")  # type: ignore[arg-type]
+    space._digest_prepared(session, "/box")  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "/box", "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    targets = [target for command in session.commands for target in re.findall(r"\bcd (\S+)", command)]
+    assert targets == [f"/box/{WORK_DIR}", "/abs/tree", f"/box/{repo_workspace.PREPARED_DIR}"]
+    assert session.commands[-1].endswith(" /box/answer")
+    assert not any("PWD" in command for command in session.commands)
+
+
+def test_an_absolute_cd_ignores_a_cdpath_decoy(tmp_path: Path) -> None:
+    """A ``cd`` from :func:`absolute_cd` stays in the working folder when ``CDPATH`` names a decoy with the same folder (SKY-737)."""
+    for parent in (tmp_path / "box", tmp_path / "decoy"):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    script = f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, str((tmp_path / 'box').resolve()))} && pwd -P"
+    for shell in ("/bin/sh", "/bin/bash"):
+        done = subprocess.run(
+            [shell, "-c", script],
+            cwd=tmp_path / "box",
+            env={"PATH": "/usr/bin:/bin", "CDPATH": str(tmp_path / "decoy")},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert done.stdout.strip() == str((tmp_path / "box" / repo_workspace.PREPARED_DIR).resolve())
+
+
+def test_an_image_pwd_through_a_link_cannot_move_the_box_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An exported ``PWD`` through a box-owned link gives no root that the link can later move to a decoy (SKY-737).
+
+    Bash takes ``PWD`` from the environment when it names the working
+    folder, so ``pwd`` and ``"$PWD"`` follow the link; ``getcwd`` does not.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tmp_path: Pytest temporary folder.
+    """
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    box, decoy, link = tmp_path / "box", tmp_path / "decoy", tmp_path / "l"
+    for parent in (box, decoy):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    link.symlink_to(box)
+
+    class Session:
+        """Run each command in the box folder with the image's ``PWD``."""
+
+        def run(self, command: str, **options: Any) -> CommandResult:
+            """Run one command with bash.
+
+            Args:
+                command: The shell command.
+                **options: Other run options.
+
+            Returns:
+                The command's result.
+            """
+            env = {"PATH": "/usr/bin:/bin", "PWD": str(link)}
+            done = subprocess.run(
+                ["/bin/bash", "-c", command], cwd=box, env=env, capture_output=True, text=True, check=False
+            )
+            return CommandResult(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+    session = Session()
+    assert session.run("pwd").stdout.strip() == str(link)
+    root = repo_workspace.physical_root(session, True)  # type: ignore[arg-type]
+    assert root == str(box.resolve())
+    link.unlink()
+    link.symlink_to(decoy)
+    done = session.run(f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR, root)} && pwd -P")
+    assert done.stdout.strip() == str((box / repo_workspace.PREPARED_DIR).resolve())
+
+
+@pytest.mark.parametrize("user_image", [False, True], ids=["skynet", "user"])
+def test_a_user_image_box_starts_the_base_interpreter_with_only_the_kept_variables(
+    monkeypatch: pytest.MonkeyPatch, user_image: bool
+) -> None:
+    """A user image box drops the image's environment, such as loader paths, and keeps only the named variables (SKY-737)."""
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    script = "import os; print([name for name in ('APP_ANSWER', 'LD_LIBRARY_PATH', 'PATH') if name in os.environ])"
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image, ("APP_ANSWER",)) + f'"$p" -I -S -c "{script}"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "APP_ANSWER": "text", "LD_LIBRARY_PATH": "/tmp/planted"},
+        check=True,
+    )
+    names = ["APP_ANSWER"] if user_image else ["APP_ANSWER", "LD_LIBRARY_PATH", "PATH"]
+    assert done.stdout.strip() == str(names)
+
+
+@pytest.mark.parametrize(("user_image", "planted_runs"), [(False, True), (True, False)], ids=["skynet", "user"])
+def test_a_planted_path_python_runs_only_outside_a_user_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user_image: bool, planted_runs: bool
+) -> None:
+    """With no base interpreter, a user image box fails closed instead of running a planted ``python3`` (SKY-737)."""
+    planted = tmp_path / "bin" / "python3"
+    planted.parent.mkdir()
+    planted.write_text("#!/bin/sh\necho planted\n")
+    planted.chmod(0o755)
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", str(tmp_path / "missing" / "python3"))
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image) + '"$p" -I -S -c "print(1)"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.pathsep.join([str(planted.parent), "/usr/bin", "/bin"])},
+        check=False,
+    )
+    assert (done.stdout.strip() == "planted") is planted_runs
+    assert (done.returncode == 0) is planted_runs
 
 
 @pytest.mark.parametrize(("provider", "capable"), [(DockerEnvironment, False), (VercelEnvironment, True)])
@@ -1343,7 +1504,7 @@ def test_a_python3_that_the_version_plants_on_path_never_hashes_the_tree(
     )
     try:
         box = _open(space, "")
-        clean = space.fingerprint(box.session, WORK_DIR)
+        clean = space.fingerprint(box.session, WORK_DIR, box.root)
         box.close()
         assert clean is not None
         marker = tmp_path / "planted-python3-ran"
@@ -1514,6 +1675,43 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert not candidate.spec.private
     assert metric.spec.private
     assert candidate.spec.operation_key != metric.spec.operation_key
+
+
+def test_each_role_opens_its_own_user_image_and_the_metric_uses_its_checked_python(tmp_path: Path) -> None:
+    """The setup and candidate boxes use the [run] image, the metric box the [metric] image (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(
+        tmp_path,
+        runtime,
+        run_image="run@sha256:" + "a" * 64,
+        metric_image="metric@sha256:" + "b" * 64,
+        metric_python=sys.executable,
+    )
+    try:
+        _open(space, "").close()
+        metric = space.open_metric()
+        metric.install_metric_files()
+        metric.close()
+    finally:
+        space.close()
+    setup, candidate, metric_box = runtime.boxes
+    assert setup.spec.image == candidate.spec.image == "run@sha256:" + "a" * 64
+    assert metric_box.spec.image == "metric@sha256:" + "b" * 64
+    assert space.metric_python == sys.executable
+    assert any(command.startswith(f"cd {METRIC_REPO_DIR} && {sys.executable} -I") for command, _ in metric_box.commands)
+
+
+def test_a_workspace_without_user_images_keeps_the_default_image_and_python3(tmp_path: Path) -> None:
+    """With no image key, every box uses the run's image and the metric runs ``python3`` (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert {box.spec.image for box in runtime.boxes} == {_ONLINE.image}
+    assert space.metric_python == "python3"
 
 
 def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
@@ -2015,8 +2213,8 @@ def test_a_stage_answer_reaches_a_call_folder_that_the_box_user_made_in_docker()
     )
     try:
         space = SimpleNamespace(_protected=("eval/metric.py",), watched=True, changes=lambda current, before: ())
-        space.fingerprint = lambda box, directory, **options: RepoWorkspace.fingerprint(
-            space, box, directory, **options
+        space.fingerprint = lambda box, directory, root, **options: RepoWorkspace.fingerprint(
+            space, box, directory, root, **options
         )
         call = ".app-repo/calls/000001/candidate"
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{call}/input.json": "{}"})
@@ -2042,7 +2240,7 @@ def test_the_check_reads_private_files_that_the_box_user_made_in_docker() -> Non
         session.write_files({f"{WORK_DIR}/eval/metric.py": "x = 1\n", f"{WORK_DIR}/eval/hidden/data.py": "y = 2\n"})
         made = session.run(f"chmod 0600 {WORK_DIR}/eval/metric.py && chmod 0700 {WORK_DIR}/eval/hidden")
         assert made.exit_code == 0
-        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR)  # type: ignore[arg-type]
+        files, _ = RepoWorkspace.fingerprint(space, session, WORK_DIR, "/workspace")  # type: ignore[arg-type]
         assert sorted(files) == ["eval/hidden/data.py", "eval/metric.py"]
     finally:
         session.close()

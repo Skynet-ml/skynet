@@ -24,6 +24,7 @@ import pytest
 from core.api.errors import DomainError
 from core.billing.host_agent import host_proposer
 from core.billing.vercel_usage import PROPOSER_REGISTRY_HOSTS
+from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
 from core.i18n_keys import I18nKey
@@ -32,7 +33,7 @@ from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_K
 from core.storage.base import JobStore
 
 from .. import engine as engine_module
-from .. import repo_gate
+from .. import repo_gate, repo_staging
 from ..checkpoint_compat import CheckpointCompatibilityError, checkpoint_manifest, validate_checkpoint
 from ..constants import EVENT_ERROR, EVENT_RESULT
 from ..engine import BackgroundWorker, WorkerShutdownError, reset_worker_for_tests
@@ -48,6 +49,7 @@ from .mocks import (
     stopped_box_event,
 )
 from .test_budget_lifecycle import _checkpoint
+from .test_repo_staging import _BUILT_IMAGE, _FakeBudget, _ImageRuntime, _LocalBuilder, _tree
 
 
 @pytest.fixture(autouse=True)
@@ -1060,7 +1062,10 @@ def _run_repository_job(
     host: tuple[str, str] | None = None,
     patched: dict[str, Any] | None = None,
     proposer: dict[str, Any] | None = None,
-) -> tuple[MagicMock, MagicMock, MagicMock]:
+    staged: Any = None,
+    sandbox_runtime: Any = None,
+    seed: dict[str, Any] | None = None,
+) -> tuple[MagicMock, MagicMock, Any]:
     """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
 
     Args:
@@ -1073,6 +1078,10 @@ def _run_repository_job(
             applied after the defaults.
         proposer: The stored ``proposer`` settings, or ``None`` to keep the
             request's own.
+        staged: What staging returns, or ``None`` for a mock.
+        sandbox_runtime: The parent's sandbox runtime, which also gets a
+            budget that runs each paid call at once; ``None`` keeps the mock.
+        seed: Extra fields on the stored job row.
 
     Returns:
         The budget gateway, the publish step and the staged repository.
@@ -1095,12 +1104,17 @@ def _run_repository_job(
         payload_overview=_BLACKBOX_OVERVIEW,
         execution_budget_id="budget",
         execution_budget_generation=0,
+        **(seed or {}),
     )
     worker.enqueue_job("repo-hardened")
     gateway = MagicMock()
     gateway.protect_payload.side_effect = lambda payload, **kwargs: payload
     gateway.cost_ceiling_cents.return_value = 100
-    staged = MagicMock()
+    if sandbox_runtime is not None:
+        gateway.parent_sandbox_runtime.return_value = sandbox_runtime
+        gateway.runtime = _FakeBudget()
+    if staged is None:
+        staged = MagicMock()
 
     def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
         """Stage the repository the way the real step leaves the payload."""
@@ -1166,6 +1180,122 @@ def test_repository_run_adds_its_record_before_the_publish(worker: BackgroundWor
     assert record.call_args.args[0] is publish.call_args.args[0]
     assert record.call_args.args[2] is staged
     assert record.call_args.kwargs == {"image": None}
+
+
+def _box_staged(tmp_path: Path, source: tuple[str, str]) -> repo_staging.StagedRepository:
+    """Stage a tree whose ``[run]`` box uses one user image source (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        source: The ``[run]`` box source as ``(kind, value)``: ``image`` or ``dockerfile``.
+
+    Returns:
+        A staged repository with that box source and no hidden paths.
+    """
+    files = {"box/Dockerfile": "FROM python:3.12-slim\n", "src/app.py": "x = 1\n"}
+    return repo_staging.StagedRepository(
+        snapshot=RepoSnapshot(commit="c" * 40, archive=_tree(tmp_path, files), readonly_paths=(), size_bytes=1),
+        secrets={},
+        workdir=tmp_path,
+        box_sources={"run": source},
+    )
+
+
+@pytest.mark.parametrize(("held", "builds"), [(True, 1), (False, 2)], ids=["held", "pruned"])
+def test_a_repository_run_builds_again_when_its_reused_local_image_is_gone(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: bool,
+    builds: int,
+) -> None:
+    """A second run reuses the first run's local build only while Docker still holds it (SKY-737).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+        held: Whether ``docker image inspect`` still finds the image.
+        builds: How many builds the two runs make.
+    """
+    monkeypatch.setattr(repo_staging, "_local_image_exists", lambda image: held)
+    builder = _LocalBuilder()
+    published: list[Any] = []
+    for attempt in range(2):
+        workdir = tmp_path / str(attempt)
+        workdir.mkdir()
+        _gateway, publish, _staged = _run_repository_job(
+            worker,
+            store,
+            {},
+            staged=_box_staged(workdir, ("dockerfile", "box/Dockerfile")),
+            sandbox_runtime=_ImageRuntime(),
+            patched={"image_builder": lambda settings: builder, "add_run_record": MagicMock()},
+        )
+        published.append(publish.call_args.args[2])
+
+    assert len(builder.requests) == builds
+    assert len(store.image_builds) == builds
+    assert [staged.box_images["run"]["image"] for staged in published] == [_BUILT_IMAGE, _BUILT_IMAGE]
+    assert store.get_job("repo-hardened")["box_images"] == published[-1].box_images
+
+
+def test_a_resumed_repository_run_boots_from_its_pinned_box_images(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """A resume uses the images on the job row and builds, checks and pins nothing new (SKY-737).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+    pinned = {"run": {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "dockerfile"}}
+    runtime, builder = _ImageRuntime(), _LocalBuilder()
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=runtime,
+        seed={"box_images": pinned},
+        patched={"image_builder": lambda settings: builder, "add_run_record": MagicMock()},
+    )
+
+    assert publish.call_args.args[2].box_images == pinned
+    assert store.get_job("repo-hardened")["box_images"] == pinned
+    assert builder.requests == []
+    assert runtime.specs == []
+
+
+def test_a_parallel_start_that_pinned_first_gives_its_box_images(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """When another start of the same run pinned first, this start uses that start's images (SKY-737).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+    first = {"run": {"image": "registry.example/first@sha256:" + "d" * 64, "digest": "sha256:" + "d" * 64}}
+    store.pin_box_images = MagicMock(return_value=first)  # type: ignore[method-assign]
+    image = "registry.example/u@sha256:" + "e" * 64
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("image", image)),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"add_run_record": MagicMock()},
+    )
+
+    assert store.pin_box_images.call_args.args[1]["run"]["image"] == image
+    assert publish.call_args.args[2].box_images == first
 
 
 def test_a_stored_job_with_the_files_proposer_fails_on_an_engine_that_ignores_it(

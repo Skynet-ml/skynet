@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import logging
@@ -65,7 +66,7 @@ from ..repo_scorer import (
     _scrub,
     _StageRelay,
 )
-from ..repo_workspace import CandidateBox, RepoBoxSource, RepoWorkspace
+from ..repo_workspace import WORK_DIR, CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -205,6 +206,37 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
     }
+
+
+def test_the_metric_runs_on_the_python_that_the_image_check_reported(tmp_path: Path) -> None:
+    """A ``[metric]`` user image scores with the trusted Python its ``ascent check --image`` gave (SKY-737)."""
+    marker = tmp_path / "checked-python-ran"
+    python = tmp_path / "image" / "python"
+    python.parent.mkdir()
+    python.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command="cat src/app.py > built.txt",
+            secrets={},
+            metric_image="metric@sha256:" + "b" * 64,
+            metric_python=str(python),
+        ),
+        SCORER,
+        timeout_seconds=60,
+        run_entry=SCORER_RUN,
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.1)
+    finally:
+        scorer.close()
+    assert marker.exists()
 
 
 def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
@@ -5466,6 +5498,102 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
         scorer.close()
 
 
+class _CdpathRuntime(LocalSubprocessRuntime):
+    """Local runtime whose candidate runs see a ``CDPATH`` with a decoy work folder in it."""
+
+    def __init__(self, decoy: Path) -> None:
+        """Keep the decoy folder.
+
+        Args:
+            decoy: The folder that ``CDPATH`` names.
+        """
+        super().__init__()
+        self.decoy = decoy
+        self.commands: list[str] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box whose candidate runs export ``CDPATH`` first.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        session = super().open(spec)
+        decoy, commands = self.decoy, self.commands
+
+        class _Cdpath:
+            def __getattr__(self, name: str) -> Any:
+                """Pass every other attribute to the local box.
+
+                Args:
+                    name: The attribute.
+
+                Returns:
+                    The local box's attribute.
+                """
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> Any:
+                """Run the command; a candidate run gets ``CDPATH`` set to the decoy.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                if runner.CANDIDATE_FLAG in command:
+                    commands.append(command)
+                    command = f"export CDPATH={shlex.quote(str(decoy))}; {command}"
+                return session.run(command, **options)
+
+        return _Cdpath()
+
+
+def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_path: Path) -> None:
+    """The root supervisor's ``cd`` is absolute, so a ``CDPATH`` decoy work folder is never used (SKY-737)."""
+    decoy = tmp_path / "decoy"
+    (decoy / WORK_DIR / "src").mkdir(parents=True)
+    (decoy / WORK_DIR / "src" / "cand.py").write_text("def echo(value):\n    return 'DECOY'\n")
+    runtime = _CdpathRuntime(decoy)
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert "DECOY" not in json.dumps(result)
+    assert runtime.commands
+    targets = [re.findall(r"\bcd (\S+)", command) for command in runtime.commands]
+    assert all(len(found) == 1 and found[0].startswith("/") and found[0].endswith(f"/{WORK_DIR}") for found in targets)
+    assert not any("PWD" in command for command in runtime.commands)
+
+
+@pytest.mark.parametrize("user_image", [True, False])
+def test_the_root_supervisor_falls_back_to_the_path_python3_only_without_a_user_image(
+    tmp_path: Path, user_image: bool
+) -> None:
+    """In a user image the supervisor runs only the base Python, never a ``python3`` that PATH finds (SKY-737).
+
+    Args:
+        tmp_path: Folder for the probed repository.
+        user_image: Whether the workspace runs a user ``[run]`` image.
+    """
+    runtime = _CdpathRuntime(tmp_path / "decoy")
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    scorer._workspace.user_run_image = user_image
+    try:
+        scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert runtime.commands
+    for command in runtime.commands:
+        assert f"p={shlex.quote(repo_scorer._BASE_PYTHON)}" in command
+        assert ("p=python3" in command) is not user_image
+
+
 def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:
     """A ``[run]`` timeout has no score, and the metric that would get the time never runs (SKY-642, SKY-751).
 
@@ -5516,6 +5644,35 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
     assert "The supervisor file changed before it ran." in done.stderr
     path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
     assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1
+
+
+@pytest.mark.parametrize("value", [None, "/etc/box.cnf", "/dev/null"], ids=["unset", "set", "image-dev-null"])
+def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: Path, value: str | None) -> None:
+    """The whole root process, after the hash too, reads no image OpenSSL config (SKY-737).
+
+    An image without ``_hashlib`` first loads OpenSSL at the runner's ``import ssl``,
+    after the hash, so the runner body must still see ``/dev/null``. The body also
+    gets the box's own value in ``_box_openssl_conf``, for the entry.
+    """
+    source = "import os, ssl\nprint(repr(os.environ.get('OPENSSL_CONF')), repr(_box_openssl_conf))\n"
+    path = tmp_path / "runner.py"
+    path.write_text(source, encoding="utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    env = {name: item for name, item in os.environ.items() if name != "OPENSSL_CONF"}
+    if value is not None:
+        env["OPENSSL_CONF"] = value
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", repo_scorer._SUPERVISOR_BOOT, str(path), digest],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        env=env,
+    )
+
+    assert repo_scorer._SUPERVISOR_BOOT.index("'/dev/null'") < repo_scorer._SUPERVISOR_BOOT.index("import hashlib")
+    assert done.stdout == f"'/dev/null' {value!r}\n"
 
 
 _BASH_METRIC = """#!/usr/bin/env bash

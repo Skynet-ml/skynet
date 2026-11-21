@@ -8,8 +8,10 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -47,8 +49,11 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.sandbox.image_build import BuildResult, ImageBuildError, LocalDockerImageBuilder
+from core.sandbox.image_registry import ImageRegistryError
+from core.sandbox.providers import vercel
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import runner
+from core.service_gateway.optimization.blackbox import repo_workspace, runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.registry import ENGINES
@@ -60,6 +65,7 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ServiceSpec,
     TargetStage,
 )
+from core.service_gateway.optimization.blackbox.repo_tree import extract_folder
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
@@ -1596,7 +1602,7 @@ class _Box:
         self.commands.append((command, self.online))
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
-        if command == "pwd":
+        if command == "pwd" or "os.getcwd()" in command:
             return CommandResult(exit_code=0, stdout="/box\n")
         if "pwd -P" in command:
             return CommandResult(exit_code=0, stdout="/box/.app-services\n")
@@ -5741,3 +5747,1506 @@ def test_a_run_recorded_before_the_direction_existed_resumes_as_a_maximize_run()
     repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "maximize"}})
     with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
         repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "minimize"}})
+
+
+_BUILT_IMAGE = "registry.example/u@sha256:" + "b" * 64
+_METRIC_IMAGE = "registry.example/metric@sha256:" + "c" * 64
+_BOX_TREE = {
+    **_RUN_TREE,
+    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n'
+    'dockerfile = "box/Dockerfile"\n\n[metric]\ndockerfile = "box/Dockerfile"\n',
+    "box/Dockerfile": "FROM python:3.12-slim\nRUN pip install openascent==0.4.4\n",
+}
+
+
+class _FakeBuilder:
+    """Build a Dockerfile with no Docker, and remember each request."""
+
+    kind = "codebuild"
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Start with no builds.
+
+        Args:
+            fail: Whether each build fails.
+        """
+        self.fail = fail
+        self.requests: list[Any] = []
+
+    def build(self, request: Any) -> BuildResult:
+        """Return a built image, or fail like a broken Dockerfile.
+
+        Args:
+            request: The build request.
+
+        Returns:
+            The fixed built image.
+
+        Raises:
+            ImageBuildError: When the builder fails.
+        """
+        self.requests.append(request)
+        assert (request.context_dir / request.dockerfile).is_file()
+        if self.fail:
+            raise ImageBuildError("The build failed.", log="step 2 failed\n", log_tail="step 2 failed")
+        return BuildResult(
+            image=_BUILT_IMAGE,
+            digest="sha256:" + "b" * 64,
+            size_bytes=10,
+            input_hash="unused",
+            log="built\n",
+            log_tail="built",
+        )
+
+
+class _ImageStore:
+    """Keep image builds in memory, like the job store's ``image_builds`` table."""
+
+    def __init__(self) -> None:
+        """Start with no builds."""
+        self.builds: list[dict[str, Any]] = []
+
+    def find_image_build(self, username: str, input_hash: str) -> dict[str, Any] | None:
+        """Return the user's successful build of the same inputs.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+
+        Returns:
+            The build, or ``None``.
+        """
+        for build in self.builds:
+            if (build["username"], build["input_hash"]) == (username, input_hash) and build["image"]:
+                return build
+        return None
+
+    def save_image_build(self, username: str, input_hash: str, **fields: Any) -> str:
+        """Keep one build and return its id.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+            **fields: Builder, image, size and log.
+
+        Returns:
+            The new build's id.
+        """
+        build_id = f"build-{len(self.builds) + 1}"
+        self.builds.append({"id": build_id, "username": username, "input_hash": input_hash, **fields})
+        return build_id
+
+
+class _FakeRegistry:
+    """Hold a set of digests, like the user image registry."""
+
+    def __init__(self, held: set[str]) -> None:
+        """Hold ``held``.
+
+        Args:
+            held: The digests the registry still holds.
+        """
+        self.held = held
+        self.checks: list[tuple[str, str]] = []
+
+    def check_digest(self, owner: str, digest: str) -> None:
+        """Fail for a digest the registry does not hold.
+
+        Args:
+            owner: The registry repository's owner.
+            digest: The digest to find.
+
+        Raises:
+            ImageRegistryError: When the registry does not hold the digest.
+        """
+        self.checks.append((owner, digest))
+        if digest not in self.held:
+            raise ImageRegistryError("gone")
+
+
+class _FakeBudget:
+    """Run each paid dispatch at once and record its charge."""
+
+    def __init__(self) -> None:
+        """Start with no charges."""
+        self.charges: list[dict[str, Any]] = []
+
+    def execute(self, quote: Any, policy: Any, dispatch: Any, **kwargs: Any) -> Any:
+        """Run the dispatch and record its provider cost.
+
+        Args:
+            quote: The reserved quote.
+            policy: The charge policy.
+            dispatch: The paid call.
+            **kwargs: The operation key and cost kind.
+
+        Returns:
+            The dispatch's value.
+        """
+        paid = dispatch()
+        self.charges.append({"provider_usd": paid.provider_usd, **kwargs})
+        return paid.value
+
+
+def _walk(path: str, last: str = "755 regular file", modes: dict[str, str] | None = None) -> list[str]:
+    """Write the lines that the probe's walk prints for a path with no link on the way.
+
+    Args:
+        path: The absolute path.
+        last: The mode and type of the path's last part, or ``none`` when it does not exist.
+        modes: The modes that differ from a root-owned 755 folder, by path; ``none`` ends the walk there.
+
+    Returns:
+        The walk's lines.
+    """
+    modes = {path: last, **(modes or {})}
+    lines = [_stat(modes.get("/", "755 directory"), "/")]
+    parts = path.split("/")[1:]
+    for depth in range(1, len(parts) + 1):
+        here = "/" + "/".join(parts[:depth])
+        mode = modes.get(here, "755 directory")
+        if mode == "none":
+            return [*lines, f"none {here}"]
+        lines.append(_stat(mode, here))
+    return lines
+
+
+def _stat(mode: str, path: str) -> str:
+    """Write the ``stat`` line for a path, owned by root unless the mode starts with a uid.
+
+    Args:
+        mode: ``"<mode> <type>"``, or ``"<uid> <mode> <type>"``.
+        path: The absolute path.
+
+    Returns:
+        The line.
+    """
+    return f"{mode} {path}" if mode.split()[1].isdigit() else f"0 {mode} {path}"
+
+
+def _entry(tag: str, path: str, last: str = "755 regular file", modes: dict[str, str] | None = None) -> list[str]:
+    """Write the tagged line that the interpreter prints for a path, and the walk of it.
+
+    Args:
+        tag: ``path``, ``file``, ``opt``, ``dir``, ``lib`` or ``absent``.
+        path: The absolute path.
+        last: The mode and type of the path's last part, or ``none``.
+        modes: The modes that differ from a root-owned 755 folder, by path.
+
+    Returns:
+        The tagged line and the walk's lines.
+    """
+    return [f"{tag} {path}", *_walk(path, last, modes)]
+
+
+# What the probe prints in ``python:3.12-slim``, where python3 links to python3.12, in short.
+_PYTHON_FILE = "0 755 regular file /usr/local/bin/python3.12"
+_BASE = [*_walk("/usr/local/bin/python3", "777 symbolic link"), "link python3.12", _PYTHON_FILE]
+_ENTRIES = [
+    "account ok 1000",
+    *_entry("path", "/usr/local/lib/python312.zip", "none"),
+    *_entry("path", "/usr/local/lib/python3.12", "755 directory"),
+    *_entry("file", "/usr/local/lib/libpython3.12.so.1.0"),
+    *_entry("file", "/usr/lib/aarch64-linux-gnu/libc.so.6"),
+    *_entry("absent", "/etc/ld.so.preload", "none"),
+    *_entry("opt", "/etc/ld.so.cache", "644 regular file"),
+    *_entry("lib", "/usr/lib", "755 directory"),
+    *_entry("absent", "/usr/local/bin/pybuilddir.txt", "none"),
+    *_entry("dir", "/usr/local", "755 directory"),
+]
+
+
+def _listing(
+    clean: list[str] = _ENTRIES,
+    box: list[str] = _ENTRIES,
+    base: list[str] = _BASE,
+    programs: dict[str, list[str]] | None = None,
+    folders: dict[str, list[str]] | None = None,
+    tools: dict[str, list[str] | None] | None = None,
+) -> str:
+    """Write the probe's whole standard output.
+
+    Args:
+        clean: The lines of the run with ``env -i``.
+        box: The lines of the run with the box's environment.
+        base: The walk of ``BASE_PYTHON``.
+        programs: The walks of root's fixed paths that differ from the defaults, by path. The defaults
+            are a root-owned 755 file, and a root-owned 1777 ``/tmp``.
+        folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
+        tools: The walks of ``folder/tool`` entries that differ from one root-owned file in ``/usr/bin``
+            for each tool, by entry; ``None`` makes an entry a ``notool`` line.
+
+    Returns:
+        The probe's standard output.
+    """
+    walks = {path: _walk(path) for path in repo_staging._ROOT_PATHS}
+    walks = walks | {"/tmp": _walk("/tmp", "1777 directory")} | (programs or {})
+    fixed = [line for path, walk in walks.items() for line in (f"file {path}", *walk)]
+    bins = {folder: _walk(folder, "755 directory") for folder in repo_staging._ROOT_PATH.split(":")}
+    fixed += [line for folder, walk in (bins | (folders or {})).items() for line in (f"bin {folder}", *walk)]
+    found = {f"/usr/bin/{name}": _walk(f"/usr/bin/{name}") for name in repo_staging._ROOT_TOOLS} | (tools or {})
+    for folder in repo_staging._ROOT_PATH.split(":"):
+        for name in repo_staging._ROOT_TOOLS:
+            walk = found.get(f"{folder}/{name}")
+            fixed += [f"notool {folder}/{name}"] if walk is None else [f"tool {folder}/{name}", *walk]
+    return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
+
+
+_TRUSTED_PROBE = _listing()
+
+
+class _CheckSession:
+    """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
+
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
+        """Keep the check outcome.
+
+        Args:
+            ok: Whether the image passes.
+            probe: What the trusted interpreter probe prints.
+        """
+        self.ok = ok
+        self.probe = probe
+        self.commands: list[str] = []
+
+    def run(self, command: str, **_: Any) -> CommandResult:
+        """Print the check's JSON report, or the probe's listing.
+
+        Args:
+            command: The check or probe command.
+            **_: Unused run options.
+
+        Returns:
+            The report, with exit code 1 when the image fails.
+        """
+        self.commands.append(command)
+        if not command.startswith("ascent check"):
+            return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
+        checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
+        report = {"ok": self.ok, "checks": checks, "python": sys.executable}
+        return CommandResult(exit_code=0 if self.ok else 1, stdout=json.dumps(report) + "\n")
+
+    def close(self) -> None:
+        """Close nothing."""
+
+
+class _ImageRuntime:
+    """Run boxes as local processes and record the image each box asks for."""
+
+    accepts_user_images = True
+    max_lifetime_seconds = 120.0
+
+    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
+        """Start with no boxes.
+
+        Args:
+            check_ok: Whether each image passes its check.
+            probe: What the trusted interpreter probe prints in each check box.
+        """
+        self.check_ok = check_ok
+        self.probe = probe
+        self.specs: list[SandboxSpec] = []
+        self.checks: list[_CheckSession] = []
+        self._local = LocalSubprocessRuntime()
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a check box, or a local box for any other work.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        self.specs.append(spec)
+        if spec.operation_key.startswith("image-check:"):
+            self.checks.append(_CheckSession(self.check_ok, self.probe))
+            return self.checks[-1]
+        return self._local.open(spec)
+
+
+class _ImageGateway(_LocalGateway):
+    """Open every box through one image-recording runtime."""
+
+    def __init__(self, runtime: _ImageRuntime) -> None:
+        """Keep the runtime.
+
+        Args:
+            runtime: The runtime that opens each box.
+        """
+        super().__init__()
+        self.runtime = runtime
+
+    def parent_sandbox_runtime(self) -> Any:
+        """Return the image-recording runtime.
+
+        Returns:
+            The runtime.
+        """
+        return self.runtime
+
+
+def _prepare(staged: Any, runtime: Any, **kwargs: Any) -> Any:
+    """Prepare the box images of ``staged`` as the engine does, with fakes.
+
+    Args:
+        staged: The staged repository.
+        runtime: The runtime that opens the check boxes.
+        **kwargs: The builder, store, budget, registry or pinned images.
+
+    Returns:
+        The staged repository with its box images.
+    """
+    options = {"builder": _FakeBuilder(), "store": _ImageStore(), **kwargs}
+    return repo_staging.prepare_box_images(staged, owner_id="job-1", username="alice", runtime=runtime, **options)
+
+
+def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run builds the Dockerfile once, checks it in each role, and scores in the built image (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_BOX_TREE, monkeypatch)
+    # The local boxes have no /usr/local/bin/python3; a user image box never falls back to PATH.
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    builder, budget, runtime = _FakeBuilder(), _FakeBudget(), _ImageRuntime()
+    try:
+        staged = _prepare(
+            staged, runtime, builder=builder, budget=budget, registry=_FakeRegistry({"sha256:" + "b" * 64})
+        )
+        staged_payload["scorer"] = {"kind": "python", "metric_code": _OUTPUT_METRIC, "timeout_seconds": 60}
+        staged_payload["_budget_gateway_descriptor"] = {
+            "url": "http://127.0.0.1:1/v1",
+            "control_token": "control-token",
+            "image": "img",
+            "lifetime_seconds": 120,
+        }
+        gateway = _ImageGateway(runtime)
+        repo_staging.bind_repo_scorer(staged_payload, staged, gateway, owner_id="job-1")
+        result = gateway.evaluator.score("", None)
+    finally:
+        staged.close_scorers()
+        staged.cleanup()
+
+    assert json.loads(result["feedback"])["output"] == {"value": None, "sees_cases": False}
+    # Both roles name the same Dockerfile, so the second build reuses the first by its input hash.
+    assert len(builder.requests) == 1
+    assert builder.requests[0].dockerfile == "Dockerfile"
+    assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
+    assert budget.charges[0]["provider_usd"] >= 0
+    assert [check.commands for check in runtime.checks] == [
+        ["ascent check --image --role candidate", repo_staging._TRUSTED_PYTHON_PROBE],
+        ["ascent check --image --role metric"],
+    ]
+    checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
+    assert all(spec.network_disabled for spec in checks)
+    assert [spec.private for spec in checks] == [False, True]
+    work = [spec for spec in runtime.specs if not spec.operation_key.startswith("image-check:")]
+    assert work
+    assert {spec.image for spec in work} == {_BUILT_IMAGE}
+    assert staged.box_images["metric"]["python"] == sys.executable
+    assert staged.box_images["run"]["source"] == "dockerfile"
+
+
+def test_an_image_that_fails_its_check_stops_the_run_before_any_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed ``ascent check --image`` raises with the failed check, and no candidate box opens (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(check_ok=False)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="no python3 on PATH"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def test_a_failed_build_is_charged_kept_and_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Dockerfile that does not build shows its log tail, keeps its log, and is charged (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget, runtime = _ImageStore(), _FakeBudget(), _ImageRuntime()
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="step 2 failed"):
+            _prepare(staged, runtime, builder=_FakeBuilder(fail=True), store=store, budget=budget)
+    finally:
+        staged.cleanup()
+    assert [(build["image"], build["log"]) for build in store.builds] == [(None, "step 2 failed\n")]
+    assert len(budget.charges) == 1
+    assert runtime.specs == []
+
+
+def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same user's same Dockerfile and context build once; a lost image builds again (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    builder, store = _FakeBuilder(), _ImageStore()
+    held = _FakeRegistry({"sha256:" + "b" * 64})
+    records = []
+    for registry in (held, held, _FakeRegistry(set())):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            records.append(_prepare(staged, _ImageRuntime(), builder=builder, store=store, registry=registry))
+        finally:
+            staged.cleanup()
+    first, second, third = (record.box_images["run"] for record in records)
+    assert len(builder.requests) == 2
+    assert second == first
+    assert first["build_log"] == "image-build:build-1"
+    assert third["build_log"] == "image-build:build-2"
+    assert first["input_hash"] == third["input_hash"]
+
+
+class _LocalBuilder(_FakeBuilder):
+    """Build like local Docker, which keeps its images with no registry."""
+
+    kind = LocalDockerImageBuilder.kind
+
+
+@pytest.mark.parametrize(("held", "builds"), [(True, 1), (False, 2)], ids=["held", "pruned"])
+def test_a_pruned_local_image_builds_again(monkeypatch: pytest.MonkeyPatch, held: bool, builds: int) -> None:
+    """With no registry, a reused local build must still be in Docker, or the run builds it again (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        held: Whether ``docker image inspect`` still finds the image.
+        builds: How many builds two runs make.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    inspected: list[str] = []
+    monkeypatch.setattr(repo_staging, "_local_image_exists", lambda image: inspected.append(image) or held)
+    builder, store = _LocalBuilder(), _ImageStore()
+    for _ in range(2):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            _prepare(staged, _ImageRuntime(), builder=builder, store=store)
+        finally:
+            staged.cleanup()
+    assert len(builder.requests) == builds
+    assert inspected == [_BUILT_IMAGE]
+
+
+def test_a_reused_build_with_no_registry_and_no_local_docker_builds_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A builder that keeps no local image and has no registry cannot confirm a reuse, so it builds (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    monkeypatch.setattr(repo_staging, "_local_image_exists", lambda image: pytest.fail("no local Docker check"))
+    builder, store = _FakeBuilder(), _ImageStore()
+    for _ in range(2):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            _prepare(staged, _ImageRuntime(), builder=builder, store=store)
+        finally:
+            staged.cleanup()
+    assert len(builder.requests) == 2
+
+
+def _base(modes: dict[str, str] | None = None, file: str = "755 regular file") -> list[str]:
+    """Write the walk of ``BASE_PYTHON`` in ``python:3.12-slim``, with some modes changed.
+
+    Args:
+        modes: The folder modes that differ from 755, by path.
+        file: The mode and type of the interpreter file.
+
+    Returns:
+        The walk's lines.
+    """
+    return [
+        *_walk("/usr/local/bin/python3", "777 symbolic link", modes),
+        "link python3.12",
+        f"0 {file} /usr/local/bin/python3.12",
+    ]
+
+
+# R2: a sys.path folder that links into a folder the box user can write.
+_LINKED_INTO_WRITABLE = [
+    *_entry("path", "/usr/local/lib/python3.12", "777 symbolic link"),
+    "link sub/python3.12",
+    "0 777 directory /usr/local/lib/sub",
+    "0 755 directory /usr/local/lib/sub/python3.12",
+]
+
+
+def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A box uid that ``/etc/passwd`` does not name stops the run at the image check, not at run time (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount none 1000\n"))
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"has no /etc/passwd line for the box user \(uid 1000\)"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "",
+        "\n".join(_BASE) + "\n",
+        _listing(base=_base(file="1000 755 regular file")),
+        _listing(base=_base({"/usr/local": "775 directory"})),
+        _listing(base=_base({"/usr": "757 directory"})),
+        _listing(base=_base({"/": "1777 directory"})),
+        _TRUSTED_PROBE.replace("0 755 directory /usr/local\n", "1000 755 directory /usr/local\n", 1),
+        _listing(base=_base(file="757 regular file")),
+        _listing(base=_base(file="750 regular file")),
+        _listing(base=_base(file="755 directory")),
+        _listing(base=_walk("/usr/local/bin/python3", "none")),
+        _listing(base=[*_walk("/usr/local/bin/python3", "777 symbolic link")]),
+        _listing(base=[*_walk("/usr/local/bin", "777 symbolic link"), "link /opt", "0 755 directory /", *_BASE[-3:]]),
+        _listing(
+            base=[
+                *_walk("/usr/local/bin/python3", "777 symbolic link"),
+                *["link python3", "0 777 symbolic link /usr/local/bin/python3"] * 40,
+                "link python3",
+            ]
+        ),
+        _TRUSTED_PROBE.replace("file /usr/bin/env\n", ""),
+        _TRUSTED_PROBE.replace("0 755 regular file /usr/bin/env", "0 757 regular file /usr/bin/env"),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "none")}),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "1000 755 regular file")}),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "775 regular file")}),
+        _listing(programs={"/bin/bash": _walk("/bin/bash", modes={"/bin": "777 directory"})}),
+        _listing(programs={"/bin/sh": _walk("/bin/sh", "755 directory")}),
+        _TRUSTED_PROBE.replace("file /bin/mkdir\n", ""),
+        _listing(programs={"/tmp": _walk("/tmp", "777 directory")}),
+        _listing(programs={"/tmp": _walk("/tmp", "1000 1777 directory")}),
+        _listing(programs={"/tmp": _walk("/tmp", "777 symbolic link")}),
+        _listing(programs={"/tmp": _walk("/tmp", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "666 regular file")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", modes={"/etc": "1000 755 directory"})}),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "664 regular file")}),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "755 directory")}),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "777 directory")}),
+        _listing(folders={"/usr/sbin": _walk("/usr/sbin", "1000 755 directory")}),
+        _listing(folders={"/sbin": _walk("/sbin", modes={"/": "775 directory"})}),
+        _listing(folders={"/bin": _walk("/bin", "755 regular file")}),
+        _TRUSTED_PROBE.replace("bin /usr/local/sbin\n", ""),
+        _listing(tools={"/usr/bin/tail": _walk("/usr/bin/tail", "1000 755 regular file")}),
+        _listing(tools={"/usr/bin/tr": _walk("/usr/bin/tr", "757 regular file")}),
+        _listing(tools={"/usr/local/sbin/head": _walk("/usr/local/sbin/head", "none")}),
+        _listing(
+            tools={
+                "/usr/local/bin/tail": [
+                    *_walk("/usr/local/bin/tail", "777 symbolic link"),
+                    "link /home/box/tail",
+                    *_walk("/home/box/tail", "none", {"/home/box": "1000 755 directory"}),
+                ]
+            }
+        ),
+        _listing(tools={"/usr/local/sbin/tail": _walk("/usr/local/sbin/tail", "1000 1 regular file")}),
+        _listing(tools={"/usr/bin/base64": None}),
+        _listing(tools={"/usr/bin/head": None, "/bin/head": _walk("/bin/head", "755 directory")}),
+        _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", ""),
+        _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", "tool /usr/bin/tr\ntool /usr/bin/tr\n"),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "700 directory")}),
+        _TRUSTED_PROBE.replace("notool /usr/local/sbin/tail\n", ""),
+        _TRUSTED_PROBE.replace("notool /usr/local/sbin/tail\n", "tool /usr/local/sbin/tail\n"),
+        _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\n"),
+        _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount ok x\n"),
+        _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
+        _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", modes={"/usr/lib": "777 directory"})]),
+        _listing(box=[*_ENTRIES, *_LINKED_INTO_WRITABLE]),
+        _listing(
+            box=[*_ENTRIES, *_entry("file", "/usr/lib/libpython3.12.so.1.0", modes={"/usr/lib": "757 directory"})]
+        ),
+        _listing(box=[*_ENTRIES, *_entry("file", "/tmp/p.so", modes={"/tmp": "1777 directory"})]),
+        _listing(box=[*_ENTRIES, *_entry("opt", "/etc/ld.so.preload", "666 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("file", "/usr/lib/x.so (deleted)", "none")]),
+        _listing(box=[*_ENTRIES, *_entry("file", "/usr/local/lib/python3.12", "755 directory")]),
+        _listing(box=[*_ENTRIES, *_entry("dir", "/opt/python", "none")]),
+        _listing(box=[*_ENTRIES, *_entry("file", "/usr/lib/libc.so.6", "1000 644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("unknown", "/usr/lib/libc.so.6")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/etc/ld.so.preload", "644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("opt", "/etc/ld.so.preload", "600 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("opt", "/etc/ld.so.cache", "640 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("file", "/usr/lib/libx.so", "600 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/usr/local/bin/pybuilddir.txt", "644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/usr/local/bin/lib/python3.12/os.py", "644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("lib", "/usr/lib/libc.so.6")]),
+        _listing(box=[*_ENTRIES, *_entry("lib", "/opt/lib", "777 directory")]),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "600 regular file")}),
+        _listing(tools={"/usr/local/sbin/tr": _walk("/usr/local/sbin/tr", "700 regular file")}),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "0 711 regular file /usr/local/bin/python3.12"),
+        _listing(box=[*_ENTRIES, "path usr/lib", *_walk("/usr/lib", "755 directory")]),
+        _listing(box=[line for line in _ENTRIES if not line.startswith("file ")]),
+        _listing(box=[]),
+        _TRUSTED_PROBE.split("run box\n")[0],
+        _TRUSTED_PROBE.replace("run clean", "run x").replace("run box", "run clean").replace("run x", "run box"),
+        _TRUSTED_PROBE + "path /opt\n",
+        _TRUSTED_PROBE.replace("link python3.12", "link python3.12\x01"),
+        _TRUSTED_PROBE.replace("\n", "\x0b"),
+        _TRUSTED_PROBE.replace("link python3.12\n", "link python3.12\x1c"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, f"{_PYTHON_FILE} extra"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "0 755 socket /usr/local/bin/python3.12"),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "00 755 regular file /usr/local/bin/python3.12"),
+    ],
+    ids=[
+        "missing",
+        "only-the-interpreter-walk",
+        "user-owned-file",
+        "group-writable-folder",
+        "writable-ancestor-folder",
+        "sticky-writable-root",
+        "user-owned-ancestor-folder",
+        "other-writable-file",
+        "not-executable-by-others",
+        "not-a-file",
+        "missing-interpreter",
+        "chain-cut-short",
+        "linked-folder-without-its-walk",
+        "link-loop-hits-the-cap",
+        "no-env-walk",
+        "writable-env",
+        "missing-timeout",
+        "user-owned-timeout",
+        "group-writable-timeout",
+        "bash-under-a-writable-folder",
+        "sh-is-a-folder",
+        "no-mkdir-walk",
+        "tmp-not-sticky",
+        "user-owned-tmp",
+        "tmp-is-a-link",
+        "missing-tmp",
+        "writable-passwd",
+        "missing-passwd",
+        "passwd-in-a-user-owned-etc",
+        "group-writable-nsswitch",
+        "nsswitch-is-a-folder",
+        "writable-usr-local-sbin",
+        "user-owned-usr-sbin",
+        "sbin-under-a-writable-root",
+        "bin-is-a-file",
+        "no-usr-local-sbin-walk",
+        "user-owned-tail",
+        "writable-tr",
+        "dangling-head-in-usr-local-sbin",
+        "A-dangling-tail-link-to-a-box-folder",
+        "B-box-owned-unrunnable-tail-before-usr-bin",
+        "base64-in-no-folder",
+        "head-is-a-folder-in-bin",
+        "no-tr-walk",
+        "tr-listed-twice",
+        "usr-local-sbin-that-others-cannot-search-hides-a-tail-link",
+        "no-notool-line-for-usr-local-sbin-tail",
+        "tool-line-without-its-walk",
+        "no-account-line",
+        "malformed-account-line",
+        "R1-stdlib-moved-to-a-writable-folder",
+        "R1-stdlib-under-a-writable-folder",
+        "R2-link-into-a-writable-folder",
+        "libpython-under-a-writable-usr-lib",
+        "preloaded-library-in-tmp",
+        "writable-ld-so-preload",
+        "deleted-mapped-file",
+        "mapped-file-is-a-folder",
+        "missing-prefix",
+        "user-owned-mapped-file",
+        "unknown-tag",
+        "R10-present-ld-so-preload",
+        "R10-unreadable-ld-so-preload",
+        "R10-unreadable-ld-so-cache",
+        "R10-unreadable-library",
+        "R10-pybuilddir-txt",
+        "R10-stray-os-py",
+        "R10-lib-folder-is-a-file",
+        "R10-writable-lib-folder",
+        "R10-unreadable-passwd",
+        "R10-root-only-tr-before-usr-bin",
+        "R10-unreadable-python",
+        "relative-path",
+        "run-without-files",
+        "empty-run",
+        "box-run-missing",
+        "runs-out-of-order",
+        "extra-lines",
+        "control-byte-in-target",
+        "lines-split-by-vertical-tabs",
+        "line-split-by-a-file-separator",
+        "unknown-file-type",
+        "special-file",
+        "malformed-uid",
+    ],
+)
+def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
+    """A ``[run]`` image where the box user could change what root's interpreter loads stops the run (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        probe: What the trusted interpreter probe prints.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=probe)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"has no trusted Python at /usr/local/bin/python3"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _TRUSTED_PROBE,
+        _listing(base=_walk("/usr/local/bin/python3")),
+        _listing(
+            base=[
+                *_walk("/usr/local/bin/python3", "777 symbolic link"),
+                "link /opt/py/python3",
+                *_walk("/opt/py/python3", "777 symbolic link"),
+                "link /usr/bin/python3.12",
+                *_walk("/usr/bin/python3.12"),
+            ]
+        ),
+        _listing(
+            base=[
+                *_walk("/usr/local/bin/python3", "777 symbolic link"),
+                "link ../bin/./python3.12",
+                "0 755 directory /usr/local/bin",
+                _PYTHON_FILE,
+            ]
+        ),
+        _listing(
+            box=[
+                *_ENTRIES,
+                "file /lib/ld-linux-aarch64.so.1",
+                *_walk("/lib", "777 symbolic link"),
+                "link usr/lib",
+                "0 755 directory /usr",
+                "0 755 directory /usr/lib",
+                "0 755 regular file /usr/lib/ld-linux-aarch64.so.1",
+            ]
+        ),
+        _listing(box=["env PATH", "env MALLOC_ARENA_MAX", *_ENTRIES]),
+        _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "none")}),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "644 regular file")}),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "none")}),
+        _listing(
+            folders={
+                "/bin": [
+                    *_walk("/bin", "777 symbolic link"),
+                    "link usr/bin",
+                    "0 755 directory /usr",
+                    "0 755 directory /usr/bin",
+                ]
+            },
+            tools={
+                "/bin/tail": [
+                    *_walk("/bin", "777 symbolic link"),
+                    "link usr/bin",
+                    "0 755 directory /usr",
+                    "0 755 directory /usr/bin",
+                    "0 755 regular file /usr/bin/tail",
+                ]
+            },
+        ),
+        _listing(box=["env LANG", "locale LANG=C.UTF-8", "env LC_ALL", "locale LC_ALL=en_US.utf8", *_ENTRIES]),
+        _listing(tools={"/usr/local/bin/tail": _walk("/usr/local/bin/tail"), "/usr/bin/tail": None}),
+    ],
+    ids=[
+        "python-image-layout",
+        "plain-file",
+        "two-absolute-links",
+        "dot-dot-target",
+        "linked-top-folder",
+        "plain-environment",
+        "no-nsswitch",
+        "read-only-passwd",
+        "no-usr-local-sbin",
+        "merged-usr-bin-link",
+        "utf-8-locale",
+        "tail-only-in-usr-local-bin",
+    ],
+)
+def test_a_root_owned_python_chain_passes(probe: str) -> None:
+    """Paths under root-owned folders pass, missing ``sys.path`` entries too; a failed probe never does (SKY-737).
+
+    The probe exits 1 when ``find`` sees a writable file or a link below a
+    ``sys.path`` folder, so only its exit code tells that case apart.
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
+    assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
+
+
+@pytest.mark.parametrize(
+    ("variables", "names"),
+    [
+        (["env LD_LIBRARY_PATH"], "LD_LIBRARY_PATH"),
+        (["env LD_PRELOAD"], "LD_PRELOAD"),
+        (["env PATH", "env LD_AUDIT", "env GCONV_PATH"], "GCONV_PATH, LD_AUDIT"),
+        (["env BASH_ENV"], "BASH_ENV"),
+        (["env ENV"], "ENV"),
+        (["env CDPATH"], "CDPATH"),
+        (["env BASH_FUNC_cd%%"], "BASH_FUNC_cd%%"),
+        (["env SHELLOPTS", "env PS4", "env IFS"], "IFS, PS4, SHELLOPTS"),
+        (["env OPENSSL_CONF"], "OPENSSL_CONF"),
+        (["env TMPDIR", "env TEMP", "env TMP"], "TEMP, TMP, TMPDIR"),
+        (["env LANG", "locale LANG=en_US.ISO-8859-1"], "LANG"),
+        (["env LC_CTYPE", "locale LC_CTYPE=/tmp/x.UTF-8", "env LANG", "locale LANG=C.UTF-8"], "LC_CTYPE"),
+        (["env LANGUAGE", "locale LANGUAGE=en_US.UTF-8:de_DE"], "LANGUAGE"),
+    ],
+    ids=[
+        "library-path-with-an-empty-element",
+        "preload",
+        "audit-and-gconv",
+        "bash-env",
+        "posix-env",
+        "cdpath",
+        "exported-function",
+        "shell-options-and-trace",
+        "openssl-config",
+        "temp-folder",
+        "latin-1-lang",
+        "locale-path-in-lc-ctype",
+        "non-utf-8-language-entry",
+    ],
+)
+def test_a_run_image_with_root_variables_in_its_env_is_refused(
+    monkeypatch: pytest.MonkeyPatch, variables: list[str], names: str
+) -> None:
+    """An image ENV that root's loader or shell reads, such as ``LD_LIBRARY_PATH`` or ``BASH_ENV``, stops the run (SKY-737).
+
+    The probe prints only the names, so ``/x:`` (an empty element, which
+    glibc reads as the work folder) and ``/x`` refuse alike.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        variables: The ``env`` lines of the box run.
+        names: The names that the message lists.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_listing(box=[*variables, *_ENTRIES]))
+    try:
+        with pytest.raises(
+            repo_staging.BoxImageError,
+            match=rf"sets {re.escape(names)} in its environment.*BASH_FUNC_\* variable, and BASHOPTS, BASH_COMPAT, BASH_ENV",
+        ):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+
+
+def test_the_probe_root_path_is_the_vercel_root_path() -> None:
+    """The probe walks the same PATH that every Vercel root script sets (SKY-737)."""
+    assert repo_staging._ROOT_PATH == vercel.ROOT_PATH
+    words = re.findall(r"(?:^|[;|]) *(?:do +)?([a-z0-9]+)", vercel.TAIL_SCRIPT)
+    assert set(words) - {"export", "while", "echo", "shift", "done"} == set(repo_staging._ROOT_TOOLS)
+
+
+def test_the_probe_imports_what_the_root_scripts_import() -> None:
+    """The interpreter loads every module that the runner and the hash scripts import at their top (SKY-737)."""
+    # The first line imports only os, to set OPENSSL_CONF before any module can load OpenSSL.
+    first, imports = repo_staging._PATH_SCRIPT.split("\n")[0], repo_staging._PATH_SCRIPT.split("\n")[3]
+
+    assert first == "import os"
+    assert imports.startswith("import ")
+    for name in ("hashlib", "json", "ssl", "ctypes", "http.server", "urllib.request", "collections.abc"):
+        assert name in imports.removeprefix("import ").split(", ")
+    assert "__future__" not in imports
+
+
+def _shell_probe(start: Path) -> str:
+    """Point the probe at a test interpreter that the test's own user owns.
+
+    Args:
+        start: The interpreter path the probe starts at.
+
+    Returns:
+        The probe, with ``find`` taking the test's user in place of root.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the probe needs GNU or busybox stat and /proc, as in the box images")
+    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(start)))
+    return probe.replace("! -user 0", f"! -user {os.getuid()}")
+
+
+def _fake_python(root: Path, extra: str = "") -> Path:
+    """Make an interpreter under a prefix that prints the tagged lines a real one prints.
+
+    Args:
+        root: The folder that becomes the prefix.
+        extra: More lines for the interpreter to print.
+
+    Returns:
+        The interpreter file.
+    """
+    stdlib = root / "lib" / "python3.12"
+    for folder in (root / "bin", root / "lib", stdlib, stdlib / "json", stdlib / "site-packages"):
+        folder.mkdir()
+        folder.chmod(0o755)
+    (stdlib / "os.py").write_text("x\n")
+    (stdlib / "os.py").chmod(0o644)
+    python = root / "bin" / "python3.12"
+    python.write_text(
+        "#!/bin/sh\n"
+        f"printf 'path %s\\n' \"${{FAKE_PATH:-{stdlib}}}\"\n"
+        f"printf 'file %s\\n' {shlex.quote(str(python))}\n"
+        f"printf 'dir %s\\n' {shlex.quote(str(root))}\n"
+        f"printf '%s' {shlex.quote(extra)}\n"
+        # The real script leaves out the OPENSSL_CONF=/dev/null that the clean run adds.
+        "env | grep -vx OPENSSL_CONF=/dev/null | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_%]*\\)=.*/env \\1/p'\n"
+        '[ -z "${LC_ALL+1}" ] || printf \'locale LC_ALL=%s\\n\' "$LC_ALL"\n'
+    )
+    python.chmod(0o755)
+    return python
+
+
+def _run_probe(start: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run the probe from a test interpreter.
+
+    Args:
+        start: The interpreter path the probe starts at.
+        **env: Variables to add to the box's environment.
+
+    Returns:
+        The finished probe.
+    """
+    probe = _shell_probe(start)
+    return subprocess.run(
+        ["/bin/sh", "-c", probe], capture_output=True, text=True, check=False, env={**os.environ, **env}
+    )
+
+
+def test_the_trusted_python_probe_walks_each_hop_and_each_path_that_the_interpreter_names(tmp_path: Path) -> None:
+    """The probe walks every part of a two-link chain, then runs the interpreter twice and walks its paths (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    target = _fake_python(root)
+    (root / "real").mkdir()
+    (root / "real" / "python3").symlink_to(target)
+    (root / "bin" / "python3").symlink_to(root / "real" / "python3")
+    start = root / "bin" / "python3"
+
+    done = _run_probe(start, FAKE_PATH="/nonexistent/box")
+
+    assert done.returncode == 0, done.stderr
+    lines = done.stdout.splitlines()
+    walk = lines[: lines.index("file /usr/bin/env")]
+    expected: list[str] = []
+    for hop, link in zip(
+        (start, root / "real" / "python3", target), (root / "real" / "python3", target, None), strict=True
+    ):
+        parts = str(hop).split("/")[1:]
+        expected += ["/"] + ["/" + "/".join(parts[:depth]) for depth in range(1, len(parts) + 1)]
+        expected += [f"link {link}"] if link else []
+    assert [re.sub(r"^\d+ \d+ (directory|symbolic link|regular file) ", "", line) for line in walk] == expected
+    tagged = [line for line in lines if line.split(" ")[0] in ("run", "path", "file", "dir", "none")]
+    paths = [f"file {target}", f"dir {root}"]
+    assert tagged[tagged.index("run clean") :] == [
+        "run clean",
+        f"path {root / 'lib' / 'python3.12'}",
+        *paths,
+        "run box",
+        "path /nonexistent/box",
+        "none /nonexistent",
+        *paths,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("change", "trusted"),
+    [
+        (None, True),
+        ("chmod o+w lib/python3.12/site-packages", True),
+        ("chmod o+w lib/python3.12/os.py", False),
+        ("chmod g+w lib/python3.12/json", False),
+        ("ln -s /tmp lib/python3.12/json/tmp", False),
+        ("touch bin/pyvenv.cfg", False),
+        ("touch pyvenv.cfg", False),
+        ("touch bin/python3.12._pth", False),
+    ],
+    ids=[
+        "python-image-layout",
+        "writable-site-packages",
+        "writable-stdlib-file",
+        "writable-stdlib-folder",
+        "link-in-the-stdlib",
+        "pyvenv-cfg-next-to-the-interpreter",
+        "pyvenv-cfg-one-folder-up",
+        "pth-file",
+    ],
+)
+def test_the_trusted_python_probe_fails_on_what_could_move_or_change_the_import_path(
+    tmp_path: Path, change: str | None, trusted: bool
+) -> None:
+    """A writable file, a link below ``sys.path`` or a venv file fails the probe; ``site-packages`` does not (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        change: The shell command, run in the prefix, that changes the layout.
+        trusted: Whether the probe still passes.
+    """
+    root = tmp_path.resolve()
+    python = _fake_python(root)
+    if change is not None:
+        subprocess.run(["/bin/sh", "-c", change], cwd=root, check=True)
+
+    done = _run_probe(python)
+
+    assert (done.returncode == 0) is trusted, done.stderr
+
+
+@pytest.mark.parametrize("extra", ["evil\n", "path relative\n", "path /opt/x\x01\n", "run box\n"])
+def test_the_trusted_python_probe_stops_at_an_odd_interpreter_line(tmp_path: Path, extra: str) -> None:
+    """An untagged, relative or control-byte line from the interpreter fails the probe (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        extra: The odd line.
+    """
+    python = _fake_python(tmp_path.resolve(), extra)
+
+    assert _run_probe(python).returncode == 1
+
+
+@pytest.mark.parametrize("target", ["python3.12\n0 755 regular file /usr/bin/python3", "python3.12\n", "py\x01"])
+def test_the_trusted_python_probe_stops_at_a_link_target_with_a_control_byte(tmp_path: Path, target: str) -> None:
+    """A newline or control byte in a link target fails the probe, so it cannot forge a listing line (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        target: The link target.
+    """
+    root = tmp_path.resolve()
+    (root / "python3.12").write_text("#!/bin/sh\n")
+    (root / "python3").symlink_to(target)
+
+    done = _run_probe(root / "python3")
+
+    assert done.returncode == 1
+    assert not any(line.startswith("link ") for line in done.stdout.splitlines())
+
+
+def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: Path) -> None:
+    """The box run lists an image ``LD_LIBRARY_PATH`` or ``BASH_ENV`` by name, and the clean run does not (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    python = _fake_python(root)
+
+    done = _run_probe(python, LD_LIBRARY_PATH="/opt/foo:", BASH_ENV="/tmp/evil-rc", CDPATH="/workspace")
+
+    assert done.returncode == 0, done.stderr
+    clean, box = done.stdout.split("run box\n")
+    for name in ("LD_LIBRARY_PATH", "BASH_ENV", "CDPATH"):
+        assert f"env {name}" not in clean.split("\n")
+        assert f"env {name}" in box.split("\n")
+    assert "/opt/foo" not in done.stdout
+    assert "evil-rc" not in done.stdout
+    assert repo_staging._root_variables(done) == ["BASH_ENV", "CDPATH", "LD_LIBRARY_PATH"]
+
+
+@pytest.mark.parametrize("locale", ["C.UTF-8", "en_US.ISO-8859-1", None])
+def test_the_box_run_of_the_probe_uses_the_image_locale(tmp_path: Path, locale: str | None) -> None:
+    """The box run gets the image's own ``LC_ALL`` or none, never the probe's ``C`` (SKY-737).
+
+    Root's bash and supervisor run with the image locale, so the box run must
+    map the same locale files, and a non-UTF-8 value must be refused.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        locale: The image's ``LC_ALL``, or None when the image sets none.
+    """
+    python = _fake_python(tmp_path.resolve())
+    env = {name: value for name, value in os.environ.items() if name != "LC_ALL"}
+    env |= {"LC_ALL": locale} if locale is not None else {}
+
+    done = subprocess.run(["/bin/sh", "-c", _shell_probe(python)], capture_output=True, text=True, check=False, env=env)
+
+    assert done.returncode == 0, done.stderr
+    clean, box = done.stdout.split("run box\n")
+    assert "env LC_ALL" not in clean.split("\n")
+    assert ("env LC_ALL" in box.split("\n")) is (locale is not None)
+    assert [line for line in box.split("\n") if line.startswith("locale ")] == (
+        [f"locale LC_ALL={locale}"] if locale is not None else []
+    )
+    assert repo_staging._root_variables(done) == (["LC_ALL"] if locale == "en_US.ISO-8859-1" else [])
+
+
+def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
+    """The real interpreter script prints ``env`` lines with names only (SKY-737)."""
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LD_PRELOAD": "",
+            "SECRET_VALUE": "do-not-print",
+            "BASH_FUNC_cd%%": "() { :; }",
+            "LANG": "C.UTF-8",
+            "LANGUAGE": "de_DE",
+            "LC_CTYPE": "C.UTF-8",
+        },
+    )
+
+    assert done.returncode == 0, done.stderr
+    lines = set(done.stdout.split("\n"))
+    assert {"env LD_PRELOAD", "env SECRET_VALUE", "env BASH_FUNC_cd%%"} <= lines
+    assert {"locale LANG=C.UTF-8", "locale LANGUAGE=de_DE", "locale LC_CTYPE=C.UTF-8"} <= lines
+    assert ("path /usr/lib/locale" in lines) is Path("/usr/lib/locale").is_dir()
+    assert repo_staging._root_variables(subprocess.CompletedProcess([], 0, done.stdout, "")) == [
+        "BASH_FUNC_cd%%",
+        "LANGUAGE",
+        "LD_PRELOAD",
+    ]
+    assert "do-not-print" not in done.stdout
+
+
+@pytest.mark.parametrize("value", ["/dev/null", "/etc/box.cnf"], ids=["clean-run-value", "image-value"])
+def test_the_path_script_names_the_loader_files_and_the_build_landmarks(value: str) -> None:
+    """The script lists the loader cache and folders, and the paths that must be missing (SKY-737).
+
+    Args:
+        value: The ``OPENSSL_CONF`` that the run starts with.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "OPENSSL_CONF": value},
+    )
+
+    assert done.returncode == 0, done.stderr
+    lines = set(done.stdout.split("\n"))
+    assert {"absent /etc/ld.so.preload", "opt /etc/ld.so.cache", "lib /usr/lib"} <= lines
+    folder = Path(base).resolve().parent
+    assert {f"absent {folder}/pybuilddir.txt", f"absent {folder}/Modules/Setup.local"} <= lines
+    # The clean run's own /dev/null is not an image variable; an image value is.
+    assert ("env OPENSSL_CONF" in lines) is (value != "/dev/null")
+
+
+def test_the_path_script_refuses_a_locale_that_does_not_load() -> None:
+    """The script loads the image locale as root's bash does, and stops when it does not load (SKY-737)."""
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "xx_YY.UTF-8"},
+    )
+
+    assert done.returncode != 0
+    assert "the image locale does not load" in done.stderr
+
+
+def test_the_path_script_accepts_an_image_with_no_locale_trees(tmp_path: Path) -> None:
+    """An image that ran ``rm -rf /usr/share/locale`` still passes the script (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder, which holds no locale trees.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    trees = f'("{tmp_path}/lib/locale", "{tmp_path}/share/locale")'
+    script = repo_staging._PATH_SCRIPT.replace('("/usr/lib/locale", "/usr/share/locale")', trees)
+    assert script != repo_staging._PATH_SCRIPT
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert {f"path {tmp_path}/lib/locale", f"path {tmp_path}/share/locale"} <= set(done.stdout.split("\n"))
+
+
+def test_the_path_script_reports_whether_passwd_names_the_box_user(tmp_path: Path) -> None:
+    """The script finds the box uid in ``/etc/passwd`` with the supervisor's rules, and says when it cannot (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    uid = os.getuid()
+    accounts = tmp_path / "passwd"
+    found = []
+    for text in (
+        None,
+        f"box:x:{uid}:{uid}::/home/box:/bin/sh\n",
+        f"box:x:{uid}:{uid}::/home/box:/bin/sh:extra\n:x:{uid}:{uid}::/:/bin/sh\nother:x:{uid + 1}:0::/:/bin/sh\n",
+        b"\xff",
+    ):
+        script = repo_staging._PATH_SCRIPT
+        if text is not None:
+            accounts.write_bytes(text if isinstance(text, bytes) else text.encode())
+            script = script.replace('open("/etc/passwd"', f"open({str(accounts)!r}")
+        done = subprocess.run(
+            [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+        )
+        assert done.returncode == 0, done.stderr
+        found.append([line for line in done.stdout.split("\n") if line.startswith("account ")])
+    assert found == [[f"account ok {uid}"], [f"account ok {uid}"], [f"account none {uid}"], [f"account none {uid}"]]
+
+
+def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no image key, nothing builds or checks, and the record keeps version 1 and its hash (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    runtime = _ImageRuntime()
+    try:
+        assert _prepare(staged, runtime) is staged
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+    record = result["details"]["record"]
+    metric = hashlib.sha256(
+        _framed("eval/scorer.py", b"def score(): ...\n") + _framed("metric.py", _RECORD_METRIC.encode())
+    )
+    assert runtime.specs == []
+    assert record["record_version"] == 1
+    assert "boxes" not in record
+    assert record["metric_sha256"] == metric.hexdigest()
+
+
+def test_a_metric_image_is_part_of_the_metric_hash_and_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``[metric] image`` digest is one more metric part, and the record names each box (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    metric = '[metric]\nfiles = ["eval/scorer.py"]\n'
+    tree = {
+        **_CASES_TREE,
+        "ascent.toml": _CASES_TREE["ascent.toml"].replace(metric, f'{metric}image = "{_METRIC_IMAGE}"\n'),
+    }
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        staged = _prepare(staged, _ImageRuntime(), builder=None)
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+    record = result["details"]["record"]
+    digest = ("sha256:" + "c" * 64).encode()
+    expected = hashlib.sha256(
+        _framed("/[metric] image", digest)
+        + _framed("eval/scorer.py", b"def score(): ...\n")
+        + _framed("metric.py", _RECORD_METRIC.encode())
+    )
+    assert record["metric_sha256"] == expected.hexdigest()
+    assert record["record_version"] == 2
+    assert record["boxes"] == {
+        "metric": {"digest": "sha256:" + "c" * 64, "source": "image", "input_hash": None, "build_log": None}
+    }
+
+
+@pytest.mark.parametrize(
+    ("accepts", "builder", "message"),
+    [(False, _FakeBuilder(), "cannot start a box from a user image"), (True, None, "cannot build a Dockerfile")],
+)
+def test_a_deployment_that_cannot_use_the_image_says_so(
+    monkeypatch: pytest.MonkeyPatch, accepts: bool, builder: Any, message: str
+) -> None:
+    """A runtime that ignores the image, or a deployment with no builder, fails before any box (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        accepts: Whether the runtime starts a box from a user image.
+        builder: The deployment's builder.
+        message: The expected error text.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    monkeypatch.setattr(runtime, "accepts_user_images", accepts)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=message):
+            _prepare(staged, runtime, builder=builder)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+
+
+def test_a_resume_uses_the_pinned_images_and_builds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resumed run keeps the images it pinned at its start, so a later push cannot change them (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    builder, runtime = _FakeBuilder(), _ImageRuntime()
+    pinned = {
+        role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "dockerfile"}
+        for role in ("run", "metric")
+    }
+    try:
+        staged = _prepare(staged, runtime, builder=builder, pinned=pinned)
+    finally:
+        staged.cleanup()
+    assert staged.box_images == pinned
+    assert builder.requests == []
+    assert runtime.specs == []
+
+
+def test_the_build_context_holds_only_the_dockerfile_folder(tmp_path: Path) -> None:
+    """The context of ``box/Dockerfile`` is ``box``, so no other repository file reaches the build (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    archive = _tree(tmp_path, {"box/Dockerfile": "FROM x\n", "box/lib/a.txt": "a\n", "src/app.py": "x = 1\n"})
+
+    context = extract_folder(archive, "box", tmp_path / "context")
+    whole = extract_folder(archive, ".", tmp_path / "whole")
+
+    assert context == tmp_path / "context" / "box"
+    assert sorted(
+        str(path.relative_to(tmp_path / "context")) for path in (tmp_path / "context").rglob("*") if path.is_file()
+    ) == [
+        "box/Dockerfile",
+        "box/lib/a.txt",
+    ]
+    assert (whole / "src" / "app.py").read_text() == "x = 1\n"
+
+
+def _context_build(
+    tmp_path: Path, role: str, links: dict[str, tuple[bytes, str]] | None = None, *, hidden_file: bool = True
+) -> _FakeBuilder:
+    """Build ``box/Dockerfile`` for one role from a tree whose ``box`` folder holds the hidden ``box/score.py``.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        role: ``run`` or ``metric``.
+        links: Links in the tree, as ``_tree`` takes them.
+        hidden_file: Whether ``box/score.py`` is a regular file; a link in ``links`` can take its place.
+
+    Returns:
+        The builder, which holds the build request.
+    """
+    files = {"box/Dockerfile": "FROM x\n", "box/app.py": "x = 1\n", "secret.txt": "SECRET = 1\n"}
+    if hidden_file:
+        files["box/score.py"] = "SECRET = 1\n"
+    staged = repo_staging.StagedRepository(
+        snapshot=RepoSnapshot(commit="c" * 40, archive=_tree(tmp_path, files, links), readonly_paths=(), size_bytes=1),
+        secrets={},
+        workdir=tmp_path,
+        hidden_paths=("box/score.py",),
+    )
+    builder = _FakeBuilder()
+    repo_staging._dockerfile_image(
+        staged,
+        role,
+        "box/Dockerfile",
+        owner_id="job-1",
+        username="alice",
+        builder=builder,
+        store=_ImageStore(),
+        budget=_FakeBudget(),
+        registry=None,
+    )
+    return builder
+
+
+def _context_files(builder: _FakeBuilder) -> dict[str, str]:
+    """Return each regular file of the build context with its text, by context path.
+
+    Args:
+        builder: The builder that holds one build request.
+
+    Returns:
+        The context's regular files; a link is never followed.
+    """
+    context = builder.requests[0].context_dir
+    return {
+        str(path.relative_to(context)): path.read_text()
+        for path in context.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_the_candidate_image_context_never_holds_a_hidden_file(tmp_path: Path) -> None:
+    """A hidden scoring file inside the Dockerfile's folder never reaches the [run] image build (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(tmp_path, "run")
+
+    assert _context_files(builder) == {"Dockerfile": "FROM x\n", "app.py": "x = 1\n"}
+
+
+def test_the_metric_image_context_keeps_the_hidden_scoring_files(tmp_path: Path) -> None:
+    """The metric box may read the hidden files, so its build context keeps them (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(tmp_path, "metric")
+
+    assert _context_files(builder)["score.py"] == "SECRET = 1\n"
+
+
+def test_a_link_to_a_hidden_file_carries_nothing_into_the_candidate_image(tmp_path: Path) -> None:
+    """A hard link to a hidden file is dropped, and a symlink to one points at nothing (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    builder = _context_build(
+        tmp_path,
+        "run",
+        links={"box/copy.py": (tarfile.LNKTYPE, "box/score.py"), "box/peek.py": (tarfile.SYMTYPE, "score.py")},
+    )
+
+    context = builder.requests[0].context_dir
+    assert _context_files(builder) == {"Dockerfile": "FROM x\n", "app.py": "x = 1\n"}
+    assert not (context / "copy.py").exists()
+    assert not (context / "peek.py").exists()
+
+
+def test_a_hidden_path_that_is_a_link_stops_the_candidate_image_build(tmp_path: Path) -> None:
+    """A hidden path that is a link loses only the link in the strip, so the build refuses it (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    with pytest.raises(
+        repo_staging.BoxImageError, match=r"hidden scoring path 'box/score\.py' is, holds or lies inside"
+    ):
+        _context_build(tmp_path, "run", links={"box/score.py": (tarfile.SYMTYPE, "../secret.txt")}, hidden_file=False)

@@ -124,8 +124,10 @@ from .repo_staging import (
     StagedRepository,
     add_run_record,
     bind_repo_scorer,
+    image_builder,
     infer_repo_setup,
     is_repo_payload,
+    prepare_box_images,
     publish_improvement,
     runs_proposer_entry,
     stage_repository,
@@ -1040,6 +1042,33 @@ class BackgroundWorker:
                         budget_gateway.allow_guest_hosts(
                             tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
                         )
+                        # Before the setup model and the scorer box, so a bad image stops the run
+                        # before it pays for either; a resume keeps the images it pinned (SKY-737).
+                        if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
+                            staged_repository = prepare_box_images(
+                                staged_repository,
+                                owner_id=optimization_id,
+                                username=execution_payload.username,
+                                runtime=budget_gateway.parent_sandbox_runtime(),
+                                builder=image_builder(settings),
+                                store=self._job_store,
+                                budget=budget_gateway.runtime,
+                                pinned=job_data.get("box_images"),
+                            )
+                            pinned_images = self._job_store.pin_box_images(
+                                optimization_id, dict(staged_repository.box_images)
+                            )
+                            # A parallel start of the same run pinned first, so every box uses its images.
+                            if pinned_images != staged_repository.box_images:
+                                staged_repository = prepare_box_images(
+                                    staged_repository,
+                                    owner_id=optimization_id,
+                                    username=execution_payload.username,
+                                    runtime=budget_gateway.parent_sandbox_runtime(),
+                                    builder=None,
+                                    store=self._job_store,
+                                    pinned=pinned_images,
+                                )
                         inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                         if inferred_setup is not None:
                             self._record_setup_command(optimization_id, inferred_setup)

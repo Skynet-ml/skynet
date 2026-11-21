@@ -65,6 +65,8 @@ _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "t
 _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
+# Staging builds or pins each box image and checks it before the first candidate (SKY-737).
+_BOX_IMAGES = frozenset({"run.image", "run.dockerfile", "metric.image", "metric.dockerfile"})
 _OUTCOME_TARGET = frozenset({"outcome.target"})
 # The run end judges each limit on the final score (SKY-692), in its score's direction (SKY-775).
 _OUTCOME_LIMITS = frozenset({"outcome.require"})
@@ -88,6 +90,7 @@ _ENFORCED_EVERYWHERE = (
     | _TARGET_MCP
     | _RUN_ENTRY
     | _ROLE_BOXES
+    | _BOX_IMAGES
     | _OUTCOME_TARGET
     | _OUTCOME_LIMITS
     | _METRIC_ENTRY
@@ -507,7 +510,7 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         if key in stages[name] and not (key == "network" and stages[name][key] == [])
     ]
     keys += [("services", f"[services.{name}]") for name in services]
-    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus")
+    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus", "image", "dockerfile")
     keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
     metric_keys = (
         "entry",
@@ -521,6 +524,8 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         "services",
         "illegal",
         "vcpus",
+        "image",
+        "dockerfile",
     )
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
     if "scores" in metric:
