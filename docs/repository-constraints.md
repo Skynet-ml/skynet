@@ -742,7 +742,7 @@ A minimal metric image:
 ```dockerfile
 # eval/box/Dockerfile
 FROM python:3.12-slim
-RUN pip install --no-cache-dir openascent==0.4.4 numpy==2.1.0
+RUN pip install --no-cache-dir openascent==0.4.5 numpy==2.1.0
 RUN useradd --uid 1000 --create-home box
 USER 1000
 ```
@@ -763,10 +763,10 @@ root `USER`, or a named `USER` such as `USER app`. Skynet cannot confirm
 outside the box that a name is not root, because the image's own
 `/etc/passwd` maps the name to a user id. `USER 1000:1000` also works.
 
-Two limits stay. A hosted run builds a Dockerfile and pulls a user image only
-when the image build settings are configured for that environment. Without
-them, a run with these keys stops before its first version with a clear
-error. A hardening run does not support a user image yet.
+Two limits stay. Only a local Docker run starts a box from a user image now.
+A hosted run cannot copy a user image into its sandbox yet, so a hosted run
+with these keys stops before its first version with a clear error. A
+hardening run does not support a user image yet.
 
 ## The metric: `[metric] entry`
 
