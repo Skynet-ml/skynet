@@ -58,6 +58,24 @@ export function limitMissing(screen: string, { uncapped, limit }: BudgetChoice):
   return LIMIT_SCREENS.has(screen) && !uncapped && limit == null;
 }
 
+/**
+ * Whether the stepper and the agent's jumps hold the metric step. They hold
+ * while costs are unsettled, while the run falls short of its floor, and
+ * while the user cleared a capped run's limit: the hardening Start and the
+ * run need a budget, and without a limit they fail with `budget.invalid`
+ * (SKY-450). Before the limit card mounts (`limitShown`), the limit is unset
+ * only because the card has not filled its default yet, so that holds nothing.
+ */
+export function metricStepHeld(
+  floorCents: number | null,
+  choice: BudgetChoice,
+  costSettled: boolean,
+  limitShown: boolean,
+): boolean {
+  if (!costSettled || (limitShown && !choice.uncapped && choice.limit == null)) return true;
+  return floorCents != null && budgetShortfall(floorCents, choice) !== null;
+}
+
 /** A saved setup's spending limit: the draft slice fields a reload restores. */
 export interface SavedLimit {
   maxCostCents: number | null;

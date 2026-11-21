@@ -24,8 +24,8 @@ import { ExecutionBudgetProvider } from "../../hooks/use-execution-budget";
 import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unified-wizard";
 import {
   budgetContinueBlock,
-  budgetShortfall,
   limitMissing,
+  metricStepHeld,
   runBalance,
   type BudgetShortfall,
 } from "../../lib/budget-limit";
@@ -175,15 +175,17 @@ function UnifiedWizardFrame() {
   );
   // The stepper holds too: no step past a held Continue, and never the
   // metric step while the run can't start, from wherever the user stands.
-  const runShort = useMemo(
+  // The limit card lives on the Optimizer step, so it is shown once that step mounts.
+  const limitShown = mounted("optimizer");
+  const metricHeld = useMemo(
     () =>
-      floorCents != null &&
-      budgetShortfall(floorCents, {
-        uncapped: budgetUncapped,
-        limit: maxCostCents,
-        balance,
-      }) !== null,
-    [floorCents, budgetUncapped, maxCostCents, balance],
+      metricStepHeld(
+        floorCents,
+        { uncapped: budgetUncapped, limit: maxCostCents, balance },
+        w.costSettled,
+        limitShown,
+      ),
+    [floorCents, budgetUncapped, maxCostCents, balance, w.costSettled, limitShown],
   );
   const { openTo } = useSettingsModal();
   const addFunds = useAddFundsAction();
@@ -382,11 +384,8 @@ function UnifiedWizardFrame() {
         step !== undefined &&
         (steps.indexOf(step) > position || (step === current && target > page));
       const open = inputsOpen && !pricing && shortfall === null;
-      // The stepper's own hold: no jump into the metric step while costs are unsettled.
-      const held =
-        step !== undefined &&
-        (runShort || !w.costSettled) &&
-        WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
+      // The stepper's own hold on the metric step (``metricStepHeld``).
+      const held = step !== undefined && metricHeld && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
       // A step on the way with a problem (an optimizer that no longer fits
       // the data, a stale check) holds the jump, so Continue shows it.
       const blocked =
@@ -408,8 +407,7 @@ function UnifiedWizardFrame() {
       inputsOpen,
       pricing,
       shortfall,
-      runShort,
-      w.costSettled,
+      metricHeld,
       agentForward,
       goTo,
       canEnter,
@@ -502,7 +500,6 @@ function UnifiedWizardFrame() {
     return () => window.removeEventListener("keydown", onKey);
   }, [forward, back, submitting, lastScreen]);
 
-  const metricHeld = runShort || !w.costSettled;
   const reachable = (step: WizardStepId) =>
     WIZARD_STAGE[step] <= WIZARD_STAGE[current] ||
     (shortfall === null && !(metricHeld && WIZARD_STAGE[step] >= WIZARD_STAGE.metric));

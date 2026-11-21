@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { budgetContinueBlock, budgetShortfall, limitMissing, runBalance } = await import("./budget-limit.ts");
+const { budgetContinueBlock, budgetShortfall, limitMissing, metricStepHeld, runBalance } =
+  await import("./budget-limit.ts");
 
 const floor = 119;
 
@@ -79,4 +80,49 @@ test("limitMissing holds only an empty capped limit on a limit screen", () => {
   assert.equal(limitMissing("budget", { uncapped: true, limit: null, balance: null }), false);
   assert.equal(limitMissing("budget", { uncapped: false, limit: 500, balance: null }), false);
   assert.equal(limitMissing("models", { uncapped: false, limit: null, balance: null }), false);
+});
+
+test("metricStepHeld holds the metric step while the user cleared a capped limit", () => {
+  const held = (choice: { uncapped: boolean; limit: number | null; balance: number | null }) =>
+    metricStepHeld(floor, choice, true, true);
+
+  // SKY-450: the hardening Start and the run fail with budget.invalid without a limit.
+  assert.equal(held({ uncapped: false, limit: null, balance: null }), true);
+  assert.equal(
+    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, true),
+    true,
+  );
+  assert.equal(held({ uncapped: true, limit: null, balance: null }), false);
+  assert.equal(held({ uncapped: false, limit: floor, balance: null }), false);
+});
+
+test("metricStepHeld lets an unset limit pass before the limit card mounts", () => {
+  // Guided hides the Optimizer step; its card fills the default limit only once it mounts.
+  assert.equal(
+    metricStepHeld(floor, { uncapped: false, limit: null, balance: null }, true, false),
+    false,
+  );
+  assert.equal(
+    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, false),
+    false,
+  );
+});
+
+test("metricStepHeld still holds a short run and unsettled costs", () => {
+  assert.equal(
+    metricStepHeld(floor, { uncapped: false, limit: floor - 1, balance: null }, true, true),
+    true,
+  );
+  assert.equal(
+    metricStepHeld(floor, { uncapped: true, limit: null, balance: floor - 1 }, true, true),
+    true,
+  );
+  assert.equal(
+    metricStepHeld(floor, { uncapped: false, limit: floor, balance: null }, false, true),
+    true,
+  );
+  assert.equal(
+    metricStepHeld(null, { uncapped: false, limit: 500, balance: null }, true, true),
+    false,
+  );
 });
