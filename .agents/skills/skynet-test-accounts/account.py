@@ -17,8 +17,7 @@ failed or killed ``create`` still leaves a secret that ``list`` shows.
 secret. If sign-in fails for a ``pending`` account, it first finishes the
 email confirmation and marks the secret ``ready``. ``forget`` removes
 only the secret, for an account that does not exist: register never
-succeeded, the preview database is gone, or an earlier ``delete`` printed
-``account delete: HTTP 200``.
+succeeded, or an earlier ``delete`` printed ``account delete: HTTP 200``.
 Only ``env`` prints the password; run it only inside ``eval``. No command
 prints a token or an email code.
 """
@@ -316,8 +315,8 @@ def verify_pending(ident, value):
             sys.exit(
                 "account: sign-in failed and no new email code arrived; the secret stays."
                 " A verified account gets no new code, so the account may still exist."
-                " Use forget only if create printed no 'register: HTTP 2xx' line, the preview"
-                " database is gone, or an earlier delete printed 'account delete: HTTP 200'."
+                " Use forget only if create printed no 'register: HTTP 2xx' line,"
+                " or an earlier delete printed 'account delete: HTTP 200'."
                 f" Otherwise report the id {ident}."
             )
         status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
@@ -375,7 +374,7 @@ def delete(ident):
         if not token:
             sys.exit(
                 "account: sign-in failed; the secret stays. If an earlier delete printed"
-                " 'account delete: HTTP 200', or the preview database is gone, the account is gone:"
+                " 'account delete: HTTP 200', the account is gone:"
                 f" run python3 account.py forget {ident}. Otherwise report the id."
             )
         header = Path(tmp) / "auth"
@@ -439,8 +438,8 @@ def main():
         "env": "print the login.sh exports (password included); run it only inside eval",
         "delete": "delete the account in the app, then its secret; cancel its runs first; run it after every check",
         "forget": (
-            "remove only the secret; use it only when register never succeeded, the preview"
-            " database is gone, or an earlier delete printed 'account delete: HTTP 200'"
+            "remove only the secret; use it only when register never succeeded,"
+            " or an earlier delete printed 'account delete: HTTP 200'"
         ),
     }
     for name, text in helps.items():
