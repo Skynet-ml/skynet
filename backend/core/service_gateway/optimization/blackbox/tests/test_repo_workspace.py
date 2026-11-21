@@ -1243,6 +1243,26 @@ def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: 
     assert len(session.commands) == 3
     assert all(f"p={shlex.quote(repo_workspace.BASE_PYTHON)} && " in command for command in session.commands)
     assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
+    assert all(('"$p" -I -S -c' in command) for command in session.commands)
+    assert all(("/usr/bin/env -i " in command) is (run_image is not None) for command in session.commands)
+
+
+@pytest.mark.parametrize("user_image", [False, True], ids=["skynet", "user"])
+def test_a_user_image_box_starts_the_base_interpreter_with_only_the_kept_variables(
+    monkeypatch: pytest.MonkeyPatch, user_image: bool
+) -> None:
+    """A user image box drops the image's environment, such as loader paths, and keeps only the named variables (SKY-737)."""
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
+    script = "import os; print([name for name in ('APP_ANSWER', 'LD_LIBRARY_PATH', 'PATH') if name in os.environ])"
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image, ("APP_ANSWER",)) + f'"$p" -I -S -c "{script}"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "APP_ANSWER": "text", "LD_LIBRARY_PATH": "/tmp/planted"},
+        check=True,
+    )
+    names = ["APP_ANSWER"] if user_image else ["APP_ANSWER", "LD_LIBRARY_PATH", "PATH"]
+    assert done.stdout.strip() == str(names)
 
 
 @pytest.mark.parametrize(("user_image", "planted_runs"), [(False, True), (True, False)], ids=["skynet", "user"])

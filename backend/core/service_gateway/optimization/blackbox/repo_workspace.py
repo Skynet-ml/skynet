@@ -297,24 +297,30 @@ print(sha.hexdigest())
 """
 
 
-def _pick_base_python(user_image: bool = False) -> str:
+def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> str:
     """Set ``p`` in a box command to the base interpreter.
 
     In Skynet's image it falls back to ``python3`` from PATH only where no
     base interpreter exists, such as the local test runtime. The box user
     cannot remove the root-owned one in the image, so the fallback never runs
     there. A user image gives no such promise, so its box never falls back:
-    its image check proved the base interpreter root-owned (SKY-737).
+    its image check proved the base interpreter root-owned (SKY-737). The
+    image's environment can name loader paths, such as ``LD_LIBRARY_PATH``,
+    so a user image box starts the interpreter with an empty environment, as
+    the image check ran it.
 
     Args:
         user_image: Whether the box runs a user ``[run]`` image.
+        keep: Names of the environment variables that the script reads, kept in a user image box.
 
     Returns:
-        A shell prefix that sets ``p`` and ends in ``&& ``. It keeps one
-        ``&&`` chain, so a failed ``cd`` before it still stops the hash.
+        A shell prefix that sets ``p`` and ends in ``&& ``, or in a user image
+        box in ``/usr/bin/env -i`` and the kept variables, so ``"$p"`` follows
+        it. It keeps one ``&&`` chain, so a failed ``cd`` before it still stops the hash.
     """
     if user_image:
-        return f"p={shlex.quote(BASE_PYTHON)} && "
+        kept = "".join(f' {name}="${name}"' for name in keep)
+        return f"p={shlex.quote(BASE_PYTHON)} && /usr/bin/env -i{kept} "
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
@@ -784,7 +790,8 @@ def _write_answer(session: SandboxSession, path: str, text: str, *, user_image: 
         Whether the write succeeded.
     """
     result = session.run(
-        f'{_pick_base_python(user_image)}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
+        f'{_pick_base_python(user_image, ("APP_ANSWER",))}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)}'
+        f' "$PWD"/{shlex.quote(path)}',
         env={"APP_ANSWER": text},
         timeout_seconds=_HASH_TIMEOUT_SECONDS,
     )
