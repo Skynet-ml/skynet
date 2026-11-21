@@ -65,14 +65,18 @@ export function limitMissing(screen: string, { uncapped, limit }: BudgetChoice):
  * run need a budget, and without a limit they fail with `budget.invalid`
  * (SKY-450). Before the limit card mounts (`limitShown`), the limit is unset
  * only because the card has not filled its default yet, so that holds nothing.
+ * Once the user went past the Optimizer step (`pastOptimizer`), an unset limit
+ * was cleared on purpose, even when a reload left the card unmounted.
  */
 export function metricStepHeld(
   floorCents: number | null,
   choice: BudgetChoice,
   costSettled: boolean,
   limitShown: boolean,
+  pastOptimizer: boolean,
 ): boolean {
-  if (!costSettled || (limitShown && !choice.uncapped && choice.limit == null)) return true;
+  const limitCleared = (limitShown || pastOptimizer) && !choice.uncapped && choice.limit == null;
+  if (!costSettled || limitCleared) return true;
   return floorCents != null && budgetShortfall(floorCents, choice) !== null;
 }
 

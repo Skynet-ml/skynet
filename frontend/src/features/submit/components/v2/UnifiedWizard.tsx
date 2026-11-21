@@ -177,6 +177,9 @@ function UnifiedWizardFrame() {
   // metric step while the run can't start, from wherever the user stands.
   // The limit card lives on the Optimizer step, so it is shown once that step mounts.
   const limitShown = mounted("optimizer");
+  // After a reload only the current step mounts, so a limit the user cleared
+  // earlier still holds once the run went past the Optimizer step.
+  const pastOptimizer = WIZARD_STAGE[w.state.furthestStep] > WIZARD_STAGE.optimizer;
   const metricHeld = useMemo(
     () =>
       metricStepHeld(
@@ -184,8 +187,9 @@ function UnifiedWizardFrame() {
         { uncapped: budgetUncapped, limit: maxCostCents, balance },
         w.costSettled,
         limitShown,
+        pastOptimizer,
       ),
-    [floorCents, budgetUncapped, maxCostCents, balance, w.costSettled, limitShown],
+    [floorCents, budgetUncapped, maxCostCents, balance, w.costSettled, limitShown, pastOptimizer],
   );
   const { openTo } = useSettingsModal();
   const addFunds = useAddFundsAction();

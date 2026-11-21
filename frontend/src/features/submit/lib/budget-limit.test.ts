@@ -84,12 +84,12 @@ test("limitMissing holds only an empty capped limit on a limit screen", () => {
 
 test("metricStepHeld holds the metric step while the user cleared a capped limit", () => {
   const held = (choice: { uncapped: boolean; limit: number | null; balance: number | null }) =>
-    metricStepHeld(floor, choice, true, true);
+    metricStepHeld(floor, choice, true, true, false);
 
   // SKY-450: the hardening Start and the run fail with budget.invalid without a limit.
   assert.equal(held({ uncapped: false, limit: null, balance: null }), true);
   assert.equal(
-    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, true),
+    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, true, false),
     true,
   );
   assert.equal(held({ uncapped: true, limit: null, balance: null }), false);
@@ -99,30 +99,50 @@ test("metricStepHeld holds the metric step while the user cleared a capped limit
 test("metricStepHeld lets an unset limit pass before the limit card mounts", () => {
   // Guided hides the Optimizer step; its card fills the default limit only once it mounts.
   assert.equal(
-    metricStepHeld(floor, { uncapped: false, limit: null, balance: null }, true, false),
+    metricStepHeld(floor, { uncapped: false, limit: null, balance: null }, true, false, false),
     false,
   );
   assert.equal(
-    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, false),
+    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, false, false),
     false,
   );
 });
 
 test("metricStepHeld still holds a short run and unsettled costs", () => {
   assert.equal(
-    metricStepHeld(floor, { uncapped: false, limit: floor - 1, balance: null }, true, true),
+    metricStepHeld(floor, { uncapped: false, limit: floor - 1, balance: null }, true, true, false),
     true,
   );
   assert.equal(
-    metricStepHeld(floor, { uncapped: true, limit: null, balance: floor - 1 }, true, true),
+    metricStepHeld(floor, { uncapped: true, limit: null, balance: floor - 1 }, true, true, false),
     true,
   );
   assert.equal(
-    metricStepHeld(floor, { uncapped: false, limit: floor, balance: null }, false, true),
+    metricStepHeld(floor, { uncapped: false, limit: floor, balance: null }, false, true, false),
     true,
   );
   assert.equal(
-    metricStepHeld(null, { uncapped: false, limit: 500, balance: null }, true, true),
+    metricStepHeld(null, { uncapped: false, limit: 500, balance: null }, true, true, false),
+    false,
+  );
+});
+
+test("metricStepHeld holds a cleared limit after a reload past the Optimizer step", () => {
+  // A reload mounts only the current step, so the limit card is not shown.
+  assert.equal(
+    metricStepHeld(floor, { uncapped: false, limit: null, balance: null }, true, false, true),
+    true,
+  );
+  assert.equal(
+    metricStepHeld(null, { uncapped: false, limit: null, balance: null }, true, false, true),
+    true,
+  );
+  assert.equal(
+    metricStepHeld(null, { uncapped: true, limit: null, balance: null }, true, false, true),
+    false,
+  );
+  assert.equal(
+    metricStepHeld(null, { uncapped: false, limit: 500, balance: null }, true, false, true),
     false,
   );
 });
