@@ -109,6 +109,7 @@ from .repo_workspace import (
     MetricBox,
     RepoSetupError,
     RepoWorkspace,
+    absolute_cd,
     redact,
 )
 from .rule_judge import RuleJudge
@@ -152,8 +153,14 @@ _BASE_PYTHON = "/usr/local/bin/python3"
 # The supervisor runs as root, but the box user can rewrite the runner file
 # between the write and the run (a process an earlier case left). So root reads
 # the file once, checks its hash against the parent's copy, and runs those
-# same bytes (SKY-398).
+# same bytes (SKY-398). An image OpenSSL config can name an engine library in
+# a folder that the box user writes. OpenSSL loads its config at its first use
+# in the process, which is the hash, or the runner's ``import ssl`` when the
+# image has no ``_hashlib``. So ``OPENSSL_CONF`` stays ``/dev/null`` for the
+# whole root process. The boot runs in the runner's globals, so
+# ``_box_openssl_conf`` keeps the box's own value for the entry (SKY-737).
 _SUPERVISOR_BOOT = (
+    "import os;_box_openssl_conf=os.environ.get('OPENSSL_CONF');os.environ['OPENSSL_CONF']='/dev/null';"
     "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
     "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
     "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
@@ -737,11 +744,13 @@ class RepoScorer:
                 forward(stream, data)
 
             with sandbox_log.event_scope(source="run"):
+                # A user image box never falls back to the PATH python3, as in _pick_base_python (SKY-737).
+                fallback = "" if self._workspace.user_run_image else '; [ -x "$p" ] || p=python3'
                 result = candidate.box.run(
-                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    f"p={shlex.quote(_BASE_PYTHON)}{fallback}"
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
-                    f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f'; {absolute_cd(candidate.path, root)} && exec "$p" {_ISOLATED} {_NO_SITE}'
                     f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
                     f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,

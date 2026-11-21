@@ -1222,32 +1222,99 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # root scripts import, and prints a tagged line for each path that it uses:
 # ``path`` for a ``sys.path`` entry, ``file`` for each file mapped into it or
 # into its shell (``/proc/<pid>/maps``, so libpython, libc and any preloaded
-# library wherever they are) and for the ELF loader that it names, ``opt``
-# for a loader file that may be missing, and ``dir`` for its prefix. The hash
-# scripts start it with ``env -i`` and the supervisor with the box's own
-# environment, so it runs both ways. ``w`` walks one path from ``/``: it
+# library wherever they are) and for the ELF loader that it, root's programs
+# and root's tools name, ``opt`` for a loader file that may be missing, ``lib``
+# for each loader folder (the default ones, those in ``/etc/ld.so.cache`` or
+# ``/etc/ld-musl-*.path``, and the RPATH and RUNPATH of each mapped file and
+# root program), ``absent`` for a path that must not exist
+# (``/etc/ld.so.preload``, and the CPython build and venv landmarks that
+# ``getpath`` looks for next to the interpreter), and ``dir`` for its prefix.
+# Every regular file that the listing names must be readable by others: a
+# root-only file could name a path, such as a preloaded library, that the
+# probe never sees. Each library in a loader folder must be root's and
+# readable by others for the same reason. The hash scripts start it with
+# ``env -i OPENSSL_CONF=/dev/null``, so an image OpenSSL config loads no
+# engine into root, and the supervisor with the box's own environment, so it
+# runs both ways. ``w`` walks one path from ``/``: it
 # prints ``stat`` (owner uid, octal mode, type, name) of ``/`` and of each
 # part, follows each link hop by hop with plain ``readlink``, as ``namei`` and
 # ``readlink -f`` hide the hops, and prints ``link <target>`` after it, or
-# ``none <path>`` for the first part that does not exist. ``_trusted_python``
+# ``none <path>`` for the first part that does not exist. The probe runs as
+# the box user, and a folder that it cannot search hides what is in it from
+# ``[ -e ]``, but not from root, so ``w`` fails the probe instead of printing
+# ``none`` below such a folder. ``_trusted_python``
 # judges the listing. Below each ``sys.path`` folder, except
 # ``site-packages`` and ``dist-packages``, which ``-S`` keeps out of
 # ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
-# group or others can write, or that is a link. A ``pyvenv.cfg`` or ``._pth``
+# group or others can write, or that is a link. In the locale trees a
+# root-owned link may stay, as Debian links ``coreutils.mo`` files there; the
+# interpreter prints a ``file`` line for each one, so its target is checked. A ``pyvenv.cfg`` or ``._pth``
 # file next to the interpreter would move ``sys.path``, so it fails the probe
-# too. A newline in a name or target could forge a listing line, so the probe
+# too. ``env`` lines name the variables of each run, without their values,
+# for :func:`_root_variables`. A newline in a name or target could forge a listing line, so the probe
 # stops at any byte outside printable ASCII. ``$(...)`` drops trailing
 # newlines, so the ``x`` keeps them and the probe sees the target the kernel follows.
 _MAX_LINK_HOPS = 40
+# The programs that root runs by absolute path in a box: the Vercel root
+# wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
+# scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
+_ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
+# Other paths that root uses in a box. The supervisor reads ``/etc/passwd``
+# itself; ``/etc/nsswitch.conf`` names the NSS modules that glibc loads for
+# any other lookup. ``/tmp`` holds the supervisor's run folder and
+# the Vercel root wrapper's output, so it must be root's, sticky and 1777.
+_ROOT_TMP = "/tmp"
+_OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
+_ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
+# The PATH of every root script on Vercel (``vercel.ROOT_PATH``, which a test
+# keeps equal). Its root output poll runs ``_ROOT_TOOLS`` by name every 0.5 s,
+# so each folder must be out of the box user's reach. Root's lookup is not the
+# box user's ``command -v``: root takes the first file with any x bit, and a
+# dangling link can get a target later. So every ``folder/tool`` entry that
+# exists or is a link must resolve to a root-owned regular file, and at least
+# one folder must hold each tool. A missing folder may be missing. The probe
+# prints ``tool`` or ``notool`` for each pair, so no pair goes unchecked, and
+# each present folder must let others search it, or the box user's view of
+# it would hide entries that root runs.
+_ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ROOT_TOOLS = ("tail", "head", "base64", "tr")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
-    "import "
+    r"""import os
+names = [n for n in os.environ if not (n == "OPENSSL_CONF" and os.environ[n] == "/dev/null")]
+os.environ["OPENSSL_CONF"] = "/dev/null"
+import """
     + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
     + r"""
+import locale
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
+for name in names:
+    if not (name.isascii() and name.isprintable()):
+        sys.exit("an environment variable name is not printable ASCII")
+    print("env", name)
+    if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
+        value = os.environ[name]
+        if not (value.isascii() and value.isprintable()):
+            sys.exit("a locale value is not printable ASCII")
+        print("locale", name + "=" + value)
 for entry in sys.path:
     print("path", entry)
+for tree in ("/usr/lib/locale", "/usr/share/locale"):
+    print("path", tree)
+    if not os.path.lexists(tree):
+        continue
+    for folder, subfolders, files in os.walk(tree, onerror=lambda error: sys.exit(str(error))):
+        for name in subfolders + files:
+            link = os.path.join(folder, name)
+            if not (link.isascii() and link.isprintable()):
+                sys.exit("a locale file name is not printable ASCII")
+            if os.path.islink(link):
+                print("file", link)
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except locale.Error:
+    sys.exit("the image locale does not load")
 seen = set()
 for pid in ("self", str(os.getppid())):
     with open(f"/proc/{pid}/maps") as maps:
@@ -1265,14 +1332,120 @@ for at in range(start, start + size * count, size):
     if int.from_bytes(data[at : at + 4], "little") == 3:
         offset, length = (int.from_bytes(data[a:b], "little") for a, b in ((at + 8, at + 16), (at + 32, at + 40)))
         print("file", data[offset : offset + length].rstrip(b"\0").decode())
-for name in ["ld.so.preload", "ld.so.cache"] + [n for n in os.listdir("/etc") if n.startswith("ld-musl-")]:
-    print("opt", "/etc/" + name)
+try:
+    with open("/etc/passwd", encoding="utf-8") as accounts:
+        known = any(
+            len(f) == 7 and f[0] and f[2] == str(os.getuid()) for f in (line.rstrip("\n").split(":") for line in accounts)
+        )
+except (OSError, UnicodeDecodeError):
+    known = False
+print("account", "ok" if known else "none", os.getuid())
+print("absent", "/etc/ld.so.preload")
+folders = {"/lib", "/usr/lib", "/lib64", "/usr/lib64", "/usr/local/lib"}
+print("opt", "/etc/ld.so.cache")
+if os.path.lexists("/etc/ld.so.cache"):
+    with open("/etc/ld.so.cache", "rb") as cache:
+        data = cache.read()
+    at = data.find(b"glibc-ld.so.cache1.1")
+    if at < 0:
+        sys.exit("the loader cache has no glibc-ld.so.cache1.1 table")
+    for entry in range(at + 48, at + 48 + 24 * int.from_bytes(data[at + 20 : at + 24], "little"), 24):
+        name = at + int.from_bytes(data[entry + 8 : entry + 12], "little")
+        folders.add(os.path.dirname(data[name : data.index(b"\0", name)].decode("ascii")))
+for name in os.listdir("/etc"):
+    if name.startswith("ld-musl-"):
+        print("opt", "/etc/" + name)
+        with open("/etc/" + name, encoding="ascii") as paths:
+            folders.update(paths.read().replace(":", "\n").split())
+"""
+    + f"programs = {[*_ROOT_PROGRAMS, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + r"""
+for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.lexists(name)}):
+    with open(name, "rb") as elf:
+        data = elf.read()
+    if data[:4] != b"\x7fELF":
+        continue
+    if data[4:6] != b"\x02\x01":
+        sys.exit("a mapped file is not a 64-bit little-endian ELF file")
+    u = lambda a, b: int.from_bytes(data[a:b], "little")
+    start, size, count = u(32, 40), u(54, 56), u(56, 58)
+    heads = [at for at in range(start, start + size * count, size)]
+    for at in heads:
+        if u(at, at + 4) == 3:
+            print("file", data[u(at + 8, at + 16) : u(at + 8, at + 16) + u(at + 32, at + 40)].rstrip(b"\0").decode())
+    loads = [(u(at + 16, at + 24), u(at + 8, at + 16), u(at + 32, at + 40)) for at in heads if u(at, at + 4) == 1]
+    strtab, found = None, []
+    for at in heads:
+        if u(at, at + 4) == 2:
+            for item in range(u(at + 8, at + 16), u(at + 8, at + 16) + u(at + 32, at + 40), 16):
+                tag = u(item, item + 8)
+                if tag == 0:
+                    break
+                if tag == 5:
+                    strtab = u(item + 8, item + 16)
+                if tag in (15, 29):
+                    found.append(u(item + 8, item + 16))
+    if found:
+        base = next(offset + strtab - address for address, offset, length in loads if address <= strtab < address + length)
+        for value in found:
+            for folder in data[base + value : data.index(b"\0", base + value)].decode("ascii").split(":"):
+                folder = folder.replace("${ORIGIN}", "$ORIGIN").replace("$ORIGIN", os.path.dirname(name))
+                if "$" in folder or not folder.startswith("/"):
+                    sys.exit("a library search path is not an absolute folder")
+                folders.add(folder)
+def scan(folder, depth):
+    for item in os.scandir(folder):
+        info = item.stat(follow_symlinks=False)
+        if item.is_symlink():
+            if ".so" in item.name:
+                if not os.path.exists(item.path):
+                    sys.exit("a library link in a loader folder is dangling")
+                links.append(item.path)
+        elif item.is_dir(follow_symlinks=False):
+            if item.name in ("site-packages", "dist-packages"):
+                continue
+            if info.st_uid or info.st_mode & 0o022 or info.st_mode & 0o005 != 0o005:
+                sys.exit("a loader folder is not root's, or others cannot read it")
+            if depth < 4:
+                scan(item.path, depth + 1)
+        elif ".so" in item.name:
+            if info.st_uid or info.st_mode & 0o022 or not info.st_mode & 0o004:
+                sys.exit("a library in a loader folder is not root's, or others cannot read it")
+            checked.add(item.path)
+if not all(folder.startswith("/") for folder in folders):
+    sys.exit("a loader folder is not absolute")
+links, checked = [], set()
+for folder in sorted({os.path.realpath(folder) for folder in folders if os.path.isdir(folder)}):
+    scan(folder, 1)
+for target in sorted({os.path.realpath(link) for link in links} - checked):
+    print("file", target)
+for folder in sorted(folders):
+    print("lib", folder)
+version = f"python{sys.version_info[0]}.{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "")
+packed = f"python{sys.version_info[0]}{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "") + ".zip"
+for start in sorted({os.path.dirname(sys.executable), os.path.dirname(os.path.realpath(sys.executable))}):
+    for name in ("pybuilddir.txt", "Modules/Setup.local", "pyvenv.cfg"):
+        print("absent", start + "/" + name)
+    print("absent", os.path.dirname(start).rstrip("/") + "/pyvenv.cfg")
+    for landmarks, top in (
+        ((f"{sys.platlibdir}/{version}/os.py", f"{sys.platlibdir}/{version}/os.pyc"), sys.prefix),
+        ((f"{sys.platlibdir}/{packed}",), sys.prefix),
+        ((f"{sys.platlibdir}/{version}/lib-dynload",), sys.exec_prefix),
+    ):
+        here = start
+        while not (here == top and any(os.path.lexists(here.rstrip("/") + "/" + name) for name in landmarks)):
+            for name in landmarks:
+                print("absent", here.rstrip("/") + "/" + name)
+            if here == "/":
+                break
+            here = os.path.dirname(here)
 print("dir", sys.prefix)
 print("dir", sys.exec_prefix)
 """
 )
 _TRUSTED_PYTHON_PROBE = (
-    f"export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
+    # The box run gets the image's own LC_ALL back, so it maps the locale files that root's runs map.
+    f"g=${{LC_ALL+1}}; h=${{LC_ALL-}}; export LC_ALL=C; f='%u %a %F %n'; s={shlex.quote(BASE_PYTHON)}; y={shlex.quote(_PATH_SCRIPT)}\n"
     "w() {\n"
     "  a=; r=${1#/}; n=0; z=\n"
     '  stat -c "$f" / || exit 1\n'
@@ -1280,7 +1453,7 @@ _TRUSTED_PYTHON_PROBE = (
     "    c=${r%%/*}\n"
     "    case $r in */*) r=${r#*/};; *) r=;; esac\n"
     "    case $c in ''|.) continue;; ..) a=${a%/*}; continue;; esac\n"
-    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
+    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then [ -x "${a:-/}" ] || exit 1; printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
     '    stat -c "$f" "$a/$c" || exit 1\n'
     '    if [ -h "$a/$c" ]; then\n'
     f"      n=$((n+1)); [ $n -le {_MAX_LINK_HOPS} ] || exit 1\n"
@@ -1295,21 +1468,29 @@ _TRUSTED_PYTHON_PROBE = (
     'w "$s"\n'
     '[ -z "$z" ] || exit 1\n'
     'for d in "${s%/*}" "${a%/*}"; do\n'
+    '  [ -r "$d" ] && [ -x "$d" ] || exit 1\n'
     '  for e in "$d/pyvenv.cfg" "${d%/*}/pyvenv.cfg" "$d"/*._pth; do\n'
     '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
     "  done\n"
     "done\n"
-    "printf 'file /usr/bin/env\\n'; w /usr/bin/env\n"
+    f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi; done\n'
+    f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
+    '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; else printf \'notool %s\\n\' "$b/$t"; fi\n'
+    "done; done\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
-    '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
-    '  else o=$("$s" -I -S -c "$y") || exit 1; fi\n'
+    '  if [ $m = clean ]; then o=$(/usr/bin/env -i OPENSSL_CONF=/dev/null "$s" -I -S -c "$y") || exit 1\n'
+    '  elif [ -n "$g" ]; then o=$(LC_ALL="$h" "$s" -I -S -c "$y") || exit 1\n'
+    '  else o=$(/usr/bin/env -u LC_ALL "$s" -I -S -c "$y") || exit 1; fi\n'
     "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
-    "    case $v in *[![:print:]]*) exit 1;; 'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
-    '    printf \'%s\\n\' "$v"; t=${v%% *}; w "${v#* }"\n'
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'account '?*|'path /'*|'file /'*|'dir /'*|'opt /'*|'lib /'*|'absent /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale|account) continue;; esac; w "${v#* }"\n'
     '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
-    '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
-    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
+    "      case ${v#* } in /usr/lib/locale|/usr/share/locale)\n"
+    '        q=$(find "$a" \\( ! -user 0 -o ! -type l \\( -perm -020 -o -perm -002 \\) \\) -print) || exit 1;;\n'
+    '      *) q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
+    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1;; esac\n"
     '      [ -z "$q" ] || exit 1\n'
     "    fi\n"
     "  done || exit 1\n"
@@ -1317,24 +1498,106 @@ _TRUSTED_PYTHON_PROBE = (
 )
 # An absolute path of printable ASCII only, as the probe allows.
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
+_ACCOUNT_OK = re.compile(r"ok [0-9]+")
+_ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 _BOX_UID_PROBE = "id -u"
-# The file types that each tagged path may have; ``path`` and ``opt`` may also be missing.
+# The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
+# An ``absent`` path is a CPython build or venv landmark, and it must be missing.
 _ENTRY_KINDS = {
     "path": frozenset({"directory", "regular file"}),
     "file": frozenset({"regular file"}),
     "opt": frozenset({"regular file"}),
     "dir": frozenset({"directory"}),
+    "lib": frozenset({"directory"}),
+    "absent": frozenset(),
 }
-_MAY_BE_MISSING = frozenset({"path", "opt"})
+_MAY_BE_MISSING = frozenset({"path", "opt", "lib", "absent"})
+_VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
+# Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
+# supervisor with the box's environment, which holds the image ENV. The
+# loader, the shell and libc read these names before ``env -i`` can clear
+# anything, as no root process here is setuid (SKY-737). Each group:
+# - ``LD_*``: the glibc and musl loader search paths, preloads and audit
+#   libraries. An empty ``LD_LIBRARY_PATH`` element means the work folder.
+# - ``GCONV_PATH``, ``LOCPATH``, ``GLIBC_TUNABLES``: iconv modules, locale
+#   files, and how the loader picks libraries and how malloc works.
+# - ``OPENSSL_*``: the root supervisor imports ``ssl``, and OpenSSL loads
+#   its config, providers and engines from these paths.
+# - ``BASH_ENV``, ``ENV``: a file that the shell sources at its start.
+# - ``BASH_FUNC_*``: exported functions (``BASH_FUNC_name%%``), which win
+#   over builtins such as ``cd``.
+# - ``SHELLOPTS``, ``BASHOPTS``, ``POSIXLY_CORRECT``, ``BASH_COMPAT``: shell
+#   options, for example ``xtrace``, which expands ``PS4``.
+# - ``PS4``, ``BASH_XTRACEFD``: the trace prompt runs command substitutions,
+#   and the trace goes to any open file.
+# - ``CDPATH``, ``GLOBIGNORE``, ``EXECIGNORE``, ``IFS``,
+#   ``BASH_LOADABLES_PATH``: which folder ``cd`` picks, which files a glob
+#   or a command search takes, how words split, and where ``enable -f``
+#   loads builtins from. The root ``cd`` targets are absolute, so
+#   ``CDPATH`` is refused only to be safe.
+# - ``TMPDIR``, ``TEMP``, ``TMP``: Python's ``tempfile`` reads them even
+#   under ``-I``, so they could put a root folder where the box user writes.
+# - ``LANG``, ``LANGUAGE``, ``LC_*``: refused only when the value is not C,
+#   POSIX or a UTF-8 locale. Another codeset makes glibc load ``gconv``
+#   modules, and a value with ``/`` names a locale folder (``_locale_ok``).
+# ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, and the
+# interactive-only names (``PROMPT_COMMAND``, ``INPUTRC``, ``HISTFILE``) are
+# never read by ``bash -c``, so they stay allowed.
+_ROOT_PREFIXES = ("LD_", "OPENSSL_", "BASH_FUNC_")
+_ROOT_VARIABLES = frozenset(
+    {
+        "GCONV_PATH",
+        "LOCPATH",
+        "GLIBC_TUNABLES",
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "POSIXLY_CORRECT",
+        "BASH_COMPAT",
+        "PS4",
+        "BASH_XTRACEFD",
+        "CDPATH",
+        "GLOBIGNORE",
+        "EXECIGNORE",
+        "IFS",
+        "BASH_LOADABLES_PATH",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+    }
+)
+# A UTF-8 locale name, with no ``/``, so glibc reads it from its own locale files.
+_UTF8_LOCALE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:utf-8|utf8)", re.IGNORECASE)
+ROOT_ENVIRONMENT = (
+    "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
+    " image environment, and these variables change which code the shell, the system loader or the C library"
+    " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
+    " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
+    " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
+    " are not supported yet."
+)
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
-    " virtual environment. Every file that it loads, each folder on its import path and every file and"
-    " folder below that path (except site-packages), and every folder from / down to each of them, must be"
-    " owned by root and not writable by group or others. Links count only below / and outside the import path."
+    " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
+    " /etc/nsswitch.conf (when present), every tail, head, base64 and tr in a folder of root's PATH"
+    " ({path}), each folder of that PATH that exists, every file that Python loads, the locale trees,"
+    " each folder on its import path and every file and folder below that path (except site-packages), and"
+    " every folder from / down to each of them, must be"
+    " owned by root and not writable by group or others. Others must be able to read each of those files,"
+    " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
+    " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
+    " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
+    " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
+    " of the folders, and no entry may be a dangling link."
+)
+NO_ACCOUNT = (
+    "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
+    " {app}'s root supervisor finds the box user's name and home there. Add a line with seven fields for that uid."
 )
 
 
@@ -1743,8 +2006,29 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
     python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
     if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
-        if probes:
-            _check_run_probes(image, probes)
+        probe = probes.get("python")
+        names = _root_variables(probe) if probe is not None else []
+        if names:
+            raise BoxImageError(
+                ROOT_ENVIRONMENT.format(
+                    image=image, names=", ".join(names), app=APP_NAME, variables=", ".join(sorted(_ROOT_VARIABLES))
+                )
+            )
+        uid = _missing_account(probe) if probe is not None else None
+        if uid is not None:
+            raise BoxImageError(NO_ACCOUNT.format(image=image, uid=uid, app=APP_NAME))
+        if probe is not None and not _trusted_python(probe):
+            raise BoxImageError(
+                UNTRUSTED_PYTHON.format(
+                    image=image,
+                    python=BASE_PYTHON,
+                    app=APP_NAME,
+                    programs=", ".join(_ROOT_PROGRAMS),
+                    path=_ROOT_PATH,
+                )
+            )
+        if "uid" in probes:
+            _check_box_uid(image, probes["uid"])
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -1758,19 +2042,16 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
     )
 
 
-def _check_run_probes(image: str, probes: Mapping[str, Any]) -> None:
-    """Refuse a run image whose interpreter, standard library or box user fails its probe.
+def _check_box_uid(image: str, uid: Any) -> None:
+    """Refuse a run image whose box user is root (SKY-891).
 
     Args:
         image: The box image reference.
-        probes: The results of the interpreter and uid probes, by name.
+        uid: The result of :data:`_BOX_UID_PROBE`.
 
     Raises:
-        BoxImageError: When a probe fails or prints an unexpected result.
+        BoxImageError: When the probe fails or prints anything but a non-zero uid.
     """
-    if not _trusted_python(probes["python"]):
-        raise BoxImageError(UNTRUSTED_PYTHON.format(image=image, python=BASE_PYTHON, app=APP_NAME))
-    uid = probes["uid"]
     # Only a clean non-zero number passes: a failed or odd probe refuses too.
     if not uid.ok or not uid.stdout.strip().isdigit() or int(uid.stdout.strip()) == 0:
         raise BoxImageError(ROOT_BOX_USER.format(image=image, app=APP_NAME))
@@ -1787,22 +2068,61 @@ def _trusted_python(probe: Any) -> bool:
 
     Returns:
         True when ``BASE_PYTHON`` resolves to a root-owned regular file that
-        group and others cannot write and others can run, ``/usr/bin/env``
-        resolves to one that group and others cannot write, and both runs
+        group and others cannot write and others can read and run, each of
+        ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
+        present) resolves to one that group and others cannot write and others can read,
+        ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
+        missing or one that group and others cannot write and others can
+        search, the probe reports each folder and tool pair once, every entry of
+        ``_ROOT_TOOLS`` in those folders resolves to such a file and each
+        tool has one, both runs find a passwd line for the box user, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
-        passes :func:`_walk` with the file type that its tag allows.
+        passes :func:`_walk` with the file type that its tag allows, every
+        regular file among them is readable by others, and every ``absent``
+        entry is missing.
     """
     if not probe.ok:
         return False
     # Only a newline ends a line; ``splitlines`` would also split at other control bytes.
     lines = probe.stdout.removesuffix("\n").split("\n")[::-1]
     python = _walk(lines, BASE_PYTHON)
-    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or not python[0] & 0o001:
+    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or python[0] & 0o005 != 0o005:
         return False
-    if not lines or lines.pop() != "file /usr/bin/env":
-        return False
-    env = _walk(lines, "/usr/bin/env")
-    if env in (None, _MISSING) or env[1] != "regular file" or env[0] & 0o022:
+    for path in _ROOT_PATHS:
+        if not lines or lines.pop() != f"file {path}":
+            return False
+        entry = _walk(lines, path)
+        if entry is None or (entry == _MISSING and path not in _OPTIONAL_ROOT_FILES):
+            return False
+        if entry == _MISSING:
+            continue
+        if path == _ROOT_TMP:
+            if entry != (0o1777, "directory"):
+                return False
+        elif not _readable_file(entry):
+            return False
+    for folder in _ROOT_PATH.split(":"):
+        if not lines or lines.pop() != f"bin {folder}":
+            return False
+        entry = _walk(lines, folder)
+        # The box user cannot see into a folder without o+x, but root still runs its tools.
+        if entry is None or (
+            entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022 or not entry[0] & 0o001)
+        ):
+            return False
+    found = set()
+    for folder in _ROOT_PATH.split(":"):
+        for tool in _ROOT_TOOLS:
+            line = lines.pop() if lines else ""
+            if line == f"notool {folder}/{tool}":
+                continue
+            if line != f"tool {folder}/{tool}":
+                return False
+            entry = _walk(lines, f"{folder}/{tool}")
+            if entry in (None, _MISSING) or not _readable_file(entry):
+                return False
+            found.add(tool)
+    if found != set(_ROOT_TOOLS):
         return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
@@ -1810,6 +2130,11 @@ def _trusted_python(probe: Any) -> bool:
         tags = set()
         while lines and not lines[-1].startswith("run "):
             tag, _, path = lines.pop().partition(" ")
+            if tag in ("env", "locale") and _VARIABLE_NAME.fullmatch(path):
+                continue
+            if tag == "account" and _ACCOUNT_OK.fullmatch(path):
+                tags.add(tag)
+                continue
             if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
                 return False
             entry = _walk(lines, path)
@@ -1817,10 +2142,78 @@ def _trusted_python(probe: Any) -> bool:
                 return False
             if entry != _MISSING and (entry[1] not in _ENTRY_KINDS[tag] or entry[0] & 0o022):
                 return False
+            # A file that the box user cannot read could name paths, such as an ld.so.preload library, that the probe never sees.
+            if entry != _MISSING and entry[1] == "regular file" and not _readable_file(entry):
+                return False
             tags.add(tag)
-        if not {"path", "file", "dir"} <= tags:
+        if not {"account", "path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _readable_file(entry: tuple[int, str]) -> bool:
+    """Tell whether a walked entry is a regular file that group and others cannot write and others can read.
+
+    Args:
+        entry: The mode and file type that :func:`_walk` returned.
+
+    Returns:
+        True for such a file.
+    """
+    return entry[1] == "regular file" and not entry[0] & 0o022 and bool(entry[0] & 0o004)
+
+
+def _missing_account(probe: Any) -> str | None:
+    """Return the box uid when a probe run found no ``/etc/passwd`` line for it.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The uid, or ``None`` when no run reported a missing line.
+    """
+    for line in probe.stdout.split("\n"):
+        missing = _ACCOUNT_NONE.fullmatch(line)
+        if missing:
+            return missing.group(1)
+    return None
+
+
+def _root_variables(probe: Any) -> list[str]:
+    """List the variables in the probe's environments that change what root's shell, loader or libc runs.
+
+    A failed probe still counts: its ``env`` lines come before its walks, and
+    a refusal is the safe answer either way.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The sorted names, without duplicates.
+    """
+    lines = probe.stdout.split("\n")
+    names = {line.removeprefix("env ") for line in lines if line.startswith("env ")}
+    found = {name for name in names if name.startswith(_ROOT_PREFIXES) or name in _ROOT_VARIABLES}
+    for line in lines:
+        if line.startswith("locale "):
+            name, _, value = line.removeprefix("locale ").partition("=")
+            if not _locale_ok(name, value):
+                found.add(name)
+    return sorted(found)
+
+
+def _locale_ok(name: str, value: str) -> bool:
+    """Tell whether a locale variable names only C, POSIX or a UTF-8 locale.
+
+    Args:
+        name: ``LANG``, ``LANGUAGE`` or an ``LC_*`` name.
+        value: Its value; ``LANGUAGE`` is a ``:`` list of locales.
+
+    Returns:
+        True when every locale in the value is empty, C, POSIX or a UTF-8 locale.
+    """
+    values = value.split(":") if name == "LANGUAGE" else [value]
+    return all(item in ("", "C", "POSIX") or _UTF8_LOCALE.fullmatch(item) for item in values)
 
 
 def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:

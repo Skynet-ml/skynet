@@ -99,10 +99,10 @@ import io
 import json
 import math
 import os
-import pwd
 import shutil
 import signal
 import site
+import socketserver
 import ssl
 import stat
 import subprocess
@@ -265,6 +265,7 @@ ASCENT_PACKAGE_PARAM = "ascent_package"
 METRIC_FUNCTION_PARAM = "function"
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
+_PASSWD_FILE = "/etc/passwd"
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -640,7 +641,7 @@ def start_service_proxy(
                 *args: The values for the format string.
             """
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = _LoopbackHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     env = {service_env_name(name): f"{base}/service/{urllib.parse.quote(name, safe='')}/" for name in names}
@@ -1690,7 +1691,23 @@ def _refuse_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON.")
 
 
-class _QuietHTTPServer(http.server.ThreadingHTTPServer):
+class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """A loopback HTTP server that binds without a host name lookup."""
+
+    def server_bind(self) -> None:
+        """Bind the socket and name the server by its address.
+
+        ``HTTPServer.server_bind`` calls ``socket.getfqdn``, an NSS hosts
+        lookup that can load NSS modules into the root supervisor, which
+        the image check does not walk (SKY-737).
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+
+class _QuietHTTPServer(_LoopbackHTTPServer):
     """A loopback HTTP server that prints nothing when a request fails."""
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -2282,24 +2299,48 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
         The ``subprocess.Popen`` arguments that switch the user, or none.
 
     Raises:
-        EntryUserError: When root owns the candidate tree, or the
-            supervisor cannot set ``no_new_privs``.
+        EntryUserError: When root owns the candidate tree, ``/etc/passwd``
+            has no account for its owner, or the supervisor cannot set
+            ``no_new_privs``.
     """
     if os.geteuid() != 0 or (not stat.S_ISREG(os.fstat(1).st_mode) and not _has_capabilities()):
         return {}
     owner = Path().stat()
     if owner.st_uid == 0:
         raise EntryUserError("Root owns the candidate tree, so the [run] entry has no other user to run as.")
-    try:
-        account = pwd.getpwuid(owner.st_uid)
-    except KeyError:
-        pass
-    else:
-        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    name, home = _passwd_account(owner.st_uid)
+    env.update(HOME=home, USER=name, LOGNAME=name)
     if env.get(ENV_ENTRY_PATH):
         env["PATH"] = env[ENV_ENTRY_PATH]
     _block_privilege_gain()
     return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
+
+
+def _passwd_account(uid: int) -> tuple[str, str]:
+    """Find the name and home of a uid in ``/etc/passwd`` alone.
+
+    ``pwd.getpwuid`` follows ``/etc/nsswitch.conf`` and can load NSS modules
+    (``systemd``, ``sss``, ``ldap``) into this root process. The image check
+    walks ``/etc/passwd``, so only that file is read (SKY-737).
+
+    Args:
+        uid: The candidate tree's owner.
+
+    Returns:
+        The account's name and home folder.
+
+    Raises:
+        EntryUserError: When the file cannot be read or has no account for the uid.
+    """
+    try:
+        with Path(_PASSWD_FILE).open(encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split(":")
+                if len(fields) == 7 and fields[0] and fields[2] == str(uid):
+                    return fields[0], fields[5]
+    except (OSError, UnicodeDecodeError):
+        pass
+    raise EntryUserError(f"{_PASSWD_FILE} has no account for uid {uid}, so the [run] entry has no user to run as.")
 
 
 def _block_privilege_gain() -> None:
@@ -2372,13 +2413,22 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     timeout = float(payload["timeout"])
     _block_tracing()
     env = dict(os.environ)
+    # The supervisor boot sets ``OPENSSL_CONF=/dev/null`` for root only, and
+    # keeps the box's own value in ``_box_openssl_conf`` (None when unset).
+    # Without the boot, the environment is already the box's (SKY-737).
+    box_openssl_conf = globals().get("_box_openssl_conf", env.get("OPENSSL_CONF"))
+    env.pop("OPENSSL_CONF", None)
+    if box_openssl_conf is not None:
+        env["OPENSSL_CONF"] = box_openssl_conf
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))
     switch = _entry_user(env)
     # A new folder in sticky /tmp: the box user can rename anything in the
     # call's folder, so a root supervisor must not write or chown there.
-    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
+    # ``dir`` is fixed, as ``-I`` still lets an image ``TMPDIR`` pick a folder
+    # that the box user can write (SKY-737).
+    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-", dir="/tmp"))
     try:
         return _run_entry(
             entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")), payload.get(ASCENT_PACKAGE_PARAM)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import http.server
 import io
 import json
 import os
@@ -1388,6 +1389,34 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
     assert b"not listed for the [run] role" in refused.value.read()
 
 
+def test_the_loopback_servers_bind_without_a_host_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service proxy and the metric helpers bind with no ``getfqdn``, an NSS hosts lookup (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+
+    def lookup(name: str = "") -> str:
+        """Fail like a host lookup that the root supervisor must not make.
+
+        Args:
+            name: The host.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError(f"getfqdn({name!r}) ran")
+
+    monkeypatch.setattr(socket, "getfqdn", lookup)
+    url = runner.start_service_proxy(object(), ["judge"])["ASCENT_SERVICE_JUDGE_URL"]  # type: ignore[arg-type]
+    assert url.startswith("http://127.0.0.1:")
+    server = runner._QuietHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    try:
+        assert (server.server_name, server.server_port) == ("127.0.0.1", server.server_address[1])
+    finally:
+        server.server_close()
+
+
 def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> None:
     """A chunked request body reaches the parent decoded, and the service's Date and Server come back once."""
 
@@ -2250,6 +2279,7 @@ sys.modules["r"] = m
 spec.loader.exec_module(m)
 m.os.geteuid = lambda: 0
 m._has_capabilities = lambda: sys.argv[2] == "caps"
+m._PASSWD_FILE = m.os.environ["FAKE_PASSWD"]
 calls = []
 
 
@@ -2274,7 +2304,12 @@ print(json.dumps(report))
 
 
 def _root_supervisor(
-    tmp_path: Path, capabilities: str, prctl: str, *call_dir: str, entry_path: str | None = None
+    tmp_path: Path,
+    capabilities: str,
+    prctl: str,
+    *call_dir: str,
+    entry_path: str | None = None,
+    passwd: bytes | None = None,
 ) -> dict[str, Any]:
     """Run ``_ROOT_SUPERVISOR`` in the tree ``tmp_path`` and return its report.
 
@@ -2284,12 +2319,17 @@ def _root_supervisor(
         prctl: ``fails`` when every prctl call fails.
         *call_dir: The call folder, to run the whole candidate path.
         entry_path: The image's ``APP_ENTRY_PATH``, or ``None`` for an image without it.
+        passwd: The fake ``/etc/passwd``; by default one line for the test user.
 
     Returns:
         The report: the choice and the entry's PATH, the refusal or the exit
         code, and the prctl calls.
     """
+    passwd_file = tmp_path.parent / f"{tmp_path.name}.passwd"
+    default = f"root:x:0:0:root:/root:/bin/bash\nbox:x:{os.getuid()}:{os.getgid()}::/home/box:/bin/sh\n"
+    passwd_file.write_bytes(default.encode() if passwd is None else passwd)
     env = {key: value for key, value in os.environ.items() if key != runner.ENV_ENTRY_PATH}
+    env["FAKE_PASSWD"] = str(passwd_file)
     if entry_path is not None:
         env[runner.ENV_ENTRY_PATH] = entry_path
     done = subprocess.run(
@@ -2356,6 +2396,56 @@ def test_only_a_user_switch_sets_no_new_privs_on_the_supervisor(
     assert _root_supervisor(tmp_path, capabilities, "works")["calls"] == calls
 
 
+@pytest.mark.parametrize(
+    "passwd",
+    [
+        b"root:x:0:0:root:/root:/bin/bash\n",
+        b"",
+        b"box:x:{uid}:0::/home/box\n",
+        b":x:{uid}:0::/home/box:/bin/sh\n",
+        b"box:x:0{uid}:0::/home/box:/bin/sh\n",
+        b"box:x:{uid}:0::/home/\xff:/bin/sh\n",
+    ],
+    ids=["uid-not-listed", "empty-file", "short-line", "no-name", "padded-uid", "not-utf-8"],
+)
+def test_a_tree_owner_missing_from_etc_passwd_stops_the_root_supervisor(tmp_path: Path, passwd: bytes) -> None:
+    """The supervisor reads ``/etc/passwd`` itself and refuses when the owner has no line there (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        passwd: The fake ``/etc/passwd``.
+    """
+    report = _root_supervisor(tmp_path, "caps", "works", passwd=passwd.replace(b"{uid}", str(os.getuid()).encode()))
+
+    assert "has no account for uid" in report["refused"]
+    assert report["calls"] == []
+
+
+def test_the_root_supervisor_takes_home_and_user_from_etc_passwd_without_nss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HOME, USER and LOGNAME come from the ``/etc/passwd`` line, and ``pwd`` is never asked (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    passwd = tmp_path / "passwd"
+    passwd.write_text(f"root:x:0:0:root:/root:/bin/bash\nbox:x:{os.getuid()}:7::/home/box:/bin/sh\n")
+    monkeypatch.setattr(runner, "_PASSWD_FILE", str(passwd))
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runner, "_has_capabilities", lambda: True)
+    monkeypatch.setattr(runner, "_block_privilege_gain", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    env: dict[str, str] = {}
+
+    switch = runner._entry_user(env)
+
+    assert switch["user"] == os.getuid()
+    assert env == {"HOME": "/home/box", "USER": "box", "LOGNAME": "box"}
+    assert "pwd" not in runner.__dict__
+
+
 def test_the_entry_does_not_start_when_no_new_privs_cannot_be_set(tmp_path: Path) -> None:
     """A root supervisor that cannot set no_new_privs refuses the run and never starts the entry.
 
@@ -2386,6 +2476,7 @@ def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp
         "import importlib.util,sys;"
         "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
         "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;m._has_capabilities=lambda:True;"
+        "m._passwd_account=lambda uid:('box','/home/box');"
         "before=open('/proc/self/status').read();m._entry_user({});"
         "print(before);print('--- after ---');print(open('/proc/self/status').read())"
     )
@@ -3442,3 +3533,71 @@ def test_a_python_metric_entry_calls_the_function_it_names() -> None:
     assert load_scorer_from_code(code, entrypoint="score")("x") == 0.0
     with pytest.raises(ScorerError, match="defines no function 'judge'"):
         load_scorer_from_code(code, entrypoint="judge")
+
+
+@pytest.mark.parametrize("name", ["TMPDIR", "TEMP", "TMP"])
+def test_an_image_temp_variable_cannot_move_the_root_run_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The supervisor's run folder is always in /tmp, whatever temp folder the image ENV names (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder, which the image ENV names.
+        monkeypatch: Pytest monkeypatch.
+        name: The temp variable that the image sets.
+    """
+    folders: list[Path] = []
+    monkeypatch.setenv(name, str(tmp_path))
+    monkeypatch.setattr(runner.tempfile, "tempdir", None)
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, switch, run_dir, *_: folders.append(run_dir))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert len(folders) == 1
+    assert folders[0].parent == Path("/tmp")
+    assert folders[0].name.startswith(".app-run-")
+    assert not folders[0].exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("value", [None, "/etc/custom.cnf", "/dev/null"], ids=["unset", "set", "image-dev-null"])
+def test_the_entry_gets_the_box_openssl_config_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """Root keeps ``OPENSSL_CONF=/dev/null``, and the entry gets the box's own value, or none (SKY-737).
+
+    Args:
+        tmp_path: The call's folder.
+        monkeypatch: Pytest monkeypatch.
+        value: The box's ``OPENSSL_CONF`` that the supervisor boot saved.
+    """
+    envs: list[dict[str, str]] = []
+    monkeypatch.setenv("OPENSSL_CONF", "/dev/null")
+    monkeypatch.setattr(runner, "_box_openssl_conf", value, raising=False)
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, *_: envs.append(env))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert len(envs) == 1
+    assert envs[0].get("OPENSSL_CONF") == value
+    assert os.environ["OPENSSL_CONF"] == "/dev/null"
+
+
+def test_the_entry_keeps_the_openssl_config_without_the_boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner that the supervisor boot did not start passes its own ``OPENSSL_CONF`` on (SKY-737).
+
+    Args:
+        tmp_path: The call's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    envs: list[dict[str, str]] = []
+    monkeypatch.setenv("OPENSSL_CONF", "/etc/custom.cnf")
+    monkeypatch.delattr(runner, "_box_openssl_conf", raising=False)
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, *_: envs.append(env))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert [env.get("OPENSSL_CONF") for env in envs] == ["/etc/custom.cnf"]
