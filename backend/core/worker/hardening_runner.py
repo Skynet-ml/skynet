@@ -954,6 +954,11 @@ def open_hardening_runner(
         # The attackers and the fixes read and edit Python metric code; a command metric is out of scope (SKY-738).
         if constraints is not None and not isinstance(constraints.metric.entry, str):
             raise ValueError("A hardening job needs a Python metric.")
+        # The pass scores in Skynet's image, so a user box image would score each attack in another box (SKY-737).
+        if constraints is not None and any(
+            role.image or role.dockerfile for role in (constraints.run_role, constraints.metric_role)
+        ):
+            raise ValueError("A hardening job does not support a [run] or [metric] user image yet.")
         compose_services = constraints.compose_services if constraints is not None else ()
         hidden = hidden_repo_paths(constraints)
 

@@ -2221,3 +2221,72 @@ def test_a_trusted_tree_with_a_command_metric_entry_refuses_hardening(
 
     with pytest.raises(ValueError, match="needs a Python metric"), opened:
         pass
+
+
+def test_a_trusted_tree_with_a_user_box_image_refuses_hardening(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass scores in Skynet's image, so a ``[metric] image`` stops it before any box opens (SKY-737)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("def score(output, expected=None):\n    return 1.0\n")
+    (trusted / "ascent.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "x"]\n[metric]\nfiles = ["eval"]\nentry = "eval/metric.py:score"\n'
+        f'image = "registry.example/metric@sha256:{"a" * 64}"\n'
+    )
+
+    class Gateway:
+        """Protects nothing and opens no box."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", Gateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    opened = open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    )
+
+    with pytest.raises(ValueError, match="user image"), opened:
+        pass

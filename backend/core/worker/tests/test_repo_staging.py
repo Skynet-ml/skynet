@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -47,6 +48,8 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.sandbox.image_build import BuildResult, ImageBuildError
+from core.sandbox.image_registry import ImageRegistryError
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
@@ -60,6 +63,7 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ServiceSpec,
     TargetStage,
 )
+from core.service_gateway.optimization.blackbox.repo_tree import extract_folder
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
@@ -5741,3 +5745,470 @@ def test_a_run_recorded_before_the_direction_existed_resumes_as_a_maximize_run()
     repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "maximize"}})
     with pytest.raises(ConstraintsError, match=r"\(outcome\)"):
         repo_staging._ensure_unchanged(old, {"outcome": {"target": 0.9, "require": {}, "direction": "minimize"}})
+
+
+_BUILT_IMAGE = "registry.example/u@sha256:" + "b" * 64
+_METRIC_IMAGE = "registry.example/metric@sha256:" + "c" * 64
+_BOX_TREE = {
+    **_RUN_TREE,
+    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n'
+    'dockerfile = "box/Dockerfile"\n\n[metric]\ndockerfile = "box/Dockerfile"\n',
+    "box/Dockerfile": "FROM python:3.12-slim\nRUN pip install openascent==0.4.4\n",
+}
+
+
+class _FakeBuilder:
+    """Build a Dockerfile with no Docker, and remember each request."""
+
+    kind = "codebuild"
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Start with no builds.
+
+        Args:
+            fail: Whether each build fails.
+        """
+        self.fail = fail
+        self.requests: list[Any] = []
+
+    def build(self, request: Any) -> BuildResult:
+        """Return a built image, or fail like a broken Dockerfile.
+
+        Args:
+            request: The build request.
+
+        Returns:
+            The fixed built image.
+
+        Raises:
+            ImageBuildError: When the builder fails.
+        """
+        self.requests.append(request)
+        assert (request.context_dir / request.dockerfile).is_file()
+        if self.fail:
+            raise ImageBuildError("The build failed.", log="step 2 failed\n", log_tail="step 2 failed")
+        return BuildResult(
+            image=_BUILT_IMAGE,
+            digest="sha256:" + "b" * 64,
+            size_bytes=10,
+            input_hash="unused",
+            log="built\n",
+            log_tail="built",
+        )
+
+
+class _ImageStore:
+    """Keep image builds in memory, like the job store's ``image_builds`` table."""
+
+    def __init__(self) -> None:
+        """Start with no builds."""
+        self.builds: list[dict[str, Any]] = []
+
+    def find_image_build(self, username: str, input_hash: str) -> dict[str, Any] | None:
+        """Return the user's successful build of the same inputs.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+
+        Returns:
+            The build, or ``None``.
+        """
+        for build in self.builds:
+            if (build["username"], build["input_hash"]) == (username, input_hash) and build["image"]:
+                return build
+        return None
+
+    def save_image_build(self, username: str, input_hash: str, **fields: Any) -> str:
+        """Keep one build and return its id.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+            **fields: Builder, image, size and log.
+
+        Returns:
+            The new build's id.
+        """
+        build_id = f"build-{len(self.builds) + 1}"
+        self.builds.append({"id": build_id, "username": username, "input_hash": input_hash, **fields})
+        return build_id
+
+
+class _FakeRegistry:
+    """Hold a set of digests, like the user image registry."""
+
+    def __init__(self, held: set[str]) -> None:
+        """Hold ``held``.
+
+        Args:
+            held: The digests the registry still holds.
+        """
+        self.held = held
+        self.checks: list[tuple[str, str]] = []
+
+    def check_digest(self, owner: str, digest: str) -> None:
+        """Fail for a digest the registry does not hold.
+
+        Args:
+            owner: The registry repository's owner.
+            digest: The digest to find.
+
+        Raises:
+            ImageRegistryError: When the registry does not hold the digest.
+        """
+        self.checks.append((owner, digest))
+        if digest not in self.held:
+            raise ImageRegistryError("gone")
+
+
+class _FakeBudget:
+    """Run each paid dispatch at once and record its charge."""
+
+    def __init__(self) -> None:
+        """Start with no charges."""
+        self.charges: list[dict[str, Any]] = []
+
+    def execute(self, quote: Any, policy: Any, dispatch: Any, **kwargs: Any) -> Any:
+        """Run the dispatch and record its provider cost.
+
+        Args:
+            quote: The reserved quote.
+            policy: The charge policy.
+            dispatch: The paid call.
+            **kwargs: The operation key and cost kind.
+
+        Returns:
+            The dispatch's value.
+        """
+        paid = dispatch()
+        self.charges.append({"provider_usd": paid.provider_usd, **kwargs})
+        return paid.value
+
+
+class _CheckSession:
+    """Answer ``ascent check --image`` with a fixed report."""
+
+    def __init__(self, ok: bool) -> None:
+        """Keep the check outcome.
+
+        Args:
+            ok: Whether the image passes.
+        """
+        self.ok = ok
+        self.commands: list[str] = []
+
+    def run(self, command: str, **_: Any) -> CommandResult:
+        """Print the check's JSON report.
+
+        Args:
+            command: The check command.
+            **_: Unused run options.
+
+        Returns:
+            The report, with exit code 1 when the image fails.
+        """
+        self.commands.append(command)
+        checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
+        report = {"ok": self.ok, "checks": checks, "python": sys.executable}
+        return CommandResult(exit_code=0 if self.ok else 1, stdout=json.dumps(report) + "\n")
+
+    def close(self) -> None:
+        """Close nothing."""
+
+
+class _ImageRuntime:
+    """Run boxes as local processes and record the image each box asks for."""
+
+    accepts_user_images = True
+    max_lifetime_seconds = 120.0
+
+    def __init__(self, *, check_ok: bool = True) -> None:
+        """Start with no boxes.
+
+        Args:
+            check_ok: Whether each image passes its check.
+        """
+        self.check_ok = check_ok
+        self.specs: list[SandboxSpec] = []
+        self.checks: list[_CheckSession] = []
+        self._local = LocalSubprocessRuntime()
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a check box, or a local box for any other work.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        self.specs.append(spec)
+        if spec.operation_key.startswith("image-check:"):
+            self.checks.append(_CheckSession(self.check_ok))
+            return self.checks[-1]
+        return self._local.open(spec)
+
+
+class _ImageGateway(_LocalGateway):
+    """Open every box through one image-recording runtime."""
+
+    def __init__(self, runtime: _ImageRuntime) -> None:
+        """Keep the runtime.
+
+        Args:
+            runtime: The runtime that opens each box.
+        """
+        super().__init__()
+        self.runtime = runtime
+
+    def parent_sandbox_runtime(self) -> Any:
+        """Return the image-recording runtime.
+
+        Returns:
+            The runtime.
+        """
+        return self.runtime
+
+
+def _prepare(staged: Any, runtime: Any, **kwargs: Any) -> Any:
+    """Prepare the box images of ``staged`` as the engine does, with fakes.
+
+    Args:
+        staged: The staged repository.
+        runtime: The runtime that opens the check boxes.
+        **kwargs: The builder, store, budget, registry or pinned images.
+
+    Returns:
+        The staged repository with its box images.
+    """
+    options = {"builder": _FakeBuilder(), "store": _ImageStore(), **kwargs}
+    return repo_staging.prepare_box_images(staged, owner_id="job-1", username="alice", runtime=runtime, **options)
+
+
+def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run builds the Dockerfile once, checks it in each role, and scores in the built image (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_BOX_TREE, monkeypatch)
+    builder, budget, runtime = _FakeBuilder(), _FakeBudget(), _ImageRuntime()
+    try:
+        staged = _prepare(
+            staged, runtime, builder=builder, budget=budget, registry=_FakeRegistry({"sha256:" + "b" * 64})
+        )
+        staged_payload["scorer"] = {"kind": "python", "metric_code": _OUTPUT_METRIC, "timeout_seconds": 60}
+        staged_payload["_budget_gateway_descriptor"] = {
+            "url": "http://127.0.0.1:1/v1",
+            "control_token": "control-token",
+            "image": "img",
+            "lifetime_seconds": 120,
+        }
+        gateway = _ImageGateway(runtime)
+        repo_staging.bind_repo_scorer(staged_payload, staged, gateway, owner_id="job-1")
+        result = gateway.evaluator.score("", None)
+    finally:
+        staged.close_scorers()
+        staged.cleanup()
+
+    assert json.loads(result["feedback"])["output"] == {"value": None, "sees_cases": False}
+    # Both roles name the same Dockerfile, so the second build reuses the first by its input hash.
+    assert len(builder.requests) == 1
+    assert builder.requests[0].dockerfile == "Dockerfile"
+    assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
+    assert budget.charges[0]["provider_usd"] >= 0
+    assert [check.commands for check in runtime.checks] == [
+        ["ascent check --image --role candidate"],
+        ["ascent check --image --role metric"],
+    ]
+    checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
+    assert all(spec.network_disabled for spec in checks)
+    assert [spec.private for spec in checks] == [False, True]
+    work = [spec for spec in runtime.specs if not spec.operation_key.startswith("image-check:")]
+    assert work
+    assert {spec.image for spec in work} == {_BUILT_IMAGE}
+    assert staged.box_images["metric"]["python"] == sys.executable
+    assert staged.box_images["run"]["source"] == "dockerfile"
+
+
+def test_an_image_that_fails_its_check_stops_the_run_before_any_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed ``ascent check --image`` raises with the failed check, and no candidate box opens (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(check_ok=False)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="no python3 on PATH"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def test_a_failed_build_is_charged_kept_and_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Dockerfile that does not build shows its log tail, keeps its log, and is charged (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    store, budget, runtime = _ImageStore(), _FakeBudget(), _ImageRuntime()
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="step 2 failed"):
+            _prepare(staged, runtime, builder=_FakeBuilder(fail=True), store=store, budget=budget)
+    finally:
+        staged.cleanup()
+    assert [(build["image"], build["log"]) for build in store.builds] == [(None, "step 2 failed\n")]
+    assert len(budget.charges) == 1
+    assert runtime.specs == []
+
+
+def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same user's same Dockerfile and context build once; a lost image builds again (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    builder, store = _FakeBuilder(), _ImageStore()
+    held = _FakeRegistry({"sha256:" + "b" * 64})
+    records = []
+    for registry in (held, held, _FakeRegistry(set())):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            records.append(_prepare(staged, _ImageRuntime(), builder=builder, store=store, registry=registry))
+        finally:
+            staged.cleanup()
+    first, second, third = (record.box_images["run"] for record in records)
+    assert len(builder.requests) == 2
+    assert second == first
+    assert first["build_log"] == "image-build:build-1"
+    assert third["build_log"] == "image-build:build-2"
+    assert first["input_hash"] == third["input_hash"]
+
+
+def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no image key, nothing builds or checks, and the record keeps version 1 and its hash (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch, _record_payload())
+    runtime = _ImageRuntime()
+    try:
+        assert _prepare(staged, runtime) is staged
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+    record = result["details"]["record"]
+    metric = hashlib.sha256(
+        _framed("eval/scorer.py", b"def score(): ...\n") + _framed("metric.py", _RECORD_METRIC.encode())
+    )
+    assert runtime.specs == []
+    assert record["record_version"] == 1
+    assert "boxes" not in record
+    assert record["metric_sha256"] == metric.hexdigest()
+
+
+def test_a_metric_image_is_part_of_the_metric_hash_and_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``[metric] image`` digest is one more metric part, and the record names each box (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    metric = '[metric]\nfiles = ["eval/scorer.py"]\n'
+    tree = {
+        **_CASES_TREE,
+        "ascent.toml": _CASES_TREE["ascent.toml"].replace(metric, f'{metric}image = "{_METRIC_IMAGE}"\n'),
+    }
+    staged_payload, staged = _stage_with(tree, monkeypatch, _record_payload())
+    try:
+        staged = _prepare(staged, _ImageRuntime(), builder=None)
+        result = _result(0.5, 0.95, details=_guest_details(staged_payload["cases"], 7))
+        repo_staging.add_run_record(result, staged_payload, staged, image=_PINNED_IMAGE)
+    finally:
+        staged.cleanup()
+    record = result["details"]["record"]
+    digest = ("sha256:" + "c" * 64).encode()
+    expected = hashlib.sha256(
+        _framed("/[metric] image", digest)
+        + _framed("eval/scorer.py", b"def score(): ...\n")
+        + _framed("metric.py", _RECORD_METRIC.encode())
+    )
+    assert record["metric_sha256"] == expected.hexdigest()
+    assert record["record_version"] == 2
+    assert record["boxes"] == {
+        "metric": {"digest": "sha256:" + "c" * 64, "source": "image", "input_hash": None, "build_log": None}
+    }
+
+
+@pytest.mark.parametrize(
+    ("accepts", "builder", "message"),
+    [(False, _FakeBuilder(), "cannot start a box from a user image"), (True, None, "cannot build a Dockerfile")],
+)
+def test_a_deployment_that_cannot_use_the_image_says_so(
+    monkeypatch: pytest.MonkeyPatch, accepts: bool, builder: Any, message: str
+) -> None:
+    """A runtime that ignores the image, or a deployment with no builder, fails before any box (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        accepts: Whether the runtime starts a box from a user image.
+        builder: The deployment's builder.
+        message: The expected error text.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    monkeypatch.setattr(runtime, "accepts_user_images", accepts)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=message):
+            _prepare(staged, runtime, builder=builder)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+
+
+def test_a_resume_uses_the_pinned_images_and_builds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resumed run keeps the images it pinned at its start, so a later push cannot change them (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    builder, runtime = _FakeBuilder(), _ImageRuntime()
+    pinned = {
+        role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64, "source": "dockerfile"}
+        for role in ("run", "metric")
+    }
+    try:
+        staged = _prepare(staged, runtime, builder=builder, pinned=pinned)
+    finally:
+        staged.cleanup()
+    assert staged.box_images == pinned
+    assert builder.requests == []
+    assert runtime.specs == []
+
+
+def test_the_build_context_holds_only_the_dockerfile_folder(tmp_path: Path) -> None:
+    """The context of ``box/Dockerfile`` is ``box``, so no other repository file reaches the build (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    archive = _tree(tmp_path, {"box/Dockerfile": "FROM x\n", "box/lib/a.txt": "a\n", "src/app.py": "x = 1\n"})
+
+    context = extract_folder(archive, "box", tmp_path / "context")
+    whole = extract_folder(archive, ".", tmp_path / "whole")
+
+    assert context == tmp_path / "context" / "box"
+    assert sorted(
+        str(path.relative_to(tmp_path / "context")) for path in (tmp_path / "context").rglob("*") if path.is_file()
+    ) == [
+        "box/Dockerfile",
+        "box/lib/a.txt",
+    ]
+    assert (whole / "src" / "app.py").read_text() == "x = 1\n"

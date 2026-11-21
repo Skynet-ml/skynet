@@ -375,6 +375,27 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
     return destination
 
 
+def extract_folder(archive: Path, folder: str, destination: Path) -> Path:
+    """Unpack one folder of a packed tree, such as a Dockerfile's build context (SKY-737).
+
+    Args:
+        archive: Packed full tree.
+        folder: Repository-relative folder; ``.`` is the whole tree.
+        destination: Empty or missing folder the files go in, at their repository paths.
+
+    Returns:
+        The folder's path under ``destination``.
+    """
+    root = _member_path(folder)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive) as tree:
+        members = [member for member in tree if inside(_member_path(member.name), (root,))]
+        tree.extractall(destination, members=members, filter="data")
+    target = destination / root
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]:
     """Find the hidden paths that a link could carry into the agent's tree.
 

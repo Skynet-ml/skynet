@@ -1516,6 +1516,43 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
     assert candidate.spec.operation_key != metric.spec.operation_key
 
 
+def test_each_role_opens_its_own_user_image_and_the_metric_uses_its_checked_python(tmp_path: Path) -> None:
+    """The setup and candidate boxes use the [run] image, the metric box the [metric] image (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(
+        tmp_path,
+        runtime,
+        run_image="run@sha256:" + "a" * 64,
+        metric_image="metric@sha256:" + "b" * 64,
+        metric_python=sys.executable,
+    )
+    try:
+        _open(space, "").close()
+        metric = space.open_metric()
+        metric.install_metric_files()
+        metric.close()
+    finally:
+        space.close()
+    setup, candidate, metric_box = runtime.boxes
+    assert setup.spec.image == candidate.spec.image == "run@sha256:" + "a" * 64
+    assert metric_box.spec.image == "metric@sha256:" + "b" * 64
+    assert space.metric_python == sys.executable
+    assert any(command.startswith(f"cd {METRIC_REPO_DIR} && {sys.executable} -I") for command, _ in metric_box.commands)
+
+
+def test_a_workspace_without_user_images_keeps_the_default_image_and_python3(tmp_path: Path) -> None:
+    """With no image key, every box uses the run's image and the metric runs ``python3`` (SKY-737)."""
+    runtime = _Runtime()
+    space, _ = _scoring_space(tmp_path, runtime)
+    try:
+        _open(space, "").close()
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert {box.spec.image for box in runtime.boxes} == {_ONLINE.image}
+    assert space.metric_python == "python3"
+
+
 def test_the_candidate_and_metric_boxes_come_from_a_box_source_with_role_grants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

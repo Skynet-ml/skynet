@@ -448,12 +448,13 @@ def box_root(session: SandboxSession) -> str:
     return root
 
 
-def _install_metric_files(session: SandboxSession, files: str | None) -> None:
+def _install_metric_files(session: SandboxSession, files: str | None, python: str = "python3") -> None:
     """Put the packed metric files into ``METRIC_REPO_DIR`` at their repository paths.
 
     Args:
         session: The metric box or the metric setup box.
         files: The base64 tar.gz from :func:`pack_metric_files`; ``None`` only makes the folder.
+        python: The metric box's trusted interpreter.
 
     Raises:
         RepoSetupError: When the files cannot be installed.
@@ -466,7 +467,7 @@ def _install_metric_files(session: SandboxSession, files: str | None) -> None:
     source = f"{METRIC_DIR}/metric-{uuid.uuid4().hex}.b64"
     session.write_files({source: files})
     result = session.run(
-        f"cd {METRIC_REPO_DIR} && python3 -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
+        f"cd {METRIC_REPO_DIR} && {shlex.quote(python)} -I -c {shlex.quote(_INSTALL_METRIC)} ../{posixpath.basename(source)}",
         timeout_seconds=_SETUP_TIMEOUT_SECONDS,
     )
     if not result.ok:
@@ -756,7 +757,7 @@ class MetricBox:
         """
         # The extract overwrites the metric files and keeps the files a
         # [metric] setup build wrote next to them (SKY-740).
-        _install_metric_files(self.session, self._workspace.metric_files)
+        _install_metric_files(self.session, self._workspace.metric_files, self._workspace.metric_python)
 
     def close(self) -> None:
         """Give the box back to its source once."""
@@ -831,6 +832,9 @@ class RepoWorkspace:
         metric_hosts: Iterable[str] = (),
         metric_vcpus: int | None = None,
         metric_setup: str | None = None,
+        run_image: str | None = None,
+        metric_image: str | None = None,
+        metric_python: str | None = None,
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -854,6 +858,12 @@ class RepoWorkspace:
             metric_vcpus: The ``[metric] vcpus`` of the metric box; ``None`` keeps ``spec.vcpus``.
             metric_setup: The ``[metric] setup`` command, run once in the metric
                 setup box with the metric files; ``None`` builds nothing.
+            run_image: The checked ``[run]`` user image of the setup and candidate
+                boxes; ``None`` keeps ``spec.image`` (SKY-737).
+            metric_image: The checked ``[metric]`` user image of the metric boxes;
+                ``None`` keeps ``spec.image``.
+            metric_python: The trusted interpreter that ``ascent check --image
+                --role metric`` reported for ``metric_image``; ``None`` uses ``python3``.
         """
         self._runtime = runtime
         self._spec = spec
@@ -868,6 +878,9 @@ class RepoWorkspace:
         self._metric_vcpus = metric_vcpus
         self._setup = (setup_command or "").strip() or None
         self._metric_setup = (metric_setup or "").strip() or None
+        self._run_image = run_image or spec.image
+        self._metric_image = metric_image or spec.image
+        self.metric_python = metric_python or "python3"
         self._secrets = dict(secrets)
         self._failure: BaseException | None = None
         self._setup_log = ""
@@ -884,13 +897,16 @@ class RepoWorkspace:
         # Each workspace has its own keys, so no other box can reuse its snapshots.
         unique = uuid.uuid4().hex
         self._snapshot_key = snapshot_cache_key(
-            image_digest=spec.image or "",
+            image_digest=self._run_image or "",
             setup_command=self._setup or "",
             install_command="",
             lock_files={"workspace": unique},
         )
         self._metric_snapshot_key = snapshot_cache_key(
-            image_digest=spec.image or "", setup_command="", install_command="", lock_files={"metric": unique}
+            image_digest=self._metric_image or "",
+            setup_command="",
+            install_command="",
+            lock_files={"metric": unique},
         )
         self._snapshots_off = False
         self._opened = 0
@@ -979,7 +995,13 @@ class RepoWorkspace:
         assert self._folder is not None
         stripped = strip_archive(self._archive, self._hidden, self._folder / "repo.tar.gz")
         session = self._runtime.open(
-            replace(self._spec, operation_key=self._next_key("setup"), services=(), snapshot_id=None)
+            replace(
+                self._spec,
+                image=self._run_image,
+                operation_key=self._next_key("setup"),
+                services=(),
+                snapshot_id=None,
+            )
         )
         try:
             self._unpack_and_setup(session, stripped, on_output)
@@ -1052,6 +1074,7 @@ class RepoWorkspace:
         # spec's own hosts are then empty, and the install would run offline.
         spec = replace(
             self._spec,
+            image=self._metric_image,
             operation_key=self._next_key("metric-setup"),
             services=(),
             snapshot_id=None,
@@ -1065,7 +1088,7 @@ class RepoWorkspace:
             if self._requirements:
                 session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
                 result = session.run(
-                    f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
+                    f"{shlex.quote(self.metric_python)} -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
                     f" -r {METRIC_DIR}/requirements.txt && rm -f {METRIC_DIR}/requirements.txt",
                     env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
                     timeout_seconds=_SETUP_TIMEOUT_SECONDS,
@@ -1093,7 +1116,7 @@ class RepoWorkspace:
                 fails or runs out of time; the error holds the output's last lines.
         """
         assert self._metric_setup is not None
-        _install_metric_files(session, self.metric_files)
+        _install_metric_files(session, self.metric_files, self.metric_python)
         build = session.run(f"cd {METRIC_REPO_DIR} && {self._metric_setup}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         log = redact(_tail(build), self._secrets.values())
         if build.timed_out:
@@ -1244,6 +1267,7 @@ class RepoWorkspace:
             key = self._next_key(kind)
         return replace(
             self._spec,
+            image=self._metric_image if kind == "metric" else self._run_image,
             operation_key=key,
             vcpus=vcpus or self._spec.vcpus,
             services=self._spec.services if services else (),

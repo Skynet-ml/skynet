@@ -306,6 +306,37 @@ def test_a_metric_setup_passes_because_the_metric_setup_box_runs_it(
     assert check_repository(archive, (), place=place) != []  # type: ignore[arg-type]
 
 
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("raw", "keys"),
+    [
+        (
+            f'version = 1\n[run]\nentry = "run.py:main"\nimage = "python@{_DIGEST}"\n'
+            f'[metric]\nimage = "python@{_DIGEST}"\n'.encode(),
+            {"run.image", "metric.image"},
+        ),
+        (
+            b'version = 1\n[paths]\neditable = ["src"]\n[run]\nentry = "src/run.py:main"\n'
+            b'dockerfile = "box/Dockerfile"\n[metric]\ndockerfile = "box/Dockerfile"\n',
+            {"run.dockerfile", "metric.dockerfile"},
+        ),
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_box_images_pass_because_staging_builds_and_checks_them(
+    tmp_path: Path, raw: bytes, keys: set[str], place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging pins or builds each [run] and [metric] image and checks it first, so the gate lets it through (SKY-737)."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw, "box/Dockerfile": b"FROM python:3.12\n"})
+
+    assert keys <= repo_gate.ENFORCED[place]  # type: ignore[index]
+    assert check_repository(archive, (), place=place) == []  # type: ignore[arg-type]
+    monkeypatch.setitem(repo_gate.ENFORCED, place, repo_gate.ENFORCED[place] - keys)  # type: ignore[index]
+    assert check_repository(archive, (), place=place) != []  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "raw",
     [

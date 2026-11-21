@@ -609,7 +609,7 @@ class RepoScorer:
                 # ``exec`` replaces this shell with the runner. A Python metric
                 # runs in the runner and reads the key there anyway.
                 result = metric.box.run(
-                    f"cd {shlex.quote(metric.repo_path)} && exec python3 {_ISOLATED}"
+                    f"cd {shlex.quote(metric.repo_path)} && exec {shlex.quote(self._workspace.metric_python)} {_ISOLATED}"
                     f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
                     env=env,
                     timeout_seconds=self._timeout_seconds,

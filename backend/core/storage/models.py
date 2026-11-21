@@ -498,6 +498,31 @@ class PushSubscriptionModel(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ImageBuildModel(Base):
+    """One build of a user's box image from a Dockerfile (SKY-737).
+
+    A finished build is reused by the same user's later runs when the input
+    hash matches. The row also holds the full build log, which the run record
+    names by the row id, so the log stays out of the job result JSON.
+    """
+
+    __tablename__ = "image_builds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    builder: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Null for a failed build, which keeps only its log.
+    image: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    log: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (Index("ix_image_builds_username_input_hash", "username", "input_hash"),)
+
+
 class SlackConnectionModel(Base):
     """One identity's install of the Skynet Slack app, where its Slack notifications go.
 
@@ -1267,6 +1292,9 @@ class JobModel(Base):
     # The image a protected run first executed in. Every later box for the run,
     # a resume after a redeploy included, boots from it so checkpoints stay loadable.
     sandbox_image: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The user images of the [run] and [metric] boxes, by role, pinned at the
+    # first start so a resume boots the same two digests (SKY-737).
+    box_images: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     execution_budget_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_budget_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)

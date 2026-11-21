@@ -64,6 +64,7 @@ from .models import (
     BlackboxAgentRunModel,
     ConversationEmbeddingModel,
     GepaCheckpointModel,
+    ImageBuildModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -1103,6 +1104,7 @@ class RemoteDBJobStore:
                 "recovery": job.recovery,
                 "code_version": job.code_version,
                 "sandbox_image": job.sandbox_image,
+                "box_images": job.box_images,
                 "stored_bytes": job.stored_bytes or 0,
                 "accumulated_runtime_seconds": job.accumulated_runtime_seconds or 0.0,
             },
@@ -2358,6 +2360,103 @@ class RemoteDBJobStore:
         finally:
             session.close()
 
+    def pin_box_images(self, optimization_id: str, images: dict[str, Any]) -> dict[str, Any]:
+        """Record the user image of each box of a run, keeping any earlier pin (SKY-737).
+
+        Args:
+            optimization_id: The run about to open its boxes.
+            images: The box image facts by role (``run``, ``metric``), used only when none is pinned.
+
+        Returns:
+            The box images every box of this run must boot from.
+
+        Raises:
+            KeyError: When the job row does not exist.
+        """
+        session = self._get_session()
+        try:
+            job = (
+                session.query(JobModel)
+                .filter(JobModel.optimization_id == optimization_id)
+                .with_for_update()
+                .one_or_none()
+            )
+            if job is None:
+                raise KeyError(optimization_id)
+            if job.box_images is None:
+                job.box_images = images  # type: ignore[assignment]
+                session.commit()
+            return dict(job.box_images or {})
+        finally:
+            session.close()
+
+    def find_image_build(self, username: str, input_hash: str) -> dict[str, Any] | None:
+        """Return the newest finished build of a user's Dockerfile with this input hash.
+
+        Args:
+            username: The run's owner; a build is never reused for another user.
+            input_hash: The ``sha256:`` hash of the build inputs.
+
+        Returns:
+            ``{"id", "image", "builder", "size_bytes"}``, or None when no finished build matches.
+        """
+        session = self._get_session()
+        try:
+            row = (
+                session.query(ImageBuildModel)
+                .filter(
+                    ImageBuildModel.username == username,
+                    ImageBuildModel.input_hash == input_hash,
+                    ImageBuildModel.image.isnot(None),
+                )
+                .order_by(ImageBuildModel.created_at.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return {"id": row.id, "image": row.image, "builder": row.builder, "size_bytes": row.size_bytes}
+        finally:
+            session.close()
+
+    def save_image_build(
+        self,
+        username: str,
+        input_hash: str,
+        *,
+        builder: str,
+        image: str | None,
+        size_bytes: int | None,
+        log: str,
+    ) -> str:
+        """Store one build of a user's Dockerfile and its full log.
+
+        Args:
+            username: The run's owner.
+            input_hash: The ``sha256:`` hash of the build inputs.
+            builder: The builder kind, for example ``codebuild``.
+            image: The pinned image, or None for a failed build.
+            size_bytes: The image size, or None for a failed build.
+            log: The full build log.
+
+        Returns:
+            The row id, which the run record names as the build log reference.
+        """
+        session = self._get_session()
+        try:
+            row = ImageBuildModel(
+                username=username,
+                input_hash=input_hash,
+                builder=builder,
+                image=image,
+                size_bytes=size_bytes,
+                log=log,
+            )
+            session.add(row)
+            session.commit()
+            return str(row.id)
+        finally:
+            session.close()
+
     def requeue_for_rerun(self, optimization_id: str) -> bool:
         """Reset a terminal job in place for a clean from-scratch re-run.
 
@@ -2402,6 +2501,7 @@ class RemoteDBJobStore:
             job.attempts = 0  # type: ignore[assignment]
             job.automatic_resumes = 0  # type: ignore[assignment]
             job.sandbox_image = None  # type: ignore[assignment]
+            job.box_images = None  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]
             job.lease_expires_at = None  # type: ignore[assignment]

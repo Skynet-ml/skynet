@@ -207,6 +207,37 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
     }
 
 
+def test_the_metric_runs_on_the_python_that_the_image_check_reported(tmp_path: Path) -> None:
+    """A ``[metric]`` user image scores with the trusted Python its ``ascent check --image`` gave (SKY-737)."""
+    marker = tmp_path / "checked-python-ran"
+    python = tmp_path / "image" / "python"
+    python.parent.mkdir()
+    python.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command="cat src/app.py > built.txt",
+            secrets={},
+            metric_image="metric@sha256:" + "b" * 64,
+            metric_python=str(python),
+        ),
+        SCORER,
+        timeout_seconds=60,
+        run_entry=SCORER_RUN,
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.1)
+    finally:
+        scorer.close()
+    assert marker.exists()
+
+
 def test_the_scorer_opens_its_candidate_and_metric_boxes_through_the_box_source(
     scored: tuple[RepoScorer, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
