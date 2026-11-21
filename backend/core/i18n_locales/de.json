@@ -287,7 +287,6 @@
     "repo_gate.secret_host_not_allowed": "Das Secret {secret} darf nur an {allowed} gehen, aber das Repository sendet es an {host}. Füge {host} im Lauf zu den erlaubten Hosts von {secret} hinzu oder ändere die URL.",
     "repo_gate.secret_host_unlisted": "Das Secret {secret} hat keine erlaubten Hosts, aber das Repository sendet es an {host}. Füge {host} im Lauf zu den erlaubten Hosts von {secret} hinzu.",
     "repo_gate.managed_secret_unavailable": "Das Secret {secret} ist an einen {term.appName}-Schlüssel gebunden, aber {term.appName} hat keinen Schlüssel für {host}. Binde das Secret an user oder verwende einen dieser Hosts mit {term.appName}-Schlüssel: {known}.",
-    "repo_gate.unknown_connector": "Der Dienst {service} in ascent.toml ist kein Connector. Verwende einen dieser Namen: {known}.",
     "repo_gate.draft_base_moved": "Der Setup-Agent hat Dateien auf Commit {base} geändert, aber der Lauf würde bei Commit {commit} starten. Der Branch hat sich bewegt, und die geänderten Dateien würden seine neuen Commits rückgängig machen. Richte den Lauf neu ein, damit der Agent die Dateien auf dem neuen Commit ändert.",
     "optimization.retry_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast für einen erneuten Versuch.",
     "optimization.retry_wrong_status": "Nur Optimierungen im Zustand 'failed' oder 'cancelled' können erneut versucht werden — diese befindet sich im Zustand '{status}'. Klonen Sie sie stattdessen.",

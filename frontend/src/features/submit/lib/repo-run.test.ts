@@ -19,9 +19,16 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft, fileProposerCommand, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { contractMissing, contractText, finishedHardeningJobId, metricCommandText, repoBaseText, repoRunRequest } = await import(
-  "./repo-run.ts"
-);
+const {
+  LITELLM_TO_BYOK_PROVIDER,
+  contractMissing,
+  contractText,
+  finishedHardeningJobId,
+  metricCommandText,
+  repoBaseText,
+  repoRunRequest,
+} = await import("./repo-run.ts");
+const { BYOK_PROVIDERS, litellmProviderForByok } = await import("../../billing/lib/byok.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 const { HARNESS_DEFAULT_PICK, harnessPickerValue, pickHarness, proposerHeader } = await import("./engine-contract.ts");
 
@@ -629,4 +636,13 @@ test("a run whose contract names a metric command sends no metric code (SKY-770)
   const python = repoRunRequest(repoState(), { ...options, metricCommand: null });
   assert.equal(python?.scorer.command_metric, undefined);
   assert.ok(python?.scorer.metric_code);
+});
+
+test("the LiteLLM to BYOK map is the exact reverse of the billing bridge", () => {
+  const reverse = Object.fromEntries(
+    BYOK_PROVIDERS.map((p) => [litellmProviderForByok(p.slug), p.slug]).filter(
+      ([prefix, slug]) => prefix !== slug,
+    ),
+  );
+  assert.deepEqual({ ...LITELLM_TO_BYOK_PROVIDER }, reverse);
 });

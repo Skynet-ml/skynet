@@ -343,9 +343,9 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
         WizardPreflightCheck(
             key="setup",
             status="failed",
-            message="The service jira in ascent.toml is not a connector.",
-            message_code="repo_gate.unknown_connector",
-            message_params={"service": "jira", "known": "github, linear"},
+            message="The service jira in ascent.toml needs the secret JIRA_TOKEN.",
+            message_code="repo_gate.missing_secret",
+            message_params={"service": "jira", "secret": "JIRA_TOKEN"},
         ),
         WizardPreflightCheck(
             key="setup",
@@ -369,7 +369,7 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
     body = resp.json()
     assert body["code"] == "submission.validation_failed"
     assert body["params"]["failures"] == [
-        {"key": "repo_gate.unknown_connector", "params": {"service": "jira", "known": "github, linear"}},
+        {"key": "repo_gate.missing_secret", "params": {"service": "jira", "secret": "JIRA_TOKEN"}},
         {"key": "repo_gate.unenforced_local", "params": {"key": "proposer.network"}},
         {"key": "workflow.validation_failed", "params": {"error": "Traceback: raw internal text"}},
     ]
