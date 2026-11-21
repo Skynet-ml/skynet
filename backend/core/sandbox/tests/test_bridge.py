@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -870,6 +871,103 @@ def test_metered_copier_starts_no_copy_when_the_budget_refuses() -> None:
     with pytest.raises(BudgetError):
         asyncio.run(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
     assert calls == []
+
+
+def test_metered_copier_holds_no_default_pool_thread() -> None:
+    """Keep the default thread pool free while a copy runs, so other settlements still run (SKY-891)."""
+    budget = _CopyBudget()
+
+    async def run() -> tuple[str, str]:
+        """Run a copy with a one-thread default pool, and use that pool while the copy waits.
+
+        Returns:
+            The pool call's result and the copy's reference.
+        """
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        release = asyncio.Event()
+
+        async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+            """Wait until the test releases the copy.
+
+            Args:
+                source_image: The user image.
+                pull_credentials: The pull credentials.
+
+            Returns:
+                The copy's reference.
+            """
+            await release.wait()
+            return source_image
+
+        copying = asyncio.create_task(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+        await asyncio.sleep(0)
+        free = await asyncio.wait_for(asyncio.to_thread(lambda: "free"), timeout=5)
+        release.set()
+        return free, await copying
+
+    assert asyncio.run(run()) == ("free", _USER_IMAGE)
+
+
+class _HeldCopyBudget(_CopyBudget):
+    """Hold each reservation until the test releases it, so a cancel can come before the copy starts."""
+
+    def __init__(self) -> None:
+        """Start with the reservation held."""
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def execute(self, quote: Any, policy: Any, dispatch: Any, *, operation_key: str, cost_kind: str) -> Any:
+        """Wait for the release, then reserve, dispatch and settle.
+
+        Args:
+            quote: The operation quote.
+            policy: The charge policy.
+            dispatch: The paid call.
+            operation_key: The operation key.
+            cost_kind: The cost kind.
+
+        Returns:
+            The dispatch value.
+        """
+        self.entered.set()
+        assert self.release.wait(timeout=5)
+        return super().execute(quote, policy, dispatch, operation_key=operation_key, cost_kind=cost_kind)
+
+
+def test_metered_copier_settles_nothing_for_a_copy_cancelled_before_it_starts() -> None:
+    """A copy that a cancel stops before it starts settles at $0, not at one minute (SKY-891)."""
+    budget = _HeldCopyBudget()
+    calls: list[str] = []
+
+    async def copy(source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+        """Record the copy.
+
+        Args:
+            source_image: The user image.
+            pull_credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        calls.append(source_image)
+        return source_image
+
+    async def run() -> None:
+        """Cancel the copy while its reservation is held, then release the reservation."""
+        copying = asyncio.create_task(bridge.metered_copier(copy, budget)(_USER_IMAGE, None))
+        assert await asyncio.to_thread(budget.entered.wait, 5)
+        copying.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        budget.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await copying
+
+    asyncio.run(run())
+    assert calls == []
+    (result,) = budget.settled
+    assert result.provider_usd == image_copy_usd(0) == 0
 
 
 def test_vercel_copy_step_lets_a_budget_stop_through() -> None:

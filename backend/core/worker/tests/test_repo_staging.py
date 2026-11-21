@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -6023,19 +6024,17 @@ _TRUSTED_PROBE = _listing()
 
 
 class _CheckSession:
-    """Answer ``ascent check --image`` with a fixed report, and each run probe with a fixed output."""
+    """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid: str = "1000\n") -> None:
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
-            uid: What ``id -u`` prints.
         """
         self.ok = ok
         self.probe = probe
-        self.uid = uid
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
@@ -6049,8 +6048,6 @@ class _CheckSession:
             The report, with exit code 1 when the image fails.
         """
         self.commands.append(command)
-        if command == repo_staging._BOX_UID_PROBE:
-            return CommandResult(exit_code=0, stdout=self.uid)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -6067,17 +6064,15 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid: str = "1000\n") -> None:
+    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
-            uid: What ``id -u`` prints in each check box.
         """
         self.check_ok = check_ok
         self.probe = probe
-        self.uid = uid
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -6093,7 +6088,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid))
+            self.checks.append(_CheckSession(self.check_ok, self.probe))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6172,7 +6167,6 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
         [
             "ascent check --image --role candidate",
             repo_staging._TRUSTED_PYTHON_PROBE,
-            repo_staging._BOX_UID_PROBE,
         ],
         ["ascent check --image --role metric"],
     ]
@@ -7473,22 +7467,123 @@ def test_a_resume_gives_each_pinned_box_its_pull_access(monkeypatch: pytest.Monk
     assert registry.pulls == [image_registry.image_owner("alice")]
 
 
-@pytest.mark.parametrize("uid", ["0\n", "", "root\n"])
-def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.MonkeyPatch, uid: str) -> None:
-    """A root box user, or a uid probe with no clean number, refuses the run image (SKY-891).
+class _HourTokenRegistry(_FakeRegistry):
+    """Give a new one-hour token at each pull, like AssumeRole and GetAuthorizationToken."""
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return a new token and record the owner it is for.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            A token with a new password and an hour left.
+        """
+        self.pulls.append(owner)
+        return RegistryCredentials(
+            server="registry.example",
+            username="AWS",
+            password=f"token-{len(self.pulls)}",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+
+def test_every_box_of_a_run_shares_one_pull_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both roles and a second prepare of the run use one token, so Vercel copies each image once (SKY-891).
 
     Args:
         monkeypatch: Pytest monkeypatch.
-        uid: What ``id -u`` prints.
     """
     _, staged = _stage_with(_BOX_TREE, monkeypatch)
-    runtime = _ImageRuntime(uid=uid)
+    registry = _HourTokenRegistry(set())
+    pinned = {role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64} for role in ("run", "metric")}
+    try:
+        first = _prepare(staged, _ImageRuntime(), builder=None, registry=registry, pinned=pinned)
+        again = _prepare(first, _ImageRuntime(), builder=None, registry=registry, pinned=pinned)
+    finally:
+        staged.cleanup()
+    tokens = {image.credentials() for prepared in (first, again) for image in prepared.box_user_images.values()}
+    assert tokens == {("AWS", "token-1")}
+    assert registry.pulls == [image_registry.image_owner("alice")]
+
+
+def test_a_run_never_reuses_pull_access_of_another_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Access from an earlier prepare is reused only for the owner's own repository (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    staged.cleanup()
+
+    def foreign() -> tuple[str, str]:
+        """Return another repository's token.
+
+        Returns:
+            The token.
+        """
+        return "AWS", "foreign"
+
+    earlier = dataclasses.replace(
+        staged,
+        box_user_images={"run": UserImage(_BUILT_IMAGE, repository="registry.example/v", credentials=foreign)},
+    )
+    registry = _HourTokenRegistry(set())
+    access = repo_staging._run_pull_access(earlier, registry, "alice")
+    assert access is not None
+    assert access is not foreign
+    assert access() == ("AWS", "token-1")
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(_TRUSTED_PROBE.replace("account ok 1000\n", "account ok 0\n"), id="both-runs"),
+        pytest.param(
+            _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount ok 0\n"), id="box-run-only"
+        ),
+    ],
+)
+def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
+    """A probe that reports uid 0 for the box user refuses the run image (SKY-891).
+
+    The trusted-Python probe already prints the box uid, so the check runs no second probe.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        probe: What the trusted interpreter probe prints.
+    """
+    assert probe != _TRUSTED_PROBE
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(probe=probe)
     try:
         with pytest.raises(repo_staging.BoxImageError, match=r"runs the box as root \(uid 0\)"):
             _prepare(staged, runtime, registry=_FakeRegistry(set()))
     finally:
         staged.cleanup()
     assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "root"),
+    [
+        ("run clean\naccount ok 1000\nrun box\naccount ok 1000\n", False),
+        ("run clean\naccount ok 1000\nrun box\naccount ok 0\n", True),
+        ("run clean\naccount ok 00\n", True),
+        ("run clean\naccount ok \u00b2\n", True),
+        ("run clean\naccount ok \u0661\n", True),
+        ("run clean\naccount none 1000\n", True),
+        ("", True),
+    ],
+)
+def test_the_box_uid_takes_only_ascii_digits(stdout: str, root: bool) -> None:
+    """Only an ``account ok`` line with ASCII digits and no uid 0 passes, so "²" never counts as a uid (SKY-891).
+
+    Args:
+        stdout: What the probe prints.
+        root: Whether the check treats the box user as root.
+    """
+    assert repo_staging._root_box_user(CommandResult(exit_code=0, stdout=stdout)) is root
 
 
 def test_a_cloud_deployment_builds_dockerfiles_on_codebuild(monkeypatch: pytest.MonkeyPatch) -> None:

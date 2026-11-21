@@ -78,6 +78,7 @@ from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resour
 from ..egress_record import LOG_BYTES, LOG_LINES, PROXY_SOURCE, READY_MARKER, VERCEL_SOURCE, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
+from ..image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
 from ..services import ComposeService, box_resources, start_services, stop_services
@@ -140,8 +141,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CREATE_TIMEOUT = 120.0
-# A user image can be up to 20 GB (SKY-737), so its copy gets a long limit.
-COPY_TIMEOUT = 3600.0
+# The run reserves the copy for this same limit (SKY-891).
+COPY_TIMEOUT = COPY_TIMEOUT_SECONDS
 KILL_GRACE = 30.0
 KILL_AFTER_MAX = 18_000.0
 CANCEL_GRACE = 10.0
@@ -222,9 +223,6 @@ _PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
 ClientFactory = Callable[[ResponseCapture | None], Any]
 UsageFactory = Callable[..., Any]
-# Copies a source image, with optional (username, password) pull credentials,
-# into Vercel's registry and returns the copy's ``name@sha256:<digest>``.
-ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
 
 
 class ImageCopyError(SandboxInfraError):

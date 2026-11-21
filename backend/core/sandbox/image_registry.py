@@ -13,7 +13,7 @@ import base64
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -65,6 +65,15 @@ _PULL_ACTIONS = (
 # The worker task role assumes the pull role (role chaining), so AWS caps the
 # session at one hour.
 _PULL_SESSION_SECONDS = 3600
+# A user image can be up to 20 GB (SKY-737), so its copy into a provider's own
+# registry gets a long limit. The provider ends a longer copy, and the run's
+# reservation for the copy covers this limit (SKY-891).
+COPY_TIMEOUT_SECONDS = 3600.0
+# Copies a source image, with optional (username, password) pull credentials,
+# into a provider's own registry (Vercel) and returns the copy's
+# ``name@sha256:<digest>``. It is here, a leaf module, so the provider and the
+# bridge share one definition without an import cycle.
+ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
 
 
 class ImageRegistryError(RuntimeError):
@@ -205,6 +214,19 @@ class ImageRegistry(Protocol):
         """
         ...
 
+    def delete_repository(self, owner: str) -> None:
+        """Delete the owner's whole repository, with every image and tag in it.
+
+        A repository that does not exist counts as deleted.
+
+        Args:
+            owner: The owner of the repository.
+
+        Raises:
+            ImageRegistryError: The registry refused the delete.
+        """
+        ...
+
 
 def require_digest(digest: str) -> str:
     """Return the digest when it is ``sha256:<64 lowercase hex>``.
@@ -256,6 +278,19 @@ def _require_tag(tag: str) -> str:
     if not _TAG.fullmatch(tag):
         raise ImageRegistryError(f"not a valid image tag: {tag!r}")
     return tag
+
+
+def _aws_error_kind(exc: BaseException) -> str:
+    """Name an AWS error by its type and code only, because its message can echo request details.
+
+    Args:
+        exc: The boto3 or botocore error.
+
+    Returns:
+        The type name, with the AWS error code when there is one.
+    """
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+    return f"{type(exc).__name__} {code}" if code else type(exc).__name__
 
 
 def image_owner(username: str) -> str:
@@ -318,7 +353,8 @@ def image_registry(config: Any = settings, *, pull: bool = True) -> EcrRegistry 
     return EcrRegistry(
         boto3.client("ecr", region_name=region),
         prefix,
-        sts=boto3.client("sts", region_name=region),
+        # Only pull credentials use STS, so a caller that only deletes makes no STS client.
+        sts=boto3.client("sts", region_name=region) if pull else None,
         pull_role_arn=role,
         ecr_for=ecr_for,
     )
@@ -621,6 +657,27 @@ class EcrRegistry:
         """
         self._batch_delete(owner, {"imageTag": _require_tag(CACHE_TAG_PREFIX + scope)})
 
+    def delete_repository(self, owner: str) -> None:
+        """Delete the owner's whole repository, with every image and tag in it.
+
+        ``force`` deletes a repository that still holds images. It also takes
+        the images and cache tags of a build that pushed but never recorded a
+        row. ECR creates the repository again on the owner's next push.
+
+        Args:
+            owner: The owner of the repository.
+
+        Raises:
+            ImageRegistryError: The owner is invalid, or the AWS call failed.
+        """
+        name = self.repository_name(owner)
+        try:
+            self._client.delete_repository(registryId=self.registry_id, repositoryName=name, force=True)
+        except self._client.exceptions.RepositoryNotFoundException:
+            return
+        except _AWS_ERRORS as exc:
+            raise ImageRegistryError(f"cannot delete the repository {name}: {_aws_error_kind(exc)}") from None
+
     def _batch_delete(self, owner: str, image_id: Mapping[str, str]) -> None:
         """Delete one image id from the owner's repository.
 
@@ -642,10 +699,7 @@ class EcrRegistry:
         except self._client.exceptions.RepositoryNotFoundException:
             return
         except _AWS_ERRORS as exc:
-            # Name only the error type and code: an AWS message can echo request details.
-            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
-            kind = f"{type(exc).__name__} {code}" if code else type(exc).__name__
-            raise ImageRegistryError(f"cannot delete from {name}: {kind}") from None
+            raise ImageRegistryError(f"cannot delete from {name}: {_aws_error_kind(exc)}") from None
         failures = [f for f in response.get("failures", []) if f.get("failureCode") != "ImageNotFound"]
         if failures:
             reason = failures[0].get("failureReason") or failures[0].get("failureCode")

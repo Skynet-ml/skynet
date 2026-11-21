@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..billing.operation_pricing import ChargePolicy, image_copy_usd, operation_quote
@@ -30,6 +30,7 @@ from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRunt
 from ..service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeRuntime, current_sandbox_runtime
 from .errors import SandboxFatalError
 from .factory import PROVIDERS, preflight
+from .image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from .metering import USAGE_ADAPTERS
 
 # A fallback English label; the UI shows its own translated name when it has one.
@@ -40,11 +41,9 @@ _LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
 # the run record. Vercel enforces the allowlist at its edge; its box runs the
 # proxy in record-only mode, so its record is cooperative (SKY-634).
 _EGRESS_RECORDING_PROVIDERS = frozenset({"docker", "podman", "vercel"})
-# The longest copy the reservation covers: ``COPY_TIMEOUT`` of the Vercel
-# provider, which ends a longer copy. This module must not import that
-# provider, because it loads the Vercel SDK.
-COPY_RESERVE_SECONDS = 3600.0
-ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
+# The longest copy the reservation covers. The Vercel provider ends a longer
+# copy with the same limit.
+COPY_RESERVE_SECONDS = COPY_TIMEOUT_SECONDS
 
 
 def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
@@ -90,7 +89,13 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
         )
 
         def dispatch() -> PaidResult[str | BaseException]:
-            """Run the copy on the provider's event loop and charge its started minutes."""
+            """Run the copy on the provider's event loop and charge its started minutes.
+
+            Returns:
+                The copy's reference, or the error that ended it, with the
+                cost of its started minutes. A copy that a cancel stopped
+                before it started costs nothing.
+            """
             started = time.monotonic()
             value: str | BaseException
             with guard:
@@ -100,12 +105,13 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
                     running["future"] = future
             if future is None:
                 value = asyncio.CancelledError()
+                seconds = 0.0
             else:
                 try:
                     value = future.result()
                 except BaseException as error:
                     value = error
-            seconds = time.monotonic() - started
+                seconds = time.monotonic() - started
             # The copy timeout starts before the reservation, and a cancel takes
             # time too, so the measured time can pass the reserved limit. The
             # settlement must stay inside the reservation.
@@ -115,17 +121,48 @@ def metered_copier(copy_image: ImageCopier, budget: Any) -> ImageCopier:
                 evidence={"provider": "image-copy", "seconds": round(seconds, 3)},
             )
 
-        # Each copy is a new cost, so each one has its own operation key.
-        settling = asyncio.ensure_future(
-            asyncio.to_thread(
-                budget.execute,
-                quote,
-                policy,
-                dispatch,
-                operation_key=f"image-copy:{uuid.uuid4().hex}",
-                cost_kind="sandbox",
-            )
-        )
+        settling = loop.create_future()
+
+        def resolve(outcome: Any, error: BaseException | None) -> None:
+            """Pass the settlement's outcome to the waiting copy, on the event loop.
+
+            Args:
+                outcome: What ``budget.execute`` returned.
+                error: What ``budget.execute`` raised, or ``None``.
+            """
+            if settling.done():
+                return
+            if isinstance(error, asyncio.CancelledError):
+                settling.cancel()
+            elif error is not None:
+                settling.set_exception(error)
+            else:
+                settling.set_result(outcome)
+
+        def settle() -> None:
+            """Reserve, copy and settle in this thread, then hand the outcome to the loop."""
+            outcome: Any = None
+            error: BaseException | None = None
+            try:
+                # Each copy is a new cost, so each one has its own operation key.
+                outcome = budget.execute(
+                    quote,
+                    policy,
+                    dispatch,
+                    operation_key=f"image-copy:{uuid.uuid4().hex}",
+                    cost_kind="sandbox",
+                )
+            except BaseException as caught:
+                error = caught
+            # A closed loop has no copy left to wait for the outcome.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(resolve, outcome, error)
+
+        # A copy can block for up to an hour, so it gets its own thread: in the
+        # default pool it would hold a worker that the usage settlements need.
+        threading.Thread(
+            target=contextvars.copy_context().run, args=(settle,), name="image-copy-settle", daemon=True
+        ).start()
         try:
             outcome = await asyncio.shield(settling)
         except asyncio.CancelledError:

@@ -116,6 +116,19 @@ class FakeEcr:
         self._check_repository(kwargs["repositoryName"])
         return {"imageIds": [] if self.delete_failures else kwargs["imageIds"], "failures": self.delete_failures}
 
+    def delete_repository(self, **kwargs: Any) -> dict[str, Any]:
+        """Record a repository delete.
+
+        Args:
+            **kwargs: The request.
+
+        Returns:
+            The ECR response.
+        """
+        self.calls.append(("delete_repository", kwargs))
+        self._check_repository(kwargs["repositoryName"])
+        return {"repository": {"repositoryName": kwargs["repositoryName"]}}
+
 
 class FakeSts:
     """Return scripted credentials for AssumeRole and record each call."""
@@ -403,10 +416,12 @@ def test_a_failed_delete_call_names_only_the_error_type_and_code(error: Exceptio
         raise error
 
     fake.batch_delete_image = refuse  # type: ignore[method-assign]
+    fake.delete_repository = refuse  # type: ignore[method-assign]
 
     for delete in (
         lambda: _registry(fake, URI).delete_image("u1", DIGEST),
         lambda: _registry(fake, URI).delete_cache("u1", "default"),
+        lambda: _registry(fake, URI).delete_repository("u1"),
     ):
         with pytest.raises(ImageRegistryError) as caught:
             delete()
@@ -533,6 +548,31 @@ def test_image_registry_builds_the_ecr_registry_in_the_prefix_region(monkeypatch
     assert fake.clients == [("ecr", {"region_name": "us-east-2"}), ("sts", {"region_name": "us-east-2"})]
 
 
+def test_delete_repository_force_deletes_the_owner_repository() -> None:
+    """A repository delete names only the owner's repository and takes every image and tag in it (SKY-891)."""
+    fake = FakeEcr()
+
+    _registry(fake, URI).delete_repository("user-7")
+
+    assert fake.calls == [
+        ("delete_repository", {"registryId": "123456789012", "repositoryName": f"{PREFIX}/user-7", "force": True})
+    ]
+
+
+def test_delete_repository_ignores_a_repository_that_is_gone() -> None:
+    """A repository that does not exist counts as deleted (SKY-891)."""
+    _registry(FakeEcr(repositories=set()), URI).delete_repository("u1")
+
+
+def test_delete_repository_refuses_an_invalid_owner() -> None:
+    """An owner that is not one repository name component never reaches ECR (SKY-891)."""
+    fake = FakeEcr()
+
+    with pytest.raises(ImageRegistryError, match="not a valid image owner"):
+        _registry(fake, URI).delete_repository("u1/../u2")
+    assert fake.calls == []
+
+
 def test_image_registry_refuses_a_bad_prefix_or_a_missing_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
     """A set but unusable registry setting fails loudly, never as a run with no registry (SKY-891).
 
@@ -565,3 +605,5 @@ def test_a_delete_only_registry_needs_no_pull_role(monkeypatch: pytest.MonkeyPat
     assert isinstance(registry, EcrRegistry)
     with pytest.raises(ImageRegistryError, match="no pull role"):
         registry.pull_credentials("user-7")
+    # Only pull credentials use STS, so the delete-only registry makes no STS client.
+    assert image_registry_module.boto3.clients == [("ecr", {"region_name": "us-east-2"})]

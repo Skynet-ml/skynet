@@ -1191,8 +1191,8 @@ COPIED_IMAGE_OUTSIDE_REPOSITORY = (
     " an image from another registry. Use dockerfile in [{role}] in ascent.toml."
 )
 ROOT_BOX_USER = (
-    "The [run] image '{image}' runs the box as root (uid 0), or `id -u` failed in it. A root box user could replace the Python and the"
-    " standard library that {app} checks the protected files with. Set a non-root USER in the image."
+    "The [run] image '{image}' runs the box as root (uid 0), or its check reported no box uid. A root box user"
+    " could replace the Python and the standard library that {app} checks the protected files with. Set a non-root USER in the image."
 )
 
 
@@ -1500,8 +1500,9 @@ _TRUSTED_PYTHON_PROBE = (
 _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
 _ACCOUNT_OK = re.compile(r"ok [0-9]+")
 _ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
+# Only ASCII digits: ``str.isdigit`` would also take digits such as "²".
+_BOX_UID = re.compile(r"account ok ([0-9]+)")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
-_BOX_UID_PROBE = "id -u"
 # The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
 # An ``absent`` path is a CPython build or venv landmark, and it must be missing.
 _ENTRY_KINDS = {
@@ -1644,18 +1645,52 @@ def image_builder(config: Any = settings) -> ImageBuilder | None:
 _CREDENTIALS_MARGIN = timedelta(minutes=15)
 
 
+def _pull_access(registry: ImageRegistry, owner: str) -> Callable[[], tuple[str, str]]:
+    """Return a callable that gives one token for the owner's repository while it has time left (SKY-891).
+
+    The callable reuses one token while it has more than
+    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one.
+    The Vercel copy cache keys on the credentials, so a new token at each
+    box start would copy the image again for each box.
+
+    Args:
+        registry: The user image registry.
+        owner: The registry repository's owner.
+
+    Returns:
+        The callable, which returns the token's (username, password).
+    """
+    lock = threading.Lock()
+    cached: list[RegistryCredentials] = []
+
+    def credentials() -> tuple[str, str]:
+        """Return a token that pulls only from the owner's repository and has time left."""
+        # Boxes open on several threads, so the lock makes them share one token.
+        with lock:
+            token = cached[0] if cached else None
+            if token is None or token.expires_at is None or token.expires_at - datetime.now(UTC) <= _CREDENTIALS_MARGIN:
+                token = registry.pull_credentials(owner)
+                cached[:] = [token]
+            return token.username, token.password
+
+    return credentials
+
+
 def _user_image(
-    registry: ImageRegistry | None, username: str, role: str, image: str, *, copies: bool = False
+    registry: ImageRegistry | None,
+    username: str,
+    role: str,
+    image: str,
+    *,
+    copies: bool = False,
+    credentials: Callable[[], tuple[str, str]] | None = None,
 ) -> UserImage:
     """Give one box the access its start needs to its user image (SKY-891).
 
     Pull credentials reach only the owner's own repository: an image there
-    gets a callable that reuses one token while it has more than
-    ``_CREDENTIALS_MARGIN`` left and then asks the registry for a new one.
-    The Vercel copy cache keys on the credentials, so a new token at each
-    box start would copy the image again for each box. An image from
-    another registry gets none, and a provider that copies images cannot
-    start it, because its copy needs the owner's repository.
+    gets a :func:`_pull_access` callable. An image from another registry
+    gets none, and a provider that copies images cannot start it, because
+    its copy needs the owner's repository.
 
     Args:
         registry: The user image registry, or ``None`` when local Docker keeps the images.
@@ -1663,6 +1698,8 @@ def _user_image(
         role: ``run`` or ``metric``.
         image: The box image reference.
         copies: Whether the runtime starts each box from a copy of the image (Vercel).
+        credentials: The run's shared pull access to the owner's repository, so each box
+            of the run uses one token; ``None`` makes new access for this box only.
 
     Returns:
         The reference, with the owner's repository and its pull credentials for an image there.
@@ -1684,21 +1721,35 @@ def _user_image(
         if copies:
             raise outside
         return UserImage(image)
+    return UserImage(image, repository=repository, credentials=credentials or _pull_access(registry, owner))
 
-    lock = threading.Lock()
-    cached: list[RegistryCredentials] = []
 
-    def credentials() -> tuple[str, str]:
-        """Return a token that pulls only from the owner's repository and has time left."""
-        # Boxes open on several threads, so the lock makes them share one token.
-        with lock:
-            token = cached[0] if cached else None
-            if token is None or token.expires_at is None or token.expires_at - datetime.now(UTC) <= _CREDENTIALS_MARGIN:
-                token = registry.pull_credentials(owner)
-                cached[:] = [token]
-            return token.username, token.password
+def _run_pull_access(
+    staged: StagedRepository, registry: ImageRegistry | None, username: str
+) -> Callable[[], tuple[str, str]] | None:
+    """Return the one pull access that every box of the run shares (SKY-891).
 
-    return UserImage(image, repository=repository, credentials=credentials)
+    The Vercel copy cache keys on the token, so each role and each prepare
+    of one run must use the same token, or the same image is copied twice.
+    A second prepare of the run (after a parallel start pinned first) keeps
+    the access of the first, but only when it is for the same owner's repository.
+
+    Args:
+        staged: The staged tree, with the box access of an earlier prepare.
+        registry: The user image registry, or ``None`` when local Docker keeps the images.
+        username: The run's owner.
+
+    Returns:
+        The shared access, or ``None`` when there is no registry.
+    """
+    if registry is None:
+        return None
+    owner = image_owner(username)
+    repository = registry.repository_uri(owner)
+    for user_image in staged.box_user_images.values():
+        if user_image.repository == repository and user_image.credentials is not None:
+            return user_image.credentials
+    return _pull_access(registry, owner)
 
 
 def _digest(image: str) -> str:
@@ -1760,11 +1811,12 @@ def prepare_box_images(
     # Vercel copies each image into its own registry, keyed by the owner's repository, so it
     # starts no public image and no image from another registry (SKY-891).
     copies = bool(getattr(runtime, "copies_user_images", False))
+    access = _run_pull_access(staged, registry, username)
     if pinned:
         images = {role: dict(record) for role, record in pinned.items()}
         # A resume checks nothing again, but its boxes still need the pull access of today's registry.
         user_images = {
-            role: _user_image(registry, username, role, record["image"], copies=copies)
+            role: _user_image(registry, username, role, record["image"], copies=copies, credentials=access)
             for role, record in images.items()
         }
     else:
@@ -1776,7 +1828,7 @@ def prepare_box_images(
         images = {}
         # A refused image reference must stop the run before any paid build or check box.
         user_images = {
-            role: _user_image(registry, username, role, value, copies=copies)
+            role: _user_image(registry, username, role, value, copies=copies, credentials=access)
             for role, (kind, value) in staged.box_sources.items()
             if kind == "image"
         }
@@ -1802,7 +1854,9 @@ def prepare_box_images(
                     registry=registry,
                 )
             if role not in user_images:
-                user_images[role] = _user_image(registry, username, role, record["image"], copies=copies)
+                user_images[role] = _user_image(
+                    registry, username, role, record["image"], copies=copies, credentials=access
+                )
             python = _check_box_image(runtime, user_images[role], role, owner_id=owner_id)
             if python is not None:
                 record["python"] = python
@@ -1990,15 +2044,9 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
             user_image=user_image,
         )
     )
-    probes: dict[str, Any] = {}
     try:
         result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
-        if role == "run":
-            for name, command in (
-                ("python", _TRUSTED_PYTHON_PROBE),
-                ("uid", _BOX_UID_PROBE),
-            ):
-                probes[name] = session.run(command, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
     finally:
         with contextlib.suppress(Exception):
             session.close()
@@ -2006,7 +2054,6 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
     python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
     if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
-        probe = probes.get("python")
         names = _root_variables(probe) if probe is not None else []
         if names:
             raise BoxImageError(
@@ -2027,8 +2074,8 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
                     path=_ROOT_PATH,
                 )
             )
-        if "uid" in probes:
-            _check_box_uid(image, probes["uid"])
+        if probe is not None and _root_box_user(probe):
+            raise BoxImageError(ROOT_BOX_USER.format(image=image, app=APP_NAME))
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -2042,19 +2089,17 @@ def _check_box_image(runtime: Any, user_image: UserImage, role: str, *, owner_id
     )
 
 
-def _check_box_uid(image: str, uid: Any) -> None:
-    """Refuse a run image whose box user is root (SKY-891).
+def _root_box_user(probe: Any) -> bool:
+    """Tell whether the probe's box user is root, or the probe reports no box uid (SKY-891).
 
     Args:
-        image: The box image reference.
-        uid: The result of :data:`_BOX_UID_PROBE`.
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
 
-    Raises:
-        BoxImageError: When the probe fails or prints anything but a non-zero uid.
+    Returns:
+        True when no ``account ok <uid>`` line is there or any of them has uid 0.
     """
-    # Only a clean non-zero number passes: a failed or odd probe refuses too.
-    if not uid.ok or not uid.stdout.strip().isdigit() or int(uid.stdout.strip()) == 0:
-        raise BoxImageError(ROOT_BOX_USER.format(image=image, app=APP_NAME))
+    uids = [int(match.group(1)) for line in probe.stdout.split("\n") if (match := _BOX_UID.fullmatch(line))]
+    return not uids or 0 in uids
 
 
 def _trusted_python(probe: Any) -> bool:

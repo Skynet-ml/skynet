@@ -42,6 +42,7 @@ from sqlalchemy.pool import StaticPool
 from ...billing.budgets import BudgetService
 from ...billing.service import LOCAL_CUSTOMER_PREFIX, StripeBillingService, local_customer_id
 from ...config import app_env, settings
+from ...sandbox import image_registry as image_registry_module
 from ...sandbox.image_registry import ImageRegistryError, image_owner
 from ...storage import tree_purge
 from ...storage.models import (
@@ -492,7 +493,7 @@ def test_delete_removes_only_the_account_image_builds(harness: SimpleNamespace) 
 
 
 class _FakeImageRegistry:
-    """Record each image delete, like the user image registry (SKY-891)."""
+    """Record each repository delete, like the user image registry (SKY-891)."""
 
     def __init__(self, *, refuse: bool = False) -> None:
         """Start with no deletes.
@@ -501,42 +502,20 @@ class _FakeImageRegistry:
             refuse: Whether each delete fails.
         """
         self.refuse = refuse
-        self.deleted: list[tuple[str, str]] = []
-        self.caches: list[tuple[str, str]] = []
+        self.repositories: list[str] = []
 
-    def repository_uri(self, owner: str) -> str:
-        """Return the owner's repository.
-
-        Args:
-            owner: The registry repository's owner.
-
-        Returns:
-            The repository URI.
-        """
-        return f"registry.example/users/{owner}"
-
-    def delete_image(self, owner: str, digest: str) -> None:
-        """Record one delete, or refuse it.
+    def delete_repository(self, owner: str) -> None:
+        """Record one repository delete, or refuse it.
 
         Args:
             owner: The registry repository's owner.
-            digest: The image digest.
 
         Raises:
             ImageRegistryError: When the fake refuses deletes.
         """
         if self.refuse:
             raise ImageRegistryError("refused")
-        self.deleted.append((owner, digest))
-
-    def delete_cache(self, owner: str, scope: str) -> None:
-        """Record one cache delete; a cache that is already gone counts as deleted too.
-
-        Args:
-            owner: The registry repository's owner.
-            scope: The cache name inside the owner's repository.
-        """
-        self.caches.append((owner, scope))
+        self.repositories.append(owner)
 
 
 def _seed_image_builds(engine: Engine) -> None:
@@ -554,25 +533,29 @@ def _seed_image_builds(engine: Engine) -> None:
         session.commit()
 
 
-def test_delete_removes_the_account_images_from_the_registry(
-    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("seed", [True, False], ids=["with-builds", "no-builds"])
+def test_delete_removes_the_account_repository_from_the_registry(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, seed: bool
 ) -> None:
-    """Deletion deletes only the account's own pushed images from its own repository (SKY-891).
+    """Deletion deletes only the account's own repository, with or without build rows (SKY-891).
+
+    A build can push an image or its cache and stop before it records a row,
+    so the delete never depends on the rows.
 
     Args:
         harness: The test client and its engine.
         monkeypatch: Pytest monkeypatch.
+        seed: Whether the account has build rows.
     """
-    _seed_image_builds(harness.engine)
+    if seed:
+        _seed_image_builds(harness.engine)
     registry = _FakeImageRegistry()
     monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
 
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
 
     assert resp.status_code == 200
-    assert registry.deleted == [(image_owner(_EMAIL), "sha256:" + "a" * 64)]
-    # The build cache holds layers of the user's source, so it goes too.
-    assert registry.caches == [(image_owner(_EMAIL), "default")]
+    assert registry.repositories == [image_owner(_EMAIL)]
 
 
 def _bad_prefix_registry(**_: Any) -> None:
@@ -591,17 +574,13 @@ def _bad_prefix_registry(**_: Any) -> None:
     "image_registry",
     [
         pytest.param(lambda **_: _FakeImageRegistry(refuse=True), id="refused-delete"),
-        pytest.param(lambda **_: None, id="registry-not-set-up"),
         pytest.param(_bad_prefix_registry, id="bad-prefix"),
     ],
 )
 def test_an_image_registry_failure_answers_503_and_keeps_the_account(
     harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, image_registry: Callable[..., Any]
 ) -> None:
-    """A refused delete, a missing registry or a bad prefix is a 503, and the account stays (SKY-891).
-
-    The account has CodeBuild builds, so a deployment with no registry fails
-    closed: a skip would leave the images with no row that names them.
+    """A refused delete or a bad prefix is a 503, and the account stays (SKY-891).
 
     Args:
         harness: The test client and its engine.
@@ -620,23 +599,22 @@ def test_an_image_registry_failure_answers_503_and_keeps_the_account(
         assert session.scalars(select(ImageBuildModel).where(ImageBuildModel.username == _EMAIL)).all()
 
 
-def test_local_builds_need_no_registry(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An account with only local Docker builds deletes with no registry (SKY-891).
+def test_no_registry_skips_the_registry_delete(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment with no registry prefix deletes the account with no registry call and no AWS client (SKY-891).
 
     Args:
         harness: The test client and its engine.
         monkeypatch: Pytest monkeypatch.
     """
-    with Session(harness.engine) as session:
-        session.add(
-            ImageBuildModel(username=_EMAIL, input_hash="h3", builder="local-docker", image="sha256:" + "c" * 64)
-        )
-        session.commit()
-    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: None)
+    _seed_image_builds(harness.engine)
+    monkeypatch.setattr(image_registry_module.settings, "user_images_repository_prefix_uri", "")
+    monkeypatch.setattr(image_registry_module, "boto3", None)
 
     resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
 
     assert resp.status_code == 200
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is None
 
 
 def test_a_refused_registry_delete_keeps_the_account(harness: SimpleNamespace) -> None:

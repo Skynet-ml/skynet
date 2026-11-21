@@ -19,7 +19,7 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-The only outside call deletes the account's built box images from the user
+The only outside call deletes the account's whole repository from the user
 image registry, before the database rows go (SKY-891). The tree purge here
 only locks, marks and plans the account's step log packs; the router deletes
 the unused packs from the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
@@ -46,8 +46,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
-from ..sandbox.image_build import DEFAULT_CACHE_SCOPE, CodeBuildImageBuilder
-from ..sandbox.image_registry import ImageRegistry, ImageRegistryError, image_owner, image_registry
+from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
 from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
@@ -522,40 +521,28 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
     }
 
 
-def _delete_user_images(session: Session, username: str, registry: ImageRegistry | None) -> None:
-    """Delete each image the account built from the user image registry (SKY-891).
+def _delete_user_images(username: str, registry_for: Callable[[], ImageRegistry | None]) -> None:
+    """Delete the account's whole repository from the user image registry (SKY-891).
 
-    Only a digest the account's own builds recorded is deleted, and only from
-    the account's own repository. The build cache tag goes too, because its
-    layers hold the user's source. A local build has no registry, so nothing
-    is deleted for it.
+    The repository goes with every image and tag in it, the build cache
+    included, because its layers hold the user's source. Rows are not
+    needed: a build can push an image and its cache and then stop before it
+    records a row. A deployment with no registry (the prefix setting is
+    empty, as in local mode) makes no registry call and no AWS client.
 
     Args:
-        session: An open session on the store's engine.
         username: The caller's lowercased-email identity.
-        registry: The user image registry, or ``None`` when this deployment has none.
+        registry_for: Return the user image registry, or ``None`` when this
+            deployment has none. It is called only here, when the delete runs.
 
     Raises:
-        ImageRegistryError: The registry refused a delete, or the account has
-            registry builds but this deployment has no registry; the caller
-            rolls the account deletion back, so a retry deletes the rest.
+        ImageRegistryError: The registry refused the delete, or its settings
+            are set but not usable; the caller rolls the account deletion
+            back, so no image outlives the account.
     """
-    builds = session.execute(
-        select(ImageBuildModel.builder, ImageBuildModel.image).where(ImageBuildModel.username == username)
-    ).all()
-    # A failed CodeBuild build still pushed its cache, so a registry build is any CodeBuild row.
-    if not any(builder == CodeBuildImageBuilder.kind for builder, _ in builds):
-        return
-    if registry is None:
-        # Skipping would leave the user's images and cache in the registry with no row that names them.
-        raise ImageRegistryError("the account has registry images, but the user image registry is not set up")
-    owner = image_owner(username)
-    repository = registry.repository_uri(owner)
-    for digest in sorted(
-        {image.rsplit("@", 1)[-1] for _, image in builds if (image or "").startswith(repository + "@")}
-    ):
-        registry.delete_image(owner, digest)
-    registry.delete_cache(owner, DEFAULT_CACHE_SCOPE)
+    registry = registry_for()
+    if registry is not None:
+        registry.delete_repository(image_owner(username))
 
 
 def delete_account(
@@ -586,10 +573,9 @@ def delete_account(
         tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
-        ImageRegistryError: The user image registry refused to delete one of
-            the account's built images or its build cache, its settings are
-            invalid, or the account has registry builds but the registry is not
-            set up; nothing in the database is deleted.
+        ImageRegistryError: The user image registry refused to delete the
+            account's repository, or its settings are set but not usable;
+            nothing in the database is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -723,7 +709,7 @@ def delete_account(
     _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
     # The registry has no rollback, so its deletes run last before the rows
     # that name them; a refused delete still rolls the database back.
-    _delete_user_images(session, username, (registry_for or (lambda: image_registry(pull=False)))())
+    _delete_user_images(username, registry_for or (lambda: image_registry(pull=False)))
     _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
