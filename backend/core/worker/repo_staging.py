@@ -1216,10 +1216,14 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # group or others can write, or that is a link. A ``pyvenv.cfg`` or ``._pth``
 # file next to the interpreter would move ``sys.path``, so it fails the probe
 # too. ``env`` lines name the variables of each run, without their values,
-# for :func:`_loader_variables`. A newline in a name or target could forge a listing line, so the probe
+# for :func:`_root_variables`. A newline in a name or target could forge a listing line, so the probe
 # stops at any byte outside printable ASCII. ``$(...)`` drops trailing
 # newlines, so the ``x`` keeps them and the probe sees the target the kernel follows.
 _MAX_LINK_HOPS = 40
+# The programs that root runs by absolute path in a box: the Vercel root
+# wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
+# scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
+_ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
     "import "
@@ -1284,7 +1288,7 @@ _TRUSTED_PYTHON_PROBE = (
     '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
     "  done\n"
     "done\n"
-    "printf 'file /usr/bin/env\\n'; w /usr/bin/env\n"
+    f'for b in {" ".join(_ROOT_PROGRAMS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
@@ -1312,30 +1316,67 @@ _ENTRY_KINDS = {
 }
 _MAY_BE_MISSING = frozenset({"path", "opt"})
 _VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
-# Root runs ``/usr/bin/env``, the shell and the supervisor with the box's
-# environment, and the loader reads these before ``env -i`` can clear them, as
-# the process is not setuid. An empty ``LD_LIBRARY_PATH`` element means the
-# current folder, which is the candidate's work folder (SKY-737). ``LD_*``
-# covers the glibc and musl loader variables (``LD_LIBRARY_PATH``,
-# ``LD_PRELOAD``, ``LD_AUDIT``). ``GCONV_PATH`` makes iconv load modules from
-# its folders, ``LOCPATH`` makes libc parse locale files from them, and
-# ``GLIBC_TUNABLES`` changes how the loader picks libraries and how malloc
-# works. ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, so they stay.
-_LOADER_PREFIX = "LD_"
-_LOADER_VARIABLES = frozenset({"GCONV_PATH", "LOCPATH", "GLIBC_TUNABLES"})
-LOADER_ENVIRONMENT = (
+# Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
+# supervisor with the box's environment, which holds the image ENV. The
+# loader, the shell and libc read these names before ``env -i`` can clear
+# anything, as no root process here is setuid (SKY-737). Each group:
+# - ``LD_*``: the glibc and musl loader search paths, preloads and audit
+#   libraries. An empty ``LD_LIBRARY_PATH`` element means the work folder.
+# - ``GCONV_PATH``, ``LOCPATH``, ``GLIBC_TUNABLES``: iconv modules, locale
+#   files, and how the loader picks libraries and how malloc works.
+# - ``OPENSSL_*``: the root supervisor imports ``ssl``, and OpenSSL loads
+#   its config, providers and engines from these paths.
+# - ``BASH_ENV``, ``ENV``: a file that the shell sources at its start.
+# - ``BASH_FUNC_*``: exported functions (``BASH_FUNC_name%%``), which win
+#   over builtins such as ``cd``.
+# - ``SHELLOPTS``, ``BASHOPTS``, ``POSIXLY_CORRECT``, ``BASH_COMPAT``: shell
+#   options, for example ``xtrace``, which expands ``PS4``.
+# - ``PS4``, ``BASH_XTRACEFD``: the trace prompt runs command substitutions,
+#   and the trace goes to any open file.
+# - ``CDPATH``, ``GLOBIGNORE``, ``EXECIGNORE``, ``IFS``,
+#   ``BASH_LOADABLES_PATH``: which folder ``cd`` picks, which files a glob
+#   or a command search takes, how words split, and where ``enable -f``
+#   loads builtins from. The root ``cd`` targets are absolute, so
+#   ``CDPATH`` is refused only to be safe.
+# ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, and the
+# interactive-only names (``PROMPT_COMMAND``, ``INPUTRC``, ``HISTFILE``) are
+# never read by ``bash -c``, so they stay allowed.
+_ROOT_PREFIXES = ("LD_", "OPENSSL_", "BASH_FUNC_")
+_ROOT_VARIABLES = frozenset(
+    {
+        "GCONV_PATH",
+        "LOCPATH",
+        "GLIBC_TUNABLES",
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "POSIXLY_CORRECT",
+        "BASH_COMPAT",
+        "PS4",
+        "BASH_XTRACEFD",
+        "CDPATH",
+        "GLOBIGNORE",
+        "EXECIGNORE",
+        "IFS",
+        "BASH_LOADABLES_PATH",
+    }
+)
+ROOT_ENVIRONMENT = (
     "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
-    " image environment, and these variables change which libraries the system loader and the C library load."
-    " Remove every LD_* variable, GCONV_PATH, LOCPATH and GLIBC_TUNABLES from the image ENV. Images that need"
-    " LD_LIBRARY_PATH, such as CUDA images, are not supported yet."
+    " image environment, and these variables change which code the shell, the system loader or the C library"
+    " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
+    " BASH_FUNC_* variable, and {variables}. Images that need LD_LIBRARY_PATH, such as CUDA images, are not"
+    " supported yet."
 )
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
-    " virtual environment. Every file that it loads, each folder on its import path and every file and"
-    " folder below that path (except site-packages), and every folder from / down to each of them, must be"
+    " virtual environment. Every program that root runs by path ({programs}), every file that Python loads,"
+    " each folder on its import path and every file and folder below that path (except site-packages), and"
+    " every folder from / down to each of them, must be"
     " owned by root and not writable by group or others. Links count only below / and outside the import path."
 )
 
@@ -1661,11 +1702,19 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
     python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
     if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
-        names = _loader_variables(probe) if probe is not None else []
+        names = _root_variables(probe) if probe is not None else []
         if names:
-            raise BoxImageError(LOADER_ENVIRONMENT.format(image=image, names=", ".join(names), app=APP_NAME))
+            raise BoxImageError(
+                ROOT_ENVIRONMENT.format(
+                    image=image, names=", ".join(names), app=APP_NAME, variables=", ".join(sorted(_ROOT_VARIABLES))
+                )
+            )
         if probe is not None and not _trusted_python(probe):
-            raise BoxImageError(UNTRUSTED_PYTHON.format(image=image, python=BASE_PYTHON, app=APP_NAME))
+            raise BoxImageError(
+                UNTRUSTED_PYTHON.format(
+                    image=image, python=BASE_PYTHON, app=APP_NAME, programs=", ".join(_ROOT_PROGRAMS)
+                )
+            )
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -1690,8 +1739,9 @@ def _trusted_python(probe: Any) -> bool:
 
     Returns:
         True when ``BASE_PYTHON`` resolves to a root-owned regular file that
-        group and others cannot write and others can run, ``/usr/bin/env``
-        resolves to one that group and others cannot write, and both runs
+        group and others cannot write and others can run, each of
+        ``_ROOT_PROGRAMS`` resolves to one that group and others cannot
+        write, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
         passes :func:`_walk` with the file type that its tag allows.
     """
@@ -1702,11 +1752,12 @@ def _trusted_python(probe: Any) -> bool:
     python = _walk(lines, BASE_PYTHON)
     if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or not python[0] & 0o001:
         return False
-    if not lines or lines.pop() != "file /usr/bin/env":
-        return False
-    env = _walk(lines, "/usr/bin/env")
-    if env in (None, _MISSING) or env[1] != "regular file" or env[0] & 0o022:
-        return False
+    for program in _ROOT_PROGRAMS:
+        if not lines or lines.pop() != f"file {program}":
+            return False
+        entry = _walk(lines, program)
+        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+            return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
             return False
@@ -1728,8 +1779,8 @@ def _trusted_python(probe: Any) -> bool:
     return not lines
 
 
-def _loader_variables(probe: Any) -> list[str]:
-    """List the variables in the probe's environments that change what the loader or libc loads.
+def _root_variables(probe: Any) -> list[str]:
+    """List the variables in the probe's environments that change what root's shell, loader or libc runs.
 
     A failed probe still counts: its ``env`` lines come before its walks, and
     a refusal is the safe answer either way.
@@ -1741,7 +1792,7 @@ def _loader_variables(probe: Any) -> list[str]:
         The sorted names, without duplicates.
     """
     names = {line.removeprefix("env ") for line in probe.stdout.split("\n") if line.startswith("env ")}
-    return sorted(name for name in names if name.startswith(_LOADER_PREFIX) or name in _LOADER_VARIABLES)
+    return sorted(name for name in names if name.startswith(_ROOT_PREFIXES) or name in _ROOT_VARIABLES)
 
 
 def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:

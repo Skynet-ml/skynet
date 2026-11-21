@@ -5938,19 +5938,26 @@ _ENTRIES = [
 ]
 
 
-def _listing(clean: list[str] = _ENTRIES, box: list[str] = _ENTRIES, base: list[str] = _BASE) -> str:
+def _listing(
+    clean: list[str] = _ENTRIES,
+    box: list[str] = _ENTRIES,
+    base: list[str] = _BASE,
+    programs: dict[str, list[str]] | None = None,
+) -> str:
     """Write the probe's whole standard output.
 
     Args:
         clean: The lines of the run with ``env -i``.
         box: The lines of the run with the box's environment.
         base: The walk of ``BASE_PYTHON``.
+        programs: The walks of root's fixed programs that differ from a root-owned 755 file, by path.
 
     Returns:
         The probe's standard output.
     """
-    env = ["file /usr/bin/env", *_walk("/usr/bin/env")]
-    return "\n".join([*base, *env, "run clean", *clean, "run box", *box]) + "\n"
+    walks = {path: _walk(path) for path in repo_staging._ROOT_PROGRAMS} | (programs or {})
+    fixed = [line for path, walk in walks.items() for line in (f"file {path}", *walk)]
+    return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
 _TRUSTED_PROBE = _listing()
@@ -6266,6 +6273,12 @@ _LINKED_INTO_WRITABLE = [
         ),
         _TRUSTED_PROBE.replace("file /usr/bin/env\n", ""),
         _TRUSTED_PROBE.replace("0 755 regular file /usr/bin/env", "0 757 regular file /usr/bin/env"),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "none")}),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "1000 755 regular file")}),
+        _listing(programs={"/usr/bin/timeout": _walk("/usr/bin/timeout", "775 regular file")}),
+        _listing(programs={"/bin/bash": _walk("/bin/bash", modes={"/bin": "777 directory"})}),
+        _listing(programs={"/bin/sh": _walk("/bin/sh", "755 directory")}),
+        _TRUSTED_PROBE.replace("file /bin/mkdir\n", ""),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", modes={"/usr/lib": "777 directory"})]),
         _listing(box=[*_ENTRIES, *_LINKED_INTO_WRITABLE]),
@@ -6309,6 +6322,12 @@ _LINKED_INTO_WRITABLE = [
         "link-loop-hits-the-cap",
         "no-env-walk",
         "writable-env",
+        "missing-timeout",
+        "user-owned-timeout",
+        "group-writable-timeout",
+        "bash-under-a-writable-folder",
+        "sh-is-a-folder",
+        "no-mkdir-walk",
         "R1-stdlib-moved-to-a-writable-folder",
         "R1-stdlib-under-a-writable-folder",
         "R2-link-into-a-writable-folder",
@@ -6415,13 +6434,29 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
         (["env LD_LIBRARY_PATH"], "LD_LIBRARY_PATH"),
         (["env LD_PRELOAD"], "LD_PRELOAD"),
         (["env PATH", "env LD_AUDIT", "env GCONV_PATH"], "GCONV_PATH, LD_AUDIT"),
+        (["env BASH_ENV"], "BASH_ENV"),
+        (["env ENV"], "ENV"),
+        (["env CDPATH"], "CDPATH"),
+        (["env BASH_FUNC_cd%%"], "BASH_FUNC_cd%%"),
+        (["env SHELLOPTS", "env PS4", "env IFS"], "IFS, PS4, SHELLOPTS"),
+        (["env OPENSSL_CONF"], "OPENSSL_CONF"),
     ],
-    ids=["library-path-with-an-empty-element", "preload", "audit-and-gconv"],
+    ids=[
+        "library-path-with-an-empty-element",
+        "preload",
+        "audit-and-gconv",
+        "bash-env",
+        "posix-env",
+        "cdpath",
+        "exported-function",
+        "shell-options-and-trace",
+        "openssl-config",
+    ],
 )
-def test_a_run_image_with_loader_variables_in_its_env_is_refused(
+def test_a_run_image_with_root_variables_in_its_env_is_refused(
     monkeypatch: pytest.MonkeyPatch, variables: list[str], names: str
 ) -> None:
-    """An image ENV such as ``LD_LIBRARY_PATH=/x:`` stops the run, as root's loader reads it (SKY-737).
+    """An image ENV that root's loader or shell reads, such as ``LD_LIBRARY_PATH`` or ``BASH_ENV``, stops the run (SKY-737).
 
     The probe prints only the names, so ``/x:`` (an empty element, which
     glibc reads as the work folder) and ``/x`` refuse alike.
@@ -6435,7 +6470,10 @@ def test_a_run_image_with_loader_variables_in_its_env_is_refused(
     _, staged = _stage_with(files, monkeypatch)
     runtime = _ImageRuntime(probe=_listing(box=[*variables, *_ENTRIES]))
     try:
-        with pytest.raises(repo_staging.BoxImageError, match=rf"sets {names} in its environment.*Remove every LD_"):
+        with pytest.raises(
+            repo_staging.BoxImageError,
+            match=rf"sets {re.escape(names)} in its environment.*BASH_FUNC_\* variable, and BASHOPTS, BASH_COMPAT, BASH_ENV",
+        ):
             _prepare(staged, runtime)
     finally:
         staged.cleanup()
@@ -6489,7 +6527,7 @@ def _fake_python(root: Path, extra: str = "") -> Path:
         f"printf 'file %s\\n' {shlex.quote(str(python))}\n"
         f"printf 'dir %s\\n' {shlex.quote(str(root))}\n"
         f"printf '%s' {shlex.quote(extra)}\n"
-        "env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/env \\1/p'\n"
+        "env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_%]*\\)=.*/env \\1/p'\n"
     )
     python.chmod(0o755)
     return python
@@ -6625,7 +6663,7 @@ def test_the_trusted_python_probe_stops_at_a_link_target_with_a_control_byte(tmp
 
 
 def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: Path) -> None:
-    """The box run lists an image ``LD_LIBRARY_PATH`` by name, and the clean run does not (SKY-737).
+    """The box run lists an image ``LD_LIBRARY_PATH`` or ``BASH_ENV`` by name, and the clean run does not (SKY-737).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -6633,14 +6671,16 @@ def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: P
     root = tmp_path.resolve()
     python = _fake_python(root)
 
-    done = _run_probe(python, LD_LIBRARY_PATH="/opt/foo:")
+    done = _run_probe(python, LD_LIBRARY_PATH="/opt/foo:", BASH_ENV="/tmp/evil-rc", CDPATH="/workspace")
 
     assert done.returncode == 0, done.stderr
     clean, box = done.stdout.split("run box\n")
-    assert "env LD_LIBRARY_PATH" not in clean.split("\n")
-    assert "env LD_LIBRARY_PATH" in box.split("\n")
+    for name in ("LD_LIBRARY_PATH", "BASH_ENV", "CDPATH"):
+        assert f"env {name}" not in clean.split("\n")
+        assert f"env {name}" in box.split("\n")
     assert "/opt/foo" not in done.stdout
-    assert repo_staging._loader_variables(done) == ["LD_LIBRARY_PATH"]
+    assert "evil-rc" not in done.stdout
+    assert repo_staging._root_variables(done) == ["BASH_ENV", "CDPATH", "LD_LIBRARY_PATH"]
 
 
 def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
@@ -6653,11 +6693,12 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": "/usr/bin:/bin", "LD_PRELOAD": "", "SECRET_VALUE": "do-not-print"},
+        env={"PATH": "/usr/bin:/bin", "LD_PRELOAD": "", "SECRET_VALUE": "do-not-print", "BASH_FUNC_cd%%": "() { :; }"},
     )
 
     assert done.returncode == 0, done.stderr
-    assert {"env LD_PRELOAD", "env SECRET_VALUE"} <= set(done.stdout.split("\n"))
+    assert {"env LD_PRELOAD", "env SECRET_VALUE", "env BASH_FUNC_cd%%"} <= set(done.stdout.split("\n"))
+    assert "do-not-print" not in done.stdout
     assert "do-not-print" not in done.stdout
 
 

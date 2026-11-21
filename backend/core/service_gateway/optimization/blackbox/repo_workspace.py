@@ -324,6 +324,22 @@ def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> s
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
+def absolute_cd(path: str) -> str:
+    """Make a ``cd`` to a box path that the image's ``CDPATH`` cannot send elsewhere.
+
+    ``CDPATH`` applies only to a relative target, so a relative path gets
+    the box's working directory in front (SKY-737).
+
+    Args:
+        path: The folder, absolute or relative to the box's working directory.
+
+    Returns:
+        The ``cd`` command.
+    """
+    target = shlex.quote(path) if path.startswith("/") else f'"$PWD"/{shlex.quote(path)}'
+    return f"cd {target}"
+
+
 class RepoSetupError(RuntimeError):
     """The repository could not be prepared, so no version can be scored."""
 
@@ -1467,7 +1483,8 @@ class RepoWorkspace:
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f'cd {PREPARED_DIR} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
+            f'{absolute_cd(PREPARED_DIR)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f" {shlex.quote(_HASH_PREPARED)}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         lines = result.stdout.strip().splitlines() if result.ok else []
@@ -1488,7 +1505,8 @@ class RepoWorkspace:
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
         result = session.run(
-            f'cd {shlex.quote(directory)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
+            f'{absolute_cd(directory)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c'
+            f" {shlex.quote(_HASH_PROTECTED)} {paths}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
             # A box-user command's output files belong to the box user, so a
             # process that the version leaves running could replace a clean

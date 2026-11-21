@@ -65,7 +65,7 @@ from ..repo_scorer import (
     _scrub,
     _StageRelay,
 )
-from ..repo_workspace import CandidateBox, RepoBoxSource, RepoWorkspace
+from ..repo_workspace import WORK_DIR, CandidateBox, RepoBoxSource, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -5495,6 +5495,77 @@ def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: 
             scorer.score("", {"input": 1})
     finally:
         scorer.close()
+
+
+class _CdpathRuntime(LocalSubprocessRuntime):
+    """Local runtime whose candidate runs see a ``CDPATH`` with a decoy work folder in it."""
+
+    def __init__(self, decoy: Path) -> None:
+        """Keep the decoy folder.
+
+        Args:
+            decoy: The folder that ``CDPATH`` names.
+        """
+        super().__init__()
+        self.decoy = decoy
+        self.commands: list[str] = []
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box whose candidate runs export ``CDPATH`` first.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        session = super().open(spec)
+        decoy, commands = self.decoy, self.commands
+
+        class _Cdpath:
+            def __getattr__(self, name: str) -> Any:
+                """Pass every other attribute to the local box.
+
+                Args:
+                    name: The attribute.
+
+                Returns:
+                    The local box's attribute.
+                """
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> Any:
+                """Run the command; a candidate run gets ``CDPATH`` set to the decoy.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                if runner.CANDIDATE_FLAG in command:
+                    commands.append(command)
+                    command = f"export CDPATH={shlex.quote(str(decoy))}; {command}"
+                return session.run(command, **options)
+
+        return _Cdpath()
+
+
+def test_an_image_cdpath_cannot_move_the_root_supervisor_to_another_folder(tmp_path: Path) -> None:
+    """The root supervisor's ``cd`` is absolute, so a ``CDPATH`` decoy work folder is never used (SKY-737)."""
+    decoy = tmp_path / "decoy"
+    (decoy / WORK_DIR / "src").mkdir(parents=True)
+    (decoy / WORK_DIR / "src" / "cand.py").write_text("def echo(value):\n    return 'DECOY'\n")
+    runtime = _CdpathRuntime(decoy)
+    scorer = _probed(tmp_path / "repo", "src/cand.py:echo", runtime=runtime)
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert "DECOY" not in json.dumps(result)
+    assert runtime.commands
+    assert all(re.findall(r"\bcd (\S+)", command) == ['"$PWD"/' + WORK_DIR] for command in runtime.commands)
 
 
 def test_a_timed_out_run_has_no_score_without_the_metric(tmp_path: Path) -> None:

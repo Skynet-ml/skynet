@@ -109,6 +109,7 @@ from .repo_workspace import (
     MetricBox,
     RepoSetupError,
     RepoWorkspace,
+    absolute_cd,
     redact,
 )
 from .rule_judge import RuleJudge
@@ -741,7 +742,7 @@ class RepoScorer:
                     f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
-                    f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f'; {absolute_cd(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
                     f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
                     f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,

@@ -1246,6 +1246,38 @@ def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: 
     assert all(("/usr/bin/env -i " in command) is (run_image is not None) for command in session.commands)
 
 
+def test_the_root_hash_and_answer_commands_change_folder_only_to_absolute_paths(tmp_path: Path) -> None:
+    """Every ``cd`` in the hash and answer commands names ``/`` or ``"$PWD"/``, so ``CDPATH`` cannot move it (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(
+        archive, _Runtime(), setup=None, protected_paths=["eval"], run_image="registry.example/u@sha256:" + "b" * 64
+    )
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR)  # type: ignore[arg-type]
+    space.fingerprint(session, "/abs/tree")  # type: ignore[arg-type]
+    space._digest_prepared(session)  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    targets = [target for command in session.commands for target in re.findall(r"\bcd (\S+)", command)]
+    assert targets == [f'"$PWD"/{WORK_DIR}', "/abs/tree", f'"$PWD"/{repo_workspace.PREPARED_DIR}']
+
+
+def test_an_absolute_cd_ignores_a_cdpath_decoy(tmp_path: Path) -> None:
+    """A ``cd`` from :func:`absolute_cd` stays in the working folder when ``CDPATH`` names a decoy with the same folder (SKY-737)."""
+    for parent in (tmp_path / "box", tmp_path / "decoy"):
+        (parent / repo_workspace.PREPARED_DIR).mkdir(parents=True)
+    script = f"{repo_workspace.absolute_cd(repo_workspace.PREPARED_DIR)} && pwd -P"
+    for shell in ("/bin/sh", "/bin/bash"):
+        done = subprocess.run(
+            [shell, "-c", script],
+            cwd=tmp_path / "box",
+            env={"PATH": "/usr/bin:/bin", "CDPATH": str(tmp_path / "decoy")},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert done.stdout.strip() == str((tmp_path / "box" / repo_workspace.PREPARED_DIR).resolve())
+
+
 @pytest.mark.parametrize("user_image", [False, True], ids=["skynet", "user"])
 def test_a_user_image_box_starts_the_base_interpreter_with_only_the_kept_variables(
     monkeypatch: pytest.MonkeyPatch, user_image: bool
