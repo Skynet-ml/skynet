@@ -1209,7 +1209,10 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # prints ``stat`` (owner uid, octal mode, type, name) of ``/`` and of each
 # part, follows each link hop by hop with plain ``readlink``, as ``namei`` and
 # ``readlink -f`` hide the hops, and prints ``link <target>`` after it, or
-# ``none <path>`` for the first part that does not exist. ``_trusted_python``
+# ``none <path>`` for the first part that does not exist. The probe runs as
+# the box user, and a folder that it cannot search hides what is in it from
+# ``[ -e ]``, but not from root, so ``w`` fails the probe instead of printing
+# ``none`` below such a folder. ``_trusted_python``
 # judges the listing. Below each ``sys.path`` folder, except
 # ``site-packages`` and ``dist-packages``, which ``-S`` keeps out of
 # ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
@@ -1237,7 +1240,10 @@ _ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
 # box user's ``command -v``: root takes the first file with any x bit, and a
 # dangling link can get a target later. So every ``folder/tool`` entry that
 # exists or is a link must resolve to a root-owned regular file, and at least
-# one folder must hold each tool. A missing folder may be missing.
+# one folder must hold each tool. A missing folder may be missing. The probe
+# prints ``tool`` or ``notool`` for each pair, so no pair goes unchecked, and
+# each present folder must let others search it, or the box user's view of
+# it would hide entries that root runs.
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
@@ -1260,8 +1266,7 @@ for name in os.environ:
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
-    if os.path.isdir(tree):
-        print("path", tree)
+    print("path", tree)
 try:
     locale.setlocale(locale.LC_ALL, "")
 except locale.Error:
@@ -1307,7 +1312,7 @@ _TRUSTED_PYTHON_PROBE = (
     "    c=${r%%/*}\n"
     "    case $r in */*) r=${r#*/};; *) r=;; esac\n"
     "    case $c in ''|.) continue;; ..) a=${a%/*}; continue;; esac\n"
-    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
+    '    if [ ! -e "$a/$c" ] && [ ! -h "$a/$c" ]; then [ -x "${a:-/}" ] || exit 1; printf \'none %s\\n\' "$a/$c"; z=1; return 0; fi\n'
     '    stat -c "$f" "$a/$c" || exit 1\n'
     '    if [ -h "$a/$c" ]; then\n'
     f"      n=$((n+1)); [ $n -le {_MAX_LINK_HOPS} ] || exit 1\n"
@@ -1322,14 +1327,15 @@ _TRUSTED_PYTHON_PROBE = (
     'w "$s"\n'
     '[ -z "$z" ] || exit 1\n'
     'for d in "${s%/*}" "${a%/*}"; do\n'
+    '  [ -r "$d" ] && [ -x "$d" ] || exit 1\n'
     '  for e in "$d/pyvenv.cfg" "${d%/*}/pyvenv.cfg" "$d"/*._pth; do\n'
     '    if [ -e "$e" ] || [ -h "$e" ]; then exit 1; fi\n'
     "  done\n"
     "done\n"
     f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
-    f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi; done\n'
     f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
-    '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; fi\n'
+    '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; else printf \'notool %s\\n\' "$b/$t"; fi\n'
     "done; done\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
@@ -1814,7 +1820,8 @@ def _trusted_python(probe: Any) -> bool:
         ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
         present) resolves to one that group and others cannot write,
         ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
-        missing or one that group and others cannot write, every entry of
+        missing or one that group and others cannot write and others can
+        search, the probe reports each folder and tool pair once, every entry of
         ``_ROOT_TOOLS`` in those folders resolves to such a file and each
         tool has one, both runs find a passwd line for the box user, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
@@ -1844,14 +1851,19 @@ def _trusted_python(probe: Any) -> bool:
         if not lines or lines.pop() != f"bin {folder}":
             return False
         entry = _walk(lines, folder)
-        if entry is None or (entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022)):
+        # The box user cannot see into a folder without o+x, but root still runs its tools.
+        if entry is None or (
+            entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022 or not entry[0] & 0o001)
+        ):
             return False
     found = set()
     for folder in _ROOT_PATH.split(":"):
         for tool in _ROOT_TOOLS:
-            if not lines or lines[-1] != f"tool {folder}/{tool}":
+            line = lines.pop() if lines else ""
+            if line == f"notool {folder}/{tool}":
                 continue
-            lines.pop()
+            if line != f"tool {folder}/{tool}":
+                return False
             entry = _walk(lines, f"{folder}/{tool}")
             if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
                 return False

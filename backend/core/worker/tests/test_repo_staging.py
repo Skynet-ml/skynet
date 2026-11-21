@@ -5971,7 +5971,7 @@ def _listing(
             are a root-owned 755 file, and a root-owned 1777 ``/tmp``.
         folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
         tools: The walks of ``folder/tool`` entries that differ from one root-owned file in ``/usr/bin``
-            for each tool, by entry; ``None`` drops an entry.
+            for each tool, by entry; ``None`` makes an entry a ``notool`` line.
 
     Returns:
         The probe's standard output.
@@ -5985,7 +5985,7 @@ def _listing(
     for folder in repo_staging._ROOT_PATH.split(":"):
         for name in repo_staging._ROOT_TOOLS:
             walk = found.get(f"{folder}/{name}")
-            fixed += [] if walk is None else [f"tool {folder}/{name}", *walk]
+            fixed += [f"notool {folder}/{name}"] if walk is None else [f"tool {folder}/{name}", *walk]
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
@@ -6355,6 +6355,9 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
         _listing(tools={"/usr/bin/head": None, "/bin/head": _walk("/bin/head", "755 directory")}),
         _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", ""),
         _TRUSTED_PROBE.replace("tool /usr/bin/tr\n", "tool /usr/bin/tr\ntool /usr/bin/tr\n"),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "700 directory")}),
+        _TRUSTED_PROBE.replace("notool /usr/local/sbin/tail\n", ""),
+        _TRUSTED_PROBE.replace("notool /usr/local/sbin/tail\n", "tool /usr/local/sbin/tail\n"),
         _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\n"),
         _TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount ok x\n"),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
@@ -6429,6 +6432,9 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
         "head-is-a-folder-in-bin",
         "no-tr-walk",
         "tr-listed-twice",
+        "usr-local-sbin-that-others-cannot-search-hides-a-tail-link",
+        "no-notool-line-for-usr-local-sbin-tail",
+        "tool-line-without-its-walk",
         "no-account-line",
         "malformed-account-line",
         "R1-stdlib-moved-to-a-writable-folder",
