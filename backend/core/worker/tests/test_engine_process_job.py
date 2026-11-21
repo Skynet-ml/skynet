@@ -1299,6 +1299,105 @@ def test_a_cancel_during_the_image_build_stops_the_build_and_keeps_the_run_cance
     assert store.image_builds == []
 
 
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_a_cancel_stored_by_another_pod_stops_the_image_build(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that only changes the stored status, with no cancel flag in this worker, stops the build (SKY-891).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    seen: list[tuple[bool, bool]] = []
+    # The real store's narrow status read, which the cross-pod cancel check polls.
+    monkeypatch.setattr(
+        store,
+        "get_job_status_fields",
+        lambda optimization_id: {"status": store.get_job(optimization_id)["status"]},
+        raising=False,
+    )
+
+    class _CancelledByPeer(_LocalBuilder):
+        """Take a cancel that another pod stored while the build runs."""
+
+        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+            """Store the cancel, then build as the fake does.
+
+            Args:
+                request: The build request.
+                cancelled: The engine's cancel check.
+
+            Returns:
+                What the fake builder returns.
+            """
+            store.update_job("repo-hardened", status="cancelled")
+            seen.append((worker._cancel_events["repo-hardened"].is_set(), cancelled()))
+            return super().build(request, cancelled=cancelled)
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"image_builder": lambda settings: _CancelledByPeer(), "add_run_record": MagicMock()},
+    )
+
+    assert seen == [(False, True)]
+    publish.assert_not_called()
+    assert store.get_job("repo-hardened")["status"] == "cancelled"
+    assert store.image_builds == []
+
+
+@pytest.mark.usefixtures("_non_root_local_images")
+def test_a_worker_shutdown_during_the_image_build_releases_the_run_for_a_restart(
+    worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
+) -> None:
+    """A build stopped by a worker shutdown releases the run for a restart; it does not cancel it (SKY-891).
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        tmp_path: Pytest temporary folder.
+    """
+
+    class _StoppedByShutdown(_LocalBuilder):
+        """Take a worker shutdown while the build runs."""
+
+        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+            """Stop the worker, then build as the fake does.
+
+            Args:
+                request: The build request.
+                cancelled: The engine's cancel check.
+
+            Returns:
+                What the fake builder returns.
+            """
+            worker._running = False
+            worker._cancel_events["repo-hardened"].set()
+            return super().build(request, cancelled=cancelled)
+
+    _gateway, publish, _staged = _run_repository_job(
+        worker,
+        store,
+        {},
+        staged=_box_staged(tmp_path, ("dockerfile", "box/Dockerfile")),
+        sandbox_runtime=_ImageRuntime(),
+        patched={"image_builder": lambda settings: _StoppedByShutdown(), "add_run_record": MagicMock()},
+    )
+
+    job = store.get_job("repo-hardened")
+    publish.assert_not_called()
+    assert job["status"] != "cancelled"
+    assert job["claimed_by"] is None
+    assert job["recovery"]["cause"] == engine_module.WORKER_RESTART_CAUSE
+    assert store.image_builds == []
+
+
 def test_a_resumed_repository_run_boots_from_its_pinned_box_images(
     worker: BackgroundWorker, store: FakeJobStore, tmp_path: Path
 ) -> None:

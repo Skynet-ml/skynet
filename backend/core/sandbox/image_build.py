@@ -34,7 +34,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, Protocol
+from typing import IO, Any, NoReturn, Protocol
 
 from core.config import settings
 
@@ -69,6 +69,8 @@ _MIN_TIMEOUT_MINUTES = 5
 MAX_TIMEOUT_MINUTES = 480
 _QUEUE_TIMEOUT_MINUTES = 60
 _QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
+# StopBuild only starts the stop, so a cancel waits this long for the build to end.
+_STOP_WAIT_SECONDS = 300.0
 # CloudWatch can deliver the last log events a few seconds after the build ends.
 _LOG_SETTLE_SECONDS = 5.0
 # CodeBuild writes its own agent lines with this prefix, and marks each phase.
@@ -891,7 +893,8 @@ class CodeBuildImageBuilder:
         Raises:
             ImageBuildTimeoutError: The build was still running at the time
                 limit, or still queued at the queue limit.
-            ImageBuildCancelledError: ``cancelled`` answered true.
+            ImageBuildCancelledError: ``cancelled`` answered true. The build
+                ended, or it did not end inside the stop wait.
             ImageBuildError: CodeBuild does not know the build.
             BotoCoreError: A status read failed (or ClientError).
         """
@@ -907,8 +910,7 @@ class CodeBuildImageBuilder:
                 return build
             # A cancelled run's account can be deleted next, so the build must not push after it.
             if cancelled is not None and cancelled():
-                self._stop(build_id)
-                raise ImageBuildCancelledError(f"image build {build_id} stopped: the run was cancelled")
+                self._stop_cancelled(build_id)
             now = self._clock()
             if run_deadline is None and build.get("currentPhase") not in _QUEUED_PHASES:
                 run_deadline = now + self._limits.timeout_seconds
@@ -935,6 +937,52 @@ class CodeBuildImageBuilder:
         # The caller already reports a failure; a failed stop must not hide it.
         with contextlib.suppress(*_AWS_ERRORS):
             self._codebuild.stop_build(id=build_id)
+
+    def _stop_cancelled(self, build_id: str) -> NoReturn:
+        """Stop the build of a cancelled run and wait until CodeBuild says it ended (SKY-891).
+
+        StopBuild only starts the stop, so the build could still push after
+        the worker releases the run. The worker keeps its lease while it waits
+        here, so an account deletion still waits too. A failed stop is retried
+        on each poll.
+
+        Args:
+            build_id: The CodeBuild build id.
+
+        Raises:
+            ImageBuildCancelledError: Always: after the build ended, or when
+                it did not end inside ``_STOP_WAIT_SECONDS``.
+        """
+        deadline = self._clock() + _STOP_WAIT_SECONDS
+        stopped = False
+        while True:
+            # The log keeps only the AWS error code: a raw boto message can name the roles.
+            failure = ""
+            if not stopped:
+                try:
+                    self._codebuild.stop_build(id=build_id)
+                    stopped = True
+                except _AWS_ERRORS as exc:
+                    failure = _aws_error(exc)
+                if failure:
+                    logger.error("cannot stop the cancelled image build %s (%s)", build_id, failure)
+            builds: list[dict[str, Any]] | None = None
+            try:
+                builds = self._codebuild.batch_get_builds(ids=[build_id]).get("builds") or []
+            except _AWS_ERRORS as exc:
+                failure = _aws_error(exc)
+            if builds is None:
+                logger.error("cannot read the cancelled image build %s (%s)", build_id, failure)
+            if builds is not None and (not builds or builds[0].get("buildComplete")):
+                raise ImageBuildCancelledError(f"image build {build_id} stopped: the run was cancelled")
+            if self._clock() >= deadline:
+                logger.error(
+                    "cancelled image build %s did not end within %g seconds of the stop",
+                    build_id,
+                    _STOP_WAIT_SECONDS,
+                )
+                raise ImageBuildCancelledError(f"image build {build_id} did not end after the run was cancelled")
+            self._sleep(self._poll)
 
     def _user_line(self, line: str) -> str:
         """Hide the push role, the registry host and the account id in a log line.

@@ -5,7 +5,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import io
+import itertools
 import json
+import logging
 import os
 import re
 import shlex
@@ -14,12 +16,14 @@ import subprocess
 import sys
 import tarfile
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -6296,39 +6300,64 @@ def test_a_cancelled_build_is_charged_keeps_no_record_and_stops_the_run(monkeypa
 
 
 class _RunningCodeBuild:
-    """Answer each status read with a build that still runs, and record each stop."""
+    """Answer status reads like CodeBuild, and record each stop."""
 
-    def __init__(self) -> None:
-        """Start with no status reads and no stops."""
+    def __init__(self, *, polls_after_stop: int | None = 1, failed_stops: int = 0) -> None:
+        """Start with no status reads and no stops.
+
+        Args:
+            polls_after_stop: The status reads after the first good stop that
+                still see the build run, or ``None`` for a build that never ends.
+            failed_stops: How many stop calls fail first.
+        """
         self.reads = 0
         self.stopped: list[str] = []
+        self._polls_after_stop = polls_after_stop
+        self._failed_stops = failed_stops
+        self._reads_after_stop = 0
 
     def batch_get_builds(self, ids: list[str]) -> dict[str, Any]:
-        """Return the build in its build phase.
+        """Return the build, which ends some reads after a good stop.
 
         Args:
             ids: The build ids.
 
         Returns:
-            One build that is not complete.
+            One build.
         """
         self.reads += 1
-        return {"builds": [{"id": ids[0], "buildComplete": False, "currentPhase": "BUILD"}]}
+        complete = False
+        if self.stopped:
+            complete = self._polls_after_stop is not None and self._reads_after_stop >= self._polls_after_stop
+            self._reads_after_stop += 1
+        return {"builds": [{"id": ids[0], "buildComplete": complete, "currentPhase": "BUILD"}]}
 
     def stop_build(self, id: str) -> None:
-        """Record a stop.
+        """Record a stop, or fail while failed stops are left.
 
         Args:
             id: The build id.
+
+        Raises:
+            ClientError: While failed stops are left.
         """
+        if self._failed_stops:
+            self._failed_stops -= 1
+            raise ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "StopBuild")
         self.stopped.append(id)
 
 
-def test_the_codebuild_wait_stops_the_build_when_the_run_is_cancelled() -> None:
-    """A cancel seen in the status poll stops the CodeBuild build before it can push (SKY-891)."""
-    codebuild = _RunningCodeBuild()
-    answers = iter([False, True])
-    builder = CodeBuildImageBuilder(
+def _codebuild_builder(codebuild: _RunningCodeBuild, clock: Callable[[], float] = lambda: 0.0) -> Any:
+    """Return a CodeBuild builder over a fake CodeBuild client, with no sleep.
+
+    Args:
+        codebuild: The fake CodeBuild client.
+        clock: The builder's clock.
+
+    Returns:
+        The builder.
+    """
+    return CodeBuildImageBuilder(
         codebuild=codebuild,
         logs=None,
         s3=None,
@@ -6338,14 +6367,54 @@ def test_the_codebuild_wait_stops_the_build_when_the_run_is_cancelled() -> None:
         push_role_arn="arn:aws:iam::123456789012:role/push",
         limits=image_build.BuildLimits(timeout_seconds=600, max_size_bytes=1, max_context_bytes=1),
         sleep=lambda _seconds: None,
-        clock=lambda: 0.0,
+        clock=clock,
     )
 
-    with pytest.raises(ImageBuildCancelledError, match="build-1 stopped"):
-        builder._wait("build-1", lambda: next(answers))
 
-    assert codebuild.reads == 2
+def test_the_codebuild_wait_stops_the_build_and_waits_until_it_ends_when_the_run_is_cancelled() -> None:
+    """A cancel stops the CodeBuild build and raises only once CodeBuild says the build ended (SKY-891)."""
+    codebuild = _RunningCodeBuild(polls_after_stop=2)
+    answers = iter([False, True])
+
+    with pytest.raises(ImageBuildCancelledError, match="build-1 stopped"):
+        _codebuild_builder(codebuild)._wait("build-1", lambda: next(answers))
+
     assert codebuild.stopped == ["build-1"]
+    assert codebuild.reads == 5
+
+
+def test_a_failed_stop_of_a_cancelled_build_is_logged_and_tried_again(caplog: pytest.LogCaptureFixture) -> None:
+    """A StopBuild error is logged at error level with the build id, and the next poll stops again (SKY-891).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    codebuild = _RunningCodeBuild(failed_stops=1)
+
+    with caplog.at_level(logging.ERROR, logger=image_build.__name__), pytest.raises(ImageBuildCancelledError):
+        _codebuild_builder(codebuild)._wait("build-1", lambda: True)
+
+    assert codebuild.stopped == ["build-1"]
+    assert "cannot stop the cancelled image build build-1" in caplog.text
+
+
+def test_a_cancelled_build_that_does_not_end_raises_at_the_stop_deadline(caplog: pytest.LogCaptureFixture) -> None:
+    """A cancelled build still running at the stop deadline is logged with its id, and the cancel raises (SKY-891).
+
+    Args:
+        caplog: Pytest log capture.
+    """
+    codebuild = _RunningCodeBuild(polls_after_stop=None)
+    ticks = itertools.count(0.0, 60.0)
+
+    with (
+        caplog.at_level(logging.ERROR, logger=image_build.__name__),
+        pytest.raises(ImageBuildCancelledError, match="build-1 did not end"),
+    ):
+        _codebuild_builder(codebuild, clock=lambda: next(ticks))._wait("build-1", lambda: True)
+
+    assert codebuild.stopped == ["build-1"]
+    assert "cancelled image build build-1 did not end" in caplog.text
 
 
 def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.MonkeyPatch) -> None:

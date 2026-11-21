@@ -779,6 +779,26 @@ def test_image_users_refuses_a_config_section_that_is_not_an_object(inner: Any) 
 
 
 @pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param("sha256:" + "b" * 64, id="entry-string"),
+        pytest.param({"digest": "sha256:" + "b" * 64, "annotations": ["attestation"]}, id="annotations-list"),
+        pytest.param({"digest": "sha256:" + "b" * 64, "platform": "linux/amd64"}, id="platform-string"),
+    ],
+)
+def test_image_users_refuses_an_index_entry_that_is_not_valid(entry: Any) -> None:
+    """An index entry, or its annotations or platform, that is not a JSON object is an ImageRegistryError (SKY-891).
+
+    Args:
+        entry: The index's only manifest entry.
+    """
+    ecr = FakeManifestEcr({DIGEST: (_OCI_INDEX, {"manifests": [entry]})}, {})
+
+    with pytest.raises(ImageRegistryError, match="an entry that is not valid"):
+        _manifest_registry(ecr).image_users("user-7", DIGEST)
+
+
+@pytest.mark.parametrize(
     "manifests",
     [
         pytest.param({}, id="missing-image"),

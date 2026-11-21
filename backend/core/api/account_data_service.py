@@ -26,7 +26,11 @@ worker still holds a live lease on it (SKY-891). Known gap: Vercel keeps its
 own copy of each of the account's images that a Vercel box started from.
 Neither the Vercel Sandbox SDK nor the image copier has a call that deletes a
 copy, so this deletion leaves those copies in Vercel's registry and in each
-worker's copy cache.
+worker's copy cache. Known gap: an expired lease does not prove that the run's
+CodeBuild image build ended. A worker that was killed after a cancel cannot
+stop its build, which can then push after the repository delete. SKY-896
+(account deletion stops an orphaned CodeBuild image build after a hard-killed
+worker) tracks the fix.
 
 The tree purge here only locks, marks and plans the account's step log packs;
 the router deletes the unused packs from the tree bucket after the commit
@@ -532,9 +536,10 @@ class AccountRunsActiveError(Exception):
     """Refuse an account deletion while one of the account's runs is not finished (SKY-891).
 
     A run in progress can still push to the user image registry after the
-    repository delete. A cancelled run counts as in progress while its worker
-    holds a live lease, because the worker stops its image build only later. The registry then makes the repository again, and the
-    pushed layers outlive the account with no row that names them.
+    repository delete. The registry then makes the repository again, and the
+    pushed layers outlive the account with no row that names them. A cancelled
+    run counts as in progress while its worker holds a live lease, because the
+    worker stops its image build only later.
     """
 
 
@@ -612,7 +617,8 @@ def delete_account(
     # Read after the job locks, so a worker that changes a status commits first. Nothing
     # cancels the runs here: a running build could push again after the repository delete.
     # A cancel marks the run first and its worker stops the build later, so a run whose worker
-    # still holds a live lease also blocks; an expired lease means that worker is gone.
+    # still holds a live lease also blocks. An expired lease only means that the worker stopped
+    # renewing it: a hard-killed worker can leave its CodeBuild build running (SKY-896).
     if registry is not None and job_ids:
         active = session.scalar(
             select(JobModel.optimization_id)

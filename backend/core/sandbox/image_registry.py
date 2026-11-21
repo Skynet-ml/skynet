@@ -690,13 +690,18 @@ class EcrRegistry:
             ecr = self._ecr_for(self._pull_session(owner))
             media_type, manifest = self._manifest(ecr, name, digest)
             if media_type in _IMAGE_INDEX_TYPES:
-                children = [
-                    child["digest"]
-                    for child in manifest.get("manifests") or []
-                    if isinstance(child, dict)
-                    and (child.get("annotations") or {}).get("vnd.docker.reference.type") != "attestation-manifest"
-                    and (child.get("platform") or {}).get("os") != "unknown"
-                ]
+                children = []
+                for child in manifest.get("manifests") or []:
+                    if not isinstance(child, dict):
+                        raise ImageRegistryError(f"{name} image {digest} is an index with an entry that is not valid")
+                    annotations = child.get("annotations") or {}
+                    platform = child.get("platform") or {}
+                    if not isinstance(annotations, dict) or not isinstance(platform, dict):
+                        raise ImageRegistryError(f"{name} image {digest} is an index with an entry that is not valid")
+                    if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
+                        continue
+                    if platform.get("os") != "unknown":
+                        children.append(child["digest"])
                 if not children or len(children) > _INDEX_MAX_IMAGES:
                     raise ImageRegistryError(f"{name} image {digest} is an index with {len(children)} platform images")
                 images = [self._manifest(ecr, name, require_digest(str(child))) for child in children]
