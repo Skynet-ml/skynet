@@ -293,13 +293,17 @@ def test_a_contained_metric_box_sees_only_its_own_processes(monkeypatch: pytest.
     monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:9/v1")
     session = sandbox_runtime.ContainedSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, private=True))
     umount = "import ctypes; print(ctypes.CDLL(None, use_errno=True).umount2(b'/proc', 2))"
+    # A sentinel outside the box, because pytest itself can be PID 1 in a container.
+    outside = subprocess.Popen(["sleep", "30"])
     try:
         listed = session.run("echo $$; ls /proc").stdout.split()
         unmounted = session.run(f"{shlex.quote(sys.executable)} -I -c {shlex.quote(umount)}")
     finally:
         session.close()
+        outside.kill()
+        outside.wait()
     assert listed[0] == "1"
-    assert str(os.getpid()) not in listed
+    assert str(outside.pid) not in listed
     assert unmounted.stdout.strip() == "-1"
 
 
