@@ -22,12 +22,14 @@ from ...i18n import request_locale, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
 from ...models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED
 from ...models.common import ModelConfig
+from ...service_gateway.optimization.blackbox.preflight import SCORER_NOT_CHECKED
 from ...storage.preflights import setup_seed
 from ..agent_engine import fill_proposer_host_cli
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from ..preflight_execution import (
+    SETUP_NOT_CHECKED,
     WizardPreflightCheck,
     WizardPreflightRequest,
     WizardPreflightResponse,
@@ -71,6 +73,9 @@ FIXED_MESSAGE_CODES = {
     "Setup execution failed.": "submit.preflight.execution_failed",
     "The runtime did not return setup evidence.": "submit.preflight.no_evidence",
     "Setup did not return a complete set of readiness checks.": "submit.preflight.incomplete_checks",
+    SETUP_NOT_CHECKED["run"]: "submit.preflight.run_setup_not_checked",
+    SETUP_NOT_CHECKED["metric"]: "submit.preflight.metric_setup_not_checked",
+    SCORER_NOT_CHECKED: "submit.preflight.scorer_not_checked",
 }
 # The budget texts with amounts in them (``billing.budgets._admit`` and
 # ``billing.runtime.BudgetRuntime._wait_cannot_help``); their groups become the

@@ -158,7 +158,11 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
     """
     payload["target"]["repo"]["environment"] = {"setup_command": "npm ci"}
     return payload, SimpleNamespace(
-        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+        snapshot=SimpleNamespace(archive=None),
+        secrets={},
+        box_sources={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
     )
 
 
@@ -184,7 +188,9 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
         )
         session.commit()
 
-    def verify_anything(gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
+    def verify_anything(
+        gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
         """Substitute the physical scorer/runtime adapter with measured fixture execution."""
         return fixture.verify(gateway.runtime, payload, identity)
 
@@ -339,7 +345,11 @@ def test_the_setup_check_gates_secret_bindings_and_allowed_hosts(
         """
         payload["target"]["repo"]["secrets"] = []
         return payload, SimpleNamespace(
-            snapshot=SimpleNamespace(archive=archive), secrets=secrets, close_scorers=lambda: None, cleanup=lambda: None
+            snapshot=SimpleNamespace(archive=archive),
+            secrets=secrets,
+            box_sources={},
+            close_scorers=lambda: None,
+            cleanup=lambda: None,
         )
 
     monkeypatch.setattr(preflight_execution, "stage_repository", stage)
@@ -639,7 +649,9 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
         detail: Start of the expected refusal text.
     """
 
-    def stopped(gateway: Any, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
+    def stopped(
+        gateway: Any, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
         """Stop like a limit or a wallet that cannot cover one model call."""
         raise stop("The next operation needs more than the limit allows.")
 

@@ -126,7 +126,9 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
     )
     observed: list[Any] = []
 
-    def verify(payload: dict[str, Any], *, scope: str, identity: str, runtime: Any) -> dict[str, Any]:
+    def verify(
+        payload: dict[str, Any], *, scope: str, identity: str, runtime: Any, unchecked: tuple[str, ...]
+    ) -> dict[str, Any]:
         """Capture the runtime enclosing the guest preflight implementation.
 
         Args:
@@ -134,6 +136,7 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
             scope: The preflight scope.
             identity: The caller identity.
             runtime: The runtime passed to the preflight.
+            unchecked: The user-image roles the check skips.
 
         Returns:
             A preflight answer with no checks.

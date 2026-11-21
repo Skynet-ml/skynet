@@ -1010,13 +1010,16 @@ class RepoWorkspace:
         """Return the protected paths the candidate box checks."""
         return self._protected
 
-    def prepare(self, *, on_output: OutputSink | None = None) -> None:
+    def prepare(self, *, on_output: OutputSink | None = None, skip: tuple[str, ...] = ()) -> None:
         """Run the setup box and the metric setup step once, and keep both states.
 
         A failure is remembered, so no later call opens a box again.
 
         Args:
             on_output: Receives setup output as it streams.
+            skip: Roles (``run``, ``metric``) whose setup box does not open. A setup
+                check skips a role with a user image, which only the run builds (SKY-893).
+                A workspace with a skipped role is not prepared, so it scores no version.
 
         Raises:
             RepoSetupError: When the repository or the metric packages cannot be set up.
@@ -1027,17 +1030,18 @@ class RepoWorkspace:
             if self._failure is not None:
                 raise self._failure
             try:
-                self._prepare(on_output)
+                self._prepare(on_output, skip)
             except BaseException as error:
                 self._failure = error
                 raise
-            self._prepared = True
+            self._prepared = not skip
 
-    def _prepare(self, on_output: OutputSink | None) -> None:
+    def _prepare(self, on_output: OutputSink | None, skip: tuple[str, ...] = ()) -> None:
         """Split the archive, then save the repository state and the metric state; the caller holds the lock.
 
         Args:
             on_output: Receives setup output as it streams.
+            skip: Roles whose setup box does not open.
 
         Raises:
             RepoSetupError: When a step fails.
@@ -1046,8 +1050,10 @@ class RepoWorkspace:
             self._folder = Path(tempfile.mkdtemp(prefix="repo-workspace-"))
             self._requirements = read_metric_requirements(self._archive)
             self.metric_files = pack_metric_files(self._archive, self._hidden) if self._hidden else None
-        self._repo_state = self._setup_repository(on_output)
-        self._metric_state = self._setup_metric() if self._requirements or self._metric_setup else None
+        if "run" not in skip:
+            self._repo_state = self._setup_repository(on_output)
+        if "metric" not in skip:
+            self._metric_state = self._setup_metric() if self._requirements or self._metric_setup else None
 
     def _next_key(self, kind: str) -> str | None:
         """Return a new operation key for one box, so each box reserves its own hold (E31).

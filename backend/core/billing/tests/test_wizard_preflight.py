@@ -104,6 +104,7 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
         staged = SimpleNamespace(
             snapshot=SimpleNamespace(archive=tmp_path / "tree.tgz"),
             secrets={},
+            box_sources={},
             close_scorers=lambda: None,
             cleanup=lambda: None,
         )
@@ -178,6 +179,51 @@ def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) 
     )
     assert (response.id, response.status, response.may_advance) == (first["id"], "succeeded", True)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("sources", "unchecked", "codes"),
+    [
+        ({}, (), []),
+        ({"run": ("image", "run@sha256:" + "a" * 64)}, ("run",), ["submit.preflight.run_setup_not_checked"]),
+        ({"metric": ("dockerfile", "eval/Dockerfile")}, ("metric",), ["submit.preflight.metric_setup_not_checked"]),
+        (
+            {"metric": ("dockerfile", "eval/Dockerfile"), "run": ("image", "run@sha256:" + "a" * 64)},
+            ("run", "metric"),
+            ["submit.preflight.run_setup_not_checked", "submit.preflight.metric_setup_not_checked"],
+        ),
+    ],
+)
+def test_a_role_with_a_user_image_reports_its_setup_as_not_checked(
+    setup_client, monkeypatch: pytest.MonkeyPatch, sources: dict, unchecked: tuple, codes: list
+) -> None:
+    """Skip only the setup of a role with a user image, and report it as not checked (SKY-893)."""
+    client, _engine, _calls = setup_client
+    stage, verify = wizard_preflight.stage_repository, wizard_preflight._verify_anything
+    bound: list[dict] = []
+    verified: list[dict] = []
+
+    def staged_with_sources(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
+        """Stage the fixture checkout with this case's box sources."""
+        protected, staged = stage(payload, **kwargs)
+        staged.box_sources = sources
+        return protected, staged
+
+    def recorded_verify(gateway: Any, payload: dict, **kwargs: Any) -> dict:
+        """Record the roles the guest check skips."""
+        verified.append(kwargs)
+        return verify(gateway, payload, **kwargs)
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", staged_with_sources)
+    monkeypatch.setattr(wizard_preflight, "bind_repo_scorer", lambda *args, **kwargs: bound.append(kwargs))
+    monkeypatch.setattr(wizard_preflight, "_verify_anything", recorded_verify)
+    body = client.post("/wizard/preflight", json=_request(_budget(client)), headers={"Accept-Language": "en"}).json()
+    assert bound[0]["skip_setup"] == unchecked
+    assert verified[0]["unchecked"] == unchecked
+    skipped = [check for check in body["checks"] if check["status"] == "skipped"]
+    assert [(check["key"], check["message_code"]) for check in skipped] == [("setup", code) for code in codes]
+    assert [check["message"] for check in skipped] == [wizard_preflight.SETUP_NOT_CHECKED[role] for role in unchecked]
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
 
 
 @pytest.mark.parametrize(

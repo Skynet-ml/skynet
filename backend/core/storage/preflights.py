@@ -274,7 +274,8 @@ class PreflightStore:
         performed = [check for check in checks if check.get("key") != "usage"]
         if not performed or any(check.get("status") == "failed" for check in performed):
             return False
-        if any(check.get("status") != "succeeded" for check in performed):
+        # A user-image role's setup is skipped, not failed, and does not block success (SKY-893).
+        if any(check.get("status") not in {"succeeded", "skipped"} for check in performed):
             return True
         row.status = "succeeded"
         result = {
@@ -540,7 +541,10 @@ class PreflightStore:
             if status == "succeeded" and (
                 not isinstance(checks, list)
                 or not checks
-                or any(not isinstance(check, dict) or check.get("status") != "succeeded" for check in checks)
+                or any(
+                    not isinstance(check, dict) or check.get("status") not in {"succeeded", "skipped"}
+                    for check in checks
+                )
             ):
                 raise BudgetConflictError("Setup success requires completed verification evidence.")
             if budget.pending_operations:

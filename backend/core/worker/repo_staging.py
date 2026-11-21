@@ -2485,7 +2485,13 @@ def _check_report(stdout: str) -> dict[str, Any] | None:
 
 
 def bind_repo_scorer(
-    payload: dict[str, Any], staged: StagedRepository, gateway: Any, *, owner_id: str, managed_key: str = ""
+    payload: dict[str, Any],
+    staged: StagedRepository,
+    gateway: Any,
+    *,
+    owner_id: str,
+    managed_key: str = "",
+    skip_setup: tuple[str, ...] = (),
 ) -> None:
     """Score the run's versions in a parent-owned box and hand the guest only its route.
 
@@ -2507,6 +2513,9 @@ def bind_repo_scorer(
         owner_id: Job identity naming the box's operations.
         managed_key: The platform's OpenRouter key, which pays for the
             watch hook under the run's budget; ``""`` when not configured.
+        skip_setup: Roles (``run``, ``metric``) whose setup box does not open. A setup
+            check skips each role with a user image; the payload then gets no
+            evaluator route (SKY-893).
 
     Raises:
         ConstraintsError: When the run turned the watch hook on but it cannot run.
@@ -2583,8 +2592,10 @@ def bind_repo_scorer(
     _warn_metric_imports(owner_id, staged.metric_warnings)
     # Setup finishes here, in the parent, before the guest that writes
     # versions exists; a failure fails the run.
-    scorer.prepare()
-    payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
+    scorer.prepare(skip=skip_setup)
+    # A version needs both roles' setup, so a skipped role leaves the guest no scorer route.
+    if not skip_setup:
+        payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
     proposer = staged.proposer_role
     if proposer is not None and (proposer.mcp_servers or proposer.services):
         proposer_route = _proposer_model_extra(payload).get(ROUTE_KEY)

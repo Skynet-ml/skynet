@@ -210,7 +210,11 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
     """
     payload["target"]["repo"]["environment"] = {}
     return payload, SimpleNamespace(
-        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+        snapshot=SimpleNamespace(archive=None),
+        secrets={},
+        box_sources={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
     )
 
 
@@ -309,7 +313,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
         )
         session.commit()
 
-    def verify(gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
+    def verify(
+        gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
         """Run the measured fixture preflight instead of a sandbox."""
         return fixture.verify(gateway.runtime, payload, identity)
 

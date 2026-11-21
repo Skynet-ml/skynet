@@ -2139,6 +2139,21 @@ def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(
     assert not [text for text in texts if "SOURCE" in text or "very-secret-value" in text]
 
 
+@pytest.mark.parametrize(
+    ("skip", "kinds"),
+    [((), ["setup", "metric-setup"]), (("run",), ["metric-setup"]), (("metric",), ["setup"]), (("run", "metric"), [])],
+)
+def test_prepare_opens_no_setup_box_for_a_skipped_role(tmp_path: Path, skip: tuple[str, ...], kinds: list[str]) -> None:
+    """A role with a user image opens no setup box in preflight; the other role still does (SKY-893)."""
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "true")
+    try:
+        space.prepare(skip=skip)
+    finally:
+        space.close()
+    assert [box.spec.operation_key.split(":")[1].rsplit("-", 1)[0] for box in runtime.boxes] == kinds
+
+
 def test_a_failed_metric_setup_command_stops_the_run_before_any_candidate_box(tmp_path: Path) -> None:
     """A broken build fails ``prepare`` with its last lines, and no candidate box opens (SKY-740)."""
     runtime = _Runtime()

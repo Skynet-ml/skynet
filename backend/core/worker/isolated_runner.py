@@ -129,7 +129,7 @@ def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: E
 
     Args:
         payload: The guest request payload.
-        preflight: Scope and identity of the requested check.
+        preflight: Scope, identity and unchecked user-image roles of the requested check.
         events: Parent-owned event transport, for DSPy preview tokens.
 
     Returns:
@@ -147,6 +147,7 @@ def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: E
             scope=preflight["scope"],
             identity=preflight["identity"],
             runtime=runtime,
+            unchecked=tuple(preflight.get("unchecked") or ()),
         )
     return run_dspy_preflight(payload, preflight, lambda token: events.put({"type": "preview_token", **token}))
 

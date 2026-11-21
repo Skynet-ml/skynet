@@ -1134,14 +1134,17 @@ class RepoScorer:
             )
         return result.ok
 
-    def prepare(self) -> None:
+    def prepare(self, *, skip: tuple[str, ...] = ()) -> None:
         """Set the repository and the metric packages up before any version is sent.
+
+        Args:
+            skip: Roles (``run``, ``metric``) whose setup box does not open (SKY-893).
 
         Raises:
             RepoSetupError: When the repository or the metric packages cannot be set up.
         """
         with self._lock:
-            self._workspace.prepare()
+            self._workspace.prepare(skip=skip)
 
     def dispatch(self, body: Mapping[str, Any]) -> ModelHTTPResult:
         """Answer one guest scoring request through the evaluator capability.
