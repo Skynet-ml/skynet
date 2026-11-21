@@ -549,7 +549,7 @@ class Settings(BaseSettings):
         alias="IMAGE_BUILD_TIMEOUT_MINUTES",
         ge=5,
         le=480,
-        description="Longest time one user image build may take, in minutes. A build over it fails the run. CodeBuild accepts 5 to 480 minutes (SKY-888).",
+        description="Longest time one user image build may take, in minutes. A build over it fails the run. The setting allows 5 to 480 minutes; CodeBuild itself accepts up to 2160 (SKY-888).",
     )
     image_build_max_size_gb: float = Field(
         default=20.0,

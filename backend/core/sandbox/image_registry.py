@@ -190,7 +190,7 @@ def require_digest(digest: str) -> str:
     Raises:
         ImageRegistryError: The value is not a sha256 digest.
     """
-    if not _DIGEST.match(digest):
+    if not _DIGEST.fullmatch(digest):
         raise ImageRegistryError(f"not an image digest: {digest!r}")
     return digest
 
@@ -208,7 +208,7 @@ def require_owner(owner: str) -> str:
         ImageRegistryError: The value is empty, too long, or has a character
             or a ``/`` that a single repository name component refuses.
     """
-    if len(owner) > _OWNER_MAX or not _OWNER.match(owner):
+    if len(owner) > _OWNER_MAX or not _OWNER.fullmatch(owner):
         raise ImageRegistryError(f"not a valid image owner: {owner!r}")
     return owner
 
@@ -225,7 +225,7 @@ def _require_tag(tag: str) -> str:
     Raises:
         ImageRegistryError: The tag has a character or length ECR refuses.
     """
-    if not _TAG.match(tag):
+    if not _TAG.fullmatch(tag):
         raise ImageRegistryError(f"not a valid image tag: {tag!r}")
     return tag
 
@@ -267,7 +267,7 @@ class EcrRegistry:
         Raises:
             ImageRegistryError: The URI is not an ECR repository prefix URI.
         """
-        match = _ECR_PREFIX_URI.match(repository_prefix_uri)
+        match = _ECR_PREFIX_URI.fullmatch(repository_prefix_uri)
         if match is None:
             raise ImageRegistryError(f"not an ECR repository prefix URI: {repository_prefix_uri!r}")
         self._client = client
@@ -499,8 +499,8 @@ class EcrRegistry:
     def delete_cache(self, owner: str, scope: str) -> None:
         """Delete the build cache manifest of one scope from the owner's repository.
 
-        The cache layers that only this manifest names become untagged, and
-        the lifecycle rule deletes them after a day.
+        The tag is the manifest's only tag, so ECR deletes the manifest at
+        once and then removes the layers that no other image uses.
 
         Args:
             owner: The owner of the repository.
