@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "无法连接 Hugging Face。请稍后重试。",
     "connectors.reconnect_required": "您的 {provider} 关联信息已无法读取。请断开连接后重新连接。",
     "connectors.vault_not_configured": "此部署未配置凭据保管库,因此无法关联连接器。",
+    "accounts.deletion_runs_active": "您的账户未被删除：您的部分优化仍在运行。请取消它们或等待其完成，然后重试。",
     "accounts.deletion_storage_unavailable": "您的账户未被删除：暂时无法删除其存储的运行数据。请几分钟后重试。",
     "accounts.email_delivery_unavailable": "此服务器未配置电子邮件发送服务。",
     "accounts.email_not_verified": "登录前请先验证您的电子邮件。",

@@ -542,6 +542,7 @@ const terms_ar: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ar: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "لم يُحذف حسابك: لا تزال بعض عمليات التحسين الخاصة بك قيد التشغيل. ألغِها أو انتظر حتى تنتهي، ثم حاول مرة أخرى.",
   "accounts.deletion_storage_unavailable": "لم يُحذف حسابك: تعذّر حذف بيانات التشغيل المخزّنة الخاصة به الآن. حاول مرة أخرى بعد بضع دقائق.",
   "accounts.email_delivery_unavailable": "لم يتم إعداد خدمة إرسال البريد الإلكتروني على هذا الخادم.",
   "accounts.email_not_verified": "يرجى تأكيد بريدك الإلكتروني قبل تسجيل الدخول.",
@@ -1010,6 +1011,7 @@ const terms_de: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_de: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Ihr Konto wurde nicht gelöscht: Einige Ihrer Optimierungen laufen noch. Brechen Sie sie ab oder warten Sie, bis sie abgeschlossen sind, und versuchen Sie es dann erneut.",
   "accounts.deletion_storage_unavailable": "Ihr Konto wurde nicht gelöscht: Die gespeicherten Laufdaten konnten gerade nicht entfernt werden. Versuchen Sie es in einigen Minuten erneut.",
   "accounts.email_delivery_unavailable": "Der E-Mail-Versand ist auf diesem Server nicht konfiguriert.",
   "accounts.email_not_verified": "Bitte bestätigen Sie Ihre E-Mail-Adresse vor der Anmeldung.",
@@ -2016,6 +2018,7 @@ const terms_es: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_es: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Tu cuenta no se eliminó: algunas de tus optimizaciones siguen en ejecución. Cancélalas o espera a que terminen y vuelve a intentarlo.",
   "accounts.deletion_storage_unavailable": "Tu cuenta no se eliminó: no se pudieron borrar ahora sus datos de ejecución almacenados. Inténtalo de nuevo en unos minutos.",
   "accounts.email_delivery_unavailable": "La entrega de correo electrónico no está configurada en este servidor.",
   "accounts.email_not_verified": "Verifica tu correo electrónico antes de iniciar sesión.",
@@ -2484,6 +2487,7 @@ const terms_fa: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_fa: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "حساب شما حذف نشد: برخی از بهینه‌سازی‌های شما هنوز در حال اجرا هستند. آن‌ها را لغو کنید یا صبر کنید تا تمام شوند، سپس دوباره تلاش کنید.",
   "accounts.deletion_storage_unavailable": "حساب شما حذف نشد: اکنون امکان حذف داده‌های ذخیره‌شدهٔ اجراهای آن نبود. چند دقیقهٔ دیگر دوباره تلاش کنید.",
   "accounts.email_delivery_unavailable": "ارسال ایمیل روی این سرور پیکربندی نشده است.",
   "accounts.email_not_verified": "لطفاً پیش از ورود، ایمیل خود را تأیید کنید.",
@@ -2952,6 +2956,7 @@ const terms_fr: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_fr: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Votre compte n'a pas été supprimé : certaines de vos optimisations sont encore en cours. Annulez-les ou attendez qu'elles se terminent, puis réessayez.",
   "accounts.deletion_storage_unavailable": "Votre compte n'a pas été supprimé : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
   "accounts.email_delivery_unavailable": "L'envoi d'e-mails n'est pas configuré sur ce serveur.",
   "accounts.email_not_verified": "Veuillez vérifier votre adresse e-mail avant de vous connecter.",
@@ -3445,6 +3450,7 @@ const terms_hi: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_hi: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "आपका खाता नहीं हटाया गया: आपके कुछ ऑप्टिमाइज़ेशन अभी भी चल रहे हैं। उन्हें रद्द करें या उनके पूरा होने तक प्रतीक्षा करें, फिर दोबारा कोशिश करें।",
   "accounts.deletion_storage_unavailable": "आपका खाता नहीं हटाया गया: इसका सहेजा गया रन डेटा अभी नहीं हटाया जा सका। कुछ मिनट बाद फिर से कोशिश करें।",
   "accounts.email_delivery_unavailable": "इस सर्वर पर ईमेल डिलीवरी कॉन्फ़िगर नहीं है।",
   "accounts.email_not_verified": "कृपया साइन इन करने से पहले अपने ईमेल को सत्यापित करें।",
@@ -3913,6 +3919,7 @@ const terms_it: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_it: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Il tuo account non è stato eliminato: alcune delle tue ottimizzazioni sono ancora in esecuzione. Annullale o attendi che terminino, poi riprova.",
   "accounts.deletion_storage_unavailable": "Il tuo account non è stato eliminato: al momento non è stato possibile rimuovere i dati delle esecuzioni salvati. Riprova tra qualche minuto.",
   "accounts.email_delivery_unavailable": "L'invio delle email non è configurato su questo server.",
   "accounts.email_not_verified": "Verifica la tua email prima di accedere.",
@@ -4381,6 +4388,7 @@ const terms_ja: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ja: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "アカウントは削除されませんでした。実行中の最適化がまだあります。キャンセルするか完了するまで待ってから、もう一度お試しください。",
   "accounts.deletion_storage_unavailable": "アカウントは削除されませんでした。保存された実行データを今は削除できませんでした。数分後にもう一度お試しください。",
   "accounts.email_delivery_unavailable": "このサーバーではメール送信が設定されていません。",
   "accounts.email_not_verified": "サインインする前にメールアドレスを認証してください。",
@@ -4849,6 +4857,7 @@ const terms_ko: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ko: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "계정이 삭제되지 않았습니다. 일부 최적화가 아직 실행 중입니다. 최적화를 취소하거나 완료될 때까지 기다린 후 다시 시도하세요.",
   "accounts.deletion_storage_unavailable": "계정이 삭제되지 않았습니다. 저장된 실행 데이터를 지금 삭제할 수 없습니다. 몇 분 후에 다시 시도하세요.",
   "accounts.email_delivery_unavailable": "이 서버에 이메일 전송이 구성되어 있지 않습니다.",
   "accounts.email_not_verified": "로그인하기 전에 이메일을 인증해 주세요.",
@@ -5317,6 +5326,7 @@ const terms_pt: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_pt: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "A sua conta não foi eliminada: algumas das suas otimizações ainda estão em execução. Cancele-as ou aguarde que terminem e, depois, tente novamente.",
   "accounts.deletion_storage_unavailable": "A sua conta não foi eliminada: não foi possível remover agora os dados de execução guardados. Tente novamente dentro de alguns minutos.",
   "accounts.email_delivery_unavailable": "O envio de emails não está configurado neste servidor.",
   "accounts.email_not_verified": "Verifique o seu email antes de iniciar sessão.",
@@ -5825,6 +5835,7 @@ const terms_ru: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_ru: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Аккаунт не удалён: некоторые ваши оптимизации ещё выполняются. Отмените их или дождитесь их завершения, затем повторите попытку.",
   "accounts.deletion_storage_unavailable": "Аккаунт не удалён: сейчас не удалось удалить сохранённые данные запусков. Повторите попытку через несколько минут.",
   "accounts.email_delivery_unavailable": "На этом сервере не настроена отправка электронной почты.",
   "accounts.email_not_verified": "Пожалуйста, подтвердите адрес электронной почты перед входом.",
@@ -6293,6 +6304,7 @@ const terms_tr: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_tr: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Hesabınız silinmedi: bazı optimizasyonlarınız hâlâ çalışıyor. Bunları iptal edin veya bitmelerini bekleyin, ardından yeniden deneyin.",
   "accounts.deletion_storage_unavailable": "Hesabınız silinmedi: kayıtlı çalıştırma verileri şu anda kaldırılamadı. Birkaç dakika sonra yeniden deneyin.",
   "accounts.email_delivery_unavailable": "Bu sunucuda e-posta teslimatı yapılandırılmamış.",
   "accounts.email_not_verified": "Lütfen giriş yapmadan önce e-posta adresinizi doğrulayın.",
@@ -6761,6 +6773,7 @@ const terms_uk: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_uk: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "Обліковий запис не видалено: деякі ваші оптимізації ще виконуються. Скасуйте їх або дочекайтеся їх завершення, а потім спробуйте ще раз.",
   "accounts.deletion_storage_unavailable": "Обліковий запис не видалено: зараз не вдалося видалити збережені дані запусків. Спробуйте ще раз за кілька хвилин.",
   "accounts.email_delivery_unavailable": "На цьому сервері не налаштовано доставку електронної пошти.",
   "accounts.email_not_verified": "Будь ласка, підтвердьте свою електронну пошту перед входом.",
@@ -7229,6 +7242,7 @@ const terms_yue: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_yue: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "你嘅帳戶未有刪除：你仲有啲優化運行緊。請取消佢哋或者等佢哋完成，然後再試。",
   "accounts.deletion_storage_unavailable": "你嘅帳戶未有刪除：暫時刪除唔到佢儲存咗嘅運行數據。請過幾分鐘再試。",
   "accounts.email_delivery_unavailable": "此伺服器未設定電郵發送功能。",
   "accounts.email_not_verified": "請喺登入前驗證你嘅電郵地址。",
@@ -7697,6 +7711,7 @@ const terms_zh_Hans: Partial<Record<TermKey, string>> = {
 };
 
 const i18n_zh_Hans: Partial<Record<I18nMessageKey, string>> = {
+  "accounts.deletion_runs_active": "您的账户未被删除：您的部分优化仍在运行。请取消它们或等待其完成，然后重试。",
   "accounts.deletion_storage_unavailable": "您的账户未被删除：暂时无法删除其存储的运行数据。请几分钟后重试。",
   "accounts.email_delivery_unavailable": "此服务器未配置电子邮件发送服务。",
   "accounts.email_not_verified": "登录前请先验证您的电子邮件。",

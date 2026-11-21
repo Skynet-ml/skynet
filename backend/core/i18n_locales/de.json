@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "Hugging Face ist nicht erreichbar. Versuchen Sie es in Kürze erneut.",
     "connectors.reconnect_required": "Ihre {provider}-Verknüpfung kann nicht mehr gelesen werden. Trennen Sie die Verbindung und verbinden Sie sich erneut.",
     "connectors.vault_not_configured": "Der Zugangsdaten-Tresor ist in dieser Installation nicht konfiguriert, daher können keine Connectors verknüpft werden.",
+    "accounts.deletion_runs_active": "Ihr Konto wurde nicht gelöscht: Einige Ihrer Optimierungen laufen noch. Brechen Sie sie ab oder warten Sie, bis sie abgeschlossen sind, und versuchen Sie es dann erneut.",
     "accounts.deletion_storage_unavailable": "Ihr Konto wurde nicht gelöscht: Die gespeicherten Laufdaten konnten gerade nicht entfernt werden. Versuchen Sie es in einigen Minuten erneut.",
     "accounts.email_delivery_unavailable": "Der E-Mail-Versand ist auf diesem Server nicht konfiguriert.",
     "accounts.email_not_verified": "Bitte bestätigen Sie Ihre E-Mail-Adresse vor der Anmeldung.",

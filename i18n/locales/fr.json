@@ -146,6 +146,7 @@
     "connectors.hf_unreachable": "Impossible de joindre Hugging Face. Réessayez dans un instant.",
     "connectors.reconnect_required": "Votre liaison {provider} ne peut plus être lue. Déconnectez-la, puis reconnectez-la.",
     "connectors.vault_not_configured": "Le coffre d'identifiants n'est pas configuré sur ce déploiement ; les connecteurs ne peuvent donc pas être liés.",
+    "accounts.deletion_runs_active": "Votre compte n'a pas été supprimé : certaines de vos optimisations sont encore en cours. Annulez-les ou attendez qu'elles se terminent, puis réessayez.",
     "accounts.deletion_storage_unavailable": "Votre compte n'a pas été supprimé : ses données d'exécution stockées n'ont pas pu être effacées pour le moment. Réessayez dans quelques minutes.",
     "accounts.email_delivery_unavailable": "L'envoi d'e-mails n'est pas configuré sur ce serveur.",
     "accounts.email_not_verified": "Veuillez vérifier votre adresse e-mail avant de vous connecter.",
