@@ -15,11 +15,16 @@ image), and ``docker_egress_proxy.py`` is already hardened and tested.
 Open egress is refused: Docker has no edge policy, and its default bridge
 reaches services that listen only on the host's loopback. A box is offline,
 or it reaches only its allowlisted hosts on port 443 through the proxy.
+
+A box image is a local image, or a registry image pinned by digest
+(SKY-889). Docker pulls only a digest image that this machine does not
+have, before any box object exists; ``docker run`` itself never pulls.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import contextlib
 import io
@@ -85,6 +90,12 @@ _TMPFS_MOUNTS = (
 )
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
+# A first pull of a large user image can take many minutes.
+_PULL_TIMEOUT_SECONDS = 1800.0
+# Only a reference pinned by digest is pulled: a mutable tag can change under a run.
+_DIGEST_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
+# Docker's own key for Docker Hub in a config file's ``auths``.
+_DOCKER_HUB_AUTH = "https://index.docker.io/v1/"
 _KILL_GRACE_SECONDS = 15
 _GROUP_KILL_SECONDS = 10.0
 _TIMEOUT_EXIT_CODE = 124
@@ -273,6 +284,21 @@ async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
         logger.warning("Could not remove the Docker sandbox object %s: %s", args[-1], result.error_line)
 
 
+def _registry_host(image: str) -> str:
+    """Return the registry key that Docker reads credentials under for an image.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        The registry host, or Docker Hub's key for a reference with no host.
+    """
+    first, _, rest = image.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return _DOCKER_HUB_AUTH
+
+
 def _label_args(labels: Mapping[str, str]) -> list[str]:
     """Turn labels into Docker ``--label`` arguments.
 
@@ -394,16 +420,20 @@ class DockerEnvironment(SandboxEnvironment):
         image: str | None = None,
         docker_bin: str = DEFAULT_DOCKER_BIN,
         recorder: CallRecorder | None = None,
+        pull_credentials: tuple[str, str] | None = None,
     ) -> None:
         """Check the spec and choose the image.
 
         Args:
             spec: The sandbox to open.
-            image: The local image to boot when the spec names none. Docker
-                never pulls it; it must already be on this machine.
+            image: The image to boot when the spec names none. A local image
+                must already be on this machine; Docker pulls only a registry
+                image pinned by digest that is missing here.
             docker_bin: The Docker CLI path; OrbStack works through the same CLI.
             recorder: Writes each egress proxy request into the run record,
                 or None outside a run.
+            pull_credentials: The (username, password) that read a registry
+                image, or None for a public image.
 
         Raises:
             SandboxSpecError: The spec breaks a provider rule or names no image.
@@ -414,6 +444,7 @@ class DockerEnvironment(SandboxEnvironment):
             raise SandboxSpecError("The Docker sandbox needs an image in the spec or the provider.")
         self._docker_bin = docker_bin
         self._recorder = recorder
+        self._pull_credentials = pull_credentials
         self._name: str | None = None
         self._egress: _Egress | None = None
         self._egress_up = False
@@ -437,10 +468,11 @@ class DockerEnvironment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The sandbox was already started.
-            SandboxInfraError: Docker cannot start the box or its proxy.
+            SandboxInfraError: Docker cannot pull the image, or start the box or its proxy.
         """
         if self._name is not None:
             raise RuntimeError("The Docker sandbox was already started.")
+        await self._pull_missing_image()
         self._name = _unique_name(self.spec.name)
         self._egress = _Egress(network=f"{self._name}-net", proxy=f"{self._name}-egress")
         self._started_at = time.monotonic()
@@ -818,10 +850,47 @@ class DockerEnvironment(SandboxEnvironment):
         """
         return max(1, math.ceil(self.spec.lifetime_seconds - (time.monotonic() - self._started_at)))
 
+    async def _pull_missing_image(self) -> None:
+        """Pull a registry image pinned by digest when this machine does not have it.
+
+        The credentials go into a private Docker config folder for the pull
+        alone, so they never reach a command line or the user's own config.
+
+        Raises:
+            SandboxInfraError: The pull failed.
+        """
+        image = str(self._image)
+        if not _DIGEST_IMAGE.fullmatch(image):
+            return
+        present = await _docker(self._docker_bin, ["image", "inspect", "--format", "{{.Id}}", image])
+        if present.returncode == 0:
+            return
+        if self._pull_credentials is None:
+            pulled = await _docker(self._docker_bin, ["pull", image], cli_seconds=_PULL_TIMEOUT_SECONDS)
+        else:
+            # A config folder of its own drops the user's contexts too, so the
+            # pull names the current daemon itself.
+            context = await _docker(self._docker_bin, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+            host = context.stdout.decode(errors="replace").strip()
+            if context.returncode != 0 or not host:
+                raise SandboxInfraError(f"Could not find the Docker daemon to pull {image}: {context.error_line}")
+            username, password = self._pull_credentials
+            auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+            with tempfile.TemporaryDirectory() as config:
+                config_file = Path(config) / "config.json"
+                config_file.write_text(json.dumps({"auths": {_registry_host(image): {"auth": auth}}}))
+                pulled = await _docker(
+                    self._docker_bin,
+                    ["--config", config, "-H", host, "pull", image],
+                    cli_seconds=_PULL_TIMEOUT_SECONDS,
+                )
+        if pulled.returncode != 0:
+            raise SandboxInfraError(f"Could not pull the image {image}: {pulled.error_line}")
+
     async def _run_box(self) -> None:
         """Start the box container.
 
-        Docker never pulls the image; a missing image fails the start.
+        ``docker run`` never pulls the image; a missing image fails the start.
 
         Raises:
             SandboxInfraError: Docker cannot start the container.

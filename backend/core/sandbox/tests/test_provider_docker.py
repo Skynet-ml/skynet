@@ -9,6 +9,7 @@ that is unique to this test process, and a module finalizer removes them.
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import io
 import json
@@ -17,6 +18,7 @@ import tarfile
 import time
 import uuid
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,12 +30,15 @@ from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.factory import PROVIDERS
+from core.sandbox.providers import apple_container as apple_provider
 from core.sandbox.providers import docker as docker_provider
+from core.sandbox.providers.apple_container import AppleContainerEnvironment
 from core.sandbox.providers.docker import (
     EXEC_STATE_DIR,
     DockerEnvironment,
     _CliResult,
     _env_stream,
+    _registry_host,
     _sandbox_path,
 )
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -548,6 +553,167 @@ async def test_offline_box_never_pulls_its_image(fake_docker: _FakeDocker) -> No
     await DockerEnvironment(_spec()).start()
     (run,) = fake_docker.calls
     assert run[run.index("--pull") + 1] == "never"
+
+
+USER_IMAGE = "ghcr.io/acme/repo@sha256:" + "e" * 64
+
+
+def _missing_image(fake: _FakeDocker) -> None:
+    """Make ``docker image inspect`` report that the user image is not on this machine.
+
+    Args:
+        fake: The Docker CLI recorder.
+    """
+    fake.answers["image inspect"] = _CliResult(1, b"", b"Error: No such image\n")
+
+
+async def test_a_missing_digest_image_is_pulled_before_the_box_runs(fake_docker: _FakeDocker) -> None:
+    """Check that a user image pinned by digest is pulled first, and ``docker run`` still never pulls.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    _missing_image(fake_docker)
+    await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    inspect, pull, run = fake_docker.calls
+    assert inspect[:2] == ["image", "inspect"]
+    assert pull == ["pull", USER_IMAGE]
+    assert run[run.index("--pull") + 1] == "never"
+    assert run[-2] == USER_IMAGE
+
+
+async def test_a_present_digest_image_is_not_pulled(fake_docker: _FakeDocker) -> None:
+    """Check that a digest image already on this machine starts with no pull.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    assert [call[0] for call in fake_docker.calls] == ["image", "run"]
+
+
+@pytest.mark.parametrize("image", [BASE_IMAGE, "sha256:" + "e" * 64])
+async def test_a_tagged_or_local_image_is_never_pulled(fake_docker: _FakeDocker, image: str) -> None:
+    """Check that a mutable tag or a local image id never reaches ``docker pull``.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        image: The image of the box.
+    """
+    _missing_image(fake_docker)
+    await DockerEnvironment(_spec(image=image)).start()
+    assert [call[0] for call in fake_docker.calls] == ["run"]
+
+
+async def test_pull_credentials_stay_in_a_private_config(
+    fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the credentials reach the pull only through its own config file, never the argv.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _missing_image(fake_docker)
+    fake_docker.answers["context inspect"] = _CliResult(0, b"unix:///var/run/docker.sock\n", b"")
+    configs: list[dict[str, Any]] = []
+
+    async def docker(docker_bin: str, args: Sequence[str], **kwargs: Any) -> _CliResult:
+        """Read the pull's config while it exists, then answer as the recorder.
+
+        Args:
+            docker_bin: The Docker CLI path.
+            args: The CLI arguments.
+            **kwargs: The other call options.
+
+        Returns:
+            The recorder's answer.
+        """
+        if "pull" in args:
+            folder = args[list(args).index("--config") + 1]
+            configs.append(json.loads((Path(folder) / "config.json").read_text()))
+        return await fake_docker(docker_bin, args, **kwargs)
+
+    monkeypatch.setattr(docker_provider, "_docker", docker)
+    await DockerEnvironment(_spec(image=USER_IMAGE), pull_credentials=("reader", "s3cret")).start()
+    pull = fake_docker.calls[2]
+    assert pull[:4] == ["--config", pull[1], "-H", "unix:///var/run/docker.sock"]
+    assert pull[4:] == ["pull", USER_IMAGE]
+    assert not await asyncio.to_thread(Path(pull[1]).exists)
+    assert all("s3cret" not in " ".join(call) for call in fake_docker.calls)
+    auth = base64.b64encode(b"reader:s3cret").decode()
+    assert configs == [{"auths": {"ghcr.io": {"auth": auth}}}]
+
+
+async def test_a_failed_pull_fails_the_start_before_any_box(fake_docker: _FakeDocker) -> None:
+    """Check that a failed pull raises a clear error and starts no box.
+
+    Args:
+        fake_docker: The Docker CLI recorder.
+    """
+    _missing_image(fake_docker)
+    fake_docker.answers["pull"] = _CliResult(1, b"", b"denied: requested access to the resource is denied\n")
+    with pytest.raises(SandboxInfraError, match=r"Could not pull the image .*denied"):
+        await DockerEnvironment(_spec(image=USER_IMAGE)).start()
+    assert [call[0] for call in fake_docker.calls] == ["image", "pull"]
+
+
+@pytest.mark.parametrize(
+    ("image", "docker_key", "apple_host"),
+    [
+        (USER_IMAGE, "ghcr.io", "ghcr.io"),
+        ("localhost:5000/repo@sha256:" + "e" * 64, "localhost:5000", "localhost:5000"),
+        ("acme/repo@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+        ("ubuntu@sha256:" + "e" * 64, "https://index.docker.io/v1/", "docker.io"),
+    ],
+)
+def test_the_registry_host_of_an_image(image: str, docker_key: str, apple_host: str) -> None:
+    """Check the registry each CLI reads the pull credentials for.
+
+    Args:
+        image: The image reference.
+        docker_key: Docker's ``auths`` key.
+        apple_host: The ``container registry login`` server.
+    """
+    assert _registry_host(image) == docker_key
+    assert apple_provider._registry_host(image) == apple_host
+
+
+async def test_apple_container_logs_in_over_stdin_before_the_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the Apple provider sends the password only on stdin, and a failed login stops the start.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    calls: list[tuple[list[str], bytes | None]] = []
+
+    async def cli(container_bin: str, args: Sequence[str], *, stdin: bytes | None = None, **_kwargs: Any) -> Any:
+        """Record the call and refuse the login.
+
+        Args:
+            container_bin: The CLI path.
+            args: The CLI arguments.
+            stdin: The stdin bytes.
+            **_kwargs: Unused.
+
+        Returns:
+            A failed CLI result.
+        """
+        del container_bin
+        calls.append((list(args), stdin))
+        return apple_provider._CliResult(1, b"", b"Error: unauthorized\n")
+
+    monkeypatch.setattr(apple_provider, "_cli", cli)
+    env = AppleContainerEnvironment(
+        _spec(image=USER_IMAGE, network_disabled=False),
+        container_bin="container",
+        pull_credentials=("reader", "s3cret"),
+    )
+    with pytest.raises(SandboxInfraError, match="could not log in"):
+        await env.start()
+    ((args, stdin),) = calls
+    assert args == ["registry", "login", "--username", "reader", "--password-stdin", "ghcr.io"]
+    assert stdin == b"s3cret"
 
 
 async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) -> None:

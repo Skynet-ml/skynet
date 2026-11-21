@@ -10,6 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from core.billing import protected_execution
+from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.protected_execution import bind_protected_sandbox, protected_vercel_unavailable_reason
 from core.config import Settings
 from core.config import settings as global_settings
@@ -242,3 +243,72 @@ def test_async_bind_skips_the_cache_without_snapshot_support(monkeypatch: pytest
 
     assert gateway.broker._runtime is plain
     assert gateway.broker._snapshots is None
+
+
+def _spy_runtime(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace the protected runtime with a fake that records the image it boots.
+
+    Args:
+        monkeypatch: Pytest fixture.
+
+    Returns:
+        The images the bind passed to the runtime, in order.
+    """
+    images: list[str] = []
+
+    def runtime(*_args: Any, image: str, **_kwargs: Any) -> FakeRuntime:
+        """Record the image and return a runtime that cannot snapshot.
+
+        Args:
+            *_args: Unused.
+            image: The image the bind chose.
+            **_kwargs: Unused.
+
+        Returns:
+            The fake runtime.
+        """
+        images.append(image)
+        return FakeRuntime()
+
+    monkeypatch.setattr(protected_execution, "protected_runtime", runtime)
+    return images
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_bind_accepts_a_user_image_pinned_by_digest_in_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that local mode, which pins only bare ids, still boots a digest-pinned user image (SKY-889)."""
+    images = _spy_runtime(monkeypatch)
+    settings = _settings(monkeypatch)
+    # Local mode needs a Docker daemon; the check under test runs after this preflight.
+    monkeypatch.setattr(protected_execution, "protected_vercel_unavailable_reason", lambda _settings: None)
+    monkeypatch.setattr(settings, "local_mode", True)
+    user_image = "ghcr.io/acme/repo@sha256:" + "b" * 64
+
+    identity = bind_protected_sandbox(_Gateway(), settings, owner_id="job-9", image=user_image)
+
+    assert images == [user_image]
+    assert identity["image"] == user_image
+
+
+@pytest.mark.usefixtures("provider_credentials")
+@pytest.mark.parametrize("image", ["ghcr.io/acme/repo:latest", "ghcr.io/acme/repo", "ghcr.io/acme/repo@sha256:abc"])
+def test_bind_refuses_a_user_image_with_a_mutable_tag(monkeypatch: pytest.MonkeyPatch, image: str) -> None:
+    """Check that a tag or a short digest never boots, because its content can change after pricing."""
+    images = _spy_runtime(monkeypatch)
+
+    with pytest.raises(UnpricedOperationError, match="not an immutable reference"):
+        bind_protected_sandbox(_Gateway(), _settings(monkeypatch), owner_id="job-9", image=image)
+
+    assert images == []
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_bind_without_a_user_image_keeps_the_deployment_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a run with no user image still boots the deployment's own pinned image."""
+    images = _spy_runtime(monkeypatch)
+
+    identity = bind_protected_sandbox(_Gateway(), _settings(monkeypatch), owner_id="job-9")
+
+    assert images == [_DIGEST]
+    assert identity["image"] == _DIGEST
+    assert protected_execution.protected_image(_settings(monkeypatch)) == _DIGEST
