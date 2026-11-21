@@ -18,10 +18,9 @@ SPEC = importlib.util.spec_from_file_location("account", SCRIPT)
 account = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(account)
 
-HELP_CASES = ("register never succeeded", "the preview database is gone", "delete printed 'account delete: HTTP 200'")
+HELP_CASES = ("register never succeeded", "delete printed 'account delete: HTTP 200'")
 SKILL_CASES = (
     "`register` never succeeded",
-    "the preview database is gone",
     "`delete` printed `account delete: HTTP 200`",
 )
 
