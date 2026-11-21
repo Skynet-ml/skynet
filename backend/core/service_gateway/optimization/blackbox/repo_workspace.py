@@ -307,7 +307,9 @@ def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> s
     its image check proved the base interpreter root-owned (SKY-737). The
     image's environment can name loader paths, such as ``LD_LIBRARY_PATH``,
     so a user image box starts the interpreter with an empty environment, as
-    the image check ran it.
+    the image check ran it. That environment holds only ``OPENSSL_CONF=/dev/null``:
+    ``hashlib`` loads OpenSSL, whose image config can name an engine library in
+    a folder that the box user writes (SKY-737).
 
     Args:
         user_image: Whether the box runs a user ``[run]`` image.
@@ -315,12 +317,12 @@ def _pick_base_python(user_image: bool = False, keep: tuple[str, ...] = ()) -> s
 
     Returns:
         A shell prefix that sets ``p`` and ends in ``&& ``, or in a user image
-        box in ``/usr/bin/env -i`` and the kept variables, so ``"$p"`` follows
+        box in ``/usr/bin/env -i``, ``OPENSSL_CONF`` and the kept variables, so ``"$p"`` follows
         it. It keeps one ``&&`` chain, so a failed ``cd`` before it still stops the hash.
     """
     if user_image:
         kept = "".join(f' {name}="${name}"' for name in keep)
-        return f"p={shlex.quote(BASE_PYTHON)} && /usr/bin/env -i{kept} "
+        return f"p={shlex.quote(BASE_PYTHON)} && /usr/bin/env -i OPENSSL_CONF=/dev/null{kept} "
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import logging
@@ -5643,6 +5644,30 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
     assert "The supervisor file changed before it ran." in done.stderr
     path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
     assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1
+
+
+@pytest.mark.parametrize("value", [None, "/etc/box.cnf"], ids=["unset", "set"])
+def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: Path, value: str | None) -> None:
+    """Root's first hash reads no OpenSSL config, and the entry gets the box's own value back (SKY-737)."""
+    source = "import os\nprint(repr(os.environ.get('OPENSSL_CONF')))\n"
+    path = tmp_path / "runner.py"
+    path.write_text(source, encoding="utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    env = {name: item for name, item in os.environ.items() if name != "OPENSSL_CONF"}
+    if value is not None:
+        env["OPENSSL_CONF"] = value
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", repo_scorer._SUPERVISOR_BOOT, str(path), digest],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        env=env,
+    )
+
+    assert repo_scorer._SUPERVISOR_BOOT.index("'/dev/null'") < repo_scorer._SUPERVISOR_BOOT.index("import hashlib")
+    assert done.stdout == f"{value!r}\n"
 
 
 _BASH_METRIC = """#!/usr/bin/env bash

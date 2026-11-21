@@ -5928,7 +5928,7 @@ def _entry(tag: str, path: str, last: str = "755 regular file", modes: dict[str,
     """Write the tagged line that the interpreter prints for a path, and the walk of it.
 
     Args:
-        tag: ``path``, ``file``, ``opt`` or ``dir``.
+        tag: ``path``, ``file``, ``opt``, ``dir``, ``lib`` or ``absent``.
         path: The absolute path.
         last: The mode and type of the path's last part, or ``none``.
         modes: The modes that differ from a root-owned 755 folder, by path.
@@ -5948,7 +5948,10 @@ _ENTRIES = [
     *_entry("path", "/usr/local/lib/python3.12", "755 directory"),
     *_entry("file", "/usr/local/lib/libpython3.12.so.1.0"),
     *_entry("file", "/usr/lib/aarch64-linux-gnu/libc.so.6"),
-    *_entry("opt", "/etc/ld.so.preload", "none"),
+    *_entry("absent", "/etc/ld.so.preload", "none"),
+    *_entry("opt", "/etc/ld.so.cache", "644 regular file"),
+    *_entry("lib", "/usr/lib", "755 directory"),
+    *_entry("absent", "/usr/local/bin/pybuilddir.txt", "none"),
     *_entry("dir", "/usr/local", "755 directory"),
 ]
 
@@ -6372,7 +6375,18 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
         _listing(box=[*_ENTRIES, *_entry("file", "/usr/local/lib/python3.12", "755 directory")]),
         _listing(box=[*_ENTRIES, *_entry("dir", "/opt/python", "none")]),
         _listing(box=[*_ENTRIES, *_entry("file", "/usr/lib/libc.so.6", "1000 644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("unknown", "/usr/lib/libc.so.6")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/etc/ld.so.preload", "644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("opt", "/etc/ld.so.preload", "600 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("opt", "/etc/ld.so.cache", "640 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("file", "/usr/lib/libx.so", "600 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/usr/local/bin/pybuilddir.txt", "644 regular file")]),
+        _listing(box=[*_ENTRIES, *_entry("absent", "/usr/local/bin/lib/python3.12/os.py", "644 regular file")]),
         _listing(box=[*_ENTRIES, *_entry("lib", "/usr/lib/libc.so.6")]),
+        _listing(box=[*_ENTRIES, *_entry("lib", "/opt/lib", "777 directory")]),
+        _listing(programs={"/etc/passwd": _walk("/etc/passwd", "600 regular file")}),
+        _listing(tools={"/usr/local/sbin/tr": _walk("/usr/local/sbin/tr", "700 regular file")}),
+        _TRUSTED_PROBE.replace(_PYTHON_FILE, "0 711 regular file /usr/local/bin/python3.12"),
         _listing(box=[*_ENTRIES, "path usr/lib", *_walk("/usr/lib", "755 directory")]),
         _listing(box=[line for line in _ENTRIES if not line.startswith("file ")]),
         _listing(box=[]),
@@ -6448,6 +6462,17 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
         "missing-prefix",
         "user-owned-mapped-file",
         "unknown-tag",
+        "R10-present-ld-so-preload",
+        "R10-unreadable-ld-so-preload",
+        "R10-unreadable-ld-so-cache",
+        "R10-unreadable-library",
+        "R10-pybuilddir-txt",
+        "R10-stray-os-py",
+        "R10-lib-folder-is-a-file",
+        "R10-writable-lib-folder",
+        "R10-unreadable-passwd",
+        "R10-root-only-tr-before-usr-bin",
+        "R10-unreadable-python",
         "relative-path",
         "run-without-files",
         "empty-run",
@@ -6538,7 +6563,6 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         ),
         _listing(box=["env LANG", "locale LANG=C.UTF-8", "env LC_ALL", "locale LC_ALL=en_US.utf8", *_ENTRIES]),
         _listing(tools={"/usr/local/bin/tail": _walk("/usr/local/bin/tail"), "/usr/bin/tail": None}),
-        _listing(tools={"/usr/local/sbin/tr": _walk("/usr/local/sbin/tr", "700 regular file")}),
     ],
     ids=[
         "python-image-layout",
@@ -6553,7 +6577,6 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         "merged-usr-bin-link",
         "utf-8-locale",
         "tail-only-in-usr-local-bin",
-        "root-only-tr-before-usr-bin",
     ],
 )
 def test_a_root_owned_python_chain_passes(probe: str) -> None:
@@ -6637,8 +6660,10 @@ def test_the_probe_root_path_is_the_vercel_root_path() -> None:
 
 def test_the_probe_imports_what_the_root_scripts_import() -> None:
     """The interpreter loads every module that the runner and the hash scripts import at their top (SKY-737)."""
-    imports = repo_staging._PATH_SCRIPT.split("\n", 1)[0]
+    # The first line imports only os, to set OPENSSL_CONF before any module can load OpenSSL.
+    first, imports = repo_staging._PATH_SCRIPT.split("\n")[0], repo_staging._PATH_SCRIPT.split("\n")[3]
 
+    assert first == "import os"
     assert imports.startswith("import ")
     for name in ("hashlib", "json", "ssl", "ctypes", "http.server", "urllib.request", "collections.abc"):
         assert name in imports.removeprefix("import ").split(", ")
@@ -6683,7 +6708,8 @@ def _fake_python(root: Path, extra: str = "") -> Path:
         f"printf 'file %s\\n' {shlex.quote(str(python))}\n"
         f"printf 'dir %s\\n' {shlex.quote(str(root))}\n"
         f"printf '%s' {shlex.quote(extra)}\n"
-        "env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_%]*\\)=.*/env \\1/p'\n"
+        # The real script leaves out the OPENSSL_CONF=/dev/null that the clean run adds.
+        "env | grep -vx OPENSSL_CONF=/dev/null | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_%]*\\)=.*/env \\1/p'\n"
         '[ -z "${LC_ALL+1}" ] || printf \'locale LC_ALL=%s\\n\' "$LC_ALL"\n'
     )
     python.chmod(0o755)
@@ -6899,6 +6925,33 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
         "LD_PRELOAD",
     ]
     assert "do-not-print" not in done.stdout
+
+
+@pytest.mark.parametrize("value", ["/dev/null", "/etc/box.cnf"], ids=["clean-run-value", "image-value"])
+def test_the_path_script_names_the_loader_files_and_the_build_landmarks(value: str) -> None:
+    """The script lists the loader cache and folders, and the paths that must be missing (SKY-737).
+
+    Args:
+        value: The ``OPENSSL_CONF`` that the run starts with.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "OPENSSL_CONF": value},
+    )
+
+    assert done.returncode == 0, done.stderr
+    lines = set(done.stdout.split("\n"))
+    assert {"absent /etc/ld.so.preload", "opt /etc/ld.so.cache", "lib /usr/lib"} <= lines
+    folder = Path(base).resolve().parent
+    assert {f"absent {folder}/pybuilddir.txt", f"absent {folder}/Modules/Setup.local"} <= lines
+    # The clean run's own /dev/null is not an image variable; an image value is.
+    assert ("env OPENSSL_CONF" in lines) is (value != "/dev/null")
 
 
 def test_the_path_script_refuses_a_locale_that_does_not_load() -> None:

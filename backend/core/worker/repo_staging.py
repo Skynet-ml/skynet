@@ -1202,10 +1202,20 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # root scripts import, and prints a tagged line for each path that it uses:
 # ``path`` for a ``sys.path`` entry, ``file`` for each file mapped into it or
 # into its shell (``/proc/<pid>/maps``, so libpython, libc and any preloaded
-# library wherever they are) and for the ELF loader that it names, ``opt``
-# for a loader file that may be missing, and ``dir`` for its prefix. The hash
-# scripts start it with ``env -i`` and the supervisor with the box's own
-# environment, so it runs both ways. ``w`` walks one path from ``/``: it
+# library wherever they are) and for the ELF loader that it, root's programs
+# and root's tools name, ``opt`` for a loader file that may be missing, ``lib``
+# for each loader folder (the default ones, those in ``/etc/ld.so.cache`` or
+# ``/etc/ld-musl-*.path``, and the RPATH and RUNPATH of each mapped file and
+# root program), ``absent`` for a path that must not exist
+# (``/etc/ld.so.preload``, and the CPython build and venv landmarks that
+# ``getpath`` looks for next to the interpreter), and ``dir`` for its prefix.
+# Every regular file that the listing names must be readable by others: a
+# root-only file could name a path, such as a preloaded library, that the
+# probe never sees. Each library in a loader folder must be root's and
+# readable by others for the same reason. The hash scripts start it with
+# ``env -i OPENSSL_CONF=/dev/null``, so an image OpenSSL config loads no
+# engine into root, and the supervisor with the box's own environment, so it
+# runs both ways. ``w`` walks one path from ``/``: it
 # prints ``stat`` (owner uid, octal mode, type, name) of ``/`` and of each
 # part, follows each link hop by hop with plain ``readlink``, as ``namei`` and
 # ``readlink -f`` hide the hops, and prints ``link <target>`` after it, or
@@ -1216,7 +1226,9 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # judges the listing. Below each ``sys.path`` folder, except
 # ``site-packages`` and ``dist-packages``, which ``-S`` keeps out of
 # ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
-# group or others can write, or that is a link. A ``pyvenv.cfg`` or ``._pth``
+# group or others can write, or that is a link. In the locale trees a
+# root-owned link may stay, as Debian links ``coreutils.mo`` files there; the
+# interpreter prints a ``file`` line for each one, so its target is checked. A ``pyvenv.cfg`` or ``._pth``
 # file next to the interpreter would move ``sys.path``, so it fails the probe
 # too. ``env`` lines name the variables of each run, without their values,
 # for :func:`_root_variables`. A newline in a name or target could forge a listing line, so the probe
@@ -1248,13 +1260,16 @@ _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
-    "import "
+    r"""import os
+names = [n for n in os.environ if not (n == "OPENSSL_CONF" and os.environ[n] == "/dev/null")]
+os.environ["OPENSSL_CONF"] = "/dev/null"
+import """
     + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
     + r"""
 import locale
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
-for name in os.environ:
+for name in names:
     if not (name.isascii() and name.isprintable()):
         sys.exit("an environment variable name is not printable ASCII")
     print("env", name)
@@ -1267,6 +1282,13 @@ for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
     print("path", tree)
+    for folder, subfolders, files in os.walk(tree, onerror=lambda error: sys.exit(str(error))):
+        for name in subfolders + files:
+            link = os.path.join(folder, name)
+            if not (link.isascii() and link.isprintable()):
+                sys.exit("a locale file name is not printable ASCII")
+            if os.path.islink(link):
+                print("file", link)
 try:
     locale.setlocale(locale.LC_ALL, "")
 except locale.Error:
@@ -1296,8 +1318,105 @@ try:
 except (OSError, UnicodeDecodeError):
     known = False
 print("account", "ok" if known else "none", os.getuid())
-for name in ["ld.so.preload", "ld.so.cache"] + [n for n in os.listdir("/etc") if n.startswith("ld-musl-")]:
-    print("opt", "/etc/" + name)
+print("absent", "/etc/ld.so.preload")
+folders = {"/lib", "/usr/lib", "/lib64", "/usr/lib64", "/usr/local/lib"}
+print("opt", "/etc/ld.so.cache")
+if os.path.lexists("/etc/ld.so.cache"):
+    with open("/etc/ld.so.cache", "rb") as cache:
+        data = cache.read()
+    at = data.find(b"glibc-ld.so.cache1.1")
+    if at < 0:
+        sys.exit("the loader cache has no glibc-ld.so.cache1.1 table")
+    for entry in range(at + 48, at + 48 + 24 * int.from_bytes(data[at + 20 : at + 24], "little"), 24):
+        name = at + int.from_bytes(data[entry + 8 : entry + 12], "little")
+        folders.add(os.path.dirname(data[name : data.index(b"\0", name)].decode("ascii")))
+for name in os.listdir("/etc"):
+    if name.startswith("ld-musl-"):
+        print("opt", "/etc/" + name)
+        with open("/etc/" + name, encoding="ascii") as paths:
+            folders.update(paths.read().replace(":", "\n").split())
+"""
+    + f"programs = {[*_ROOT_PROGRAMS, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + r"""
+for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.lexists(name)}):
+    with open(name, "rb") as elf:
+        data = elf.read()
+    if data[:4] != b"\x7fELF":
+        continue
+    if data[4:6] != b"\x02\x01":
+        sys.exit("a mapped file is not a 64-bit little-endian ELF file")
+    u = lambda a, b: int.from_bytes(data[a:b], "little")
+    start, size, count = u(32, 40), u(54, 56), u(56, 58)
+    heads = [at for at in range(start, start + size * count, size)]
+    for at in heads:
+        if u(at, at + 4) == 3:
+            print("file", data[u(at + 8, at + 16) : u(at + 8, at + 16) + u(at + 32, at + 40)].rstrip(b"\0").decode())
+    loads = [(u(at + 16, at + 24), u(at + 8, at + 16), u(at + 32, at + 40)) for at in heads if u(at, at + 4) == 1]
+    strtab, found = None, []
+    for at in heads:
+        if u(at, at + 4) == 2:
+            for item in range(u(at + 8, at + 16), u(at + 8, at + 16) + u(at + 32, at + 40), 16):
+                tag = u(item, item + 8)
+                if tag == 0:
+                    break
+                if tag == 5:
+                    strtab = u(item + 8, item + 16)
+                if tag in (15, 29):
+                    found.append(u(item + 8, item + 16))
+    if found:
+        base = next(offset + strtab - address for address, offset, length in loads if address <= strtab < address + length)
+        for value in found:
+            for folder in data[base + value : data.index(b"\0", base + value)].decode("ascii").split(":"):
+                folder = folder.replace("${ORIGIN}", "$ORIGIN").replace("$ORIGIN", os.path.dirname(name))
+                if "$" in folder or not folder.startswith("/"):
+                    sys.exit("a library search path is not an absolute folder")
+                folders.add(folder)
+def scan(folder, depth):
+    for item in os.scandir(folder):
+        info = item.stat(follow_symlinks=False)
+        if item.is_symlink():
+            if ".so" in item.name:
+                if not os.path.exists(item.path):
+                    sys.exit("a library link in a loader folder is dangling")
+                links.append(item.path)
+        elif item.is_dir(follow_symlinks=False):
+            if item.name in ("site-packages", "dist-packages"):
+                continue
+            if info.st_uid or info.st_mode & 0o022 or info.st_mode & 0o005 != 0o005:
+                sys.exit("a loader folder is not root's, or others cannot read it")
+            if depth < 4:
+                scan(item.path, depth + 1)
+        elif ".so" in item.name:
+            if info.st_uid or info.st_mode & 0o022 or not info.st_mode & 0o004:
+                sys.exit("a library in a loader folder is not root's, or others cannot read it")
+            checked.add(item.path)
+if not all(folder.startswith("/") for folder in folders):
+    sys.exit("a loader folder is not absolute")
+links, checked = [], set()
+for folder in sorted({os.path.realpath(folder) for folder in folders if os.path.isdir(folder)}):
+    scan(folder, 1)
+for target in sorted({os.path.realpath(link) for link in links} - checked):
+    print("file", target)
+for folder in sorted(folders):
+    print("lib", folder)
+version = f"python{sys.version_info[0]}.{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "")
+packed = f"python{sys.version_info[0]}{sys.version_info[1]}" + ("t" if "t" in sys.abiflags else "") + ".zip"
+for start in sorted({os.path.dirname(sys.executable), os.path.dirname(os.path.realpath(sys.executable))}):
+    for name in ("pybuilddir.txt", "Modules/Setup.local", "pyvenv.cfg"):
+        print("absent", start + "/" + name)
+    print("absent", os.path.dirname(start).rstrip("/") + "/pyvenv.cfg")
+    for landmarks, top in (
+        ((f"{sys.platlibdir}/{version}/os.py", f"{sys.platlibdir}/{version}/os.pyc"), sys.prefix),
+        ((f"{sys.platlibdir}/{packed}",), sys.prefix),
+        ((f"{sys.platlibdir}/{version}/lib-dynload",), sys.exec_prefix),
+    ):
+        here = start
+        while not (here == top and any(os.path.lexists(here.rstrip("/") + "/" + name) for name in landmarks)):
+            for name in landmarks:
+                print("absent", here.rstrip("/") + "/" + name)
+            if here == "/":
+                break
+            here = os.path.dirname(here)
 print("dir", sys.prefix)
 print("dir", sys.exec_prefix)
 """
@@ -1339,15 +1458,17 @@ _TRUSTED_PYTHON_PROBE = (
     "done; done\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
-    '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
+    '  if [ $m = clean ]; then o=$(/usr/bin/env -i OPENSSL_CONF=/dev/null "$s" -I -S -c "$y") || exit 1\n'
     '  elif [ -n "$g" ]; then o=$(LC_ALL="$h" "$s" -I -S -c "$y") || exit 1\n'
     '  else o=$(/usr/bin/env -u LC_ALL "$s" -I -S -c "$y") || exit 1; fi\n'
     "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
-    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'account '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'locale '?*|'account '?*|'path /'*|'file /'*|'dir /'*|'opt /'*|'lib /'*|'absent /'*) ;; *) exit 1;; esac\n"
     '    printf \'%s\\n\' "$v"; t=${v%% *}; case $t in env|locale|account) continue;; esac; w "${v#* }"\n'
     '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
-    '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
-    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
+    "      case ${v#* } in /usr/lib/locale|/usr/share/locale)\n"
+    '        q=$(find "$a" \\( ! -user 0 -o ! -type l \\( -perm -020 -o -perm -002 \\) \\) -print) || exit 1;;\n'
+    '      *) q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
+    " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1;; esac\n"
     '      [ -z "$q" ] || exit 1\n'
     "    fi\n"
     "  done || exit 1\n"
@@ -1358,14 +1479,17 @@ _PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
 _ACCOUNT_OK = re.compile(r"ok [0-9]+")
 _ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
-# The file types that each tagged path may have; ``path`` and ``opt`` may also be missing.
+# The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
+# An ``absent`` path is a CPython build or venv landmark, and it must be missing.
 _ENTRY_KINDS = {
     "path": frozenset({"directory", "regular file"}),
     "file": frozenset({"regular file"}),
     "opt": frozenset({"regular file"}),
     "dir": frozenset({"directory"}),
+    "lib": frozenset({"directory"}),
+    "absent": frozenset(),
 }
-_MAY_BE_MISSING = frozenset({"path", "opt"})
+_MAY_BE_MISSING = frozenset({"path", "opt", "lib", "absent"})
 _VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
 # Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
 # supervisor with the box's environment, which holds the image ENV. The
@@ -1441,8 +1565,11 @@ UNTRUSTED_PYTHON = (
     " ({path}), each folder of that PATH that exists, every file that Python loads, the locale trees,"
     " each folder on its import path and every file and folder below that path (except site-packages), and"
     " every folder from / down to each of them, must be"
-    " owned by root and not writable by group or others. /tmp must be a root-owned folder with mode 1777."
-    " Links count only below / and outside the import path. Each of those four tools must be in at least one"
+    " owned by root and not writable by group or others. Others must be able to read each of those files,"
+    " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
+    " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
+    " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
+    " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
     " of the folders, and no entry may be a dangling link."
 )
 NO_ACCOUNT = (
@@ -1816,23 +1943,25 @@ def _trusted_python(probe: Any) -> bool:
 
     Returns:
         True when ``BASE_PYTHON`` resolves to a root-owned regular file that
-        group and others cannot write and others can run, each of
+        group and others cannot write and others can read and run, each of
         ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
-        present) resolves to one that group and others cannot write,
+        present) resolves to one that group and others cannot write and others can read,
         ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
         missing or one that group and others cannot write and others can
         search, the probe reports each folder and tool pair once, every entry of
         ``_ROOT_TOOLS`` in those folders resolves to such a file and each
         tool has one, both runs find a passwd line for the box user, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
-        passes :func:`_walk` with the file type that its tag allows.
+        passes :func:`_walk` with the file type that its tag allows, every
+        regular file among them is readable by others, and every ``absent``
+        entry is missing.
     """
     if not probe.ok:
         return False
     # Only a newline ends a line; ``splitlines`` would also split at other control bytes.
     lines = probe.stdout.removesuffix("\n").split("\n")[::-1]
     python = _walk(lines, BASE_PYTHON)
-    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or not python[0] & 0o001:
+    if python in (None, _MISSING) or python[1] != "regular file" or python[0] & 0o022 or python[0] & 0o005 != 0o005:
         return False
     for path in _ROOT_PATHS:
         if not lines or lines.pop() != f"file {path}":
@@ -1845,7 +1974,7 @@ def _trusted_python(probe: Any) -> bool:
         if path == _ROOT_TMP:
             if entry != (0o1777, "directory"):
                 return False
-        elif entry[1] != "regular file" or entry[0] & 0o022:
+        elif not _readable_file(entry):
             return False
     for folder in _ROOT_PATH.split(":"):
         if not lines or lines.pop() != f"bin {folder}":
@@ -1865,7 +1994,7 @@ def _trusted_python(probe: Any) -> bool:
             if line != f"tool {folder}/{tool}":
                 return False
             entry = _walk(lines, f"{folder}/{tool}")
-            if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+            if entry in (None, _MISSING) or not _readable_file(entry):
                 return False
             found.add(tool)
     if found != set(_ROOT_TOOLS):
@@ -1888,10 +2017,25 @@ def _trusted_python(probe: Any) -> bool:
                 return False
             if entry != _MISSING and (entry[1] not in _ENTRY_KINDS[tag] or entry[0] & 0o022):
                 return False
+            # A file that the box user cannot read could name paths, such as an ld.so.preload library, that the probe never sees.
+            if entry != _MISSING and entry[1] == "regular file" and not _readable_file(entry):
+                return False
             tags.add(tag)
         if not {"account", "path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _readable_file(entry: tuple[int, str]) -> bool:
+    """Tell whether a walked entry is a regular file that group and others cannot write and others can read.
+
+    Args:
+        entry: The mode and file type that :func:`_walk` returned.
+
+    Returns:
+        True for such a file.
+    """
+    return entry[1] == "regular file" and not entry[0] & 0o022 and bool(entry[0] & 0o004)
 
 
 def _missing_account(probe: Any) -> str | None:

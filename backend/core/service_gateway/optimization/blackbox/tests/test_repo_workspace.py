@@ -1246,6 +1246,8 @@ def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: 
     assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
     assert all(('"$p" -I -S -c' in command) for command in session.commands)
     assert all(("/usr/bin/env -i " in command) is (run_image is not None) for command in session.commands)
+    # An image OpenSSL config could load an engine from a box-user folder into root's hashlib.
+    assert all(("env -i OPENSSL_CONF=/dev/null " in command) is (run_image is not None) for command in session.commands)
 
 
 def test_the_root_hash_and_answer_commands_change_folder_only_to_absolute_paths(tmp_path: Path) -> None:
