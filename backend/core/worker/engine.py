@@ -1044,7 +1044,7 @@ class BackgroundWorker:
                         )
                         # Before the setup model and the scorer box, so a bad image stops the run
                         # before it pays for either; a resume keeps the images it pinned (SKY-737).
-                        if staged_repository.box_sources:
+                        if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
                             staged_repository = prepare_box_images(
                                 staged_repository,
                                 owner_id=optimization_id,
