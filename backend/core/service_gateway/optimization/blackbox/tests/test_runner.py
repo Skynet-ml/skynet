@@ -3559,3 +3559,22 @@ def test_an_image_temp_variable_cannot_move_the_root_run_folder(
     assert folders[0].name.startswith(".app-run-")
     assert not folders[0].exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_entry_gets_no_root_openssl_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boot's ``OPENSSL_CONF=/dev/null`` is for root only; the entry gets the box's own environment (SKY-737).
+
+    Args:
+        tmp_path: The call's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    envs: list[dict[str, str]] = []
+    monkeypatch.setenv("OPENSSL_CONF", "/dev/null")
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, *_: envs.append(env))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert len(envs) == 1
+    assert "OPENSSL_CONF" not in envs[0]
+    assert os.environ["OPENSSL_CONF"] == "/dev/null"

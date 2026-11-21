@@ -5648,8 +5648,12 @@ def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("value", [None, "/etc/box.cnf"], ids=["unset", "set"])
 def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: Path, value: str | None) -> None:
-    """Root's first hash reads no OpenSSL config, and the entry gets the box's own value back (SKY-737)."""
-    source = "import os\nprint(repr(os.environ.get('OPENSSL_CONF')))\n"
+    """The whole root process, after the hash too, reads no image OpenSSL config (SKY-737).
+
+    An image without ``_hashlib`` first loads OpenSSL at the runner's ``import ssl``,
+    after the hash, so the runner body must still see ``/dev/null``.
+    """
+    source = "import os, ssl\nprint(repr(os.environ.get('OPENSSL_CONF')))\n"
     path = tmp_path / "runner.py"
     path.write_text(source, encoding="utf-8")
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -5667,7 +5671,7 @@ def test_the_root_supervisor_hashes_without_the_image_openssl_config(tmp_path: P
     )
 
     assert repo_scorer._SUPERVISOR_BOOT.index("'/dev/null'") < repo_scorer._SUPERVISOR_BOOT.index("import hashlib")
-    assert done.stdout == f"{value!r}\n"
+    assert done.stdout == "'/dev/null'\n"
 
 
 _BASH_METRIC = """#!/usr/bin/env bash

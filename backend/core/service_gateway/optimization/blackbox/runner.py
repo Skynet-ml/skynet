@@ -2413,6 +2413,10 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     timeout = float(payload["timeout"])
     _block_tracing()
     env = dict(os.environ)
+    # The supervisor boot set ``OPENSSL_CONF=/dev/null`` for root only. The
+    # image check refuses every ``OPENSSL_*`` in the image ENV, so the box had
+    # none, and the entry gets the box's own environment (SKY-737).
+    env.pop("OPENSSL_CONF", None)
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))

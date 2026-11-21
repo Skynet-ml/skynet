@@ -153,15 +153,15 @@ _BASE_PYTHON = "/usr/local/bin/python3"
 # The supervisor runs as root, but the box user can rewrite the runner file
 # between the write and the run (a process an earlier case left). So root reads
 # the file once, checks its hash against the parent's copy, and runs those
-# same bytes (SKY-398). OpenSSL reads its config once per process, at the
-# first hash. An image config can name an engine library in a folder that the
-# box user writes, so that read sees ``/dev/null``; the entry then gets the
-# box's own ``OPENSSL_CONF`` back (SKY-737).
+# same bytes (SKY-398). An image OpenSSL config can name an engine library in
+# a folder that the box user writes. OpenSSL loads its config at its first use
+# in the process, which is the hash, or the runner's ``import ssl`` when the
+# image has no ``_hashlib``. So ``OPENSSL_CONF`` stays ``/dev/null`` for the
+# whole root process (SKY-737).
 _SUPERVISOR_BOOT = (
-    "import os;c=os.environ.pop('OPENSSL_CONF',None);os.environ['OPENSSL_CONF']='/dev/null';"
+    "import os;os.environ['OPENSSL_CONF']='/dev/null';"
     "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
     "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
-    "del os.environ['OPENSSL_CONF'];c is None or os.environ.update(OPENSSL_CONF=c);"
     "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
     "exec(compile(s,p,'exec'),g)"
 )

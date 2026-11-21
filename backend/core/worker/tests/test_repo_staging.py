@@ -6971,6 +6971,26 @@ def test_the_path_script_refuses_a_locale_that_does_not_load() -> None:
     assert "the image locale does not load" in done.stderr
 
 
+def test_the_path_script_accepts_an_image_with_no_locale_trees(tmp_path: Path) -> None:
+    """An image that ran ``rm -rf /usr/share/locale`` still passes the script (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder, which holds no locale trees.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    trees = f'("{tmp_path}/lib/locale", "{tmp_path}/share/locale")'
+    script = repo_staging._PATH_SCRIPT.replace('("/usr/lib/locale", "/usr/share/locale")', trees)
+    assert script != repo_staging._PATH_SCRIPT
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert {f"path {tmp_path}/lib/locale", f"path {tmp_path}/share/locale"} <= set(done.stdout.split("\n"))
+
+
 def test_the_path_script_reports_whether_passwd_names_the_box_user(tmp_path: Path) -> None:
     """The script finds the box uid in ``/etc/passwd`` with the supervisor's rules, and says when it cannot (SKY-737).
 

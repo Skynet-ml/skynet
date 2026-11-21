@@ -1282,6 +1282,8 @@ for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
     print("path", tree)
+    if not os.path.lexists(tree):
+        continue
     for folder, subfolders, files in os.walk(tree, onerror=lambda error: sys.exit(str(error))):
         for name in subfolders + files:
             link = os.path.join(folder, name)
