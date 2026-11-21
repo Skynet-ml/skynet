@@ -123,7 +123,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     patch_violations,
     strip_archive,
 )
-from ..service_gateway.optimization.blackbox.repo_workspace import RepoSetupError, RepoWorkspace
+from ..service_gateway.optimization.blackbox.repo_workspace import BASE_PYTHON, RepoSetupError, RepoWorkspace
 from ..service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
@@ -1166,6 +1166,21 @@ DOCKERFILE_UNSUPPORTED = (
 )
 
 
+# The candidate box hashes the protected files with BASE_PYTHON and never
+# falls back to PATH in a user image, so the image must hold it where the box
+# user cannot replace it. ``stat`` prints, for the path, its folder, its
+# resolved target and the target's folder: owner uid, octal mode and file type.
+_TRUSTED_PYTHON_PROBE = (
+    f'p={shlex.quote(BASE_PYTHON)}; t=$(readlink -f "$p") && [ -f "$t" ] && [ -x "$t" ]'
+    ' && stat -c "%u %a %F" "$p" "${p%/*}" "$t" "${t%/*}"'
+)
+UNTRUSTED_PYTHON = (
+    "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
+    " The image must hold it as an executable file or a link to one. It, its target and both folders must be"
+    " owned by root and not writable by group or others."
+)
+
+
 class BoxImageError(RepoSetupError):
     """A user box image did not build or failed its check, so no candidate runs (SKY-737)."""
 
@@ -1358,7 +1373,7 @@ def _dockerfile_image(
         raise BoxImageError(f"[{role}] dockerfile '{dockerfile}': {error}") from error
     record = {"source": "dockerfile", "input_hash": input_hash}
     found = store.find_image_build(username, input_hash)
-    if found is not None and _still_held(registry, request.owner, found["image"]):
+    if found is not None and _still_held(registry, kind, request.owner, found["image"]):
         return {
             "image": found["image"],
             "digest": _digest(found["image"]),
@@ -1407,24 +1422,47 @@ def _dockerfile_image(
     return {"image": outcome.image, "digest": outcome.digest, **record, "build_log": f"image-build:{build_id}"}
 
 
-def _still_held(registry: ImageRegistry | None, owner: str, image: str) -> bool:
-    """Check that the registry still holds a reused build.
+def _still_held(registry: ImageRegistry | None, builder: str, owner: str, image: str) -> bool:
+    """Check that a reused build's image still exists where the builder puts it.
 
     Args:
-        registry: The user image registry, or ``None`` for a local image.
+        registry: The user image registry, or ``None`` when the builder keeps its images.
+        builder: The kind of the builder in use.
         owner: The owner of the registry repository.
         image: The reused build's image.
 
     Returns:
-        True with no registry, or when the registry holds the digest.
+        True when the registry holds the digest, or with no registry when
+        local Docker still holds the image id. False for any other builder
+        with no registry, because nothing can confirm its image.
     """
-    if registry is None:
+    if registry is not None:
+        try:
+            registry.check_digest(owner, _digest(image))
+        except ImageRegistryError:
+            return False
         return True
+    # ``docker image prune`` removes a local build, and a run that reused
+    # its id would then fail at every box start.
+    return builder == LocalDockerImageBuilder.kind and _local_image_exists(image)
+
+
+def _local_image_exists(image: str) -> bool:
+    """Ask local Docker whether it still holds an image.
+
+    Args:
+        image: The image id or reference.
+
+    Returns:
+        Whether ``docker image inspect`` finds it.
+    """
     try:
-        registry.check_digest(owner, _digest(image))
-    except ImageRegistryError:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image], capture_output=True, timeout=_CHECK_TIMEOUT_SECONDS, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return False
-    return True
+    return result.returncode == 0
 
 
 def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> str | None:
@@ -1454,6 +1492,7 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
     )
     try:
         result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
     finally:
         with contextlib.suppress(Exception):
             session.close()
@@ -1461,6 +1500,8 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
     python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
     if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
+        if probe is not None and not _trusted_python(probe):
+            raise BoxImageError(UNTRUSTED_PYTHON.format(image=image, python=BASE_PYTHON, app=APP_NAME))
         return python if check_role == "metric" else None
     failed = [
         f"- {check.get('name')}: {check.get('message')}"
@@ -1472,6 +1513,29 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
         f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
         f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
     )
+
+
+def _trusted_python(probe: Any) -> bool:
+    """Tell whether the image's base interpreter is out of the box user's reach.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        True when the path, its folder, its target and the target's folder are
+        all owned by root, and none but a link is writable by group or others.
+    """
+    lines = probe.stdout.strip().splitlines() if probe.ok else []
+    if len(lines) != 4:
+        return False
+    for line in lines:
+        parts = line.split(" ", 2)
+        if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]):
+            return False
+        # A link's own mode is always 777 and grants nothing; its folder guards it.
+        if parts[2] != "symbolic link" and int(parts[1], 8) & 0o022:
+            return False
+    return True
 
 
 def _check_report(stdout: str) -> dict[str, Any] | None:

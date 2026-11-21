@@ -1207,6 +1207,64 @@ def test_the_check_runs_as_root_unless_the_provider_root_has_no_capability(
         space.close()
 
 
+class _CommandRecordingSession(_SudoRecordingSession):
+    """A box that records each command line, and prints an empty fingerprint."""
+
+    def __init__(self) -> None:
+        """Start with no command."""
+        super().__init__()
+        self.commands: list[str] = []
+
+    def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+        """Record the command line and print an empty fingerprint.
+
+        Args:
+            command: Shell command line.
+            sudo: The command asks for root.
+            **options: Other run options.
+
+        Returns:
+            A clean result with an empty fingerprint.
+        """
+        self.commands.append(command)
+        return super().run(command, sudo=sudo, **options)
+
+
+@pytest.mark.parametrize("run_image", [None, "registry.example/u@sha256:" + "b" * 64], ids=["skynet", "user"])
+def test_a_user_image_box_never_runs_the_path_python(tmp_path: Path, run_image: str | None) -> None:
+    """Hash and answer with the base interpreter alone in a user image box, with no PATH fallback (SKY-737)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/labels.csv": "a,1\n"})
+    space = _space(archive, _Runtime(), setup=None, protected_paths=["eval"], run_image=run_image)
+    session = _CommandRecordingSession()
+    space.fingerprint(session, WORK_DIR)  # type: ignore[arg-type]
+    space._digest_prepared(session)  # type: ignore[arg-type]
+    repo_workspace._write_answer(session, "answer", "text", user_image=space.user_run_image)  # type: ignore[arg-type]
+    assert len(session.commands) == 3
+    assert all(f"p={shlex.quote(repo_workspace.BASE_PYTHON)} && " in command for command in session.commands)
+    assert all(("p=python3" in command) is (run_image is None) for command in session.commands)
+
+
+@pytest.mark.parametrize(("user_image", "planted_runs"), [(False, True), (True, False)], ids=["skynet", "user"])
+def test_a_planted_path_python_runs_only_outside_a_user_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user_image: bool, planted_runs: bool
+) -> None:
+    """With no base interpreter, a user image box fails closed instead of running a planted ``python3`` (SKY-737)."""
+    planted = tmp_path / "bin" / "python3"
+    planted.parent.mkdir()
+    planted.write_text("#!/bin/sh\necho planted\n")
+    planted.chmod(0o755)
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", str(tmp_path / "missing" / "python3"))
+    done = subprocess.run(
+        ["/bin/sh", "-c", repo_workspace._pick_base_python(user_image) + '"$p" -I -S -c "print(1)"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.pathsep.join([str(planted.parent), "/usr/bin", "/bin"])},
+        check=False,
+    )
+    assert (done.stdout.strip() == "planted") is planted_runs
+    assert (done.returncode == 0) is planted_runs
+
+
 @pytest.mark.parametrize(("provider", "capable"), [(DockerEnvironment, False), (VercelEnvironment, True)])
 def test_the_session_takes_the_root_kind_from_the_provider_class(provider: type, capable: bool) -> None:
     """Read the root's kind from the provider class, never from the box, through each session wrapper (TS-1)."""

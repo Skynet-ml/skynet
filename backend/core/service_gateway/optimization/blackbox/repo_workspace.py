@@ -297,17 +297,24 @@ print(sha.hexdigest())
 """
 
 
-def _pick_base_python() -> str:
+def _pick_base_python(user_image: bool = False) -> str:
     """Set ``p`` in a box command to the base interpreter.
 
-    It falls back to ``python3`` from PATH only where no base interpreter
-    exists, such as the local test runtime. The box user cannot remove the
-    root-owned one in the image, so the fallback never runs there.
+    In Skynet's image it falls back to ``python3`` from PATH only where no
+    base interpreter exists, such as the local test runtime. The box user
+    cannot remove the root-owned one in the image, so the fallback never runs
+    there. A user image gives no such promise, so its box never falls back:
+    its image check proved the base interpreter root-owned (SKY-737).
+
+    Args:
+        user_image: Whether the box runs a user ``[run]`` image.
 
     Returns:
         A shell prefix that sets ``p`` and ends in ``&& ``. It keeps one
         ``&&`` chain, so a failed ``cd`` before it still stops the hash.
     """
+    if user_image:
+        return f"p={shlex.quote(BASE_PYTHON)} && "
     return f'p={shlex.quote(BASE_PYTHON)} && {{ [ -x "$p" ] || p=python3; }} && '
 
 
@@ -679,7 +686,7 @@ class CandidateBox:
                 # contents can name a change.
                 changes = workspace.changes(current, current[1] if self._unstamped else before)
                 try:
-                    written = _write_answer(self.session, path, text)
+                    written = _write_answer(self.session, path, text, user_image=workspace.user_run_image)
                 except Exception:
                     # A found change must still reach the rule judge.
                     if changes:
@@ -764,19 +771,20 @@ class MetricBox:
         self.box.release(healthy=True)
 
 
-def _write_answer(session: SandboxSession, path: str, text: str) -> bool:
+def _write_answer(session: SandboxSession, path: str, text: str, *, user_image: bool = False) -> bool:
     """Write one relay answer with a box-user command, which moves no protected file's change time.
 
     Args:
         session: The box the answer goes to.
         path: Where the answer goes, relative to the box.
         text: The answer.
+        user_image: Whether the box runs a user ``[run]`` image.
 
     Returns:
         Whether the write succeeded.
     """
     result = session.run(
-        f'{_pick_base_python()}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
+        f'{_pick_base_python(user_image)}"$p" -I -S -c {shlex.quote(_WRITE_ANSWER)} "$PWD"/{shlex.quote(path)}',
         env={"APP_ANSWER": text},
         timeout_seconds=_HASH_TIMEOUT_SECONDS,
     )
@@ -879,6 +887,7 @@ class RepoWorkspace:
         self._setup = (setup_command or "").strip() or None
         self._metric_setup = (metric_setup or "").strip() or None
         self._run_image = run_image or spec.image
+        self.user_run_image = bool(run_image)
         self._metric_image = metric_image or spec.image
         self.metric_python = metric_python or "python3"
         self._secrets = dict(secrets)
@@ -1451,7 +1460,7 @@ class RepoWorkspace:
             failed or printed something that is not a digest.
         """
         result = session.run(
-            f'cd {PREPARED_DIR} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
+            f'cd {PREPARED_DIR} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c {shlex.quote(_HASH_PREPARED)}',
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         lines = result.stdout.strip().splitlines() if result.ok else []
@@ -1472,7 +1481,7 @@ class RepoWorkspace:
         """
         paths = " ".join(shlex.quote(path) for path in self._protected)
         result = session.run(
-            f'cd {shlex.quote(directory)} && {_pick_base_python()}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
+            f'cd {shlex.quote(directory)} && {_pick_base_python(self.user_run_image)}"$p" -I -S -c {shlex.quote(_HASH_PROTECTED)} {paths}',
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
             # A box-user command's output files belong to the box user, so a
             # process that the version leaves running could replace a clean

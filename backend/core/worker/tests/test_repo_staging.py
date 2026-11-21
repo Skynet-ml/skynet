@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,10 +49,10 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
-from core.sandbox.image_build import BuildResult, ImageBuildError
+from core.sandbox.image_build import BuildResult, ImageBuildError, LocalDockerImageBuilder
 from core.sandbox.image_registry import ImageRegistryError
 from core.sandbox.services import ComposeService
-from core.service_gateway.optimization.blackbox import runner
+from core.service_gateway.optimization.blackbox import repo_workspace, runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR, RUN_FAILED_STATUS
 from core.service_gateway.optimization.blackbox.registry import ENGINES
@@ -5886,29 +5887,36 @@ class _FakeBudget:
         return paid.value
 
 
-class _CheckSession:
-    """Answer ``ascent check --image`` with a fixed report."""
+_TRUSTED_PROBE = "0 755 symbolic link\n0 755 directory\n0 755 regular file\n0 755 directory\n"
 
-    def __init__(self, ok: bool) -> None:
+
+class _CheckSession:
+    """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
+
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
+            probe: What the trusted interpreter probe prints.
         """
         self.ok = ok
+        self.probe = probe
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
-        """Print the check's JSON report.
+        """Print the check's JSON report, or the probe's listing.
 
         Args:
-            command: The check command.
+            command: The check or probe command.
             **_: Unused run options.
 
         Returns:
             The report, with exit code 1 when the image fails.
         """
         self.commands.append(command)
+        if not command.startswith("ascent check"):
+            return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
         report = {"ok": self.ok, "checks": checks, "python": sys.executable}
         return CommandResult(exit_code=0 if self.ok else 1, stdout=json.dumps(report) + "\n")
@@ -5923,13 +5931,15 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(self, *, check_ok: bool = True) -> None:
+    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
+            probe: What the trusted interpreter probe prints in each check box.
         """
         self.check_ok = check_ok
+        self.probe = probe
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -5945,7 +5955,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok))
+            self.checks.append(_CheckSession(self.check_ok, self.probe))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -5993,6 +6003,8 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
         monkeypatch: Pytest monkeypatch.
     """
     staged_payload, staged = _stage_with(_BOX_TREE, monkeypatch)
+    # The local boxes have no /usr/local/bin/python3; a user image box never falls back to PATH.
+    monkeypatch.setattr(repo_workspace, "BASE_PYTHON", sys.executable)
     builder, budget, runtime = _FakeBuilder(), _FakeBudget(), _ImageRuntime()
     try:
         staged = _prepare(
@@ -6019,7 +6031,7 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
     assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
     assert budget.charges[0]["provider_usd"] >= 0
     assert [check.commands for check in runtime.checks] == [
-        ["ascent check --image --role candidate"],
+        ["ascent check --image --role candidate", repo_staging._TRUSTED_PYTHON_PROBE],
         ["ascent check --image --role metric"],
     ]
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
@@ -6088,6 +6100,114 @@ def test_a_second_run_reuses_the_build_by_its_input_hash(monkeypatch: pytest.Mon
     assert first["build_log"] == "image-build:build-1"
     assert third["build_log"] == "image-build:build-2"
     assert first["input_hash"] == third["input_hash"]
+
+
+class _LocalBuilder(_FakeBuilder):
+    """Build like local Docker, which keeps its images with no registry."""
+
+    kind = LocalDockerImageBuilder.kind
+
+
+@pytest.mark.parametrize(("held", "builds"), [(True, 1), (False, 2)], ids=["held", "pruned"])
+def test_a_pruned_local_image_builds_again(monkeypatch: pytest.MonkeyPatch, held: bool, builds: int) -> None:
+    """With no registry, a reused local build must still be in Docker, or the run builds it again (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        held: Whether ``docker image inspect`` still finds the image.
+        builds: How many builds two runs make.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    inspected: list[str] = []
+    monkeypatch.setattr(repo_staging, "_local_image_exists", lambda image: inspected.append(image) or held)
+    builder, store = _LocalBuilder(), _ImageStore()
+    for _ in range(2):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            _prepare(staged, _ImageRuntime(), builder=builder, store=store)
+        finally:
+            staged.cleanup()
+    assert len(builder.requests) == builds
+    assert inspected == [_BUILT_IMAGE]
+
+
+def test_a_reused_build_with_no_registry_and_no_local_docker_builds_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A builder that keeps no local image and has no registry cannot confirm a reuse, so it builds (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    monkeypatch.setattr(repo_staging, "_local_image_exists", lambda image: pytest.fail("no local Docker check"))
+    builder, store = _FakeBuilder(), _ImageStore()
+    for _ in range(2):
+        _, staged = _stage_with(files, monkeypatch)
+        try:
+            _prepare(staged, _ImageRuntime(), builder=builder, store=store)
+        finally:
+            staged.cleanup()
+    assert len(builder.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "",
+        "0 755 regular file\n0 755 directory\n",
+        "1000 755 regular file\n0 755 directory\n0 755 regular file\n0 755 directory\n",
+        "0 755 symbolic link\n0 775 directory\n0 755 regular file\n0 755 directory\n",
+        "0 755 symbolic link\n0 755 directory\n0 757 regular file\n0 755 directory\n",
+        "0 755 symbolic link\n0 755 directory\n0 755 regular file\n1000 755 directory\n",
+    ],
+    ids=["missing", "short", "user-owned", "group-writable-folder", "other-writable-target", "user-owned-folder"],
+)
+def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
+    """A ``[run]`` image whose base interpreter the box user could replace stops the run (SKY-737).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        probe: What the trusted interpreter probe prints.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=probe)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"has no trusted Python at /usr/local/bin/python3"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def test_a_trusted_python_link_with_mode_777_passes() -> None:
+    """A root-owned link passes with its own 777 mode, since its folder guards it (SKY-737)."""
+    listing = "0 777 symbolic link\n0 755 directory\n0 755 regular file\n0 755 directory\n"
+    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=listing))
+    assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=listing))
+
+
+def test_the_trusted_python_probe_reads_a_real_tree(tmp_path: Path) -> None:
+    """The probe prints owner, mode and type for the path, its target and both folders (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("this stat has no -c option, unlike the box images")
+    target = tmp_path / "real" / "python3.12"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "python3").symlink_to(target)
+    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(
+        shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(tmp_path / "bin" / "python3"))
+    )
+    done = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
+    lines = done.stdout.splitlines()
+    assert done.returncode == 0, done.stderr
+    assert [line.split(" ", 2)[2] for line in lines] == ["symbolic link", "directory", "regular file", "directory"]
+    assert {line.split(" ", 1)[0] for line in lines} == {str(os.getuid())}
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:

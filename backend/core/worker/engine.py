@@ -1055,7 +1055,20 @@ class BackgroundWorker:
                                 budget=budget_gateway.runtime,
                                 pinned=job_data.get("box_images"),
                             )
-                            self._job_store.pin_box_images(optimization_id, dict(staged_repository.box_images))
+                            pinned_images = self._job_store.pin_box_images(
+                                optimization_id, dict(staged_repository.box_images)
+                            )
+                            # A parallel start of the same run pinned first, so every box uses its images.
+                            if pinned_images != staged_repository.box_images:
+                                staged_repository = prepare_box_images(
+                                    staged_repository,
+                                    owner_id=optimization_id,
+                                    username=execution_payload.username,
+                                    runtime=budget_gateway.parent_sandbox_runtime(),
+                                    builder=None,
+                                    store=self._job_store,
+                                    pinned=pinned_images,
+                                )
                         inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                         if inferred_setup is not None:
                             self._record_setup_command(optimization_id, inferred_setup)
