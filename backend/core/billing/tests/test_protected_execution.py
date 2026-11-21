@@ -289,7 +289,7 @@ def test_bind_accepts_a_user_image_pinned_by_digest_in_local_mode(monkeypatch: p
     user_image = "ghcr.io/acme/repo@sha256:" + "b" * 64
 
     identity = bind_protected_sandbox(
-        _Gateway(), settings, owner_id="job-9", image=user_image, user_image_repository=_OWNER_REPOSITORY
+        _Gateway(), settings, owner_id="job-9", source_image=user_image, user_image_repository=_OWNER_REPOSITORY
     )
 
     assert images == [user_image]
@@ -303,7 +303,11 @@ def test_bind_accepts_a_user_image_in_the_owners_repository(monkeypatch: pytest.
     user_image = f"ghcr.io/acme/repo/app@sha256:{_HEX}"
 
     bind_protected_sandbox(
-        _Gateway(), _settings(monkeypatch), owner_id="job-9", image=user_image, user_image_repository=_OWNER_REPOSITORY
+        _Gateway(),
+        _settings(monkeypatch),
+        owner_id="job-9",
+        source_image=user_image,
+        user_image_repository=_OWNER_REPOSITORY,
     )
 
     assert images == [user_image]
@@ -332,7 +336,11 @@ def test_bind_refuses_a_user_image_outside_the_owners_digest_repository(
 
     with pytest.raises(UnpricedOperationError, match="not pinned by digest in the owner's repository"):
         bind_protected_sandbox(
-            _Gateway(), _settings(monkeypatch), owner_id="job-9", image=image, user_image_repository=_OWNER_REPOSITORY
+            _Gateway(),
+            _settings(monkeypatch),
+            owner_id="job-9",
+            source_image=image,
+            user_image_repository=_OWNER_REPOSITORY,
         )
 
     assert images == []
@@ -342,6 +350,37 @@ def test_trusted_user_image_needs_a_repository() -> None:
     """Check that an empty repository prefix trusts no image."""
     assert not protected_execution.trusted_user_image(f"ghcr.io/acme/repo@sha256:{_HEX}", "")
     assert protected_execution.trusted_user_image(f"ghcr.io/acme@sha256:{_HEX}", "ghcr.io/acme/")
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_bind_refuses_a_source_image_with_no_owner_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a user image without the owner's repository fails closed, so it cannot reach another owner's copy."""
+    images = _spy_runtime(monkeypatch)
+
+    with pytest.raises(UnpricedOperationError, match="needs the owner's image repository"):
+        bind_protected_sandbox(
+            _Gateway(), _settings(monkeypatch), owner_id="job-9", source_image=f"ghcr.io/acme/repo@sha256:{_HEX}"
+        )
+
+    assert images == []
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_bind_refuses_a_source_image_next_to_a_deployment_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a run cannot name both a deployment image and a user image."""
+    images = _spy_runtime(monkeypatch)
+
+    with pytest.raises(UnpricedOperationError, match="both a deployment image and a user image"):
+        bind_protected_sandbox(
+            _Gateway(),
+            _settings(monkeypatch),
+            owner_id="job-9",
+            image=_DIGEST,
+            source_image=f"ghcr.io/acme/repo@sha256:{_HEX}",
+            user_image_repository=_OWNER_REPOSITORY,
+        )
+
+    assert images == []
 
 
 @pytest.mark.usefixtures("provider_credentials")

@@ -98,6 +98,10 @@ _PATH_PATTERN = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 # run. The strict grammar refuses a leading ``-`` (a CLI option) and any ``@``
 # or user info before the digest.
 _DIGEST_IMAGE = re.compile(rf"(?:{_HOST_PATTERN}/)?{_PATH_PATTERN}(?:/{_PATH_PATTERN})*@sha256:[0-9a-f]{{64}}")
+# Docker's global options that take their value as the next argument.
+_GLOBAL_VALUE_OPTIONS = frozenset(
+    {"--config", "-c", "--context", "-H", "--host", "-l", "--log-level", "--tlscacert", "--tlscert", "--tlskey"}
+)
 _DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
 # Docker's own key for Docker Hub in a config file's ``auths``.
 _DOCKER_HUB_AUTH = "https://index.docker.io/v1/"
@@ -274,11 +278,30 @@ async def _docker(
             await communication
         if cancelled is not None:
             raise cancelled
-        raise SandboxInfraError(f"docker {args[0]} did not finish in {cli_seconds:.0f}s.")
+        raise SandboxInfraError(f"docker {_subcommand(args)} did not finish in {cli_seconds:.0f}s.")
     if cancelled is not None:
         raise cancelled
     stdout, stderr = communication.result()
     return _CliResult(process.returncode or 0, stdout, stderr)
+
+
+def _subcommand(args: Sequence[str]) -> str:
+    """Return the Docker subcommand of a CLI call, past its global options.
+
+    Args:
+        args: The CLI arguments.
+
+    Returns:
+        The first argument that is not a global option or its value, or an
+        empty string when there is none.
+    """
+    rest = iter(args)
+    for arg in rest:
+        if arg in _GLOBAL_VALUE_OPTIONS:
+            next(rest, None)
+        elif not arg.startswith("-"):
+            return arg
+    return ""
 
 
 async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
@@ -308,6 +331,25 @@ def digest_image(image: str) -> bool:
         True for ``[host/]path@sha256:<64 hex>`` in the strict reference grammar.
     """
     return _DIGEST_IMAGE.fullmatch(image) is not None
+
+
+def in_repository(image: str, repository: str) -> bool:
+    """Tell whether a digest image lies in an owner's image repository.
+
+    Args:
+        image: The image reference.
+        repository: The owner's repository, for example
+            ``registry.example.com/users/alice``.
+
+    Returns:
+        True when ``image`` is a strict digest reference whose name is
+        ``repository`` or lies under it. An empty repository holds no image.
+    """
+    prefix = repository.rstrip("/")
+    if not prefix or not digest_image(image):
+        return False
+    name = image.partition("@")[0]
+    return name == prefix or name.startswith(prefix + "/")
 
 
 def registry_host(image: str) -> str:

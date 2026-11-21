@@ -722,6 +722,39 @@ def test_a_strict_digest_reference_is_accepted(image: str) -> None:
     assert digest_image(image)
 
 
+async def test_a_pull_past_its_limit_names_the_subcommand(tmp_path: Path) -> None:
+    """Check that the time-out of a pull with its own config names ``pull``, not a global option.
+
+    Args:
+        tmp_path: A folder for the fake Docker CLI.
+    """
+    cli = tmp_path / "docker"
+    cli.write_text("#!/bin/sh\nexec sleep 60\n")
+    cli.chmod(0o755)
+    args = ["--config", str(tmp_path), "-H", "unix:///var/run/docker.sock", "pull", USER_IMAGE]
+    with pytest.raises(SandboxInfraError, match=r"^docker pull did not finish"):
+        await docker_provider._docker(str(cli), args, cli_seconds=0.2, kill_on_cancel=True)
+
+
+@pytest.mark.parametrize(
+    ("args", "subcommand"),
+    [
+        (["pull", USER_IMAGE], "pull"),
+        (["--config", "/tmp/x", "-H", "unix:///s", "pull", USER_IMAGE], "pull"),
+        (["--config=/tmp/x", "image", "inspect"], "image"),
+        (["--debug"], ""),
+    ],
+)
+def test_the_subcommand_of_a_docker_call(args: list[str], subcommand: str) -> None:
+    """Check that the subcommand skips global options and their values.
+
+    Args:
+        args: The CLI arguments.
+        subcommand: The expected subcommand.
+    """
+    assert docker_provider._subcommand(args) == subcommand
+
+
 async def test_a_cancel_kills_the_pull_at_once(tmp_path: Path) -> None:
     """Check that a cancel during a slow pull kills the Docker CLI and starts no box.
 
