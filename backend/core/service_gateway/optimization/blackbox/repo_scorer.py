@@ -157,9 +157,10 @@ _BASE_PYTHON = "/usr/local/bin/python3"
 # a folder that the box user writes. OpenSSL loads its config at its first use
 # in the process, which is the hash, or the runner's ``import ssl`` when the
 # image has no ``_hashlib``. So ``OPENSSL_CONF`` stays ``/dev/null`` for the
-# whole root process (SKY-737).
+# whole root process. The boot runs in the runner's globals, so
+# ``_box_openssl_conf`` keeps the box's own value for the entry (SKY-737).
 _SUPERVISOR_BOOT = (
-    "import os;os.environ['OPENSSL_CONF']='/dev/null';"
+    "import os;_box_openssl_conf=os.environ.get('OPENSSL_CONF');os.environ['OPENSSL_CONF']='/dev/null';"
     "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
     "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
     "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"

@@ -3561,20 +3561,43 @@ def test_an_image_temp_variable_cannot_move_the_root_run_folder(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_entry_gets_no_root_openssl_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boot's ``OPENSSL_CONF=/dev/null`` is for root only; the entry gets the box's own environment (SKY-737).
+@pytest.mark.parametrize("value", [None, "/etc/custom.cnf", "/dev/null"], ids=["unset", "set", "image-dev-null"])
+def test_the_entry_gets_the_box_openssl_config_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """Root keeps ``OPENSSL_CONF=/dev/null``, and the entry gets the box's own value, or none (SKY-737).
 
     Args:
         tmp_path: The call's folder.
         monkeypatch: Pytest monkeypatch.
+        value: The box's ``OPENSSL_CONF`` that the supervisor boot saved.
     """
     envs: list[dict[str, str]] = []
     monkeypatch.setenv("OPENSSL_CONF", "/dev/null")
+    monkeypatch.setattr(runner, "_box_openssl_conf", value, raising=False)
     monkeypatch.setattr(runner, "_entry_user", lambda env: {})
     monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, *_: envs.append(env))
 
     runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
 
     assert len(envs) == 1
-    assert "OPENSSL_CONF" not in envs[0]
+    assert envs[0].get("OPENSSL_CONF") == value
     assert os.environ["OPENSSL_CONF"] == "/dev/null"
+
+
+def test_the_entry_keeps_the_openssl_config_without_the_boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner that the supervisor boot did not start passes its own ``OPENSSL_CONF`` on (SKY-737).
+
+    Args:
+        tmp_path: The call's folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    envs: list[dict[str, str]] = []
+    monkeypatch.setenv("OPENSSL_CONF", "/etc/custom.cnf")
+    monkeypatch.delattr(runner, "_box_openssl_conf", raising=False)
+    monkeypatch.setattr(runner, "_entry_user", lambda env: {})
+    monkeypatch.setattr(runner, "_run_entry", lambda entry, timeout, env, *_: envs.append(env))
+
+    runner.run_candidate({"entry": "x.py:f", "input": None, "timeout": 1}, tmp_path)
+
+    assert [env.get("OPENSSL_CONF") for env in envs] == ["/etc/custom.cnf"]
