@@ -2,19 +2,21 @@
 
 A power user can bring a Dockerfile for the candidate box or the metric box
 (SKY-737). A builder builds it with its build context and returns the image
-digest, the image size, an input hash, the full build log and a short tail
-of that log for the user. A cloud run builds on CodeBuild and pushes to the
-registry; a local run builds with the local Docker engine.
+digest, the image size, an input hash, the build log and a short tail of
+that log for the user. A cloud run builds on CodeBuild and pushes to the
+owner's registry repository; a local run builds with the local Docker engine.
 
-The input hash covers the Dockerfile bytes, every path and byte in the build
-context and the build args, so a later part can reuse a finished image when
-the hash matches.
+The input hash covers the builder kind and platform, the Dockerfile path and
+bytes, every path, mode and byte in the build context, and the build args, so
+a later part can reuse a finished image when the hash matches.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -24,22 +26,70 @@ import tempfile
 import time
 import uuid
 import zipfile
-from collections.abc import Callable, Iterator, Mapping
+from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Protocol
 
 from core.config import settings
 
-from .image_registry import ImageRegistry, ImageRegistryError
+from .image_registry import EcrRegistry, ImageRegistryError
 
-_HASH_VERSION = b"skynet-image-input-v1"
+_HASH_VERSION = b"skynet-image-input-v2"
 _BUILD_ARG_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOG_TAIL_LINES = 40
+# Keeps a runaway build log from filling the worker's memory or the database.
+MAX_LOG_CHARS = 2_000_000
 _READ_CHUNK = 1024 * 1024
 _DIGEST_VARIABLE = "IMAGE_DIGEST"
 _METADATA_FILE = "/tmp/skynet-image-metadata.json"
+# CodeBuild accepts 5 to 2160 minutes; the settings allow at most 480.
+_MIN_TIMEOUT_MINUTES = 5
+MAX_TIMEOUT_MINUTES = 480
+_QUEUE_TIMEOUT_MINUTES = 60
+_QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
+# CloudWatch can deliver the last log events a few seconds after the build ends.
+_LOG_SETTLE_SECONDS = 5.0
 LOCAL_IMAGE_NAME = "skynet-user-image"
+CODEBUILD_PLATFORM = "linux/amd64"
+# BuildKit from the ECR Public mirror of moby/buildkit:buildx-stable-1, pinned
+# by index digest, so no build pulls an unpinned image from Docker Hub.
+BUILDKIT_IMAGE = (
+    "public.ecr.aws/vend/moby/buildkit:buildx-stable-1"
+    "@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"
+)
+_CREDENTIAL_HELPER = "skynet-ecr"
+_CREDENTIAL_HELPER_PATH = f"/usr/local/bin/docker-credential-{_CREDENTIAL_HELPER}"
+# A Docker credential helper that runs in the CodeBuild container. Each call
+# assumes the push role again with the owner's session policy, so BuildKit
+# gets fresh credentials past the one-hour limit of a chained role session,
+# and those credentials reach only the owner's repository.
+_HELPER_SOURCE = """#!/usr/bin/env python3
+import json, os, subprocess, sys
+
+ROLE, POLICY, SERVER = {role!r}, {policy!r}, {server!r}
+
+if sys.argv[1:] != ["get"]:
+    sys.exit(0)
+if sys.stdin.read().strip().removeprefix("https://").rstrip("/") != SERVER:
+    print("credentials not found in native keychain")
+    sys.exit(1)
+creds = json.loads(subprocess.check_output([
+    "aws", "sts", "assume-role", "--role-arn", ROLE, "--role-session-name", "skynet-image-build",
+    "--policy", POLICY, "--duration-seconds", "3600", "--output", "json",
+]))["Credentials"]
+env = dict(
+    os.environ,
+    AWS_ACCESS_KEY_ID=creds["AccessKeyId"],
+    AWS_SECRET_ACCESS_KEY=creds["SecretAccessKey"],
+    AWS_SESSION_TOKEN=creds["SessionToken"],
+)
+secret = subprocess.check_output(
+    ["aws", "ecr", "get-login-password", "--region", os.environ["AWS_REGION"]], env=env, text=True
+).strip()
+print(json.dumps({{"ServerURL": SERVER, "Username": "AWS", "Secret": secret}}))
+"""
 
 
 class ImageBuildError(RuntimeError):
@@ -50,7 +100,7 @@ class ImageBuildError(RuntimeError):
 
         Args:
             message: What failed.
-            log: The full build log, when there is one.
+            log: The build log, when there is one.
             log_tail: The last lines of the log, for the user.
         """
         super().__init__(message)
@@ -59,7 +109,7 @@ class ImageBuildError(RuntimeError):
 
 
 class ImageBuildTimeoutError(ImageBuildError):
-    """Report a build that ran longer than the time limit."""
+    """Report a build that ran or waited longer than its time limit."""
 
 
 class ImageTooLargeError(ImageBuildError):
@@ -71,15 +121,21 @@ class BuildRequest:
     """Describe one image build.
 
     ``dockerfile`` is a path relative to ``context_dir`` and must stay inside
-    it. ``cache_scope`` names the owner of the registry build cache (for
-    example one user). It has no default, so two owners never share a cache
-    by accident.
+    it, with no symlink in any part. ``owner`` names the registry repository
+    that holds the image and its build cache (for example one user). It has
+    no default, so two owners never share a repository by accident.
+    ``cache_scope`` names a build cache inside that repository.
+
+    Build args never carry secrets: they go into the input hash, the build
+    log, the image history and the CodeBuild build record. A secret needs a
+    BuildKit ``--secret`` mount, which this builder does not offer yet.
     """
 
     context_dir: Path
-    cache_scope: str
+    owner: str
     dockerfile: str = "Dockerfile"
     build_args: Mapping[str, str] = field(default_factory=dict)
+    cache_scope: str = "default"
 
 
 @dataclass(frozen=True)
@@ -119,17 +175,30 @@ class BuildLimits:
 
     timeout_seconds: float
     max_size_bytes: int
+    max_context_bytes: int
+
+    def __post_init__(self) -> None:
+        """Refuse a limit that CodeBuild or the settings do not allow.
+
+        Raises:
+            ValueError: A limit is not positive, or the time limit is over 480 minutes.
+        """
+        if not 0 < self.timeout_seconds <= MAX_TIMEOUT_MINUTES * 60:
+            raise ValueError(f"build time limit must be over 0 and at most {MAX_TIMEOUT_MINUTES} minutes")
+        if self.max_size_bytes <= 0 or self.max_context_bytes <= 0:
+            raise ValueError("build size limits must be over 0")
 
     @classmethod
     def from_settings(cls) -> BuildLimits:
         """Read the limits from the app settings.
 
         Returns:
-            The configured time and size limits.
+            The configured time, image size and context size limits.
         """
         return cls(
             timeout_seconds=settings.image_build_timeout_minutes * 60.0,
             max_size_bytes=int(settings.image_build_max_size_gb * 1_000_000_000),
+            max_context_bytes=settings.image_build_max_context_mb * 1_000_000,
         )
 
 
@@ -146,72 +215,221 @@ def log_tail(log: str, lines: int = _LOG_TAIL_LINES) -> str:
     return "\n".join(log.rstrip("\n").splitlines()[-lines:])
 
 
-def _check_request(request: BuildRequest) -> Path:
-    """Validate the request and return the Dockerfile path.
+class _CappedLog:
+    """Collect log lines, keeping the head and the tail inside a size limit."""
+
+    def __init__(self, limit: int = MAX_LOG_CHARS) -> None:
+        """Start an empty log.
+
+        Args:
+            limit: The most characters to keep, split between head and tail.
+        """
+        self._half = max(1, limit // 2)
+        self._head: list[str] = []
+        self._head_size = 0
+        self._tail: deque[str] = deque()
+        self._tail_size = 0
+        self._cut = 0
+
+    def add(self, line: str) -> None:
+        """Add one line, cutting lines from the middle when the log is full.
+
+        Args:
+            line: The line, with no newline.
+        """
+        line = line[: self._half]
+        if not self._tail and self._head_size + len(line) + 1 <= self._half:
+            self._head.append(line)
+            self._head_size += len(line) + 1
+            return
+        self._tail.append(line)
+        self._tail_size += len(line) + 1
+        while self._tail_size > self._half:
+            self._tail_size -= len(self._tail.popleft()) + 1
+            self._cut += 1
+
+    def text(self) -> str:
+        """Return the kept log, with a marker where lines were cut.
+
+        Returns:
+            The head, the cut marker when lines were cut, and the tail.
+        """
+        marker = [f"[... {self._cut} log lines cut ...]"] if self._cut else []
+        return "\n".join([*self._head, *marker, *self._tail])
+
+
+def cap_log(log: str, limit: int = MAX_LOG_CHARS) -> str:
+    """Return the log inside the size limit, keeping its head and tail.
+
+    Args:
+        log: The full log.
+        limit: The most characters to keep.
+
+    Returns:
+        The log, or its head and tail with a cut marker between them.
+    """
+    if len(log) <= limit:
+        return log
+    capped = _CappedLog(limit)
+    for line in log.splitlines():
+        capped.add(line)
+    return capped.text()
+
+
+@dataclass(frozen=True)
+class _Dockerfile:
+    """Hold the checked Dockerfile path of a request."""
+
+    path: Path
+    relative: str
+
+
+def _check_request(request: BuildRequest) -> _Dockerfile:
+    """Validate the request and return the checked Dockerfile path.
 
     Args:
         request: The build request.
 
     Returns:
-        The absolute Dockerfile path inside the context.
+        The resolved Dockerfile path inside the context, and its normalized
+        POSIX path relative to the context.
 
     Raises:
-        ImageBuildError: The context or the Dockerfile is missing, the
-            Dockerfile is outside the context, or a build arg name is invalid.
+        ImageBuildError: The context or the Dockerfile is missing, any part
+            of the Dockerfile path is a symlink, the Dockerfile is outside
+            the context, or a build arg name is invalid.
     """
     if not request.context_dir.is_dir():
         raise ImageBuildError(f"build context {request.context_dir} is not a directory")
+    context = request.context_dir.resolve(strict=True)
     relative = PurePosixPath(request.dockerfile)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must stay inside the build context")
-    path = request.context_dir.joinpath(*relative.parts)
-    if path.is_symlink() or not path.is_file():
+    path = context
+    for part in relative.parts:
+        path = path / part
+        if path.is_symlink():
+            raise ImageBuildError(f"Dockerfile path {request.dockerfile!r} must not pass through a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ImageBuildError(f"Dockerfile {request.dockerfile!r} is not in the build context") from exc
+    if not resolved.is_relative_to(context) or not resolved.is_file():
         raise ImageBuildError(f"Dockerfile {request.dockerfile!r} is not a regular file in the build context")
     for name in request.build_args:
         if not _BUILD_ARG_NAME.match(name):
             raise ImageBuildError(f"build arg name {name!r} is not valid")
-    return path
+    return _Dockerfile(path=resolved, relative=relative.as_posix())
 
 
-def _context_entries(context_dir: Path) -> Iterator[tuple[str, Path]]:
-    """Yield every file and symlink of the context, sorted by relative path.
+@dataclass(frozen=True)
+class _Entry:
+    """Describe one path of the build context."""
 
-    Symlinks are never followed, so a link cannot pull a file from outside the
-    context into the hash or the uploaded source.
+    relative: str
+    path: Path
+    info: os.stat_result
+
+
+def _walk_error(exc: OSError) -> None:
+    """Fail the build when the context walk cannot read a folder.
+
+    Args:
+        exc: The error from ``os.walk``.
+
+    Raises:
+        ImageBuildError: Always.
+    """
+    raise ImageBuildError(f"cannot read the build context: {exc}") from exc
+
+
+def _utf8(text: str, what: str) -> bytes:
+    """Encode a context path or link target as UTF-8.
+
+    Args:
+        text: The path or target, as ``os`` decoded it.
+        what: What the text is, for the error.
+
+    Returns:
+        The UTF-8 bytes.
+
+    Raises:
+        ImageBuildError: The name is not valid UTF-8.
+    """
+    try:
+        return text.encode()
+    except UnicodeEncodeError as exc:
+        raise ImageBuildError(f"build context {what} {text!r} is not valid UTF-8") from exc
+
+
+def _context_entries(context_dir: Path, max_bytes: int) -> list[_Entry]:
+    """Return every folder, file and symlink of the context, sorted by path.
+
+    Symlinks are never followed, so a link cannot pull a file from outside
+    the context into the hash or the uploaded source. Folders are entries,
+    so an empty folder is part of the hash and the upload.
 
     Args:
         context_dir: The build context.
+        max_bytes: The most file bytes the context may hold.
 
-    Yields:
-        The POSIX relative path and the absolute path of each entry.
+    Returns:
+        The entries, sorted by POSIX relative path.
+
+    Raises:
+        ImageBuildError: A folder cannot be read, a name is not valid UTF-8,
+            or the files are larger than ``max_bytes``.
     """
-    entries: list[tuple[str, Path]] = []
-    for root, dirs, files in os.walk(context_dir, followlinks=False):
+    root_dir = context_dir.resolve(strict=True)
+    entries: list[_Entry] = []
+    total = 0
+    for root, dirs, files in os.walk(root_dir, onerror=_walk_error, followlinks=False):
         base = Path(root)
         for name in dirs + files:
             path = base / name
-            if path.is_symlink() or path.is_file():
-                entries.append((path.relative_to(context_dir).as_posix(), path))
-    yield from sorted(entries)
+            relative = path.relative_to(root_dir).as_posix()
+            _utf8(relative, "path")
+            info = path.lstat()
+            if not (stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+                if total > max_bytes:
+                    raise ImageBuildError(f"build context is larger than the {max_bytes / 1e6:g} MB limit")
+            entries.append(_Entry(relative=relative, path=path, info=info))
+    return sorted(entries, key=lambda entry: entry.relative)
 
 
-def compute_input_hash(request: BuildRequest) -> str:
-    """Hash the Dockerfile, the build context content and the build args.
+def compute_input_hash(
+    request: BuildRequest,
+    *,
+    builder: str,
+    platform: str,
+    max_context_bytes: int | None = None,
+) -> str:
+    """Hash the builder, the Dockerfile, the build context and the build args.
 
     Every field is length-prefixed, so two different inputs never feed the
     same bytes to the hash. The order of the context walk and of the build
-    args does not change the result.
+    args does not change the result. The hash covers the Dockerfile path,
+    because ``<Dockerfile>.dockerignore`` changes the context, and the file
+    and folder modes, because ``COPY`` keeps them.
 
     Args:
         request: The build request.
+        builder: The builder kind, for example ``codebuild``.
+        platform: The target platform, or ``""`` for the engine default.
+        max_context_bytes: The context size limit. ``None`` reads the settings.
 
     Returns:
         ``sha256:<64 hex>`` over the build inputs.
 
     Raises:
-        ImageBuildError: The request is invalid.
+        ImageBuildError: The request is invalid or the context is too large.
     """
     dockerfile = _check_request(request)
+    if max_context_bytes is None:
+        max_context_bytes = BuildLimits.from_settings().max_context_bytes
     digest = hashlib.sha256()
 
     def put(data: bytes) -> None:
@@ -224,16 +442,23 @@ def compute_input_hash(request: BuildRequest) -> str:
         digest.update(data)
 
     put(_HASH_VERSION)
-    put(dockerfile.read_bytes())
-    for relative, path in _context_entries(request.context_dir):
-        put(relative.encode())
-        if path.is_symlink():
+    put(builder.encode())
+    put(platform.encode())
+    put(dockerfile.relative.encode())
+    put(dockerfile.path.read_bytes())
+    for entry in _context_entries(request.context_dir, max_context_bytes):
+        put(entry.relative.encode())
+        mode = entry.info.st_mode
+        if stat.S_ISLNK(mode):
             put(b"link")
-            put(str(path.readlink()).encode())
+            put(_utf8(str(entry.path.readlink()), "symlink target"))
             continue
-        put(b"file")
-        digest.update(path.stat().st_size.to_bytes(8, "big"))
-        with path.open("rb") as handle:
+        put(b"dir" if stat.S_ISDIR(mode) else b"file")
+        put((mode & 0o7777).to_bytes(2, "big"))
+        if stat.S_ISDIR(mode):
+            continue
+        digest.update(entry.info.st_size.to_bytes(8, "big"))
+        with entry.path.open("rb") as handle:
             while chunk := handle.read(_READ_CHUNK):
                 digest.update(chunk)
     for name in sorted(request.build_args):
@@ -242,21 +467,25 @@ def compute_input_hash(request: BuildRequest) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _zip_context(context_dir: Path, target: IO[bytes]) -> None:
+def _zip_context(context_dir: Path, target: IO[bytes], max_bytes: int) -> None:
     """Write the build context as a zip archive, keeping symlinks as links.
 
     Args:
         context_dir: The build context.
         target: The open binary file to write.
+        max_bytes: The most file bytes the context may hold.
+
+    Raises:
+        ImageBuildError: The context cannot be read or is too large.
     """
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative, path in _context_entries(context_dir):
-            if path.is_symlink():
-                info = zipfile.ZipInfo(relative)
+        for entry in _context_entries(context_dir, max_bytes):
+            if stat.S_ISLNK(entry.info.st_mode):
+                info = zipfile.ZipInfo(entry.relative)
                 info.external_attr = (stat.S_IFLNK | 0o777) << 16
-                archive.writestr(info, str(path.readlink()))
+                archive.writestr(info, str(entry.path.readlink()))
             else:
-                archive.write(path, relative)
+                archive.write(entry.path, entry.relative)
 
 
 def _hex(input_hash: str) -> str:
@@ -271,7 +500,15 @@ def _hex(input_hash: str) -> str:
     return input_hash.split(":", 1)[1]
 
 
-def codebuild_buildspec(*, image_ref: str, cache_ref: str, dockerfile: str, build_args: Mapping[str, str]) -> str:
+def codebuild_buildspec(
+    *,
+    image_ref: str,
+    cache_ref: str,
+    dockerfile: str,
+    build_args: Mapping[str, str],
+    push_role_arn: str,
+    session_policy: Mapping[str, Any],
+) -> str:
     """Return the CodeBuild buildspec that builds and pushes one image.
 
     The buildspec is JSON, which YAML also reads, so no value needs YAML
@@ -279,19 +516,34 @@ def codebuild_buildspec(*, image_ref: str, cache_ref: str, dockerfile: str, buil
     SBOM attestations stay off, so the pushed digest is a plain image manifest
     whose size ECR reports.
 
+    Before BuildKit starts, the buildspec blocks the link-local range for
+    containers, so a ``RUN`` step cannot reach the CodeBuild credentials or
+    metadata endpoints. Only the Amazon DNS resolver stays open. The registry
+    credentials come from a credential helper limited to the owner's
+    repository, so the build cannot read or write another owner's images.
+
     Args:
         image_ref: The ``repository:tag`` to push.
         cache_ref: The ``repository:tag`` of the registry build cache.
         dockerfile: The Dockerfile path relative to the source root.
         build_args: The build args.
+        push_role_arn: The IAM role that the credential helper assumes.
+        session_policy: The session policy that limits it to the owner.
 
     Returns:
         The buildspec text.
     """
     server = image_ref.split("/", 1)[0]
+    helper = _HELPER_SOURCE.format(
+        role=push_role_arn,
+        policy=json.dumps(session_policy, separators=(",", ":")),
+        server=server,
+    )
+    docker_config = json.dumps({"credHelpers": {server: _CREDENTIAL_HELPER}})
     build = [
         "docker buildx build",
         "--progress plain",
+        f"--platform {CODEBUILD_PLATFORM}",
         "--provenance=false",
         "--sbom=false",
         f"--file {shlex.quote(dockerfile)}",
@@ -309,8 +561,14 @@ def codebuild_buildspec(*, image_ref: str, cache_ref: str, dockerfile: str, buil
         "phases": {
             "pre_build": {
                 "commands": [
-                    f'aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin {shlex.quote(server)}',
-                    "docker buildx create --use --driver docker-container",
+                    # -I puts each rule first, so the DNS rules end above the drop.
+                    "iptables -I DOCKER-USER -d 169.254.0.0/16 -j DROP",
+                    "iptables -I DOCKER-USER -d 169.254.169.253/32 -p udp --dport 53 -j ACCEPT",
+                    "iptables -I DOCKER-USER -d 169.254.169.253/32 -p tcp --dport 53 -j ACCEPT",
+                    f"echo {base64.b64encode(helper.encode()).decode()} | base64 -d > {_CREDENTIAL_HELPER_PATH}",
+                    f"chmod 755 {_CREDENTIAL_HELPER_PATH}",
+                    f"mkdir -p ~/.docker && echo {shlex.quote(docker_config)} > ~/.docker/config.json",
+                    f"docker buildx create --use --driver docker-container --driver-opt image={BUILDKIT_IMAGE}",
                 ]
             },
             "build": {
@@ -327,14 +585,16 @@ def codebuild_buildspec(*, image_ref: str, cache_ref: str, dockerfile: str, buil
 
 
 class CodeBuildImageBuilder:
-    """Build user images on AWS CodeBuild and push them to the registry.
+    """Build user images on AWS CodeBuild and push them to the owner's repository.
 
     The source is a zip of the build context in an S3 bucket: the builder
     uploads it, starts the CodeBuild project with an inline buildspec, polls
-    the build until it ends or the time limit passes, reads the CloudWatch
-    log, and checks the pushed digest and its size in the registry. The boto3
+    the build until it ends or a time limit passes, reads the CloudWatch log,
+    and checks the pushed digest and its size in the registry. The boto3
     clients are injected, so tests pass fakes.
     """
+
+    kind = "codebuild"
 
     def __init__(
         self,
@@ -342,16 +602,17 @@ class CodeBuildImageBuilder:
         codebuild: Any,
         logs: Any,
         s3: Any,
-        registry: ImageRegistry,
+        registry: EcrRegistry,
         project_name: str,
         source_bucket: str,
+        push_role_arn: str,
         source_prefix: str = "image-builds/",
         limits: BuildLimits | None = None,
         poll_seconds: float = 10.0,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Bind the builder to its clients, project, bucket and limits.
+        """Bind the builder to its clients, project, bucket, role and limits.
 
         Args:
             codebuild: A boto3 CodeBuild client.
@@ -360,6 +621,8 @@ class CodeBuildImageBuilder:
             registry: The registry the build pushes to.
             project_name: The CodeBuild project name.
             source_bucket: The S3 bucket for the zipped build context.
+            push_role_arn: The role a build assumes, with an owner session
+                policy, to push to the owner's repository.
             source_prefix: The key prefix in that bucket.
             limits: The time and size limits. ``None`` reads the settings.
             poll_seconds: The wait between two build status reads.
@@ -372,6 +635,7 @@ class CodeBuildImageBuilder:
         self._registry = registry
         self._project = project_name
         self._bucket = source_bucket
+        self._push_role = push_role_arn
         self._prefix = source_prefix
         self._limits = limits or BuildLimits.from_settings()
         self._poll = poll_seconds
@@ -379,7 +643,7 @@ class CodeBuildImageBuilder:
         self._clock = clock
 
     def build(self, request: BuildRequest) -> BuildResult:
-        """Build the image on CodeBuild and push it to the registry.
+        """Build the image on CodeBuild and push it to the owner's repository.
 
         Args:
             request: The Dockerfile, the build context and the build args.
@@ -388,27 +652,35 @@ class CodeBuildImageBuilder:
             The pinned image, its digest and size, the input hash and the log.
 
         Raises:
-            ImageBuildError: The build failed, gave no digest, or the registry
-                does not hold the digest.
-            ImageBuildTimeoutError: The build ran longer than the time limit.
+            ImageBuildError: The request or the context is invalid, the build
+                failed, gave no digest, or the registry does not hold it.
+            ImageBuildTimeoutError: The build ran longer than the time limit,
+                or waited longer than the queue limit.
             ImageTooLargeError: The pushed image is larger than the size limit.
         """
-        input_hash = compute_input_hash(request)
+        dockerfile = _check_request(request)
+        input_hash = compute_input_hash(
+            request,
+            builder=self.kind,
+            platform=CODEBUILD_PLATFORM,
+            max_context_bytes=self._limits.max_context_bytes,
+        )
         token = uuid.uuid4().hex[:12]
         # A unique suffix keeps two builds of the same input from colliding on
         # an immutable tag.
         try:
-            image_ref = self._registry.push_reference(f"{_hex(input_hash)}-{token}")
-            cache_ref = self._registry.cache_reference(request.cache_scope)
+            image_ref = self._registry.push_reference(request.owner, f"{_hex(input_hash)}-{token}")
+            cache_ref = self._registry.cache_reference(request.owner, request.cache_scope)
+            session_policy = self._registry.push_session_policy(request.owner)
         except ImageRegistryError as exc:
             raise ImageBuildError(str(exc)) from exc
-        key = f"{self._prefix}{_hex(input_hash)}/{token}.zip"
+        key = f"{self._prefix}{request.owner}/{_hex(input_hash)}/{token}.zip"
         with tempfile.TemporaryFile() as archive:
-            _zip_context(request.context_dir, archive)
+            _zip_context(request.context_dir, archive, self._limits.max_context_bytes)
             archive.seek(0)
             self._s3.upload_fileobj(archive, self._bucket, key)
 
-        timeout_minutes = max(5, int(self._limits.timeout_seconds // 60))
+        timeout_minutes = max(_MIN_TIMEOUT_MINUTES, math.ceil(self._limits.timeout_seconds / 60))
         started = self._codebuild.start_build(
             projectName=self._project,
             sourceTypeOverride="S3",
@@ -416,14 +688,17 @@ class CodeBuildImageBuilder:
             buildspecOverride=codebuild_buildspec(
                 image_ref=image_ref,
                 cache_ref=cache_ref,
-                dockerfile=PurePosixPath(request.dockerfile).as_posix(),
+                dockerfile=dockerfile.relative,
                 build_args=request.build_args,
+                push_role_arn=self._push_role,
+                session_policy=session_policy,
             ),
             timeoutInMinutesOverride=timeout_minutes,
+            queuedTimeoutInMinutesOverride=_QUEUE_TIMEOUT_MINUTES,
         )
         build_id = started["build"]["id"]
         build = self._wait(build_id)
-        log = self._read_log(build)
+        log = self._read_log(build, settle=True)
         tail = log_tail(log)
         status = build.get("buildStatus")
         if status == "TIMED_OUT":
@@ -434,13 +709,18 @@ class CodeBuildImageBuilder:
         exported = {v.get("name"): v.get("value") for v in build.get("exportedEnvironmentVariables") or []}
         digest = exported.get(_DIGEST_VARIABLE) or ""
         try:
-            image = self._registry.check_digest(digest)
+            image = self._registry.check_digest(request.owner, digest)
         except ImageRegistryError as exc:
             raise ImageBuildError(
                 f"image build {build_id} pushed no usable image: {exc}", log=log, log_tail=tail
             ) from exc
         if image.size_bytes > self._limits.max_size_bytes:
-            raise ImageTooLargeError(_size_message(image.size_bytes, self._limits), log=log, log_tail=tail)
+            message = _size_message(image.size_bytes, self._limits)
+            try:
+                self._registry.delete_image(request.owner, image.digest)
+            except ImageRegistryError as exc:
+                message += f"; the image stays in the registry until its lifecycle rule deletes it ({exc})"
+            raise ImageTooLargeError(message, log=log, log_tail=tail)
         return BuildResult(
             image=image.reference,
             digest=image.digest,
@@ -459,7 +739,10 @@ class CodeBuildImageBuilder:
         return f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit"
 
     def _wait(self, build_id: str) -> dict[str, Any]:
-        """Poll the build until it ends, or stop it at the time limit.
+        """Poll the build until it ends, or stop it at a time limit.
+
+        The time limit counts from the first poll that sees the build out of
+        the queue. Queue time has its own limit.
 
         Args:
             build_id: The CodeBuild build id.
@@ -468,42 +751,60 @@ class CodeBuildImageBuilder:
             The final build description.
 
         Raises:
-            ImageBuildTimeoutError: The build was still running at the time limit.
+            ImageBuildTimeoutError: The build was still running at the time
+                limit, or still queued at the queue limit.
         """
-        deadline = self._clock() + self._limits.timeout_seconds
+        queue_deadline = self._clock() + _QUEUE_TIMEOUT_MINUTES * 60
+        run_deadline: float | None = None
         while True:
             build = self._codebuild.batch_get_builds(ids=[build_id])["builds"][0]
             if build.get("buildComplete"):
                 return build
-            if self._clock() >= deadline:
+            now = self._clock()
+            if run_deadline is None and build.get("currentPhase") not in _QUEUED_PHASES:
+                run_deadline = now + self._limits.timeout_seconds
+            if run_deadline is None and now >= queue_deadline:
+                self._codebuild.stop_build(id=build_id)
+                raise ImageBuildTimeoutError(
+                    f"image build waited longer than the {_QUEUE_TIMEOUT_MINUTES}-minute queue limit"
+                )
+            if run_deadline is not None and now >= run_deadline:
                 self._codebuild.stop_build(id=build_id)
                 log = self._read_log(build)
                 raise ImageBuildTimeoutError(self._timeout_message(), log=log, log_tail=log_tail(log))
             self._sleep(self._poll)
 
-    def _read_log(self, build: Mapping[str, Any]) -> str:
-        """Read the full CloudWatch log of a build.
+    def _read_log(self, build: Mapping[str, Any], *, settle: bool = False) -> str:
+        """Read the CloudWatch log of a build, inside the log size limit.
 
         Args:
             build: The build description.
+            settle: Wait a short time at the end and read once more, for
+                events CloudWatch delivers after the build ends.
 
         Returns:
-            Every log line, in order. Empty when the build has no log stream yet.
+            The log lines in order, with the middle cut when the log is too
+            long. Empty when the build has no log stream yet.
         """
         logs = build.get("logs") or {}
         group, stream = logs.get("groupName"), logs.get("streamName")
         if not group or not stream:
             return ""
-        lines: list[str] = []
+        capped = _CappedLog()
         kwargs: dict[str, Any] = {"logGroupName": group, "logStreamName": stream, "startFromHead": True}
         while True:
             page = self._logs.get_log_events(**kwargs)
-            lines.extend(event["message"].rstrip("\n") for event in page.get("events", []))
+            for event in page.get("events", []):
+                capped.add(event["message"].rstrip("\n"))
             token = page.get("nextForwardToken")
             # CloudWatch returns the same forward token when no page is left.
-            if not token or token == kwargs.get("nextToken"):
-                return "\n".join(lines)
-            kwargs["nextToken"] = token
+            if token and token != kwargs.get("nextToken"):
+                kwargs["nextToken"] = token
+                continue
+            if not settle or not token:
+                return capped.text()
+            settle = False
+            self._sleep(_LOG_SETTLE_SECONDS)
 
 
 def _size_message(size_bytes: int, limits: BuildLimits) -> str:
@@ -527,15 +828,26 @@ class LocalDockerImageBuilder:
     directly and which never moves.
     """
 
-    def __init__(self, *, docker: str = "docker", limits: BuildLimits | None = None) -> None:
-        """Bind the builder to a Docker CLI and the limits.
+    kind = "local-docker"
+
+    def __init__(
+        self,
+        *,
+        docker: str = "docker",
+        limits: BuildLimits | None = None,
+        platform: str | None = None,
+    ) -> None:
+        """Bind the builder to a Docker CLI, the limits and a platform.
 
         Args:
             docker: The Docker CLI path.
             limits: The time and size limits. ``None`` reads the settings.
+            platform: The target platform, for example ``linux/amd64``.
+                ``None`` uses the engine default.
         """
         self._docker = docker
         self._limits = limits or BuildLimits.from_settings()
+        self._platform = platform
 
     def build(self, request: BuildRequest) -> BuildResult:
         """Build the image with ``docker build``.
@@ -547,20 +859,27 @@ class LocalDockerImageBuilder:
             The local image id, its size, the input hash and the log.
 
         Raises:
-            ImageBuildError: Docker failed or reported no image id.
+            ImageBuildError: The request or the context is invalid, or Docker
+                failed or reported no image id.
             ImageBuildTimeoutError: The build ran longer than the time limit.
             ImageTooLargeError: The image is larger than the size limit.
         """
         dockerfile = _check_request(request)
-        input_hash = compute_input_hash(request)
+        input_hash = compute_input_hash(
+            request,
+            builder=self.kind,
+            platform=self._platform or "",
+            max_context_bytes=self._limits.max_context_bytes,
+        )
         with tempfile.TemporaryDirectory() as scratch:
             iidfile = Path(scratch) / "iid"
             command = [
                 self._docker,
                 "build",
                 "--progress=plain",
+                *(("--platform", self._platform) if self._platform else ()),
                 "--file",
-                str(dockerfile),
+                str(dockerfile.path),
                 "--iidfile",
                 str(iidfile),
                 "--tag",
@@ -577,13 +896,13 @@ class LocalDockerImageBuilder:
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
-                log = (exc.stdout or b"").decode(errors="replace")
+                log = cap_log((exc.stdout or b"").decode(errors="replace"))
                 raise ImageBuildTimeoutError(
                     f"image build ran longer than the {self._limits.timeout_seconds / 60:g}-minute limit",
                     log=log,
                     log_tail=log_tail(log),
                 ) from exc
-            log = done.stdout.decode(errors="replace")
+            log = cap_log(done.stdout.decode(errors="replace"))
             tail = log_tail(log)
             image_id = iidfile.read_text().strip() if iidfile.exists() else ""
         if done.returncode != 0 or not image_id:

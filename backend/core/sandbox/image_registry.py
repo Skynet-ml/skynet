@@ -3,7 +3,8 @@
 A builder pushes each user image to a neutral OCI registry. The registry
 gives the builder its push and cache references, gives a provider the
 credentials it needs to pull, and confirms that a digest exists before a run
-pins it. v1 uses one ECR repository in Skynet's account (SKY-737).
+pins it. v1 uses one ECR repository for each owner in Skynet's account
+(SKY-737).
 """
 
 from __future__ import annotations
@@ -17,12 +18,26 @@ from typing import Any, Protocol
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 # ECR tags allow at most 128 characters from this set.
 _TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
-_ECR_URI = re.compile(
-    r"^(?P<registry>\d{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/(?P<repository>[a-z0-9._/-]+)$"
+# One ECR repository path component, so an owner can never name a path below
+# another owner's repository.
+_OWNER = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+_OWNER_MAX = 64
+_ECR_PREFIX_URI = re.compile(
+    r"^(?P<registry>\d{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/(?P<prefix>[a-z0-9]+(?:[._/-][a-z0-9]+)*)$"
 )
-# The Terraform lifecycle rule keys on this prefix: cache tags move and
-# expire on their own schedule.
+# The Terraform lifecycle rule and the tag-mutability exclusion key on this
+# prefix: cache tags move and expire on their own schedule.
 CACHE_TAG_PREFIX = "cache-"
+_PUSH_ACTIONS = (
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:BatchGetImage",
+    "ecr:CompleteLayerUpload",
+    "ecr:CreateRepository",
+    "ecr:GetDownloadUrlForLayer",
+    "ecr:InitiateLayerUpload",
+    "ecr:PutImage",
+    "ecr:UploadLayerPart",
+)
 
 
 class ImageRegistryError(RuntimeError):
@@ -59,12 +74,17 @@ class RegistryImage:
 
 
 class ImageRegistry(Protocol):
-    """Name the registry operations that a builder and a provider need."""
+    """Name the registry operations that a builder and a provider need.
 
-    def push_reference(self, tag: str) -> str:
+    Each owner (for example one user) has its own repository, so one owner's
+    build credentials never reach another owner's images or build cache.
+    """
+
+    def push_reference(self, owner: str, tag: str) -> str:
         """Return the ``repository:tag`` reference a builder pushes to.
 
         Args:
+            owner: The owner of the repository.
             tag: The image tag.
 
         Returns:
@@ -72,21 +92,23 @@ class ImageRegistry(Protocol):
         """
         ...
 
-    def cache_reference(self, scope: str) -> str:
-        """Return the ``repository:tag`` reference for a build cache scope.
+    def cache_reference(self, owner: str, scope: str) -> str:
+        """Return the ``repository:tag`` reference for a build cache.
 
         Args:
-            scope: The cache owner, for example one user. Scopes never share a cache.
+            owner: The owner of the repository.
+            scope: The cache name inside the owner's repository.
 
         Returns:
             The full cache reference.
         """
         ...
 
-    def pinned_reference(self, digest: str) -> str:
+    def pinned_reference(self, owner: str, digest: str) -> str:
         """Return the ``repository@digest`` reference that pins one image.
 
         Args:
+            owner: The owner of the repository.
             digest: The image digest, ``sha256:<64 hex>``.
 
         Returns:
@@ -102,17 +124,31 @@ class ImageRegistry(Protocol):
         """
         ...
 
-    def check_digest(self, digest: str) -> RegistryImage:
-        """Confirm that the registry holds an image with this digest.
+    def check_digest(self, owner: str, digest: str) -> RegistryImage:
+        """Confirm that the owner's repository holds an image with this digest.
 
         Args:
+            owner: The owner of the repository.
             digest: The image digest, ``sha256:<64 hex>``.
 
         Returns:
             The pinned reference, the digest and the size the registry reports.
 
         Raises:
-            ImageRegistryError: The digest is malformed or the image is not there.
+            ImageRegistryError: The digest is malformed, the image is not
+                there, or the registry reports no size.
+        """
+        ...
+
+    def delete_image(self, owner: str, digest: str) -> None:
+        """Delete one image from the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+            digest: The image digest, ``sha256:<64 hex>``.
+
+        Raises:
+            ImageRegistryError: The registry refused the delete.
         """
         ...
 
@@ -134,6 +170,24 @@ def require_digest(digest: str) -> str:
     return digest
 
 
+def require_owner(owner: str) -> str:
+    """Return the owner when it is one valid ECR repository path component.
+
+    Args:
+        owner: The value to check.
+
+    Returns:
+        The same owner.
+
+    Raises:
+        ImageRegistryError: The value is empty, too long, or has a character
+            or a ``/`` that a single repository name component refuses.
+    """
+    if len(owner) > _OWNER_MAX or not _OWNER.match(owner):
+        raise ImageRegistryError(f"not a valid image owner: {owner!r}")
+    return owner
+
+
 def _require_tag(tag: str) -> str:
     """Return the tag when ECR accepts it.
 
@@ -152,74 +206,143 @@ def _require_tag(tag: str) -> str:
 
 
 class EcrRegistry:
-    """Store user images in one ECR repository.
+    """Store user images in one ECR repository for each owner.
 
-    The boto3 ECR client is injected, so tests pass a fake and the caller
-    chooses the credentials and the Region.
+    The repositories are ``<prefix>/<owner>``. ECR creates each one on its
+    first push from the repository creation template in Terraform. The boto3
+    ECR client is injected, so tests pass a fake and the caller chooses the
+    credentials and the Region.
     """
 
-    def __init__(self, client: Any, repository_uri: str) -> None:
-        """Bind the registry to one repository.
+    def __init__(self, client: Any, repository_prefix_uri: str) -> None:
+        """Bind the registry to one repository prefix.
 
         Args:
             client: A boto3 ECR client (or a fake with the same methods).
-            repository_uri: ``<account>.dkr.ecr.<region>.amazonaws.com/<name>``.
+            repository_prefix_uri: ``<account>.dkr.ecr.<region>.amazonaws.com/<prefix>``.
 
         Raises:
-            ImageRegistryError: The URI is not an ECR repository URI.
+            ImageRegistryError: The URI is not an ECR repository prefix URI.
         """
-        match = _ECR_URI.match(repository_uri)
+        match = _ECR_PREFIX_URI.match(repository_prefix_uri)
         if match is None:
-            raise ImageRegistryError(f"not an ECR repository URI: {repository_uri!r}")
+            raise ImageRegistryError(f"not an ECR repository prefix URI: {repository_prefix_uri!r}")
         self._client = client
-        self.repository_uri = repository_uri
         self.registry_id = match["registry"]
-        self.repository_name = match["repository"]
-        self.server = repository_uri.split("/", 1)[0]
+        self.region = match["region"]
+        self.prefix = match["prefix"]
+        self.server = repository_prefix_uri.split("/", 1)[0]
 
-    def push_reference(self, tag: str) -> str:
+    def repository_name(self, owner: str) -> str:
+        """Return the name of the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            ``<prefix>/<owner>``.
+
+        Raises:
+            ImageRegistryError: The owner is not valid.
+        """
+        return f"{self.prefix}/{require_owner(owner)}"
+
+    def repository_arn(self, owner: str) -> str:
+        """Return the ARN of the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            The repository ARN.
+
+        Raises:
+            ImageRegistryError: The owner is not valid.
+        """
+        return f"arn:aws:ecr:{self.region}:{self.registry_id}:repository/{self.repository_name(owner)}"
+
+    def push_session_policy(self, owner: str) -> dict[str, Any]:
+        """Return the IAM session policy that limits a build to one owner.
+
+        The build assumes the push role with this policy, so its registry
+        credentials reach only the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            The policy document.
+
+        Raises:
+            ImageRegistryError: The owner is not valid.
+        """
+        return {
+            "Version": "2012-10-17",
+            "Statement": [
+                # GetAuthorizationToken has no resource-level permission.
+                {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
+                {"Effect": "Allow", "Action": list(_PUSH_ACTIONS), "Resource": self.repository_arn(owner)},
+            ],
+        }
+
+    def _uri(self, owner: str) -> str:
+        """Return the URI of the owner's repository.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            ``<server>/<prefix>/<owner>``.
+        """
+        return f"{self.server}/{self.repository_name(owner)}"
+
+    def push_reference(self, owner: str, tag: str) -> str:
         """Return the ``repository:tag`` reference a builder pushes to.
 
         Args:
+            owner: The owner of the repository.
             tag: The image tag. It must not start with the cache prefix.
 
         Returns:
             The full push reference.
 
         Raises:
-            ImageRegistryError: The tag is invalid or collides with the cache tags.
+            ImageRegistryError: The owner or the tag is invalid, or the tag
+                collides with the cache tags.
         """
         if _require_tag(tag).startswith(CACHE_TAG_PREFIX):
             raise ImageRegistryError(f"image tags must not start with {CACHE_TAG_PREFIX!r}: {tag!r}")
-        return f"{self.repository_uri}:{tag}"
+        return f"{self._uri(owner)}:{tag}"
 
-    def cache_reference(self, scope: str) -> str:
+    def cache_reference(self, owner: str, scope: str) -> str:
         """Return the ``repository:cache-<scope>`` reference for a build cache.
 
         Args:
-            scope: The cache owner, for example one user.
+            owner: The owner of the repository.
+            scope: The cache name inside the owner's repository.
 
         Returns:
             The full cache reference.
 
         Raises:
-            ImageRegistryError: The scope makes an invalid tag.
+            ImageRegistryError: The owner is invalid or the scope makes an invalid tag.
         """
-        return f"{self.repository_uri}:{_require_tag(CACHE_TAG_PREFIX + scope)}"
+        return f"{self._uri(owner)}:{_require_tag(CACHE_TAG_PREFIX + scope)}"
 
-    def pinned_reference(self, digest: str) -> str:
+    def pinned_reference(self, owner: str, digest: str) -> str:
         """Return the ``repository@digest`` reference that pins one image.
 
         Args:
+            owner: The owner of the repository.
             digest: The image digest.
 
         Returns:
             The pinned reference.
 
         Raises:
-            ImageRegistryError: The digest is malformed.
+            ImageRegistryError: The owner or the digest is malformed.
         """
-        return f"{self.repository_uri}@{require_digest(digest)}"
+        return f"{self._uri(owner)}@{require_digest(digest)}"
 
     def pull_credentials(self) -> RegistryCredentials:
         """Return an ECR authorization token as registry credentials.
@@ -245,32 +368,62 @@ class EcrRegistry:
             expires_at=token.get("expiresAt"),
         )
 
-    def check_digest(self, digest: str) -> RegistryImage:
-        """Confirm that the repository holds an image with this digest.
+    def check_digest(self, owner: str, digest: str) -> RegistryImage:
+        """Confirm that the owner's repository holds an image with this digest.
 
         Args:
+            owner: The owner of the repository.
             digest: The image digest.
 
         Returns:
             The pinned reference, the digest and the compressed size ECR reports.
 
         Raises:
-            ImageRegistryError: The digest is malformed or ECR does not hold it.
+            ImageRegistryError: The digest is malformed, ECR does not hold it,
+                or ECR reports no size for it.
         """
+        name = self.repository_name(owner)
         require_digest(digest)
+        missing = (self._client.exceptions.ImageNotFoundException, self._client.exceptions.RepositoryNotFoundException)
         try:
             response = self._client.describe_images(
                 registryId=self.registry_id,
-                repositoryName=self.repository_name,
+                repositoryName=name,
                 imageIds=[{"imageDigest": digest}],
             )
-        except self._client.exceptions.ImageNotFoundException as exc:
-            raise ImageRegistryError(f"{self.repository_uri} has no image {digest}") from exc
+        except missing as exc:
+            raise ImageRegistryError(f"{name} has no image {digest}") from exc
         details = [d for d in response.get("imageDetails", []) if d.get("imageDigest") == digest]
         if not details:
-            raise ImageRegistryError(f"{self.repository_uri} has no image {digest}")
-        return RegistryImage(
-            reference=self.pinned_reference(digest),
-            digest=digest,
-            size_bytes=int(details[0].get("imageSizeInBytes", 0)),
-        )
+            raise ImageRegistryError(f"{name} has no image {digest}")
+        size = details[0].get("imageSizeInBytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ImageRegistryError(f"{name} reports no size for image {digest}")
+        return RegistryImage(reference=self.pinned_reference(owner, digest), digest=digest, size_bytes=size)
+
+    def delete_image(self, owner: str, digest: str) -> None:
+        """Delete one image from the owner's repository.
+
+        An image or a repository that is already gone counts as deleted.
+
+        Args:
+            owner: The owner of the repository.
+            digest: The image digest.
+
+        Raises:
+            ImageRegistryError: The digest is malformed or ECR refused the delete.
+        """
+        name = self.repository_name(owner)
+        require_digest(digest)
+        try:
+            response = self._client.batch_delete_image(
+                registryId=self.registry_id,
+                repositoryName=name,
+                imageIds=[{"imageDigest": digest}],
+            )
+        except self._client.exceptions.RepositoryNotFoundException:
+            return
+        failures = [f for f in response.get("failures", []) if f.get("failureCode") != "ImageNotFound"]
+        if failures:
+            reason = failures[0].get("failureReason") or failures[0].get("failureCode")
+            raise ImageRegistryError(f"cannot delete image {digest} from {name}: {reason}")

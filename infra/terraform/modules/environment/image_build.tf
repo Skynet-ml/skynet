@@ -3,45 +3,46 @@
 # source bucket and starts the CodeBuild project with an inline buildspec
 # (backend/core/sandbox/image_build.py). CodeBuild builds with buildx, keeps a
 # registry cache for each owner (cache-<scope> tags) and pushes the image to
-# the user-image repository. The worker then reads the build log, checks the
+# the owner's repository. The worker then reads the build log, checks the
 # digest and pins it for the run.
 
 locals {
   image_build_name = "${local.name}-image-build"
   # Built from the name, so the trust policy needs no reference to the project.
   image_build_project_arn = "arn:aws:codebuild:${var.region}:${local.account_id}:project/${local.image_build_name}"
+  user_images_prefix      = "skynet/user-images-${var.environment}"
+  # Every owner repository under the prefix.
+  user_images_arn = "arn:aws:ecr:${var.region}:${local.account_id}:repository/${local.user_images_prefix}/*"
 }
 
 # ---------------------------------------------------------------- registry
 
-resource "aws_ecr_repository" "user_images" {
-  #checkov:skip=CKV_AWS_51:Image tags are immutable. Only the cache-* build cache tags move, and buildx must rewrite them.
-  name = "skynet/user-images-${var.environment}"
+# Each owner gets its own repository, <prefix>/<owner>, which ECR creates on
+# the first push from this template. The push role below takes a session
+# policy for one owner's repository, so a build cannot read or write the
+# images or the build cache of another owner.
+resource "aws_ecr_repository_creation_template" "user_images" {
+  prefix      = local.user_images_prefix
+  description = "User images and build caches for one owner (SKY-888)."
+  applied_for = ["CREATE_ON_PUSH"]
   # Image tags are <input hash>-<build token>, so each one is written once.
   # Only the per-owner build cache tags move.
   image_tag_mutability = "IMMUTABLE_WITH_EXCLUSION"
-  force_delete         = var.environment != "production"
 
   image_tag_mutability_exclusion_filter {
     filter      = "cache-*"
     filter_type = "WILDCARD"
   }
 
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
+  # A KMS key or resource tags in a template need a custom role for ECR, so
+  # the repositories use AES256 and carry no tags.
   encryption_configuration {
-    encryption_type = "KMS"
+    encryption_type = "AES256"
   }
-}
-
-resource "aws_ecr_lifecycle_policy" "user_images" {
-  repository = aws_ecr_repository.user_images.name
 
   # A run pins its image by digest and a later run reuses it by input hash,
   # so the backend checks that a digest still exists before it reuses one.
-  policy = jsonencode({
+  lifecycle_policy = jsonencode({
     rules = [
       {
         rulePriority = 1
@@ -210,25 +211,12 @@ data "aws_iam_policy_document" "image_build" {
     resources = ["${aws_s3_bucket.image_build_source.arn}/*"]
   }
 
-  # GetAuthorizationToken has no resource-level permission.
+  # The build pushes only through the push role, with a session policy for
+  # one owner, so this role holds no ECR permission itself.
   statement {
-    sid       = "EcrLogin"
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"]
-  }
-
-  statement {
-    sid = "PushUserImages"
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:BatchGetImage",
-      "ecr:CompleteLayerUpload",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:InitiateLayerUpload",
-      "ecr:PutImage",
-      "ecr:UploadLayerPart",
-    ]
-    resources = [aws_ecr_repository.user_images.arn]
+    sid       = "AssumePushRole"
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.image_build_push.arn]
   }
 }
 
@@ -238,10 +226,60 @@ resource "aws_iam_role_policy" "image_build" {
   policy = data.aws_iam_policy_document.image_build.json
 }
 
+data "aws_iam_policy_document" "image_build_push_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.image_build.arn]
+    }
+  }
+}
+
+# The build assumes this role with a session policy for one owner's
+# repository, so the session gets the overlap: that repository only.
+resource "aws_iam_role" "image_build_push" {
+  name               = "${local.image_build_name}-push"
+  assume_role_policy = data.aws_iam_policy_document.image_build_push_trust.json
+}
+
+data "aws_iam_policy_document" "image_build_push" {
+  # GetAuthorizationToken has no resource-level permission.
+  statement {
+    sid       = "EcrLogin"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  # CreateRepository lets the first push create the owner's repository from
+  # the creation template.
+  statement {
+    sid = "PushUserImages"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:CreateRepository",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+    ]
+    resources = [local.user_images_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "image_build_push" {
+  name   = "image-build-push"
+  role   = aws_iam_role.image_build_push.id
+  policy = data.aws_iam_policy_document.image_build_push.json
+}
+
 # The worker starts every build with a source and buildspec override, so the
 # project's own source is only a guard that fails a build started without one.
 resource "aws_codebuild_project" "image_build" {
-  #checkov:skip=CKV_AWS_147:The artifacts are off and ECR encrypts the images with KMS; a CMK costs more (see .checkov.yaml).
+  #checkov:skip=CKV_AWS_147:The artifacts are off and ECR encrypts the images; a CMK costs more (see .checkov.yaml).
   #checkov:skip=CKV_AWS_316:A Docker image build needs privileged mode; each build runs alone in a fresh CodeBuild container.
   name         = local.image_build_name
   description  = "Builds user images for the candidate box and the metric box (SKY-737)."
@@ -284,7 +322,7 @@ resource "aws_codebuild_project" "image_build" {
     }
   }
 
-  depends_on = [aws_iam_role_policy.image_build]
+  depends_on = [aws_iam_role_policy.image_build, aws_iam_role_policy.image_build_push]
 }
 
 # ---------------------------------------------------------------- worker access
@@ -308,8 +346,8 @@ data "aws_iam_policy_document" "image_build_worker" {
     resources = ["${aws_s3_bucket.image_build_source.arn}/*"]
   }
 
-  # The worker checks a digest before it pins it, and pulls the image to copy
-  # it into a provider's registry.
+  # The worker checks a digest before it pins it, pulls the image to copy it
+  # into a provider's registry, and deletes an image over the size limit.
   statement {
     sid       = "EcrLogin"
     actions   = ["ecr:GetAuthorizationToken"]
@@ -317,14 +355,15 @@ data "aws_iam_policy_document" "image_build_worker" {
   }
 
   statement {
-    sid = "ReadUserImages"
+    sid = "ManageUserImages"
     actions = [
       "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchDeleteImage",
       "ecr:BatchGetImage",
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
     ]
-    resources = [aws_ecr_repository.user_images.arn]
+    resources = [local.user_images_arn]
   }
 }
 

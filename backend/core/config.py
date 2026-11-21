@@ -557,6 +557,12 @@ class Settings(BaseSettings):
         gt=0.0,
         description="Largest user image a build may produce, in GB (10^9 bytes). An image over it fails the build. Hosted builds measure the compressed size that the registry reports; local builds measure the size that Docker reports (SKY-888).",
     )
+    image_build_max_context_mb: int = Field(
+        default=500,
+        alias="IMAGE_BUILD_MAX_CONTEXT_MB",
+        ge=1,
+        description="Largest build context a user image build may send, in MB (10^6 bytes), counted over the file sizes. A larger context fails before the upload (SKY-888).",
+    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",
