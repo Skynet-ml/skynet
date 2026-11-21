@@ -30,6 +30,10 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   unrecorded, and code in the box can write to the log. Rows carry
   ``egress_record.VERCEL_SOURCE``. Plain HTTP is not routed, so it goes out
   unrecorded too.
+- A box can start from a user image in a neutral OCI registry (SKY-889).
+  Vercel Sandbox starts only from its own registry, so the box first copies
+  the image there through an injected copier, and then starts from the
+  digest that the copier returns.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ import dataclasses
 import logging
 import math
 import posixpath
+import re
 import shlex
 import subprocess
 import time
@@ -130,6 +135,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CREATE_TIMEOUT = 120.0
+# A user image can be up to 20 GB (SKY-737), so its copy gets a long limit.
+COPY_TIMEOUT = 3600.0
 KILL_GRACE = 30.0
 KILL_AFTER_MAX = 18_000.0
 CANCEL_GRACE = 10.0
@@ -210,6 +217,15 @@ _PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
 ClientFactory = Callable[[ResponseCapture | None], Any]
 UsageFactory = Callable[..., Any]
+# Copies a source image, with optional (username, password) pull credentials,
+# into Vercel's registry and returns the copy's ``name@sha256:<digest>``.
+ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
+# A mutable tag can change under a run, so a user image is always pinned by digest.
+_DIGEST_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
+
+
+class ImageCopyError(SandboxInfraError):
+    """Report that a user image did not reach Vercel's registry."""
 
 
 def _error_types(*names: str) -> tuple[type[BaseException], ...]:
@@ -505,6 +521,9 @@ class VercelEnvironment(SandboxEnvironment):
         snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
         services: Sequence[ComposeService] = (),
         recorder: CallRecorder | None = None,
+        source_image: str | None = None,
+        pull_credentials: tuple[str, str] | None = None,
+        copy_image: ImageCopier | None = None,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -523,11 +542,27 @@ class VercelEnvironment(SandboxEnvironment):
                 their size; ``start_services`` starts them.
             recorder: Writes each request of the in-box egress proxy into the
                 run record, or ``None`` for no proxy.
+            source_image: A user image in a neutral OCI registry, pinned by
+                digest. The box copies it into Vercel's registry before it
+                starts. ``None`` starts the box from the spec or default image.
+            pull_credentials: The (username, password) that read the source
+                image, or ``None`` for a public image.
+            copy_image: Copies the source image into Vercel's registry.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
-                operation key, or the services do not fit the largest box.
+                operation key, the services do not fit the largest box, or
+                the user image is not pinned by digest or differs from the
+                spec image.
+            SandboxFatalError: A user image comes with no image copier.
         """
+        if source_image is not None:
+            if not _DIGEST_IMAGE.fullmatch(source_image):
+                raise SandboxSpecError("A user image must be pinned by digest: name@sha256:<64 hex>.")
+            if spec.image not in (None, source_image):
+                raise SandboxSpecError("The spec names an image other than the user image.")
+            if copy_image is None:
+                raise SandboxFatalError("The Vercel sandbox needs an image copier to start from a user image.")
         if budget is not None:
             if spec.operation_key is None:
                 raise SandboxSpecError("A protected Vercel sandbox needs an operation key.")
@@ -572,6 +607,10 @@ class VercelEnvironment(SandboxEnvironment):
         self._egress_log: str | None = None
         self._egress_rows = 0
         self._proxy_env: dict[str, str] = {}
+        self._source_image = source_image
+        self._pull_credentials = pull_credentials
+        self._copy_image = copy_image
+        self._copied_image: str | None = None
 
     @property
     def usage(self) -> Any | None:
@@ -686,9 +725,34 @@ class VercelEnvironment(SandboxEnvironment):
         """Return the image of the box.
 
         Returns:
-            The spec image, or the configured default.
+            The copy of the user image, else the spec image, else the
+            configured default.
         """
-        return self.spec.image or settings.vercel_sandbox_image
+        return self._copied_image or self.spec.image or settings.vercel_sandbox_image
+
+    async def _copy_source_image(self) -> str:
+        """Copy the user image into Vercel's registry.
+
+        Returns:
+            The copy's reference, pinned by digest.
+
+        Raises:
+            ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+                returned no digest reference.
+        """
+        assert self._source_image is not None
+        assert self._copy_image is not None
+        try:
+            async with asyncio.timeout(COPY_TIMEOUT):
+                copied = await self._copy_image(self._source_image, self._pull_credentials)
+        except Exception as error:
+            # Only the type: a copier's message can echo the pull credentials.
+            raise ImageCopyError(
+                f"Could not copy the image {self._source_image} into Vercel's registry: {type(error).__name__}."
+            ) from None
+        if not _DIGEST_IMAGE.fullmatch(copied):
+            raise ImageCopyError(f"The copy of {self._source_image} in Vercel's registry is not pinned by digest.")
+        return copied
 
     def _sdk_policy(self, policy: NetworkPolicy, *, update: bool) -> Any | None:
         """Build the SDK network policy of one Skynet policy.
@@ -864,7 +928,11 @@ class VercelEnvironment(SandboxEnvironment):
             logger.warning("Could not record the egress requests of %s: %s", self.name, type(error).__name__)
 
     async def _start(self) -> None:
-        """Make the client, then wait for capacity, reserve and create the box."""
+        """Copy a user image, make the client, then wait for capacity, reserve and create the box."""
+        # A snapshot already holds the image's files, so its box needs no copy.
+        if self._source_image is not None and self.snapshot_id is None and self._copied_image is None:
+            with self.timings.phase("copy"):
+                self._copied_image = await self._copy_source_image()
         with self.timings.phase("create"):
             if self._client is None:
                 self._client = self._client_factory(self._capture)

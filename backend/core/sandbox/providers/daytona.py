@@ -7,7 +7,11 @@ and ``harbor/environments/daytona/utils.py``. Changes:
 - No retries (SKY-406 D3, D10). Each SDK error maps to one sandbox error
   group, and the caller decides whether to retry.
 - No snapshots, no Dockerfile builds, no compose, no SSH and no GPU types.
-  A box always starts from an image.
+  A box always starts from an image. A user image pinned by digest
+  (SKY-889) goes to Daytona as it is, and Daytona pulls it on its side.
+  Daytona takes no pull credentials with a create call: a private registry
+  needs a registry entry in the Daytona organization (for ECR, an IAM role
+  that Daytona assumes), so this provider takes none.
 - ``exec`` runs one synchronous session command, so stdout and stderr stay
   apart and no status polling is needed.
 - ``stop_job_sandboxes`` finds the boxes of a job by their ``JOB_TAG`` label.

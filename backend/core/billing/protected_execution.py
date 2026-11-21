@@ -40,6 +40,19 @@ def _immutable(settings: Settings, image: str) -> bool:
     return bool(pattern.fullmatch(image))
 
 
+def trusted_user_image(image: str) -> bool:
+    """Check that ``image`` is a user image pinned by its registry digest.
+
+    Args:
+        image: Image reference to check.
+
+    Returns:
+        Whether the reference is ``name@sha256:<64 hex>``. A mutable tag
+        fails, because its content can change after the run is priced.
+    """
+    return bool(_IMMUTABLE_IMAGE.fullmatch(image))
+
+
 def protected_image(settings: Settings) -> str | None:
     """Return the deployment-owned immutable sandbox image.
 
@@ -161,8 +174,9 @@ def bind_protected_sandbox(
             full lifetime.
         parent_hosts: Package registries the parent's own repository scoring
             box may reach during setup; empty when the run opens no such box.
-        image: The immutable image the run is pinned to; the deployment's
-            current image when None.
+        image: The immutable image the run is pinned to: the deployment's
+            own image reference, or a user image pinned by registry digest
+            (SKY-889). The deployment's current image when None.
         provider: The sandbox provider the run chose; the deployment
             default when None.
 
@@ -181,7 +195,7 @@ def bind_protected_sandbox(
         raise UnpricedOperationError(f"The sandbox provider {provider!r} is not offered on this deployment.")
     if image is None:
         image = protected_image(settings)
-    elif not _immutable(settings, image):
+    elif not (_immutable(settings, image) or trusted_user_image(image)):
         raise UnpricedOperationError("The run's pinned sandbox image is not an immutable reference.")
     assert image is not None
     configured_lifetime = settings.vercel_sandbox_max_lifetime_seconds
