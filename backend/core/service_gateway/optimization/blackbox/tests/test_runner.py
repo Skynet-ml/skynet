@@ -2873,12 +2873,20 @@ def test_the_model_key_file_reaches_the_gateway_and_is_gone_before_the_command(t
     assert [request["authorization"] for request in gateway.requests] == ["Bearer sk-file"]
 
 
+# pytest -n runs each worker in its own process, so each import makes its own tag. Another worker's
+# tests start readable processes that hold these secrets on purpose; the tag keeps this scan from
+# finding them (SKY-897).
+_SCAN_TAG = uuid.uuid4().hex[:8]
+_SCAN_KEY = f"sk-{_SCAN_TAG}-scan"
+_SCAN_RELAY = f"http://relay-{_SCAN_TAG}.invalid/v1"
+_SCAN_TOKEN = f"{_SCAN_TAG}-relay-token-scan"
+
 # Lists each process whose environ the command can read, and each secret it finds there.
 _PROC_SCAN = (
     "for p in /proc/[0-9]*; do\n"
     '  if text=$(tr "\\0" "\\n" < "$p/environ" 2>/dev/null); then\n'
     '    echo "${p#/proc/}" >> readable\n'
-    '    for secret in "sk-scan" "http://relay.invalid/v1" "relay-token-scan"; do\n'
+    f'    for secret in "{_SCAN_KEY}" "{_SCAN_RELAY}" "{_SCAN_TOKEN}"; do\n'
     '      case "$text" in *"$secret"*) echo "${p#/proc/} $secret" >> found ;; esac\n'
     "    done\n"
     "  fi\n"
@@ -2922,17 +2930,17 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
         runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
     }
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
-    (call_dir / runner.MODEL_KEY_FILE).write_text("sk-scan")
+    (call_dir / runner.MODEL_KEY_FILE).write_text(_SCAN_KEY)
     start = f"cd {shlex.quote(str(box))} && exec {shlex.quote(sys.executable)} -I -B -u"
     start += f" {shlex.quote(runner.__file__)} {shlex.quote(str(call_dir))}"
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
     if chain == "vercel_key_in_env":
-        env["ASCENT_MODEL_KEY"] = "sk-scan"
+        env["ASCENT_MODEL_KEY"] = _SCAN_KEY
     if chain.startswith("vercel"):
         inner = f"/usr/bin/timeout --signal=KILL 60s /bin/bash {' '.join(vercel.SHELL_FLAGS)} {shlex.quote(start)}"
         script = vercel._wrapper(inner, uuid.uuid4().hex, sudo=False)[0]
     else:
-        env.update({"APP_BUDGET_RELAY_URL": "http://relay.invalid/v1", "APP_TOOL_RELAY_TOKEN": "relay-token-scan"})
+        env.update({"APP_BUDGET_RELAY_URL": _SCAN_RELAY, "APP_TOOL_RELAY_TOKEN": _SCAN_TOKEN})
         script = start
     argv = ["/bin/bash", *vercel.SHELL_FLAGS, script]
     process = subprocess.Popen(argv, env=env)
@@ -2941,7 +2949,7 @@ def test_no_process_the_command_can_read_holds_the_key_or_relay_secrets(tmp_path
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
     found = (box / "found").read_text().splitlines()
     if chain == "vercel_key_in_env":
-        assert f"{process.pid} sk-scan" in found
+        assert f"{process.pid} {_SCAN_KEY}" in found
     else:
         assert found == []
     if chain.startswith("vercel"):
@@ -3007,9 +3015,9 @@ def test_no_process_a_contained_session_command_can_read_holds_relay_secrets(tmp
         runner.ASCENT_PACKAGE_PARAM: _PACKAGE,
     }
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload))
-    (call_dir / runner.MODEL_KEY_FILE).write_text("sk-scan")
+    (call_dir / runner.MODEL_KEY_FILE).write_text(_SCAN_KEY)
     request = tmp_path / "request.json"
-    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": _SCAN_TOKEN}}
     request.write_text(
         json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
     )
@@ -3018,7 +3026,7 @@ def test_no_process_a_contained_session_command_can_read_holds_relay_secrets(tmp
     backend = Path(__file__).resolve().parents[5]
     start = f"PYTHONPATH={shlex.quote(str(backend))} {shlex.quote(sys.executable)} -c {shlex.quote(_CONTAINED_GUEST)}"
     start += f" {shlex.quote(command)} {shlex.quote(str(request))} {mode}"
-    relay = "http://relay.invalid/v1"
+    relay = _SCAN_RELAY
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(tmp_path),
@@ -3142,7 +3150,7 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     stage_call.mkdir(parents=True)
     (stage_call / runner.INPUT_FILE).write_text(json.dumps({"mode": mode, "ready": str(ready), "done": str(done)}))
     request = tmp_path / "request.json"
-    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": "relay-token-scan"}}
+    guest = {"_optimization_type": "blackbox", "_skynet_tools_route": {"token": _SCAN_TOKEN}}
     request.write_text(
         json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
     )
@@ -3154,7 +3162,7 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     backend = Path(__file__).resolve().parents[5]
     start = f"PYTHONPATH={shlex.quote(str(backend))} {python} -c {shlex.quote(_CONTAINED_STAGE_GUEST)}"
     start += f" {shlex.quote(stage)} {shlex.quote(metric)} {shlex.quote(str(request))}"
-    relay = "http://relay.invalid/v1"
+    relay = _SCAN_RELAY
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
     env.update({"APP_BUDGET_RELAY_URL": relay, "OPENAI_BASE_URL": relay, "ASCENT_MODEL_URL": relay})
     process = subprocess.Popen(
@@ -3169,7 +3177,7 @@ def test_a_metric_cannot_read_the_relay_values_of_a_stage_call_that_runs_in_its_
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text())["score"] == 1.0
     stage_pid = ready.read_text()
     found = (box / "found").read_text().splitlines()
-    assert not [line for line in found if line.endswith("relay-token-scan")]
+    assert not [line for line in found if line.endswith(_SCAN_TOKEN)]
     if mode == "open":
         assert f"{stage_pid} {relay}" in found
     else:
@@ -3236,8 +3244,8 @@ def test_a_child_that_copies_the_guest_environment_gets_no_relay_token(tmp_path:
     request = tmp_path / "request.json"
     guest = {
         "_optimization_type": "blackbox",
-        "_skynet_tools_route": {"token": "relay-token-scan"},
-        "_skynet_packages_route": {"url": "http://relay.invalid/v1", "token": "package-token-scan"},
+        "_skynet_tools_route": {"token": _SCAN_TOKEN},
+        "_skynet_packages_route": {"url": _SCAN_RELAY, "token": "package-token-scan"},
     }
     request.write_text(
         json.dumps({"payload": guest, "artifact_id": "g1", "nonce": "scan", "protocol": SANDBOX_PROTOCOL})
@@ -3247,7 +3255,7 @@ def test_a_child_that_copies_the_guest_environment_gets_no_relay_token(tmp_path:
     start = f"PYTHONPATH={shlex.quote(str(backend))} {python} -c {shlex.quote(_ENVIRON_CHILD_GUEST)}"
     start += f" {shlex.quote(str(request))} {mode}"
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
-    env["APP_BUDGET_RELAY_URL"] = "http://relay.invalid/v1"
+    env["APP_BUDGET_RELAY_URL"] = _SCAN_RELAY
     process = subprocess.Popen(
         ["bash", *vercel.SHELL_FLAGS, start], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -3256,12 +3264,12 @@ def test_a_child_that_copies_the_guest_environment_gets_no_relay_token(tmp_path:
 
     assert process.returncode == 0, stderr
     [child] = [event for event in events if event["type"] == "child"]
-    assert child["token"] == "relay-token-scan"
+    assert child["token"] == _SCAN_TOKEN
     assert "_skynet_packages_route" not in child["payload_keys"]
-    assert "APP_BUDGET_RELAY_URL=http://relay.invalid/v1" in child["environ"]
+    assert f"APP_BUDGET_RELAY_URL={_SCAN_RELAY}" in child["environ"]
     holds_token = [line for line in child["environ"] if line.endswith("-token-scan")]
     if mode == "open":
-        assert holds_token == ["APP_TOOL_RELAY_TOKEN=relay-token-scan", "APP_PACKAGE_RELAY_TOKEN=package-token-scan"]
+        assert holds_token == [f"APP_TOOL_RELAY_TOKEN={_SCAN_TOKEN}", "APP_PACKAGE_RELAY_TOKEN=package-token-scan"]
     else:
         assert holds_token == []
 
