@@ -8,6 +8,7 @@ with the local Docker engine and skips when Docker is not there.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import os
@@ -936,9 +937,39 @@ class _ReadyPopen(subprocess.Popen):  # type: ignore[type-arg]
         return super().wait(timeout)
 
 
+def _kill_pid_in(path: Path) -> None:
+    """Kill the test child whose pid the file holds, so no child outlives its test.
+
+    Args:
+        path: The file that holds the pid. A missing file means no child started.
+    """
+    if path.exists():
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.kill(int(path.read_text()), signal.SIGKILL)
+
+
+def _ended(pid: int) -> bool:
+    """Wait up to 5 seconds for a process to end and be reaped.
+
+    Args:
+        pid: The process id.
+
+    Returns:
+        True when no process with the pid is left.
+    """
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _ready_docker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, interrupt: bool = False
-) -> LocalDockerImageBuilder:
+) -> tuple[LocalDockerImageBuilder, Path]:
     """Return a local builder on a fake docker that prints, signals ready, then hangs with a child on the pipe.
 
     Args:
@@ -947,18 +978,20 @@ def _ready_docker(
         interrupt: Raise KeyboardInterrupt from the timed wait.
 
     Returns:
-        The builder, with a 1-second time limit.
+        The builder, with a 1-second time limit, and the file that holds the child's pid.
     """
     ready = tmp_path / "ready"
+    pid_file = tmp_path / "child.pid"
     fake = tmp_path / "docker"
-    fake.write_text(f"#!/bin/sh\necho '#1 building'\ntouch '{ready}'\nsleep 30 &\nwait\n")
+    fake.write_text(f"#!/bin/sh\necho '#1 building'\nsleep 30 &\necho $! > '{pid_file}'\ntouch '{ready}'\nwait\n")
     fake.chmod(0o755)
     popen = type("ReadyPopen", (_ReadyPopen,), {"ready": ready, "interrupt": interrupt})
     monkeypatch.setattr(image_build.subprocess, "Popen", popen)
-    return LocalDockerImageBuilder(
+    builder = LocalDockerImageBuilder(
         docker=os.fspath(fake),
         limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
     )
+    return builder, pid_file
 
 
 def test_local_builder_reports_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -967,14 +1000,18 @@ def test_local_builder_reports_a_timeout(tmp_path: Path, monkeypatch: pytest.Mon
     The fake docker leaves a child that holds the pipe for 30 seconds, so
     only a group kill ends the build well inside the bound.
     """
-    builder = _ready_docker(tmp_path, monkeypatch)
+    builder, pid_file = _ready_docker(tmp_path, monkeypatch)
     started = time.monotonic()
 
-    with pytest.raises(ImageBuildTimeoutError) as caught:
-        builder.build(_request(_context(tmp_path / "ctx")))
+    try:
+        with pytest.raises(ImageBuildTimeoutError) as caught:
+            builder.build(_request(_context(tmp_path / "ctx")))
 
-    assert time.monotonic() - started < _PROMPT_SECONDS
-    assert caught.value.log_tail == "#1 building"
+        assert time.monotonic() - started < _PROMPT_SECONDS
+        assert caught.value.log_tail == "#1 building"
+        assert _ended(int(pid_file.read_text()))
+    finally:
+        _kill_pid_in(pid_file)
 
 
 def test_local_builder_does_not_wait_for_a_process_outside_the_group(
@@ -983,7 +1020,13 @@ def test_local_builder_does_not_wait_for_a_process_outside_the_group(
     """A process that left docker's group and holds the pipe does not delay the timeout."""
     ready = tmp_path / "ready"
     fake = tmp_path / "docker"
-    escape = shlex.quote(f"import os, time; os.setsid(); open({os.fspath(ready)!r}, 'w').close(); time.sleep(30)")
+    # The child writes its pid to a side file, then renames it to the ready
+    # file, so the ready file never holds a partial pid.
+    escape = shlex.quote(
+        "import os, time; os.setsid(); "
+        f"open({os.fspath(ready)!r} + '.tmp', 'w').write(str(os.getpid())); "
+        f"os.replace({os.fspath(ready)!r} + '.tmp', {os.fspath(ready)!r}); time.sleep(30)"
+    )
     fake.write_text(f"#!/bin/sh\necho '#1 building'\n{shlex.quote(sys.executable)} -c {escape} &\nwait\n")
     fake.chmod(0o755)
     popen = type("ReadyPopen", (_ReadyPopen,), {"ready": ready, "interrupt": False})
@@ -995,25 +1038,63 @@ def test_local_builder_does_not_wait_for_a_process_outside_the_group(
     )
     started = time.monotonic()
 
-    with pytest.raises(ImageBuildTimeoutError) as caught:
-        builder.build(_request(_context(tmp_path / "ctx")))
+    try:
+        with pytest.raises(ImageBuildTimeoutError) as caught:
+            builder.build(_request(_context(tmp_path / "ctx")))
 
-    assert time.monotonic() - started < _PROMPT_SECONDS
-    assert caught.value.log_tail == "#1 building"
+        assert time.monotonic() - started < _PROMPT_SECONDS
+        assert caught.value.log_tail == "#1 building"
+    finally:
+        _kill_pid_in(ready)
 
 
 def test_local_builder_kills_the_group_on_an_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ctrl-C during a local build kills docker's process group and returns promptly."""
-    builder = _ready_docker(tmp_path, monkeypatch, interrupt=True)
+    builder, pid_file = _ready_docker(tmp_path, monkeypatch, interrupt=True)
     started = time.monotonic()
 
-    with pytest.raises(KeyboardInterrupt):
-        builder.build(_request(_context(tmp_path / "ctx")))
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            builder.build(_request(_context(tmp_path / "ctx")))
 
-    assert time.monotonic() - started < _PROMPT_SECONDS
-    process = _ReadyPopen.last
-    assert process is not None
-    assert process.returncode == -signal.SIGKILL
+        assert time.monotonic() - started < _PROMPT_SECONDS
+        process = _ReadyPopen.last
+        assert process is not None
+        assert process.returncode == -signal.SIGKILL
+        assert _ended(int(pid_file.read_text()))
+    finally:
+        _kill_pid_in(pid_file)
+
+
+def test_local_builder_kills_the_group_after_a_normal_exit(tmp_path: Path) -> None:
+    """A child that docker leaves in its group does not delay a successful build.
+
+    Without the group kill, the child holds the pipe, and the build waits
+    the full reader join time before it returns.
+    """
+    pid_file = tmp_path / "child.pid"
+    fake = tmp_path / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = image ]; then echo 5; exit 0; fi\n'
+        'while [ $# -gt 0 ]; do [ "$1" = --iidfile ] && iid="$2"; shift; done\n'
+        'echo sha256:abc > "$iid"\n'
+        "echo '#1 done'\n"
+        f"sleep 30 &\necho $! > '{pid_file}'\nexit 0\n"
+    )
+    fake.chmod(0o755)
+    builder = LocalDockerImageBuilder(docker=os.fspath(fake), limits=LIMITS)
+    started = time.monotonic()
+
+    try:
+        result = builder.build(_request(_context(tmp_path / "ctx")))
+
+        assert time.monotonic() - started < 3
+        assert result.image == "sha256:abc"
+        assert result.size_bytes == 5
+        assert _ended(int(pid_file.read_text()))
+    finally:
+        _kill_pid_in(pid_file)
 
 
 def test_local_docker_streams_one_huge_line_inside_the_cap(tmp_path: Path) -> None:

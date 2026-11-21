@@ -997,13 +997,26 @@ def _read_capped(stream: IO[bytes], capped: _CappedLog) -> None:
         capped.add(piece.decode(errors="replace").rstrip("\n"))
 
 
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """Kill every process in docker's process group.
+
+    An empty group raises ProcessLookupError. macOS raises PermissionError
+    when the group holds only zombies. Both mean that nothing is left to kill.
+
+    Args:
+        process: The docker process, which leads its own process group.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
 def _release_output(process: subprocess.Popen[bytes], reader: threading.Thread) -> None:
     """Join the output reader for a bounded time, and detach the pipe if it still reads.
 
-    A process outside docker's group (one that called setsid) can hold the
-    pipe open after the group kill. Closing the pipe would then block until
-    that process exits, so the builder leaves the pipe to the daemon reader,
-    which ends at EOF.
+    The builder kills docker's group before this call on every path, so only
+    a process outside the group (one that called setsid) can still hold the
+    pipe. Closing the pipe would then block until that process exits, so the
+    builder leaves the pipe to the daemon reader, which ends at EOF.
 
     Args:
         process: The docker process, already waited for.
@@ -1110,8 +1123,7 @@ class LocalDockerImageBuilder:
                 try:
                     returncode = process.wait(timeout=self._limits.timeout_seconds)
                 except BaseException as exc:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                    _kill_group(process)
                     process.wait()
                     _release_output(process, reader)
                     if not isinstance(exc, subprocess.TimeoutExpired):
@@ -1122,6 +1134,9 @@ class LocalDockerImageBuilder:
                         log=log,
                         log_tail=log_tail(log),
                     ) from exc
+                # A child that docker left in its group can hold the pipe open
+                # after a normal exit, so kill the group here too.
+                _kill_group(process)
                 _release_output(process, reader)
             log = capped.text()
             tail = log_tail(log)
