@@ -6385,8 +6385,16 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
                 "0 755 regular file /usr/lib/ld-linux-aarch64.so.1",
             ]
         ),
+        _listing(box=["env PATH", "env MALLOC_ARENA_MAX", *_ENTRIES]),
     ],
-    ids=["python-image-layout", "plain-file", "two-absolute-links", "dot-dot-target", "linked-top-folder"],
+    ids=[
+        "python-image-layout",
+        "plain-file",
+        "two-absolute-links",
+        "dot-dot-target",
+        "linked-top-folder",
+        "plain-environment",
+    ],
 )
 def test_a_root_owned_python_chain_passes(probe: str) -> None:
     """Paths under root-owned folders pass, missing ``sys.path`` entries too; a failed probe never does (SKY-737).
@@ -6399,6 +6407,38 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
     """
     assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
     assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
+
+
+@pytest.mark.parametrize(
+    ("variables", "names"),
+    [
+        (["env LD_LIBRARY_PATH"], "LD_LIBRARY_PATH"),
+        (["env LD_PRELOAD"], "LD_PRELOAD"),
+        (["env PATH", "env LD_AUDIT", "env GCONV_PATH"], "GCONV_PATH, LD_AUDIT"),
+    ],
+    ids=["library-path-with-an-empty-element", "preload", "audit-and-gconv"],
+)
+def test_a_run_image_with_loader_variables_in_its_env_is_refused(
+    monkeypatch: pytest.MonkeyPatch, variables: list[str], names: str
+) -> None:
+    """An image ENV such as ``LD_LIBRARY_PATH=/x:`` stops the run, as root's loader reads it (SKY-737).
+
+    The probe prints only the names, so ``/x:`` (an empty element, which
+    glibc reads as the work folder) and ``/x`` refuse alike.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        variables: The ``env`` lines of the box run.
+        names: The names that the message lists.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_listing(box=[*variables, *_ENTRIES]))
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=rf"sets {names} in its environment.*Remove every LD_"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
 
 
 def test_the_probe_imports_what_the_root_scripts_import() -> None:
@@ -6449,6 +6489,7 @@ def _fake_python(root: Path, extra: str = "") -> Path:
         f"printf 'file %s\\n' {shlex.quote(str(python))}\n"
         f"printf 'dir %s\\n' {shlex.quote(str(root))}\n"
         f"printf '%s' {shlex.quote(extra)}\n"
+        "env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/env \\1/p'\n"
     )
     python.chmod(0o755)
     return python
@@ -6581,6 +6622,43 @@ def test_the_trusted_python_probe_stops_at_a_link_target_with_a_control_byte(tmp
 
     assert done.returncode == 1
     assert not any(line.startswith("link ") for line in done.stdout.splitlines())
+
+
+def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: Path) -> None:
+    """The box run lists an image ``LD_LIBRARY_PATH`` by name, and the clean run does not (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    python = _fake_python(root)
+
+    done = _run_probe(python, LD_LIBRARY_PATH="/opt/foo:")
+
+    assert done.returncode == 0, done.stderr
+    clean, box = done.stdout.split("run box\n")
+    assert "env LD_LIBRARY_PATH" not in clean.split("\n")
+    assert "env LD_LIBRARY_PATH" in box.split("\n")
+    assert "/opt/foo" not in done.stdout
+    assert repo_staging._loader_variables(done) == ["LD_LIBRARY_PATH"]
+
+
+def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
+    """The real interpreter script prints ``env`` lines with names only (SKY-737)."""
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "LD_PRELOAD": "", "SECRET_VALUE": "do-not-print"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert {"env LD_PRELOAD", "env SECRET_VALUE"} <= set(done.stdout.split("\n"))
+    assert "do-not-print" not in done.stdout
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:

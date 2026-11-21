@@ -1215,7 +1215,8 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 # ``sys.path``, ``find`` fails the probe on any entry that is not root's, that
 # group or others can write, or that is a link. A ``pyvenv.cfg`` or ``._pth``
 # file next to the interpreter would move ``sys.path``, so it fails the probe
-# too. A newline in a name or target could forge a listing line, so the probe
+# too. ``env`` lines name the variables of each run, without their values,
+# for :func:`_loader_variables`. A newline in a name or target could forge a listing line, so the probe
 # stops at any byte outside printable ASCII. ``$(...)`` drops trailing
 # newlines, so the ``x`` keeps them and the probe sees the target the kernel follows.
 _MAX_LINK_HOPS = 40
@@ -1226,6 +1227,10 @@ _PATH_SCRIPT = (
     + r"""
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
+for name in os.environ:
+    if not (name.isascii() and name.isprintable()):
+        sys.exit("an environment variable name is not printable ASCII")
+    print("env", name)
 for entry in sys.path:
     print("path", entry)
 seen = set()
@@ -1285,8 +1290,8 @@ _TRUSTED_PYTHON_PROBE = (
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
     '  else o=$("$s" -I -S -c "$y") || exit 1; fi\n'
     "  printf '%s\\n' \"$o\" | while IFS= read -r v; do\n"
-    "    case $v in *[![:print:]]*) exit 1;; 'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
-    '    printf \'%s\\n\' "$v"; t=${v%% *}; w "${v#* }"\n'
+    "    case $v in *[![:print:]]*) exit 1;; 'env '?*|'path /'*|'file /'*|'dir /'*|'opt /'*) ;; *) exit 1;; esac\n"
+    '    printf \'%s\\n\' "$v"; t=${v%% *}; [ "$t" != env ] || continue; w "${v#* }"\n'
     '    if [ "$t" = path ] && [ -z "$z" ] && [ -d "$a" ] && [ ! -h "$a" ]; then\n'
     '      q=$(find "$a" \\( -path "$a/site-packages" -o -path "$a/dist-packages" \\) -prune'
     " -o \\( ! -user 0 -o -perm -020 -o -perm -002 -o -type l \\) -print) || exit 1\n"
@@ -1306,6 +1311,24 @@ _ENTRY_KINDS = {
     "dir": frozenset({"directory"}),
 }
 _MAY_BE_MISSING = frozenset({"path", "opt"})
+_VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
+# Root runs ``/usr/bin/env``, the shell and the supervisor with the box's
+# environment, and the loader reads these before ``env -i`` can clear them, as
+# the process is not setuid. An empty ``LD_LIBRARY_PATH`` element means the
+# current folder, which is the candidate's work folder (SKY-737). ``LD_*``
+# covers the glibc and musl loader variables (``LD_LIBRARY_PATH``,
+# ``LD_PRELOAD``, ``LD_AUDIT``). ``GCONV_PATH`` makes iconv load modules from
+# its folders, ``LOCPATH`` makes libc parse locale files from them, and
+# ``GLIBC_TUNABLES`` changes how the loader picks libraries and how malloc
+# works. ``MALLOC_*``, ``TZDIR`` and ``HOSTALIASES`` load no code, so they stay.
+_LOADER_PREFIX = "LD_"
+_LOADER_VARIABLES = frozenset({"GCONV_PATH", "LOCPATH", "GLIBC_TUNABLES"})
+LOADER_ENVIRONMENT = (
+    "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
+    " image environment, and these variables change which libraries the system loader and the C library load."
+    " Remove every LD_* variable, GCONV_PATH, LOCPATH and GLIBC_TUNABLES from the image ENV. Images that need"
+    " LD_LIBRARY_PATH, such as CUDA images, are not supported yet."
+)
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
 UNTRUSTED_PYTHON = (
@@ -1638,6 +1661,9 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
     python = report.get("python") if report is not None else None
     passed = result.ok and report is not None and report.get("ok") is True
     if passed and (check_role != "metric" or (isinstance(python, str) and python.startswith("/"))):
+        names = _loader_variables(probe) if probe is not None else []
+        if names:
+            raise BoxImageError(LOADER_ENVIRONMENT.format(image=image, names=", ".join(names), app=APP_NAME))
         if probe is not None and not _trusted_python(probe):
             raise BoxImageError(UNTRUSTED_PYTHON.format(image=image, python=BASE_PYTHON, app=APP_NAME))
         return python if check_role == "metric" else None
@@ -1687,6 +1713,8 @@ def _trusted_python(probe: Any) -> bool:
         tags = set()
         while lines and not lines[-1].startswith("run "):
             tag, _, path = lines.pop().partition(" ")
+            if tag == "env" and _VARIABLE_NAME.fullmatch(path):
+                continue
             if tag not in _ENTRY_KINDS or not _PRINTABLE_PATH.fullmatch(path):
                 return False
             entry = _walk(lines, path)
@@ -1698,6 +1726,22 @@ def _trusted_python(probe: Any) -> bool:
         if not {"path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _loader_variables(probe: Any) -> list[str]:
+    """List the variables in the probe's environments that change what the loader or libc loads.
+
+    A failed probe still counts: its ``env`` lines come before its walks, and
+    a refusal is the safe answer either way.
+
+    Args:
+        probe: The result of :data:`_TRUSTED_PYTHON_PROBE`.
+
+    Returns:
+        The sorted names, without duplicates.
+    """
+    names = {line.removeprefix("env ") for line in probe.stdout.split("\n") if line.startswith("env ")}
+    return sorted(name for name in names if name.startswith(_LOADER_PREFIX) or name in _LOADER_VARIABLES)
 
 
 def _walk(lines: list[str], path: str) -> tuple[int, str] | str | None:
