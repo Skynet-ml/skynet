@@ -17,6 +17,9 @@ _BYOK_FEE = Decimal(str(BYOK_FEE_FRACTION))
 # CodeBuild bills each started minute. The project uses BUILD_GENERAL1_MEDIUM on
 # Linux (infra image_build.tf). A local Docker build costs Skynet nothing (SKY-737).
 IMAGE_BUILD_USD_PER_MINUTE: Mapping[str, Decimal] = {"codebuild": Decimal("0.01")}
+# The copy of a user image into a provider's own registry (Vercel), for each
+# started minute of the copy; the reservation covers the copy's time limit (SKY-891).
+IMAGE_COPY_USD_PER_MINUTE = Decimal("0.01")
 
 
 class UnpricedOperationError(ValueError):
@@ -153,3 +156,15 @@ def image_build_usd(builder: str, seconds: float) -> Decimal:
     """
     rate = IMAGE_BUILD_USD_PER_MINUTE.get(builder, Decimal(0))
     return rate * math.ceil(max(seconds, 0.0) / 60)
+
+
+def image_copy_usd(seconds: float) -> Decimal:
+    """Return the provider charge of one user image copy into a provider's registry (SKY-891).
+
+    Args:
+        seconds: The copy time, or the time limit for the reservation.
+
+    Returns:
+        The charge for each started minute.
+    """
+    return IMAGE_COPY_USD_PER_MINUTE * math.ceil(max(seconds, 0.0) / 60)

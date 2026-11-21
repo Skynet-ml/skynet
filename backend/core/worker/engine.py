@@ -83,6 +83,7 @@ from ..models.blackbox import BLACKBOX_TARGET_REPO, HOST_CLI_AUTO_KEY, STORED_PA
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
+from ..sandbox.image_registry import image_registry
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway.embedding_pipeline import embed_finished_job
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
@@ -1045,6 +1046,7 @@ class BackgroundWorker:
                         # Before the setup model and the scorer box, so a bad image stops the run
                         # before it pays for either; a resume keeps the images it pinned (SKY-737).
                         if isinstance(staged_repository, StagedRepository) and staged_repository.box_sources:
+                            user_image_registry = image_registry(settings)
                             staged_repository = prepare_box_images(
                                 staged_repository,
                                 owner_id=optimization_id,
@@ -1053,6 +1055,7 @@ class BackgroundWorker:
                                 builder=image_builder(settings),
                                 store=self._job_store,
                                 budget=budget_gateway.runtime,
+                                registry=user_image_registry,
                                 pinned=job_data.get("box_images"),
                             )
                             pinned_images = self._job_store.pin_box_images(
@@ -1067,6 +1070,7 @@ class BackgroundWorker:
                                     runtime=budget_gateway.parent_sandbox_runtime(),
                                     builder=None,
                                     store=self._job_store,
+                                    registry=user_image_registry,
                                     pinned=pinned_images,
                                 )
                         inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)

@@ -563,6 +563,31 @@ class Settings(BaseSettings):
         ge=1,
         description="Largest build context a user image build may send, in MB (10^6 bytes), counted over the file sizes. A larger context fails before the upload (SKY-888).",
     )
+    user_images_repository_prefix_uri: str | None = Field(
+        default=None,
+        alias="USER_IMAGES_REPOSITORY_PREFIX_URI",
+        description="ECR prefix of the user image repositories, <account>.dkr.ecr.<region>.amazonaws.com/<prefix>; each user gets <prefix>/<owner>. With IMAGE_PULL_ROLE_ARN it turns on the registry that pins, pulls and deletes user images. Unset in local mode (SKY-891).",
+    )
+    image_pull_role_arn: str | None = Field(
+        default=None,
+        alias="IMAGE_PULL_ROLE_ARN",
+        description="Role the worker assumes, with a session policy for one owner, to get a token that pulls only that owner's images (SKY-891).",
+    )
+    image_build_project: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_PROJECT",
+        description="CodeBuild project that builds user Dockerfiles. With IMAGE_BUILD_SOURCE_BUCKET, IMAGE_BUILD_PUSH_ROLE_ARN and the user image registry it turns on hosted builds; unset, a cloud Dockerfile fails with a clear error (SKY-891).",
+    )
+    image_build_source_bucket: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_SOURCE_BUCKET",
+        description="S3 bucket that holds the zipped build context of each CodeBuild user image build (SKY-891).",
+    )
+    image_build_push_role_arn: str | None = Field(
+        default=None,
+        alias="IMAGE_BUILD_PUSH_ROLE_ARN",
+        description="Role a CodeBuild build assumes, with a session policy for one owner, to push to that owner's repository (SKY-891).",
+    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",

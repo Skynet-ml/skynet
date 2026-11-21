@@ -5,11 +5,13 @@ from __future__ import annotations
 import base64
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, require_digest
+from core.sandbox import image_registry as image_registry_module
+from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, image_owner, image_registry, require_digest
 
 SERVER = "123456789012.dkr.ecr.us-east-2.amazonaws.com"
 PREFIX = "skynet/user-images-staging"
@@ -407,3 +409,94 @@ def test_validation_refuses_a_trailing_newline() -> None:
         registry.push_reference("alice", "abc\n")
     with pytest.raises(ImageRegistryError, match="ECR repository prefix URI"):
         _registry(FakeEcr(), URI + "\n")
+
+
+def test_repository_uri_names_the_owner_repository_with_no_tag() -> None:
+    """The repository URI is the prefix of each pinned image of the owner (SKY-891)."""
+    registry = _registry(FakeEcr(), URI)
+
+    assert registry.repository_uri("user-7") == f"{URI}/user-7"
+    assert registry.pinned_reference("user-7", DIGEST).startswith(registry.repository_uri("user-7") + "@")
+    with pytest.raises(ImageRegistryError):
+        registry.repository_uri("../x")
+
+
+def test_image_owner_is_a_stable_repository_name_that_hides_the_username() -> None:
+    """Each user gets one valid repository name that does not show the username (SKY-891)."""
+    owner = image_owner("owner@example.com")
+
+    assert owner == image_owner("owner@example.com")
+    assert owner != image_owner("other@example.com")
+    assert "owner" not in owner
+    assert _registry(FakeEcr(), URI).repository_name(owner) == f"{PREFIX}/{owner}"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"user_images_repository_prefix_uri": None, "image_pull_role_arn": PULL_ROLE},
+        {"user_images_repository_prefix_uri": URI, "image_pull_role_arn": None},
+        {"user_images_repository_prefix_uri": None, "image_pull_role_arn": None},
+    ],
+)
+def test_image_registry_is_off_until_both_settings_are_set(values: dict[str, Any]) -> None:
+    """A deployment with no registry settings, such as local mode, gets no registry (SKY-891).
+
+    Args:
+        values: The registry settings.
+    """
+    assert image_registry(SimpleNamespace(**values)) is None
+
+
+class _FakeBoto3:
+    """Record each client that the registry factory makes."""
+
+    def __init__(self) -> None:
+        """Start with no clients."""
+        self.clients: list[tuple[str, dict[str, Any]]] = []
+
+    def client(self, name: str, **options: Any) -> Any:
+        """Make a fake client.
+
+        Args:
+            name: The AWS service.
+            **options: The client options.
+
+        Returns:
+            A fake client of that service.
+        """
+        self.clients.append((name, options))
+        return FakeSts() if name == "sts" else FakeEcr()
+
+
+def test_image_registry_builds_the_ecr_registry_in_the_prefix_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry uses the worker's clients in the Region of its prefix (SKY-891).
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    fake = _FakeBoto3()
+    monkeypatch.setattr(image_registry_module, "boto3", fake)
+
+    registry = image_registry(SimpleNamespace(user_images_repository_prefix_uri=URI, image_pull_role_arn=PULL_ROLE))
+
+    assert isinstance(registry, EcrRegistry)
+    assert registry.repository_uri("user-7") == f"{URI}/user-7"
+    assert fake.clients == [("ecr", {"region_name": "us-east-2"}), ("sts", {"region_name": "us-east-2"})]
+
+
+def test_image_registry_refuses_a_bad_prefix_or_a_missing_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A set but unusable registry setting fails loudly, never as a run with no registry (SKY-891).
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    monkeypatch.setattr(image_registry_module, "boto3", _FakeBoto3())
+    with pytest.raises(ImageRegistryError, match="not an ECR repository prefix URI"):
+        image_registry(
+            SimpleNamespace(user_images_repository_prefix_uri="registry.example/x", image_pull_role_arn=PULL_ROLE)
+        )
+
+    monkeypatch.setattr(image_registry_module, "boto3", None)
+    with pytest.raises(ImageRegistryError, match="needs boto3"):
+        image_registry(SimpleNamespace(user_images_repository_prefix_uri=URI, image_pull_role_arn=PULL_ROLE))

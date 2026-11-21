@@ -3254,11 +3254,11 @@ wheels = [
 
 [[package]]
 name = "openascent"
-version = "0.4.4"
+version = "0.4.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ef/c2/61ae47a5e9363533ad1138edd6a1b13658c4779d8129a4d253719f122ae6/openascent-0.4.4.tar.gz", hash = "sha256:5ac91e8d3f4c15a48e9b920dbb53bfb0c602da2f9df5fb24e09084ab042cc83c", size = 90720, upload-time = "2026-11-21T01:06:55.494Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/14/55378f78125a5b2b4d4e597774017ac85cfe05defe33f671fc9148589cef/openascent-0.4.5.tar.gz", hash = "sha256:b08a935f7a8f0e2f465b45169950d13899bbc9cc86e455610dce3ca64582855f", size = 92211, upload-time = "2026-11-21T03:50:19.113Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/41/b43218415754c7cfe9d6bad0c4f98abe4285e67dada8e50b268a6309bed4/openascent-0.4.4-py3-none-any.whl", hash = "sha256:dfbcb86736eb95ee2e563e341287a409b1d66419b9a0242431777c9d756e4a80", size = 86072, upload-time = "2026-11-21T01:06:54.213Z" },
+    { url = "https://files.pythonhosted.org/packages/07/c3/35d3aa614a5db93446a99f8960e8aef13ee072876b144bb5f8d993ac53c3/openascent-0.4.5-py3-none-any.whl", hash = "sha256:0f8e27473bd1688569e2ab30ede5504b544cca5945472b46ea71b958d7e7b899", size = 87026, upload-time = "2026-11-21T03:50:17.687Z" },
 ]
 
 [[package]]
@@ -5492,7 +5492,7 @@ requires-dist = [
     { name = "mosaic-sandbox", marker = "extra == 'mosaic'", specifier = ">=0.15.1,<0.16" },
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "openascent", specifier = "==0.4.4" },
+    { name = "openascent", specifier = "==0.4.5" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "pillow", marker = "extra == 'render'", specifier = ">=13.0.0" },
     { name = "pip", specifier = "==26.2.1" },

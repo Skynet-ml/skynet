@@ -10,12 +10,20 @@ pins it. v1 uses one ECR repository for each owner in Skynet's account
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
+
+from core.config import settings
+
+try:
+    import boto3
+except ImportError:
+    boto3 = None
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 # ECR tags allow at most 128 characters from this set.
@@ -89,6 +97,17 @@ class ImageRegistry(Protocol):
     Each owner (for example one user) has its own repository, so one owner's
     build credentials never reach another owner's images or build cache.
     """
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the URI of the owner's repository, with no tag or digest.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            ``<server>/<repository>``.
+        """
+        ...
 
     def push_reference(self, owner: str, tag: str) -> str:
         """Return the ``repository:tag`` reference a builder pushes to.
@@ -230,6 +249,70 @@ def _require_tag(tag: str) -> str:
     return tag
 
 
+def image_owner(username: str) -> str:
+    """Name the registry repository of one user's images.
+
+    Args:
+        username: The user who owns the images.
+
+    Returns:
+        A short lowercase name that the registry accepts and that hides the username.
+    """
+    return "u" + hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+
+
+def image_registry(config: Any = settings) -> EcrRegistry | None:
+    """Return the user image registry of this deployment (SKY-891).
+
+    Args:
+        config: The app settings.
+
+    Returns:
+        An ECR registry with the worker's AWS credentials when the repository
+        prefix and the pull role are set; ``None`` otherwise, for example in
+        local mode, where local Docker keeps the images.
+
+    Raises:
+        ImageRegistryError: The settings are set but boto3 is missing, or the
+            prefix is not an ECR repository prefix URI.
+    """
+    prefix = config.user_images_repository_prefix_uri
+    role = config.image_pull_role_arn
+    if not prefix or not role:
+        return None
+    if boto3 is None:
+        raise ImageRegistryError("the user image registry needs boto3")
+    match = _ECR_PREFIX_URI.fullmatch(prefix)
+    if match is None:
+        raise ImageRegistryError(f"not an ECR repository prefix URI: {prefix!r}")
+    region = match["region"]
+
+    def ecr_for(credentials: Mapping[str, Any]) -> Any:
+        """Make an ECR client from assumed-role credentials.
+
+        Args:
+            credentials: The ``Credentials`` that STS ``AssumeRole`` returns.
+
+        Returns:
+            A boto3 ECR client in the registry's Region.
+        """
+        return boto3.client(
+            "ecr",
+            region_name=region,
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretAccessKey"],
+            aws_session_token=credentials["SessionToken"],
+        )
+
+    return EcrRegistry(
+        boto3.client("ecr", region_name=region),
+        prefix,
+        sts=boto3.client("sts", region_name=region),
+        pull_role_arn=role,
+        ecr_for=ecr_for,
+    )
+
+
 class EcrRegistry:
     """Store user images in one ECR repository for each owner.
 
@@ -361,6 +444,20 @@ class EcrRegistry:
             ``<server>/<prefix>/<owner>``.
         """
         return f"{self.server}/{self.repository_name(owner)}"
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the URI of the owner's repository, with no tag or digest.
+
+        Args:
+            owner: The owner of the repository.
+
+        Returns:
+            ``<server>/<prefix>/<owner>``.
+
+        Raises:
+            ImageRegistryError: The owner is not valid.
+        """
+        return self._uri(owner)
 
     def push_reference(self, owner: str, tag: str) -> str:
         """Return the ``repository:tag`` reference a builder pushes to.

@@ -19,9 +19,10 @@ Two deliberate exceptions to "hard delete everything":
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
-This module makes no outside call. The tree purge here only locks, marks and
-plans the account's step log packs; the router deletes the unused packs from
-the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
+The only outside call deletes the account's built box images from the user
+image registry, before the database rows go (SKY-891). The tree purge here
+only locks, marks and plans the account's step log packs; the router deletes
+the unused packs from the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
 OpenRouter, or any other provider; severing the local link is the whole of
 the operation.
 Deprovisioning the upstream Stripe customer or OpenRouter runtime key is left
@@ -33,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +46,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
 from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
@@ -518,7 +521,36 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
     }
 
 
-def delete_account(session: Session, username: str) -> AccountDeletionSummary:
+def _delete_user_images(session: Session, username: str, registry: ImageRegistry | None) -> None:
+    """Delete each image the account built from the user image registry (SKY-891).
+
+    Only a digest the account's own builds recorded is deleted, and only from
+    the account's own repository. A local build has no registry, so nothing
+    is deleted for it.
+
+    Args:
+        session: An open session on the store's engine.
+        username: The caller's lowercased-email identity.
+        registry: The user image registry, or ``None`` when this deployment has none.
+
+    Raises:
+        ImageRegistryError: The registry refused a delete; the caller rolls
+            the account deletion back, so a retry deletes the rest.
+    """
+    if registry is None:
+        return
+    images = session.scalars(
+        select(ImageBuildModel.image).where(ImageBuildModel.username == username, ImageBuildModel.image.is_not(None))
+    )
+    owner = image_owner(username)
+    repository = registry.repository_uri(owner)
+    for digest in sorted({image.rsplit("@", 1)[-1] for image in images if image.startswith(repository + "@")}):
+        registry.delete_image(owner, digest)
+
+
+def delete_account(
+    session: Session, username: str, *, registry_for: Callable[[], ImageRegistry | None] | None = None
+) -> AccountDeletionSummary:
     """Purge everything owned by ``username`` within the given session.
 
     Runs entirely inside the caller's transaction (the caller commits), so a
@@ -535,12 +567,16 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     Args:
         session: An open session on the store's engine; the caller commits.
         username: The caller's lowercased-email identity.
+        registry_for: Return the user image registry, or ``None`` when this
+            deployment has none. ``None`` reads the deployment's settings.
 
     Returns:
         Counts of hard-deleted and anonymized rows. The summary also holds the
         tree purge, whose unused packs the caller deletes after the commit.
 
     Raises:
+        ImageRegistryError: The user image registry refused to delete one of
+            the account's built images; nothing in the database is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -672,6 +708,9 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
     _run_delete(delete(ChatMediaModel).where(ChatMediaModel.username == username))
+    # The registry has no rollback, so its deletes run last before the rows
+    # that name them; a refused delete still rolls the database back.
+    _delete_user_images(session, username, (registry_for or image_registry)())
     _run_delete(delete(ImageBuildModel).where(ImageBuildModel.username == username))
     _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))

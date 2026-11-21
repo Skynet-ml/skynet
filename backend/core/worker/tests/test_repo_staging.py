@@ -10,11 +10,14 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,8 +52,9 @@ from core.models.blackbox import (
     BlackboxProposer,
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
-from core.sandbox.image_build import BuildResult, ImageBuildError, LocalDockerImageBuilder
-from core.sandbox.image_registry import ImageRegistryError
+from core.sandbox import image_build, image_registry
+from core.sandbox.image_build import BuildResult, CodeBuildImageBuilder, ImageBuildError, LocalDockerImageBuilder
+from core.sandbox.image_registry import EcrRegistry, ImageRegistryError, RegistryCredentials
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import repo_workspace, runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
@@ -77,6 +81,7 @@ from core.service_gateway.optimization.blackbox.sandbox import (
     LocalSubprocessSession,
     SandboxSpec,
 )
+from core.service_gateway.optimization.blackbox.sandbox_contract import UserImage
 from core.service_gateway.optimization.blackbox.service import CASE_SPLIT_KEY, case_split_positions, legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
@@ -5847,6 +5852,30 @@ class _FakeRegistry:
         """
         self.held = held
         self.checks: list[tuple[str, str]] = []
+        self.pulls: list[str] = []
+
+    def repository_uri(self, owner: str) -> str:
+        """Return the owner's repository, which holds the built image.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            The repository of :data:`_BUILT_IMAGE`.
+        """
+        return "registry.example/u"
+
+    def pull_credentials(self, owner: str) -> RegistryCredentials:
+        """Return fake credentials and record the owner they are for.
+
+        Args:
+            owner: The registry repository's owner.
+
+        Returns:
+            Fake credentials.
+        """
+        self.pulls.append(owner)
+        return RegistryCredentials(server="registry.example", username="AWS", password="pull-token")
 
     def check_digest(self, owner: str, digest: str) -> None:
         """Fail for a digest the registry does not hold.
@@ -5896,17 +5925,21 @@ _TRUSTED_PROBE = (
 
 
 class _CheckSession:
-    """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
+    """Answer ``ascent check --image`` with a fixed report, and each run probe with a fixed output."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid: str = "1000\n", stdlib: str = "ok\n") -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
+            uid: What ``id -u`` prints.
+            stdlib: What the stdlib probe prints.
         """
         self.ok = ok
         self.probe = probe
+        self.uid = uid
+        self.stdlib = stdlib
         self.commands: list[str] = []
 
     def run(self, command: str, **_: Any) -> CommandResult:
@@ -5920,6 +5953,10 @@ class _CheckSession:
             The report, with exit code 1 when the image fails.
         """
         self.commands.append(command)
+        if command == repo_staging._BOX_UID_PROBE:
+            return CommandResult(exit_code=0, stdout=self.uid)
+        if command == repo_staging._STDLIB_PROBE:
+            return CommandResult(exit_code=0, stdout=self.stdlib)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -5936,15 +5973,21 @@ class _ImageRuntime:
     accepts_user_images = True
     max_lifetime_seconds = 120.0
 
-    def __init__(self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE) -> None:
+    def __init__(
+        self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid: str = "1000\n", stdlib: str = "ok\n"
+    ) -> None:
         """Start with no boxes.
 
         Args:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
+            uid: What ``id -u`` prints in each check box.
+            stdlib: What the stdlib probe prints in each check box.
         """
         self.check_ok = check_ok
         self.probe = probe
+        self.uid = uid
+        self.stdlib = stdlib
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -5960,7 +6003,7 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe))
+            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid, self.stdlib))
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6036,7 +6079,12 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
     assert [charge["operation_key"] for charge in budget.charges] == ["image-build:job-1:run"]
     assert budget.charges[0]["provider_usd"] >= 0
     assert [check.commands for check in runtime.checks] == [
-        ["ascent check --image --role candidate", repo_staging._TRUSTED_PYTHON_PROBE],
+        [
+            "ascent check --image --role candidate",
+            repo_staging._TRUSTED_PYTHON_PROBE,
+            repo_staging._BOX_UID_PROBE,
+            repo_staging._STDLIB_PROBE,
+        ],
         ["ascent check --image --role metric"],
     ]
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
@@ -6045,6 +6093,13 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
     work = [spec for spec in runtime.specs if not spec.operation_key.startswith("image-check:")]
     assert work
     assert {spec.image for spec in work} == {_BUILT_IMAGE}
+    # Each check box and each work box starts with its own repository and fresh pull access (SKY-891).
+    for spec in runtime.specs:
+        assert spec.user_image is not None
+        assert spec.user_image.reference == _BUILT_IMAGE
+        assert spec.user_image.repository == "registry.example/u"
+        assert spec.user_image.credentials is not None
+        assert spec.user_image.credentials() == ("AWS", "pull-token")
     assert staged.box_images["metric"]["python"] == sys.executable
     assert staged.box_images["run"]["source"] == "dockerfile"
 
@@ -6568,3 +6623,298 @@ def test_a_hidden_path_that_is_a_link_stops_the_candidate_image_build(tmp_path: 
         repo_staging.BoxImageError, match=r"hidden scoring path 'box/score\.py' is, holds or lies inside"
     ):
         _context_build(tmp_path, "run", links={"box/score.py": (tarfile.SYMTYPE, "../secret.txt")}, hidden_file=False)
+
+
+_ECR_PREFIX = "123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/user-images-staging"
+
+
+def _ecr_registry() -> EcrRegistry:
+    """Return a real ECR registry whose clients are never called.
+
+    Returns:
+        The registry.
+    """
+    return EcrRegistry(object(), _ECR_PREFIX, sts=object(), pull_role_arn="arn:aws:iam::1:role/pull", ecr_for=dict)
+
+
+def test_a_user_image_in_the_own_repository_gets_only_that_repository_and_its_pull_access() -> None:
+    """An image in the owner's repository gets the repository and a fresh token source (SKY-891)."""
+    registry = _ecr_registry()
+    own = registry.pinned_reference(image_registry.image_owner("alice"), "sha256:" + "b" * 64)
+
+    image = repo_staging._user_image(registry, "alice", "run", own)
+
+    assert image.reference == own
+    assert image.repository == registry.repository_uri(image_registry.image_owner("alice"))
+    assert image.credentials is not None
+
+
+def test_a_public_user_image_gets_no_registry_credentials() -> None:
+    """An image from another registry pulls with no credentials, so no token leaves the user's repository."""
+    image = repo_staging._user_image(_ecr_registry(), "alice", "metric", _METRIC_IMAGE)
+
+    assert image == UserImage(_METRIC_IMAGE)
+    assert image.credentials is None
+
+
+@pytest.mark.parametrize("path", ["skynet/user-images-staging/{other}", "skynet/other-images"])
+def test_an_image_in_another_repository_of_the_user_image_registry_is_refused(path: str) -> None:
+    """A user ``image =`` in another user's repository, or any other repository there, is refused (SKY-891).
+
+    Args:
+        path: The repository path of the image in the registry.
+    """
+    other = path.format(other=image_registry.image_owner("bob"))
+    reference = f"{_ECR_PREFIX.split('/', 1)[0]}/{other}@sha256:" + "d" * 64
+
+    with pytest.raises(repo_staging.BoxImageError, match="not in your own image repository"):
+        repo_staging._user_image(_ecr_registry(), "alice", "run", reference)
+
+
+def test_a_run_image_in_another_users_repository_stops_before_any_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[run] image`` that names another user's repository fails before a check box opens (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    other = "registry.example/someone-else@sha256:" + "d" * 64
+    run = 'entry = "src/app.py:run"\n'
+    tree = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].replace('dockerfile = "box/Dockerfile"\n', "", 1)}
+    tree["ascent.toml"] = tree["ascent.toml"].replace(run, f'{run}image = "{other}"\n')
+    _, staged = _stage_with(tree, monkeypatch)
+    runtime, registry = _ImageRuntime(), _FakeRegistry(set())
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="not in your own image repository"):
+            _prepare(staged, runtime, registry=registry)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+    assert registry.pulls == []
+
+
+def test_a_resume_gives_each_pinned_box_its_pull_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resume checks nothing again, but each box still gets its repository and a fresh token (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime, registry = _ImageRuntime(), _FakeRegistry(set())
+    pinned = {role: {"image": _BUILT_IMAGE, "digest": "sha256:" + "b" * 64} for role in ("run", "metric")}
+    try:
+        staged = _prepare(staged, runtime, builder=None, registry=registry, pinned=pinned)
+    finally:
+        staged.cleanup()
+    assert runtime.specs == []
+    assert {role: image.repository for role, image in staged.box_user_images.items()} == {
+        "run": "registry.example/u",
+        "metric": "registry.example/u",
+    }
+    assert staged.box_user_images["run"].credentials() == ("AWS", "pull-token")
+    assert registry.pulls == [image_registry.image_owner("alice")]
+
+
+@pytest.mark.parametrize("uid", ["0\n", "", "root\n"])
+def test_a_run_image_whose_box_user_is_root_is_refused(monkeypatch: pytest.MonkeyPatch, uid: str) -> None:
+    """A root box user, or a uid probe with no clean number, refuses the run image (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        uid: What ``id -u`` prints.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(uid=uid)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"runs the box as root \(uid 0\)"):
+            _prepare(staged, runtime, registry=_FakeRegistry(set()))
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+@pytest.mark.parametrize(
+    "stdlib",
+    ["bad '/usr/local/lib/python3.12/os.py' is not root-owned or writable by group or others\n", "", "ok\nextra\n"],
+)
+def test_a_run_image_with_a_writable_stdlib_is_refused(monkeypatch: pytest.MonkeyPatch, stdlib: str) -> None:
+    """A stdlib that the box user can change, or a stdlib probe that does not finish, refuses the image (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        stdlib: What the stdlib probe prints.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(stdlib=stdlib)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="standard library that the box user can change"):
+            _prepare(staged, runtime, registry=_FakeRegistry(set()))
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+def _run_stdlib_script(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: Path) -> str:
+    """Run the stdlib probe's script in this process on a fake standard library.
+
+    Every entry reports uid 0, and every folder above ``root`` reports a
+    root-owned ``755`` folder, so the result depends only on the modes and
+    links under ``root``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        capsys: Pytest output capture.
+        root: The fake standard library.
+
+    Returns:
+        What the script printed.
+    """
+    real_lstat = os.lstat
+
+    def lstat(path: Any) -> os.stat_result:
+        """Report root ownership, and a plain folder for each folder above ``root``."""
+        found = real_lstat(path)
+        name = os.fspath(path)
+        mode = found.st_mode if name == str(root) or name.startswith(f"{root}/") else stat.S_IFDIR | 0o755
+        return os.stat_result((mode, found.st_ino, found.st_dev, found.st_nlink, 0, 0, found.st_size, 0, 0, 0))
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(sysconfig, "get_path", lambda key: str(root))
+    try:
+        exec(repo_staging._STDLIB_SCRIPT, {})
+    except SystemExit:
+        pass
+    finally:
+        monkeypatch.undo()
+    return capsys.readouterr().out
+
+
+def _fake_stdlib(tmp_path: Path) -> Path:
+    """Make a small standard library that the probe accepts.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+
+    Returns:
+        Its root folder.
+    """
+    root = tmp_path.resolve() / "lib" / "python3.12"
+    (root / "encodings").mkdir(parents=True)
+    (root / "site-packages").mkdir()
+    for name in ("os.py", "encodings/__init__.py"):
+        (root / name).write_text("")
+    for path in (root, root / "encodings", root / "site-packages"):
+        path.chmod(0o755)
+    for name in ("os.py", "encodings/__init__.py"):
+        (root / name).chmod(0o644)
+    (root / "os2.py").symlink_to("os.py")
+    return root
+
+
+def test_the_stdlib_probe_accepts_a_root_owned_stdlib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stdlib with no writable entry passes, and a writable file in site-packages does not count (SKY-891).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+        capsys: Pytest output capture.
+    """
+    root = _fake_stdlib(tmp_path)
+    (root / "site-packages" / "user.py").write_text("")
+    (root / "site-packages" / "user.py").chmod(0o666)
+
+    assert _run_stdlib_script(monkeypatch, capsys, root) == "ok\n"
+
+
+@pytest.mark.parametrize("change", ["file", "folder", "link"])
+def test_the_stdlib_probe_refuses_a_stdlib_the_box_user_can_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], change: str
+) -> None:
+    """A group or other writable file or folder, or a link out of the stdlib, fails the probe (SKY-891).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        monkeypatch: Pytest monkeypatch.
+        capsys: Pytest output capture.
+        change: What the fake stdlib gets wrong.
+    """
+    root = _fake_stdlib(tmp_path)
+    if change == "file":
+        (root / "encodings" / "__init__.py").chmod(0o666)
+        name = root / "encodings" / "__init__.py"
+    elif change == "folder":
+        (root / "encodings").chmod(0o777)
+        name = root / "encodings"
+    else:
+        (tmp_path / "outside").mkdir()
+        (root / "json").symlink_to(tmp_path.resolve() / "outside")
+        name = root / "json"
+
+    out = _run_stdlib_script(monkeypatch, capsys, root)
+    (root / "encodings").chmod(0o755)
+
+    assert out.startswith(f"bad {str(name)!a} ")
+    assert "ok" not in out.splitlines()
+
+
+def test_a_cloud_deployment_builds_dockerfiles_on_codebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the registry and CodeBuild settings, a cloud Dockerfile gets the CodeBuild builder (SKY-891).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    clients: list[tuple[str, str | None]] = []
+
+    def client(name: str, region_name: str | None = None, **_: Any) -> str:
+        """Record each boto3 client the factories make."""
+        clients.append((name, region_name))
+        return f"{name}-client"
+
+    fake_boto3 = SimpleNamespace(client=client)
+    monkeypatch.setattr(image_registry, "boto3", fake_boto3)
+    monkeypatch.setattr(image_build, "boto3", fake_boto3)
+    config = SimpleNamespace(
+        local_mode=False,
+        user_images_repository_prefix_uri=_ECR_PREFIX,
+        image_pull_role_arn="arn:aws:iam::123456789012:role/pull",
+        image_build_project="skynet-staging-image-build",
+        image_build_source_bucket="skynet-staging-image-build-source",
+        image_build_push_role_arn="arn:aws:iam::123456789012:role/push",
+    )
+
+    builder = repo_staging.image_builder(config)
+
+    assert isinstance(builder, CodeBuildImageBuilder)
+    assert {name for name, _ in clients} == {"ecr", "sts", "codebuild", "logs", "s3"}
+    assert {region for _, region in clients} == {"us-east-2"}
+
+
+@pytest.mark.parametrize(
+    "unset",
+    ["user_images_repository_prefix_uri", "image_pull_role_arn", "image_build_project", "image_build_source_bucket"],
+)
+def test_a_cloud_deployment_without_every_build_setting_has_no_builder(
+    monkeypatch: pytest.MonkeyPatch, unset: str
+) -> None:
+    """A cloud deployment that misses one registry or build setting keeps the clear Dockerfile error.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        unset: The setting that is not set.
+    """
+    fake_boto3 = SimpleNamespace(client=lambda name, **_: f"{name}-client")
+    monkeypatch.setattr(image_registry, "boto3", fake_boto3)
+    monkeypatch.setattr(image_build, "boto3", fake_boto3)
+    config = SimpleNamespace(
+        local_mode=False,
+        user_images_repository_prefix_uri=_ECR_PREFIX,
+        image_pull_role_arn="arn:aws:iam::123456789012:role/pull",
+        image_build_project="skynet-staging-image-build",
+        image_build_source_bucket="skynet-staging-image-build-source",
+        image_build_push_role_arn="arn:aws:iam::123456789012:role/push",
+    )
+    setattr(config, unset, None)
+
+    assert repo_staging.image_builder(config) is None
+    assert isinstance(repo_staging.image_builder(SimpleNamespace(local_mode=True)), LocalDockerImageBuilder)

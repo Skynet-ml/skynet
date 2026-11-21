@@ -265,10 +265,15 @@ async def _copy_image_once(copy_image: ImageCopier, source_image: str, pull_cred
     Raises:
         ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
             returned no digest reference.
+        BudgetError: A metered copier found no funds for the copy.
     """
     try:
         async with asyncio.timeout(COPY_TIMEOUT):
             copied = await copy_image(source_image, pull_credentials)
+    except BudgetError:
+        # A metered copier refused the copy before it started (SKY-891); the
+        # budget stop must reach the run as it is, not as a failed copy.
+        raise
     except Exception as error:
         # Only the type: a copier's message can echo the pull credentials.
         raise ImageCopyError(

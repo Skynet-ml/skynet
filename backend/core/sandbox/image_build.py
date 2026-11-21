@@ -41,6 +41,11 @@ from core.config import settings
 from .image_registry import EcrRegistry, ImageRegistryError
 
 try:
+    import boto3
+except ImportError:
+    boto3 = None
+
+try:
     from botocore.exceptions import BotoCoreError, ClientError
 except ImportError:
     BotoCoreError = None
@@ -970,6 +975,40 @@ class CodeBuildImageBuilder:
                 return capped.text()
             settle = False
             self._sleep(_LOG_SETTLE_SECONDS)
+
+
+def codebuild_builder(registry: EcrRegistry | None, config: Any = settings) -> CodeBuildImageBuilder | None:
+    """Return the CodeBuild builder of this deployment, or ``None`` when it is not set up (SKY-891).
+
+    Args:
+        registry: The user image registry the builds push to, or ``None``.
+        config: The app settings.
+
+    Returns:
+        A builder with the worker's AWS credentials in the registry's Region
+        when the registry, the project, the source bucket and the push role
+        are all set; ``None`` otherwise.
+
+    Raises:
+        ImageBuildError: The settings are set but boto3 is missing.
+    """
+    project = config.image_build_project
+    bucket = config.image_build_source_bucket
+    push_role = config.image_build_push_role_arn
+    if registry is None or not project or not bucket or not push_role:
+        return None
+    if boto3 is None:
+        raise ImageBuildError("the CodeBuild image builder needs boto3")
+    region = registry.region
+    return CodeBuildImageBuilder(
+        codebuild=boto3.client("codebuild", region_name=region),
+        logs=boto3.client("logs", region_name=region),
+        s3=boto3.client("s3", region_name=region),
+        registry=registry,
+        project_name=project,
+        source_bucket=bucket,
+        push_role_arn=push_role,
+    )
 
 
 def _aws_error(exc: BaseException) -> str:
