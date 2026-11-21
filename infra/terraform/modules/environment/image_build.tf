@@ -13,6 +13,8 @@ locals {
   user_images_prefix      = "skynet/user-images-${var.environment}"
   # Every owner repository under the prefix.
   user_images_arn = "arn:aws:ecr:${var.region}:${local.account_id}:repository/${local.user_images_prefix}/*"
+  # The backend reads it as USER_IMAGES_REPOSITORY_PREFIX_URI (SKY-891).
+  user_images_prefix_uri = "${local.account_id}.dkr.ecr.${var.region}.amazonaws.com/${local.user_images_prefix}"
 }
 
 # ---------------------------------------------------------------- registry
@@ -411,4 +413,23 @@ resource "aws_iam_role_policy" "image_build_worker" {
   name   = "image-build"
   role   = aws_iam_role.task["worker"].id
   policy = data.aws_iam_policy_document.image_build_worker.json
+}
+
+# ---------------------------------------------------------------- account deletion
+
+# Account deletion deletes the account's whole repository with force, so no
+# layer of the user's source outlives the account (SKY-891, SKY-894). The
+# forced delete also removes the images, so the API needs no image action.
+data "aws_iam_policy_document" "image_build_backend" {
+  statement {
+    sid       = "DeleteUserImageRepositories"
+    actions   = ["ecr:DeleteRepository"]
+    resources = [local.user_images_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "image_build_backend" {
+  name   = "user-images-delete"
+  role   = aws_iam_role.task["backend"].id
+  policy = data.aws_iam_policy_document.image_build_backend.json
 }
