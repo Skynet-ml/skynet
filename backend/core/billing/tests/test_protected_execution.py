@@ -245,6 +245,10 @@ def test_async_bind_skips_the_cache_without_snapshot_support(monkeypatch: pytest
     assert gateway.broker._snapshots is None
 
 
+_OWNER_REPOSITORY = "ghcr.io/acme"
+_HEX = "b" * 64
+
+
 def _spy_runtime(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Replace the protected runtime with a fake that records the image it boots.
 
@@ -284,20 +288,72 @@ def test_bind_accepts_a_user_image_pinned_by_digest_in_local_mode(monkeypatch: p
     monkeypatch.setattr(settings, "local_mode", True)
     user_image = "ghcr.io/acme/repo@sha256:" + "b" * 64
 
-    identity = bind_protected_sandbox(_Gateway(), settings, owner_id="job-9", image=user_image)
+    identity = bind_protected_sandbox(
+        _Gateway(), settings, owner_id="job-9", image=user_image, user_image_repository=_OWNER_REPOSITORY
+    )
 
     assert images == [user_image]
     assert identity["image"] == user_image
 
 
 @pytest.mark.usefixtures("provider_credentials")
-@pytest.mark.parametrize("image", ["ghcr.io/acme/repo:latest", "ghcr.io/acme/repo", "ghcr.io/acme/repo@sha256:abc"])
-def test_bind_refuses_a_user_image_with_a_mutable_tag(monkeypatch: pytest.MonkeyPatch, image: str) -> None:
-    """Check that a tag or a short digest never boots, because its content can change after pricing."""
+def test_bind_accepts_a_user_image_in_the_owners_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a digest-pinned image under the owner's own repository boots."""
+    images = _spy_runtime(monkeypatch)
+    user_image = f"ghcr.io/acme/repo/app@sha256:{_HEX}"
+
+    bind_protected_sandbox(
+        _Gateway(), _settings(monkeypatch), owner_id="job-9", image=user_image, user_image_repository=_OWNER_REPOSITORY
+    )
+
+    assert images == [user_image]
+
+
+@pytest.mark.usefixtures("provider_credentials")
+@pytest.mark.parametrize(
+    "image",
+    [
+        "ghcr.io/acme/repo:latest",
+        "ghcr.io/acme/repo",
+        "ghcr.io/acme/repo@sha256:abc",
+        f"ghcr.io/other/repo@sha256:{_HEX}",
+        f"ghcr.io/acme-evil/repo@sha256:{_HEX}",
+        f"10.0.0.5:5000/x@sha256:{_HEX}",
+        f"10.0.0.5:5000/ghcr.io/acme/x@sha256:{_HEX}",
+        f"--config=/x@sha256:{_HEX}",
+        f"user:pass@ghcr.io/acme/img@sha256:{_HEX}",
+    ],
+)
+def test_bind_refuses_a_user_image_outside_the_owners_digest_repository(
+    monkeypatch: pytest.MonkeyPatch, image: str
+) -> None:
+    """Check that a tag, a short digest, another owner, another host or a CLI option never boots."""
     images = _spy_runtime(monkeypatch)
 
+    with pytest.raises(UnpricedOperationError, match="not pinned by digest in the owner's repository"):
+        bind_protected_sandbox(
+            _Gateway(), _settings(monkeypatch), owner_id="job-9", image=image, user_image_repository=_OWNER_REPOSITORY
+        )
+
+    assert images == []
+
+
+def test_trusted_user_image_needs_a_repository() -> None:
+    """Check that an empty repository prefix trusts no image."""
+    assert not protected_execution.trusted_user_image(f"ghcr.io/acme/repo@sha256:{_HEX}", "")
+    assert protected_execution.trusted_user_image(f"ghcr.io/acme@sha256:{_HEX}", "ghcr.io/acme/")
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_bind_refuses_a_user_digest_image_with_no_owner_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a user image that is not the deployment's image needs the owner's repository to boot."""
+    images = _spy_runtime(monkeypatch)
+    settings = _settings(monkeypatch)
+    monkeypatch.setattr(protected_execution, "protected_vercel_unavailable_reason", lambda _settings: None)
+    monkeypatch.setattr(settings, "local_mode", True)
+
     with pytest.raises(UnpricedOperationError, match="not an immutable reference"):
-        bind_protected_sandbox(_Gateway(), _settings(monkeypatch), owner_id="job-9", image=image)
+        bind_protected_sandbox(_Gateway(), settings, owner_id="job-9", image=f"ghcr.io/acme/repo@sha256:{_HEX}")
 
     assert images == []
 

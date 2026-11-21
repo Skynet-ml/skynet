@@ -51,6 +51,7 @@ from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecErro
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..resources import ResourceMode, SandboxSpec
+from .docker import registry_host
 
 logger = logging.getLogger(__name__)
 
@@ -351,21 +352,6 @@ def _resource_args(spec: SandboxSpec) -> list[str]:
     return args
 
 
-def _registry_host(image: str) -> str:
-    """Return the registry host of an image reference.
-
-    Args:
-        image: The image reference.
-
-    Returns:
-        The host part, or ``docker.io`` for a reference with no host.
-    """
-    first, _, rest = image.partition("/")
-    if rest and ("." in first or ":" in first or first == "localhost"):
-        return first
-    return "docker.io"
-
-
 def _label_args(labels: Mapping[str, str]) -> list[str]:
     """Return one ``--label`` option for each label.
 
@@ -584,11 +570,13 @@ class AppleContainerEnvironment(SandboxEnvironment):
             raise RuntimeError("The Apple container sandbox was already started.")
         if self._pull_credentials is not None:
             username, password = self._pull_credentials
-            # The password goes over stdin, so ``ps`` never shows it.
+            # The password goes over stdin, so ``ps`` never shows it. A login
+            # creates no container, so a cancel can kill it at once.
             login = await _cli(
                 self._bin,
-                ["registry", "login", "--username", username, "--password-stdin", _registry_host(str(self._image))],
+                ["registry", "login", "--username", username, "--password-stdin", registry_host(str(self._image))],
                 stdin=password.encode(),
+                kill_on_cancel=True,
             )
             if login.returncode != 0:
                 raise _service_error(f"The container CLI could not log in to pull the image {self._image}", login)

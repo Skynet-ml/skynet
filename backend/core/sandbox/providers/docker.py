@@ -92,8 +92,13 @@ _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
 # A first pull of a large user image can take many minutes.
 _PULL_TIMEOUT_SECONDS = 1800.0
-# Only a reference pinned by digest is pulled: a mutable tag can change under a run.
-_DIGEST_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
+_HOST_PATTERN = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*(?::[0-9]+)?"
+_PATH_PATTERN = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+# Only a reference pinned by digest is pulled: a mutable tag can change under a
+# run. The strict grammar refuses a leading ``-`` (a CLI option) and any ``@``
+# or user info before the digest.
+_DIGEST_IMAGE = re.compile(rf"(?:{_HOST_PATTERN}/)?{_PATH_PATTERN}(?:/{_PATH_PATTERN})*@sha256:[0-9a-f]{{64}}")
+_DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
 # Docker's own key for Docker Hub in a config file's ``auths``.
 _DOCKER_HUB_AUTH = "https://index.docker.io/v1/"
 _KILL_GRACE_SECONDS = 15
@@ -215,7 +220,12 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
 
 
 async def _docker(
-    docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None, cli_seconds: float = _CLI_TIMEOUT_SECONDS
+    docker_bin: str,
+    args: Sequence[str],
+    *,
+    stdin: bytes | None = None,
+    cli_seconds: float = _CLI_TIMEOUT_SECONDS,
+    kill_on_cancel: bool = False,
 ) -> _CliResult:
     """Run one Docker CLI command and capture its output.
 
@@ -224,6 +234,8 @@ async def _docker(
         args: The CLI arguments.
         stdin: Bytes for the command's stdin, or ``None`` for no input.
         cli_seconds: Kill the CLI after this many seconds.
+        kill_on_cancel: Kill the CLI at once on a cancel, instead of waiting
+            for it to end. Only for a call that creates no container.
 
     Returns:
         The exit code and the captured output.
@@ -253,6 +265,8 @@ async def _docker(
             await asyncio.wait({communication}, timeout=deadline - loop.time())
         except asyncio.CancelledError as error:
             cancelled = error
+            if kill_on_cancel:
+                break
     if not communication.done():
         communication.cancel()
         await _kill(process)
@@ -284,19 +298,46 @@ async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
         logger.warning("Could not remove the Docker sandbox object %s: %s", args[-1], result.error_line)
 
 
-def _registry_host(image: str) -> str:
-    """Return the registry key that Docker reads credentials under for an image.
+def digest_image(image: str) -> bool:
+    """Tell whether an image reference is a registry image pinned by digest.
 
     Args:
         image: The image reference.
 
     Returns:
-        The registry host, or Docker Hub's key for a reference with no host.
+        True for ``[host/]path@sha256:<64 hex>`` in the strict reference grammar.
+    """
+    return _DIGEST_IMAGE.fullmatch(image) is not None
+
+
+def registry_host(image: str) -> str:
+    """Return the registry host of an image reference.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        The lowercase host part, or ``docker.io`` for Docker Hub: a reference
+        with no host, or one of Docker Hub's own host names.
     """
     first, _, rest = image.partition("/")
     if rest and ("." in first or ":" in first or first == "localhost"):
-        return first
-    return _DOCKER_HUB_AUTH
+        host = first.lower()
+        return "docker.io" if host in _DOCKER_HUB_HOSTS else host
+    return "docker.io"
+
+
+def _auth_key(image: str) -> str:
+    """Return the key that Docker reads an image's credentials under.
+
+    Args:
+        image: The image reference.
+
+    Returns:
+        The registry host, or Docker's own key for Docker Hub.
+    """
+    host = registry_host(image)
+    return _DOCKER_HUB_AUTH if host == "docker.io" else host
 
 
 def _label_args(labels: Mapping[str, str]) -> list[str]:
@@ -860,17 +901,24 @@ class DockerEnvironment(SandboxEnvironment):
             SandboxInfraError: The pull failed.
         """
         image = str(self._image)
-        if not _DIGEST_IMAGE.fullmatch(image):
+        if not digest_image(image):
             return
-        present = await _docker(self._docker_bin, ["image", "inspect", "--format", "{{.Id}}", image])
+        # None of these calls creates a container, so a cancel kills them at once.
+        present = await _docker(
+            self._docker_bin, ["image", "inspect", "--format", "{{.Id}}", image], kill_on_cancel=True
+        )
         if present.returncode == 0:
             return
         if self._pull_credentials is None:
-            pulled = await _docker(self._docker_bin, ["pull", image], cli_seconds=_PULL_TIMEOUT_SECONDS)
+            pulled = await _docker(
+                self._docker_bin, ["pull", image], cli_seconds=_PULL_TIMEOUT_SECONDS, kill_on_cancel=True
+            )
         else:
             # A config folder of its own drops the user's contexts too, so the
             # pull names the current daemon itself.
-            context = await _docker(self._docker_bin, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+            context = await _docker(
+                self._docker_bin, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], kill_on_cancel=True
+            )
             host = context.stdout.decode(errors="replace").strip()
             if context.returncode != 0 or not host:
                 raise SandboxInfraError(f"Could not find the Docker daemon to pull {image}: {context.error_line}")
@@ -878,11 +926,12 @@ class DockerEnvironment(SandboxEnvironment):
             auth = base64.b64encode(f"{username}:{password}".encode()).decode()
             with tempfile.TemporaryDirectory() as config:
                 config_file = Path(config) / "config.json"
-                config_file.write_text(json.dumps({"auths": {_registry_host(image): {"auth": auth}}}))
+                config_file.write_text(json.dumps({"auths": {_auth_key(image): {"auth": auth}}}))
                 pulled = await _docker(
                     self._docker_bin,
                     ["--config", config, "-H", host, "pull", image],
                     cli_seconds=_PULL_TIMEOUT_SECONDS,
+                    kill_on_cancel=True,
                 )
         if pulled.returncode != 0:
             raise SandboxInfraError(f"Could not pull the image {image}: {pulled.error_line}")

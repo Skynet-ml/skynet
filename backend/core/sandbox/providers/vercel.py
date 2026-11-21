@@ -43,10 +43,10 @@ import base64
 import codecs
 import contextlib
 import dataclasses
+import functools
 import logging
 import math
 import posixpath
-import re
 import shlex
 import subprocess
 import time
@@ -86,6 +86,7 @@ from ..snapshots import (
     snapshot_hold_retention,
 )
 from ..telemetry import BoxTimings, current_output_sink
+from .docker import digest_image
 
 try:
     import httpx2
@@ -220,12 +221,57 @@ UsageFactory = Callable[..., Any]
 # Copies a source image, with optional (username, password) pull credentials,
 # into Vercel's registry and returns the copy's ``name@sha256:<digest>``.
 ImageCopier = Callable[[str, tuple[str, str] | None], Awaitable[str]]
-# A mutable tag can change under a run, so a user image is always pinned by digest.
-_DIGEST_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
+# The digest pins the content, so each process copies one source image into
+# one Vercel project once, and later boxes reuse that copy. A failed or
+# cancelled copy is not kept. Tasks are kept for each event loop, because a
+# task cannot be awaited from another loop.
+_COPIED: dict[tuple[str, str, str], str] = {}
+_COPYING: dict[tuple[str, str, str, asyncio.AbstractEventLoop], asyncio.Task[str]] = {}
 
 
 class ImageCopyError(SandboxInfraError):
     """Report that a user image did not reach Vercel's registry."""
+
+
+async def _copy_image_once(copy_image: ImageCopier, source_image: str, pull_credentials: tuple[str, str] | None) -> str:
+    """Copy one user image into Vercel's registry.
+
+    Args:
+        copy_image: The image copier.
+        source_image: The user image, pinned by digest.
+        pull_credentials: The (username, password) that read the source image.
+
+    Returns:
+        The copy's reference, pinned by digest.
+
+    Raises:
+        ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
+            returned no digest reference.
+    """
+    try:
+        async with asyncio.timeout(COPY_TIMEOUT):
+            copied = await copy_image(source_image, pull_credentials)
+    except Exception as error:
+        # Only the type: a copier's message can echo the pull credentials.
+        raise ImageCopyError(
+            f"Could not copy the image {source_image} into Vercel's registry: {type(error).__name__}."
+        ) from None
+    if not digest_image(copied):
+        raise ImageCopyError(f"The copy of {source_image} in Vercel's registry is not pinned by digest.")
+    return copied
+
+
+def _finish_copy(key: tuple[str, str, str], loop: asyncio.AbstractEventLoop, task: asyncio.Task[str]) -> None:
+    """Keep a successful copy, and drop the copy task from the running copies.
+
+    Args:
+        key: The source image, Vercel team and Vercel project.
+        loop: The event loop of the copy task.
+        task: The copy task, which is done.
+    """
+    _COPYING.pop((*key, loop), None)
+    if not task.cancelled() and task.exception() is None:
+        _COPIED[key] = task.result()
 
 
 def _error_types(*names: str) -> tuple[type[BaseException], ...]:
@@ -557,7 +603,7 @@ class VercelEnvironment(SandboxEnvironment):
             SandboxFatalError: A user image comes with no image copier.
         """
         if source_image is not None:
-            if not _DIGEST_IMAGE.fullmatch(source_image):
+            if not digest_image(source_image):
                 raise SandboxSpecError("A user image must be pinned by digest: name@sha256:<64 hex>.")
             if spec.image not in (None, source_image):
                 raise SandboxSpecError("The spec names an image other than the user image.")
@@ -731,28 +777,37 @@ class VercelEnvironment(SandboxEnvironment):
         return self._copied_image or self.spec.image or settings.vercel_sandbox_image
 
     async def _copy_source_image(self) -> str:
-        """Copy the user image into Vercel's registry.
+        """Return the copy of the user image in Vercel's registry, and copy it once.
+
+        Boxes that start at the same time wait for one copy. A cancel of a
+        waiter cancels that copy.
 
         Returns:
             The copy's reference, pinned by digest.
 
         Raises:
-            ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``, or
-                returned no digest reference.
+            ImageCopyError: The copy failed, ran past ``COPY_TIMEOUT``,
+                returned no digest reference, or another waiter cancelled it.
         """
         assert self._source_image is not None
         assert self._copy_image is not None
+        key = (self._source_image, str(settings.vercel_team_id), str(settings.vercel_project_id))
+        copied = _COPIED.get(key)
+        if copied is not None:
+            return copied
+        loop = asyncio.get_running_loop()
+        task = _COPYING.get((*key, loop))
+        if task is None:
+            task = loop.create_task(_copy_image_once(self._copy_image, self._source_image, self._pull_credentials))
+            _COPYING[(*key, loop)] = task
+            task.add_done_callback(functools.partial(_finish_copy, key, loop))
         try:
-            async with asyncio.timeout(COPY_TIMEOUT):
-                copied = await self._copy_image(self._source_image, self._pull_credentials)
-        except Exception as error:
-            # Only the type: a copier's message can echo the pull credentials.
-            raise ImageCopyError(
-                f"Could not copy the image {self._source_image} into Vercel's registry: {type(error).__name__}."
-            ) from None
-        if not _DIGEST_IMAGE.fullmatch(copied):
-            raise ImageCopyError(f"The copy of {self._source_image} in Vercel's registry is not pinned by digest.")
-        return copied
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() == 0:
+                raise ImageCopyError(f"The copy of {self._source_image} was cancelled.") from None
+            raise
 
     def _sdk_policy(self, policy: NetworkPolicy, *, update: bool) -> Any | None:
         """Build the SDK network policy of one Skynet policy.

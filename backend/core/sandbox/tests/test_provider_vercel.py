@@ -3279,6 +3279,46 @@ class FakeCopier:
         return self.result
 
 
+@pytest.fixture(autouse=True)
+def fresh_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no kept image copies, so one test's copy never serves another.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(vercel, "_COPIED", {})
+    monkeypatch.setattr(vercel, "_COPYING", {})
+
+
+class HangingCopier(FakeCopier):
+    """Stand in for a copy that never ends until it is cancelled."""
+
+    def __init__(self, log: list[str]) -> None:
+        """Prepare the event that tells the test the copy began.
+
+        Args:
+            log: The shared call log.
+        """
+        super().__init__(log)
+        self.started = asyncio.Event()
+
+    async def __call__(self, source: str, credentials: tuple[str, str] | None) -> str:
+        """Record the copy, then wait until a cancel.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            Never returns.
+        """
+        self.calls.append((source, credentials))
+        self.log.append("copy")
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 def _user_env(client: FakeClient, log: list[str], copier: Any, **options: Any) -> VercelEnvironment:
     """Make a protected provider that starts from the user image.
 
@@ -3372,3 +3412,88 @@ async def test_a_box_without_a_user_image_starts_as_before(client: FakeClient, l
     assert created["image"] == "python:3.12"
     assert env.usage.request["image"] == "python:3.12"
     await env.stop()
+
+
+async def test_two_boxes_from_one_user_image_copy_it_once(client: FakeClient, log: list[str]) -> None:
+    """Check that a second box reuses the first copy, so the copy runs once for each digest."""
+    copier = FakeCopier(log)
+    first = _user_env(client, log, copier)
+    await first.start()
+    await first.stop()
+    second = _user_env(client, log, copier)
+    await second.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE, _VCR_IMAGE]
+    await second.stop()
+
+
+async def test_boxes_that_start_together_wait_for_one_copy(client: FakeClient, log: list[str]) -> None:
+    """Check that concurrent starts from one user image share one copy."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def copier(source: str, credentials: tuple[str, str] | None) -> str:
+        """Count the copy and wait until the test releases it.
+
+        Args:
+            source: The user image.
+            credentials: The pull credentials.
+
+        Returns:
+            The copy's reference.
+        """
+        del credentials
+        calls.append(source)
+        started.set()
+        await release.wait()
+        return _VCR_IMAGE
+
+    envs = [_user_env(client, log, copier) for _ in range(3)]
+    starts = [asyncio.ensure_future(env.start()) for env in envs]
+    await started.wait()
+    release.set()
+    await asyncio.gather(*starts)
+    assert calls == [_USER_IMAGE]
+    assert [created["image"] for created in client.create_kwargs] == [_VCR_IMAGE] * 3
+    assert vercel._COPYING == {}
+    for env in envs:
+        await env.stop()
+
+
+async def test_a_failed_copy_is_not_kept(client: FakeClient, log: list[str]) -> None:
+    """Check that a box after a failed copy tries the copy again."""
+    with pytest.raises(ImageCopyError):
+        await _user_env(client, log, FakeCopier(log, error=RuntimeError("busy"))).start()
+    copier = FakeCopier(log)
+    env = _user_env(client, log, copier)
+    await env.start()
+    assert copier.calls == [(_USER_IMAGE, None)]
+    await env.stop()
+
+
+async def test_a_copy_past_its_timeout_fails_and_creates_no_box(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a copy that runs past ``COPY_TIMEOUT`` raises a clear error and reserves nothing."""
+    monkeypatch.setattr(vercel, "COPY_TIMEOUT", 0.05)
+    with pytest.raises(ImageCopyError, match="TimeoutError"):
+        await _user_env(client, log, HangingCopier(log)).start()
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPIED == {}
+
+
+async def test_a_cancel_during_the_copy_stops_it_and_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel during the copy reaches the caller, ends the copy, and keeps nothing."""
+    copier = HangingCopier(log)
+    start = asyncio.ensure_future(_user_env(client, log, copier).start())
+    await copier.started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    await asyncio.sleep(0)
+    assert log == ["copy"]
+    assert client.create_kwargs == []
+    assert vercel._COPYING == {}
+    assert vercel._COPIED == {}
