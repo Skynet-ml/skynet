@@ -6210,6 +6210,12 @@ _FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
         _probe(_LINK),
         _probe(_LINK, ("/usr/local/bin/python3.12", "755 regular file", None), _FILE),
         _probe(*[("/usr/local/bin/python3", "777 symbolic link", "python3")] * 40),
+        _TRUSTED_PROBE.replace("link python3.12", "link python3.12\x01"),
+        _TRUSTED_PROBE.replace("\n", "\x0b"),
+        _TRUSTED_PROBE.replace("link python3.12\n", "link python3.12\x1c"),
+        _TRUSTED_PROBE.replace("0 755 regular file", "0 755 regular file extra"),
+        _TRUSTED_PROBE.replace("0 755 regular file", "0 755 socket"),
+        _TRUSTED_PROBE.replace("0 755 regular file", "00 755 regular file"),
     ],
     ids=[
         "missing",
@@ -6229,6 +6235,12 @@ _FILE = ("/usr/local/bin/python3.12", "755 regular file", None)
         "chain-cut-short",
         "extra-lines",
         "link-loop-hits-the-cap",
+        "control-byte-in-target",
+        "lines-split-by-vertical-tabs",
+        "line-split-by-a-file-separator",
+        "unknown-file-type",
+        "special-file",
+        "malformed-uid",
     ],
 )
 def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.MonkeyPatch, probe: str) -> None:
@@ -6302,6 +6314,29 @@ def test_the_trusted_python_probe_walks_a_real_link_chain(tmp_path: Path) -> Non
         expected += ["/" + "/".join(parts[:depth]) for depth in range(len(parts))] + [hop]
         expected += [link] if link else []
     assert names == expected
+
+
+@pytest.mark.parametrize("target", ["python3.12\n0 755 regular file /usr/bin/python3", "python3.12\n", "py\x01"])
+def test_the_trusted_python_probe_stops_at_a_link_target_with_a_control_byte(tmp_path: Path, target: str) -> None:
+    """A newline or control byte in a link target fails the probe, so it cannot forge a listing line (SKY-737).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        target: The link target.
+    """
+    if subprocess.run(["stat", "-c", "%u", "/"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("this stat has no -c option, unlike the box images")
+    root = tmp_path.resolve()
+    (root / "python3.12").write_text("#!/bin/sh\n")
+    (root / "python3").symlink_to(target)
+    probe = repo_staging._TRUSTED_PYTHON_PROBE.replace(
+        shlex.quote(repo_workspace.BASE_PYTHON), shlex.quote(str(root / "python3"))
+    )
+
+    done = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
+
+    assert done.returncode == 1
+    assert "link " not in done.stdout
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1174,21 +1174,30 @@ DOCKERFILE_UNSUPPORTED = (
 # ``readlink -f`` hide the hops. For each hop it prints ``stat`` (owner uid,
 # octal mode, type, name) of ``/``, every folder down to the hop and the hop
 # itself, then ``link <target>`` for a link. ``_trusted_python`` judges it.
+# A newline in a name or target could forge a listing line, so the probe stops
+# at any byte outside printable ASCII. ``$(...)`` drops trailing newlines, so
+# the ``x`` keeps them and the probe sees the target the kernel follows.
 _MAX_LINK_HOPS = 40
 _TRUSTED_PYTHON_PROBE = (
-    f"f='%u %a %F %n'; p={shlex.quote(BASE_PYTHON)}; n=0\n"
+    f"export LC_ALL=C; f='%u %a %F %n'; p={shlex.quote(BASE_PYTHON)}; n=0\n"
     f"while [ $n -lt {_MAX_LINK_HOPS} ]; do n=$((n+1))\n"
+    "  case $p in *[![:print:]]*) exit 1;; esac\n"
     '  stat -c "$f" / || exit 1\n'
     "  a=; r=${p#/}\n"
     '  while [ "${r#*/}" != "$r" ]; do a=$a/${r%%/*}; r=${r#*/}; stat -c "$f" "$a" || exit 1; done\n'
     '  stat -c "$f" "$p" || exit 1\n'
     '  [ -h "$p" ] || exit 0\n'
-    '  l=$(readlink "$p") || exit 1\n'
+    '  l=$(readlink "$p" && echo x) || exit 1\n'
+    "  l=${l%?x}\n"
+    "  case $l in *[![:print:]]*|'') exit 1;; esac\n"
     "  printf 'link %s\\n' \"$l\"\n"
     "  case $l in /*) p=$l;; *) p=${p%/*}/$l;; esac\n"
     "done\n"
     "exit 1"
 )
+# An absolute path of printable ASCII only, as the probe allows.
+_PRINTABLE_PATH = re.compile(r"/[\x20-\x7e]*")
+_FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one. That file, each"
@@ -1548,12 +1557,13 @@ def _trusted_python(probe: Any) -> bool:
     """
     if not probe.ok:
         return False
-    lines = probe.stdout.splitlines()[::-1]
+    # Only a newline ends a line; ``splitlines`` would also split at other control bytes.
+    lines = probe.stdout.removesuffix("\n").split("\n")[::-1]
     path = BASE_PYTHON
     for _ in range(_MAX_LINK_HOPS):
         parts = path.split("/")[1:]
         # The probe and this walk join paths the same way only with no "." or "..".
-        if not path.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        if not _PRINTABLE_PATH.fullmatch(path) or any(part in ("", ".", "..") for part in parts):
             return False
         for depth in range(len(parts)):
             entry = _stat_entry(lines.pop() if lines else "", "/" + "/".join(parts[:depth]))
@@ -1587,7 +1597,7 @@ def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
     if not line.endswith(" " + name):
         return None
     parts = line[: -len(name) - 1].split(" ", 2)
-    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]):
+    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]) or parts[2] not in _FILE_TYPES:
         return None
     return int(parts[1], 8), parts[2]
 
