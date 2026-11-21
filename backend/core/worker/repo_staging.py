@@ -1199,6 +1199,11 @@ ROOT_IMAGE_USER = (
     " A root box user could replace the Python and the standard library that {app} checks the protected files with."
     " Set a non-root USER in the image."
 )
+NAMED_IMAGE_USER = (
+    "The [{role}] image '{image}' sets its USER by name. {app} cannot confirm outside the box that a name"
+    " is not root (uid 0), because the image's own /etc/passwd maps the name to a uid."
+    " Set a numeric non-root USER in the image, for example `USER 1000` or `USER 1000:1000`."
+)
 UNREADABLE_IMAGE_USER = (
     "{app} could not read the USER of the [{role}] image '{image}', so it cannot confirm that its boxes do not run"
     " as root. Try again, or use an image that {app} built from your Dockerfile."
@@ -1511,6 +1516,8 @@ _ACCOUNT_OK = re.compile(r"ok [0-9]+")
 _ACCOUNT_NONE = re.compile(r"account none ([0-9]+)")
 # Only ASCII digits: ``str.isdigit`` would also take digits such as "²".
 _BOX_UID = re.compile(r"account ok ([0-9]+)")
+# An image USER as ``<uid>`` or ``<uid>:<gid>``, in ASCII digits only.
+_NUMERIC_USER = re.compile(r"[0-9]+(?::[0-9]+)?")
 # The metric role runs no trusted-Python probe, so this gives its box uid (SKY-891).
 _BOX_UID_PROBE = 'import os; print("account ok", os.getuid())'
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
@@ -2038,7 +2045,9 @@ def _check_box_image(
     The run role also needs a trusted interpreter and standard library. Both
     roles need a box user that is not root, on every runtime: a root box user
     could change the checked files after the check (SKY-891). The image's
-    own USER and the uid in the box must both be non-root.
+    own USER, read outside the box, must be a numeric non-root uid: the box
+    runs the image's own interpreter, so the uid that the box reports is only
+    a second check.
 
     Args:
         runtime: The parent's metered sandbox runtime.
@@ -2072,8 +2081,8 @@ def _check_box_image(
         report = _check_report(result.stdout)
         python = report.get("python") if report is not None else None
         absolute = isinstance(python, str) and python.startswith("/")
-        # The image's python reports the uid, so a root user that replaced it could lie;
-        # the image's USER, read outside the box below, covers that case.
+        # The image's own python reports the uid, so an image can lie here; only the
+        # numeric USER read outside the box below protects against a root box user.
         uid_probe = (
             session.run(
                 f"{shlex.quote(python)} -I -S -c {shlex.quote(_BOX_UID_PROBE)}", timeout_seconds=_CHECK_TIMEOUT_SECONDS
@@ -2123,11 +2132,13 @@ def _check_box_image(
 
 
 def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, role: str, username: str) -> None:
-    """Refuse an image whose own USER is root, read outside the box (SKY-891).
+    """Refuse an image whose own USER is not a numeric non-root uid, read outside the box (SKY-891).
 
     The registry reads the config of an image in the owner's repository, for
     each platform. Any other image must be in local Docker, which the check
     box's start pulled it into. A USER that cannot be read refuses the image.
+    A USER name refuses the image too: the image's own ``/etc/passwd`` could
+    map it to uid 0, and only the image's own programs can read that file.
 
     Args:
         registry: The user image registry, or ``None`` when local Docker keeps the images.
@@ -2136,7 +2147,7 @@ def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, rol
         username: The run's owner.
 
     Raises:
-        BoxImageError: When the USER is root or cannot be read.
+        BoxImageError: When the USER is root, a name, or cannot be read.
     """
     image = user_image.reference
     if registry is not None and user_image.repository is not None:
@@ -2150,6 +2161,8 @@ def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, rol
         raise BoxImageError(UNREADABLE_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
     if any(_root_user(user) for user in users):
         raise BoxImageError(ROOT_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
+    if not all(_NUMERIC_USER.fullmatch(user) for user in users):
+        raise BoxImageError(NAMED_IMAGE_USER.format(role=role, image=image, app=APP_NAME))
 
 
 def _local_image_user(image: str) -> tuple[str, ...] | None:
@@ -2182,8 +2195,8 @@ def _root_user(user: str) -> bool:
         user: The image config ``User``, as ``name``, ``uid``, ``name:group`` or ``uid:gid``.
 
     Returns:
-        True for root. A user name that maps to uid 0 in the image's
-        ``/etc/passwd`` is caught by the uid check in the box.
+        True for root. Any other user name gives False here, and
+        :func:`_check_image_user` refuses it as a name.
     """
     name = user.split(":", 1)[0]
     return name in ("", "root") or (name.isascii() and name.isdigit() and int(name) == 0)

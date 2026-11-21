@@ -21,7 +21,11 @@ Two deliberate exceptions to "hard delete everything":
 
 The only outside call deletes the account's whole repository from the user
 image registry, as the last step before the caller's commit. With a registry,
-the deletion refuses while a run of the account is not finished (SKY-891). The tree purge here
+the deletion refuses while a run of the account is not finished (SKY-891).
+Known gap: Vercel keeps its own copy of each of the account's images that a
+Vercel box started from. Neither the Vercel Sandbox SDK nor the image copier
+has a call that deletes a copy, so this deletion leaves those copies in
+Vercel's registry and in each worker's copy cache. The tree purge here
 only locks, marks and plans the account's step log packs; the router deletes
 the unused packs from the tree bucket after the commit (SKY-733). Nothing here calls Stripe,
 OpenRouter, or any other provider; severing the local link is the whole of
@@ -782,6 +786,8 @@ def delete_account(
     # repository goes with every image and tag, the build cache included, because its layers hold the
     # user's source; a build can push and then stop before it records a row. A refused delete still
     # rolls the main database back. A deployment with no registry makes no call (SKY-891).
+    # Known gap: Vercel keeps its copy of each image that a Vercel box started from. The Vercel
+    # Sandbox SDK has no call that deletes a copied image, so the copies stay in Vercel's registry.
     if registry is not None:
         registry.delete_repository(image_owner(username))
 

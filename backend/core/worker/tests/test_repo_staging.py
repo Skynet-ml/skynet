@@ -7629,7 +7629,7 @@ def _check(role: str, runtime: Any, registry: Any = None, repository: str | None
 
 
 @pytest.mark.parametrize("role", ["run", "metric"])
-@pytest.mark.parametrize("users", [("",), ("root",), ("0",), ("0:1000",), ("root:root",), ("1000", "0")])
+@pytest.mark.parametrize("users", [("",), ("root",), ("0",), ("0:0",), ("0:1000",), ("root:root",), ("1000", "0")])
 def test_an_image_whose_own_user_is_root_is_refused_in_each_role(role: str, users: tuple[str, ...]) -> None:
     """The registry reads the image's USER, and root in any platform image refuses the image (SKY-891).
 
@@ -7645,15 +7645,62 @@ def test_an_image_whose_own_user_is_root_is_refused_in_each_role(role: str, user
 
 
 @pytest.mark.parametrize("role", ["run", "metric"])
-def test_an_image_with_a_non_root_user_passes_in_each_role(role: str) -> None:
-    """A non-root USER in each platform image passes (SKY-891).
+@pytest.mark.parametrize("users", [("1000",), ("1000:1000",), ("1000:1000", "1001")])
+def test_an_image_with_a_numeric_non_root_user_passes_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """A numeric non-root USER in each platform image passes (SKY-891).
 
     Args:
         role: ``run`` or ``metric``.
+        users: The USER of each platform image.
     """
-    registry = _FakeRegistry(set(), users=("1000:1000", "app"))
+    registry = _FakeRegistry(set(), users=users)
 
     assert _check(role, _ImageRuntime(), registry) == (sys.executable if role == "metric" else None)
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize("users", [("admin",), ("app:app",), ("1000:wheel",), ("1000", "app"), ("\u0660",), (" 1000",)])
+def test_an_image_whose_user_is_a_name_is_refused_in_each_role(role: str, users: tuple[str, ...]) -> None:
+    """A USER name refuses the image, because the image's own /etc/passwd could map it to uid 0 (SKY-891).
+
+    The box reports its uid with the image's own programs, so an image can lie
+    there. Only the numeric USER read outside the box is trusted.
+
+    Args:
+        role: ``run`` or ``metric``.
+        users: The USER of each platform image.
+    """
+    registry = _FakeRegistry(set(), users=users)
+
+    with pytest.raises(repo_staging.BoxImageError, match=rf"\[{role}\] image .* sets its USER by name.*`USER 1000`"):
+        _check(role, _ImageRuntime(), registry)
+
+
+@pytest.mark.parametrize(
+    ("user", "numeric"),
+    [
+        ("1000", True),
+        ("1000:1000", True),
+        ("1000:0", True),
+        ("0", True),
+        ("admin", False),
+        ("1000:wheel", False),
+        ("1000:", False),
+        (":1000", False),
+        ("1000:1000:1", False),
+        ("\u0660", False),
+        ("1000\n", False),
+        ("", False),
+    ],
+)
+def test_a_numeric_image_user_is_ascii_digits_with_an_optional_gid(user: str, numeric: bool) -> None:
+    """Only ``<uid>`` or ``<uid>:<gid>`` in ASCII digits is numeric; :func:`_root_user` refuses uid 0 (SKY-891).
+
+    Args:
+        user: The image config ``User``.
+        numeric: Whether it is numeric.
+    """
+    assert (repo_staging._NUMERIC_USER.fullmatch(user) is not None) is numeric
 
 
 @pytest.mark.parametrize("role", ["run", "metric"])
@@ -7730,7 +7777,7 @@ def test_the_local_user_read_fails_closed(
     ],
 )
 def test_a_root_image_user_is_none_root_or_uid_0(user: str, root: bool) -> None:
-    """No USER, ``root`` or uid 0 runs as root with any group; other names wait for the box uid check (SKY-891).
+    """No USER, ``root`` or uid 0 runs as root with any group; the numeric check refuses other names (SKY-891).
 
     Args:
         user: The image config ``User``.
