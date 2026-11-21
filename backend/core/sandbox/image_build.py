@@ -17,6 +17,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -47,6 +48,8 @@ except ImportError:
 
 # Without botocore the names above are None, and except takes no None entry.
 _AWS_ERRORS = tuple(kind for kind in (BotoCoreError, ClientError) if kind is not None)
+
+logger = logging.getLogger(__name__)
 
 _HASH_VERSION = b"skynet-image-input-v2"
 _BUILD_ARG_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -994,6 +997,24 @@ def _read_capped(stream: IO[bytes], capped: _CappedLog) -> None:
         capped.add(piece.decode(errors="replace").rstrip("\n"))
 
 
+def _release_output(process: subprocess.Popen[bytes], reader: threading.Thread) -> None:
+    """Join the output reader for a bounded time, and detach the pipe if it still reads.
+
+    A process outside docker's group (one that called setsid) can hold the
+    pipe open after the group kill. Closing the pipe would then block until
+    that process exits, so the builder leaves the pipe to the daemon reader,
+    which ends at EOF.
+
+    Args:
+        process: The docker process, already waited for.
+        reader: The thread that reads its output.
+    """
+    reader.join(_READER_JOIN_SECONDS)
+    if reader.is_alive():
+        logger.warning("docker process %s left a process that holds its output open; the log may be short", process.pid)
+        process.stdout = None
+
+
 def _size_message(size_bytes: int, limits: BuildLimits) -> str:
     """Return the error text for an image over the size limit.
 
@@ -1092,7 +1113,7 @@ class LocalDockerImageBuilder:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
-                    reader.join(_READER_JOIN_SECONDS)
+                    _release_output(process, reader)
                     if not isinstance(exc, subprocess.TimeoutExpired):
                         raise
                     log = capped.text()
@@ -1101,7 +1122,7 @@ class LocalDockerImageBuilder:
                         log=log,
                         log_tail=log_tail(log),
                     ) from exc
-                reader.join(_READER_JOIN_SECONDS)
+                _release_output(process, reader)
             log = capped.text()
             tail = log_tail(log)
             image_id = iidfile.read_text().strip() if iidfile.exists() else ""

@@ -11,10 +11,13 @@ import base64
 import io
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,7 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from core.sandbox import image_build
 from core.sandbox.image_build import (
     BUILDKIT_IMAGE,
+    LOCAL_IMAGE_NAME,
     MAX_LOG_CHARS,
     BuildLimits,
     BuildRequest,
@@ -973,6 +977,31 @@ def test_local_builder_reports_a_timeout(tmp_path: Path, monkeypatch: pytest.Mon
     assert caught.value.log_tail == "#1 building"
 
 
+def test_local_builder_does_not_wait_for_a_process_outside_the_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process that left docker's group and holds the pipe does not delay the timeout."""
+    ready = tmp_path / "ready"
+    fake = tmp_path / "docker"
+    escape = shlex.quote(f"import os, time; os.setsid(); open({os.fspath(ready)!r}, 'w').close(); time.sleep(30)")
+    fake.write_text(f"#!/bin/sh\necho '#1 building'\n{shlex.quote(sys.executable)} -c {escape} &\nwait\n")
+    fake.chmod(0o755)
+    popen = type("ReadyPopen", (_ReadyPopen,), {"ready": ready, "interrupt": False})
+    monkeypatch.setattr(image_build.subprocess, "Popen", popen)
+    monkeypatch.setattr(image_build, "_READER_JOIN_SECONDS", 0.5)
+    builder = LocalDockerImageBuilder(
+        docker=os.fspath(fake),
+        limits=BuildLimits(timeout_seconds=1.0, max_size_bytes=10, max_context_bytes=10**9),
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ImageBuildTimeoutError) as caught:
+        builder.build(_request(_context(tmp_path / "ctx")))
+
+    assert time.monotonic() - started < _PROMPT_SECONDS
+    assert caught.value.log_tail == "#1 building"
+
+
 def test_local_builder_kills_the_group_on_an_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ctrl-C during a local build kills docker's process group and returns promptly."""
     builder = _ready_docker(tmp_path, monkeypatch, interrupt=True)
@@ -1019,21 +1048,26 @@ def test_local_docker_builds_a_real_small_image(tmp_path: Path) -> None:
     """Local Docker builds a FROM scratch image and reports its id, size and log."""
     context = _context(tmp_path)
     builder = LocalDockerImageBuilder(limits=LIMITS)
+    # A unique build arg gives this run its own tag. The cleanup removes only
+    # that tag, so a parallel run on the same engine keeps the shared image.
+    args = {"UNUSED": uuid.uuid4().hex}
+    input_hash = _hash(_request(context, build_args=args), builder="local-docker", platform="")
+    tag = f"{LOCAL_IMAGE_NAME}:{input_hash.split(':', 1)[1][:32]}"
 
-    result = builder.build(_request(context, build_args={"UNUSED": "1"}))
+    try:
+        result = builder.build(_request(context, build_args=args))
 
-    assert result.digest.startswith("sha256:")
-    assert result.image == result.digest
-    assert 0 < result.size_bytes < 1_000_000
-    assert result.input_hash == _hash(
-        _request(context, build_args={"UNUSED": "1"}), builder="local-docker", platform=""
-    )
-    assert result.log
+        assert result.digest.startswith("sha256:")
+        assert result.image == result.digest
+        assert 0 < result.size_bytes < 1_000_000
+        assert result.input_hash == input_hash
+        assert result.log
 
-    small = BuildLimits(timeout_seconds=600.0, max_size_bytes=1, max_context_bytes=10**9)
-    with pytest.raises(ImageTooLargeError):
-        LocalDockerImageBuilder(limits=small).build(_request(context))
-    subprocess.run(["docker", "image", "rm", "-f", result.digest], capture_output=True, check=False)
+        small = BuildLimits(timeout_seconds=600.0, max_size_bytes=1, max_context_bytes=10**9)
+        with pytest.raises(ImageTooLargeError):
+            LocalDockerImageBuilder(limits=small).build(_request(context, build_args=args))
+    finally:
+        subprocess.run(["docker", "image", "rm", tag], capture_output=True, check=False)
 
 
 def test_local_docker_failure_keeps_the_log(tmp_path: Path) -> None:
