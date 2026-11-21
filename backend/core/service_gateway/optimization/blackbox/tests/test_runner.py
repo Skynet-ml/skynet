@@ -2250,6 +2250,7 @@ sys.modules["r"] = m
 spec.loader.exec_module(m)
 m.os.geteuid = lambda: 0
 m._has_capabilities = lambda: sys.argv[2] == "caps"
+m._PASSWD_FILE = m.os.environ["FAKE_PASSWD"]
 calls = []
 
 
@@ -2274,7 +2275,12 @@ print(json.dumps(report))
 
 
 def _root_supervisor(
-    tmp_path: Path, capabilities: str, prctl: str, *call_dir: str, entry_path: str | None = None
+    tmp_path: Path,
+    capabilities: str,
+    prctl: str,
+    *call_dir: str,
+    entry_path: str | None = None,
+    passwd: bytes | None = None,
 ) -> dict[str, Any]:
     """Run ``_ROOT_SUPERVISOR`` in the tree ``tmp_path`` and return its report.
 
@@ -2284,12 +2290,17 @@ def _root_supervisor(
         prctl: ``fails`` when every prctl call fails.
         *call_dir: The call folder, to run the whole candidate path.
         entry_path: The image's ``APP_ENTRY_PATH``, or ``None`` for an image without it.
+        passwd: The fake ``/etc/passwd``; by default one line for the test user.
 
     Returns:
         The report: the choice and the entry's PATH, the refusal or the exit
         code, and the prctl calls.
     """
+    passwd_file = tmp_path.parent / f"{tmp_path.name}.passwd"
+    default = f"root:x:0:0:root:/root:/bin/bash\nbox:x:{os.getuid()}:{os.getgid()}::/home/box:/bin/sh\n"
+    passwd_file.write_bytes(default.encode() if passwd is None else passwd)
     env = {key: value for key, value in os.environ.items() if key != runner.ENV_ENTRY_PATH}
+    env["FAKE_PASSWD"] = str(passwd_file)
     if entry_path is not None:
         env[runner.ENV_ENTRY_PATH] = entry_path
     done = subprocess.run(
@@ -2356,6 +2367,56 @@ def test_only_a_user_switch_sets_no_new_privs_on_the_supervisor(
     assert _root_supervisor(tmp_path, capabilities, "works")["calls"] == calls
 
 
+@pytest.mark.parametrize(
+    "passwd",
+    [
+        b"root:x:0:0:root:/root:/bin/bash\n",
+        b"",
+        b"box:x:{uid}:0::/home/box\n",
+        b":x:{uid}:0::/home/box:/bin/sh\n",
+        b"box:x:0{uid}:0::/home/box:/bin/sh\n",
+        b"box:x:{uid}:0::/home/\xff:/bin/sh\n",
+    ],
+    ids=["uid-not-listed", "empty-file", "short-line", "no-name", "padded-uid", "not-utf-8"],
+)
+def test_a_tree_owner_missing_from_etc_passwd_stops_the_root_supervisor(tmp_path: Path, passwd: bytes) -> None:
+    """The supervisor reads ``/etc/passwd`` itself and refuses when the owner has no line there (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        passwd: The fake ``/etc/passwd``.
+    """
+    report = _root_supervisor(tmp_path, "caps", "works", passwd=passwd.replace(b"{uid}", str(os.getuid()).encode()))
+
+    assert "has no account for uid" in report["refused"]
+    assert report["calls"] == []
+
+
+def test_the_root_supervisor_takes_home_and_user_from_etc_passwd_without_nss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HOME, USER and LOGNAME come from the ``/etc/passwd`` line, and ``pwd`` is never asked (SKY-737).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+        monkeypatch: Pytest monkeypatch.
+    """
+    passwd = tmp_path / "passwd"
+    passwd.write_text(f"root:x:0:0:root:/root:/bin/bash\nbox:x:{os.getuid()}:7::/home/box:/bin/sh\n")
+    monkeypatch.setattr(runner, "_PASSWD_FILE", str(passwd))
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runner, "_has_capabilities", lambda: True)
+    monkeypatch.setattr(runner, "_block_privilege_gain", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    env: dict[str, str] = {}
+
+    switch = runner._entry_user(env)
+
+    assert switch["user"] == os.getuid()
+    assert env == {"HOME": "/home/box", "USER": "box", "LOGNAME": "box"}
+    assert "pwd" not in runner.__dict__
+
+
 def test_the_entry_does_not_start_when_no_new_privs_cannot_be_set(tmp_path: Path) -> None:
     """A root supervisor that cannot set no_new_privs refuses the run and never starts the entry.
 
@@ -2386,6 +2447,7 @@ def test_the_supervisor_really_holds_no_new_privs_after_a_user_switch_choice(tmp
         "import importlib.util,sys;"
         "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
         "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;m._has_capabilities=lambda:True;"
+        "m._passwd_account=lambda uid:('box','/home/box');"
         "before=open('/proc/self/status').read();m._entry_user({});"
         "print(before);print('--- after ---');print(open('/proc/self/status').read())"
     )

@@ -51,6 +51,7 @@ from core.models.blackbox import (
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.image_build import BuildResult, ImageBuildError, LocalDockerImageBuilder
 from core.sandbox.image_registry import ImageRegistryError
+from core.sandbox.providers import vercel
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import repo_workspace, runner
 from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
@@ -5943,6 +5944,8 @@ def _listing(
     box: list[str] = _ENTRIES,
     base: list[str] = _BASE,
     programs: dict[str, list[str]] | None = None,
+    folders: dict[str, list[str]] | None = None,
+    tools: dict[str, list[str]] | None = None,
 ) -> str:
     """Write the probe's whole standard output.
 
@@ -5952,6 +5955,8 @@ def _listing(
         base: The walk of ``BASE_PYTHON``.
         programs: The walks of root's fixed paths that differ from the defaults, by path. The defaults
             are a root-owned 755 file, and a root-owned 1777 ``/tmp``.
+        folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
+        tools: The ``tool`` lines and walks of root's PATH tools that differ from ``/usr/bin/<name>``, by name.
 
     Returns:
         The probe's standard output.
@@ -5959,6 +5964,10 @@ def _listing(
     walks = {path: _walk(path) for path in repo_staging._ROOT_PATHS}
     walks = walks | {"/tmp": _walk("/tmp", "1777 directory")} | (programs or {})
     fixed = [line for path, walk in walks.items() for line in (f"file {path}", *walk)]
+    bins = {folder: _walk(folder, "755 directory") for folder in repo_staging._ROOT_PATH.split(":")}
+    fixed += [line for folder, walk in (bins | (folders or {})).items() for line in (f"bin {folder}", *walk)]
+    found = {name: [f"tool {name} /usr/bin/{name}", *_walk(f"/usr/bin/{name}")] for name in repo_staging._ROOT_TOOLS}
+    fixed += [line for lines in (found | (tools or {})).values() for line in lines]
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
@@ -6290,6 +6299,17 @@ _LINKED_INTO_WRITABLE = [
         _listing(programs={"/etc/passwd": _walk("/etc/passwd", modes={"/etc": "1000 755 directory"})}),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "664 regular file")}),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "755 directory")}),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "777 directory")}),
+        _listing(folders={"/usr/sbin": _walk("/usr/sbin", "1000 755 directory")}),
+        _listing(folders={"/sbin": _walk("/sbin", modes={"/": "775 directory"})}),
+        _listing(folders={"/bin": _walk("/bin", "755 regular file")}),
+        _TRUSTED_PROBE.replace("bin /usr/local/sbin\n", ""),
+        _listing(tools={"tail": ["tool tail /usr/bin/tail", *_walk("/usr/bin/tail", "1000 755 regular file")]}),
+        _listing(tools={"tr": ["tool tr /usr/bin/tr", *_walk("/usr/bin/tr", "757 regular file")]}),
+        _listing(tools={"head": ["tool head /usr/local/sbin/head", *_walk("/usr/local/sbin/head", "none")]}),
+        _listing(tools={"base64": ["tool base64 base64"]}),
+        _listing(tools={"base64": ["tool head /usr/bin/head", *_walk("/usr/bin/head")]}),
+        _TRUSTED_PROBE.replace("tool tr /usr/bin/tr\n", ""),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", "757 directory")]),
         _listing(box=[*_ENTRIES, *_entry("path", "/usr/lib/python3.12", modes={"/usr/lib": "777 directory"})]),
         _listing(box=[*_ENTRIES, *_LINKED_INTO_WRITABLE]),
@@ -6348,6 +6368,17 @@ _LINKED_INTO_WRITABLE = [
         "passwd-in-a-user-owned-etc",
         "group-writable-nsswitch",
         "nsswitch-is-a-folder",
+        "writable-usr-local-sbin",
+        "user-owned-usr-sbin",
+        "sbin-under-a-writable-root",
+        "bin-is-a-file",
+        "no-usr-local-sbin-walk",
+        "user-owned-tail",
+        "writable-tr",
+        "head-found-but-missing",
+        "relative-base64",
+        "tool-out-of-order",
+        "no-tr-walk",
         "R1-stdlib-moved-to-a-writable-folder",
         "R1-stdlib-under-a-writable-folder",
         "R2-link-into-a-writable-folder",
@@ -6427,6 +6458,27 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         _listing(box=["env PATH", "env MALLOC_ARENA_MAX", *_ENTRIES]),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "none")}),
         _listing(programs={"/etc/passwd": _walk("/etc/passwd", "644 regular file")}),
+        _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "none")}),
+        _listing(
+            folders={
+                "/bin": [
+                    *_walk("/bin", "777 symbolic link"),
+                    "link usr/bin",
+                    "0 755 directory /usr",
+                    "0 755 directory /usr/bin",
+                ]
+            },
+            tools={
+                "tail": [
+                    "tool tail /bin/tail",
+                    *_walk("/bin", "777 symbolic link"),
+                    "link usr/bin",
+                    "0 755 directory /usr",
+                    "0 755 directory /usr/bin",
+                    "0 755 regular file /usr/bin/tail",
+                ]
+            },
+        ),
         _listing(box=["env LANG", "locale LANG=C.UTF-8", "env LC_ALL", "locale LC_ALL=en_US.utf8", *_ENTRIES]),
     ],
     ids=[
@@ -6438,6 +6490,8 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         "plain-environment",
         "no-nsswitch",
         "read-only-passwd",
+        "no-usr-local-sbin",
+        "merged-usr-bin-link",
         "utf-8-locale",
     ],
 )
@@ -6511,6 +6565,13 @@ def test_a_run_image_with_root_variables_in_its_env_is_refused(
             _prepare(staged, runtime)
     finally:
         staged.cleanup()
+
+
+def test_the_probe_root_path_is_the_vercel_root_path() -> None:
+    """The probe walks the same PATH that every Vercel root script sets (SKY-737)."""
+    assert repo_staging._ROOT_PATH == vercel.ROOT_PATH
+    words = re.findall(r"(?:^|[;|]) *(?:do +)?([a-z0-9]+)", vercel.TAIL_SCRIPT)
+    assert set(words) - {"export", "while", "echo", "shift", "done"} == set(repo_staging._ROOT_TOOLS)
 
 
 def test_the_probe_imports_what_the_root_scripts_import() -> None:
@@ -6760,21 +6821,40 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
             "LD_PRELOAD": "",
             "SECRET_VALUE": "do-not-print",
             "BASH_FUNC_cd%%": "() { :; }",
-            "LANG": "en_US.ISO-8859-1",
+            "LANG": "C.UTF-8",
+            "LANGUAGE": "de_DE",
             "LC_CTYPE": "C.UTF-8",
         },
     )
 
     assert done.returncode == 0, done.stderr
-    assert {"env LD_PRELOAD", "env SECRET_VALUE", "env BASH_FUNC_cd%%"} <= set(done.stdout.split("\n"))
-    assert {"locale LANG=en_US.ISO-8859-1", "locale LC_CTYPE=C.UTF-8"} <= set(done.stdout.split("\n"))
+    lines = set(done.stdout.split("\n"))
+    assert {"env LD_PRELOAD", "env SECRET_VALUE", "env BASH_FUNC_cd%%"} <= lines
+    assert {"locale LANG=C.UTF-8", "locale LANGUAGE=de_DE", "locale LC_CTYPE=C.UTF-8"} <= lines
+    assert ("path /usr/lib/locale" in lines) is Path("/usr/lib/locale").is_dir()
     assert repo_staging._root_variables(subprocess.CompletedProcess([], 0, done.stdout, "")) == [
         "BASH_FUNC_cd%%",
-        "LANG",
+        "LANGUAGE",
         "LD_PRELOAD",
     ]
     assert "do-not-print" not in done.stdout
-    assert "do-not-print" not in done.stdout
+
+
+def test_the_path_script_refuses_a_locale_that_does_not_load() -> None:
+    """The script loads the image locale as root's bash does, and stops when it does not load (SKY-737)."""
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", repo_staging._PATH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "xx_YY.UTF-8"},
+    )
+
+    assert done.returncode != 0
+    assert "the image locale does not load" in done.stderr
 
 
 def test_a_contract_with_no_image_keeps_the_old_record(monkeypatch: pytest.MonkeyPatch) -> None:

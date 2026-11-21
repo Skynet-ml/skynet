@@ -99,7 +99,6 @@ import io
 import json
 import math
 import os
-import pwd
 import shutil
 import signal
 import site
@@ -265,6 +264,7 @@ ASCENT_PACKAGE_PARAM = "ascent_package"
 METRIC_FUNCTION_PARAM = "function"
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
+_PASSWD_FILE = "/etc/passwd"
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -2282,24 +2282,48 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
         The ``subprocess.Popen`` arguments that switch the user, or none.
 
     Raises:
-        EntryUserError: When root owns the candidate tree, or the
-            supervisor cannot set ``no_new_privs``.
+        EntryUserError: When root owns the candidate tree, ``/etc/passwd``
+            has no account for its owner, or the supervisor cannot set
+            ``no_new_privs``.
     """
     if os.geteuid() != 0 or (not stat.S_ISREG(os.fstat(1).st_mode) and not _has_capabilities()):
         return {}
     owner = Path().stat()
     if owner.st_uid == 0:
         raise EntryUserError("Root owns the candidate tree, so the [run] entry has no other user to run as.")
-    try:
-        account = pwd.getpwuid(owner.st_uid)
-    except KeyError:
-        pass
-    else:
-        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    name, home = _passwd_account(owner.st_uid)
+    env.update(HOME=home, USER=name, LOGNAME=name)
     if env.get(ENV_ENTRY_PATH):
         env["PATH"] = env[ENV_ENTRY_PATH]
     _block_privilege_gain()
     return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
+
+
+def _passwd_account(uid: int) -> tuple[str, str]:
+    """Find the name and home of a uid in ``/etc/passwd`` alone.
+
+    ``pwd.getpwuid`` follows ``/etc/nsswitch.conf`` and can load NSS modules
+    (``systemd``, ``sss``, ``ldap``) into this root process. The image check
+    walks ``/etc/passwd``, so only that file is read (SKY-737).
+
+    Args:
+        uid: The candidate tree's owner.
+
+    Returns:
+        The account's name and home folder.
+
+    Raises:
+        EntryUserError: When the file cannot be read or has no account for the uid.
+    """
+    try:
+        with Path(_PASSWD_FILE).open(encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split(":")
+                if len(fields) == 7 and fields[0] and fields[2] == str(uid):
+                    return fields[0], fields[5]
+    except (OSError, UnicodeDecodeError):
+        pass
+    raise EntryUserError(f"{_PASSWD_FILE} has no account for uid {uid}, so the [run] entry has no user to run as.")
 
 
 def _block_privilege_gain() -> None:

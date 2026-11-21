@@ -1224,18 +1224,25 @@ _MAX_LINK_HOPS = 40
 # wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
 # scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
 _ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
-# Other paths that root uses in a box. The supervisor's ``pwd.getpwuid``
-# reads ``/etc/passwd`` and ``/etc/nsswitch.conf``, which names the NSS
-# modules that glibc loads. ``/tmp`` holds the supervisor's run folder and
+# Other paths that root uses in a box. The supervisor reads ``/etc/passwd``
+# itself; ``/etc/nsswitch.conf`` names the NSS modules that glibc loads for
+# any other lookup. ``/tmp`` holds the supervisor's run folder and
 # the Vercel root wrapper's output, so it must be root's, sticky and 1777.
 _ROOT_TMP = "/tmp"
 _OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
 _ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
+# The PATH of every root script on Vercel (``vercel.ROOT_PATH``, which a test
+# keeps equal). Its root output poll runs ``_ROOT_TOOLS`` by name every 0.5 s,
+# so each folder and the file that each name finds must be out of the box
+# user's reach. A missing folder is skipped by the lookup, so it may be missing.
+_ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ROOT_TOOLS = ("tail", "head", "base64", "tr")
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
     "import "
     + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
     + r"""
+import locale
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in os.environ:
@@ -1249,6 +1256,13 @@ for name in os.environ:
         print("locale", name + "=" + value)
 for entry in sys.path:
     print("path", entry)
+for tree in ("/usr/lib/locale", "/usr/share/locale"):
+    if os.path.isdir(tree):
+        print("path", tree)
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except locale.Error:
+    sys.exit("the image locale does not load")
 seen = set()
 for pid in ("self", str(os.getppid())):
     with open(f"/proc/{pid}/maps") as maps:
@@ -1302,6 +1316,12 @@ _TRUSTED_PYTHON_PROBE = (
     "  done\n"
     "done\n"
     f'for b in {" ".join(_ROOT_PATHS)}; do printf \'file %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {_ROOT_PATH.replace(":", " ")}; do printf \'bin %s\\n\' "$b"; w "$b"; done\n'
+    f"for b in {' '.join(_ROOT_TOOLS)}; do\n"
+    f'  q=$(PATH={_ROOT_PATH}; command -v "$b") || exit 1\n'
+    "  case $q in *[![:print:]]*) exit 1;; /*) ;; *) exit 1;; esac\n"
+    '  printf \'tool %s %s\\n\' "$b" "$q"; w "$q"\n'
+    "done\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i "$s" -I -S -c "$y") || exit 1\n'
@@ -1400,7 +1420,8 @@ UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
     " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
-    " /etc/nsswitch.conf (when present), every file that Python loads,"
+    " /etc/nsswitch.conf (when present), the tail, head, base64 and tr that root's PATH finds, each folder"
+    " of that PATH ({path}) that exists, every file that Python loads, the locale trees,"
     " each folder on its import path and every file and folder below that path (except site-packages), and"
     " every folder from / down to each of them, must be"
     " owned by root and not writable by group or others. /tmp must be a root-owned folder with mode 1777."
@@ -1739,7 +1760,11 @@ def _check_box_image(runtime: Any, image: str, role: str, *, owner_id: str) -> s
         if probe is not None and not _trusted_python(probe):
             raise BoxImageError(
                 UNTRUSTED_PYTHON.format(
-                    image=image, python=BASE_PYTHON, app=APP_NAME, programs=", ".join(_ROOT_PROGRAMS)
+                    image=image,
+                    python=BASE_PYTHON,
+                    app=APP_NAME,
+                    programs=", ".join(_ROOT_PROGRAMS),
+                    path=_ROOT_PATH,
                 )
             )
         return python if check_role == "metric" else None
@@ -1769,7 +1794,9 @@ def _trusted_python(probe: Any) -> bool:
         group and others cannot write and others can run, each of
         ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
         present) resolves to one that group and others cannot write,
-        ``/tmp`` is a root-owned 1777 folder, and both runs
+        ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
+        missing or one that group and others cannot write, each of
+        ``_ROOT_TOOLS`` that it finds is such a file, and both runs
         list at least one ``path``, ``file`` and ``dir`` entry, each of which
         passes :func:`_walk` with the file type that its tag allows.
     """
@@ -1792,6 +1819,21 @@ def _trusted_python(probe: Any) -> bool:
             if entry != (0o1777, "directory"):
                 return False
         elif entry[1] != "regular file" or entry[0] & 0o022:
+            return False
+    for folder in _ROOT_PATH.split(":"):
+        if not lines or lines.pop() != f"bin {folder}":
+            return False
+        entry = _walk(lines, folder)
+        if entry is None or (entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022)):
+            return False
+    for tool in _ROOT_TOOLS:
+        if not lines or not lines[-1].startswith(f"tool {tool} /"):
+            return False
+        path = lines.pop().removeprefix(f"tool {tool} ")
+        if not _PRINTABLE_PATH.fullmatch(path):
+            return False
+        entry = _walk(lines, path)
+        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
             return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
