@@ -23,11 +23,12 @@ The registry call deletes the account's whole repository from the user image
 registry. It runs after every main-database statement and before the step log
 shard purge, because neither has a rollback and images can be rebuilt. With a registry,
 the deletion refuses while a run of the account is not finished, or while a
-worker still holds a live lease on it (SKY-891). Known gap: Vercel keeps its
-own copy of each of the account's images that a Vercel box started from.
-Neither the Vercel Sandbox SDK nor the image copier has a call that deletes a
-copy, so this deletion leaves those copies in Vercel's registry and in each
-worker's copy cache. Known gap: an expired lease does not prove that the run's
+worker still holds a live lease on it (SKY-891). The Vercel copies of the
+account's images go next, with one delete of the account's Vercel registry
+repository (SKY-895). Known gap: each worker keeps its in-memory copy cache
+until it restarts. A cached copy names a source digest that only a rebuild of
+the same bytes can make again, and its box then fails to start, so the cache
+cannot leak an image. Known gap: an expired lease does not prove that the run's
 CodeBuild image build ended. A worker that was killed after a cancel cannot
 stop its build, which can then push after the repository delete. SKY-896
 (account deletion stops an orphaned CodeBuild image build after a hard-killed
@@ -61,6 +62,7 @@ from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
 from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
+from ..sandbox.vcr_copy import delete_copies
 from ..storage import tree_purge
 from ..storage.models import (
     AgentConversationModel,
@@ -579,9 +581,10 @@ def delete_account(
         AccountRunsActiveError: The deployment has a user image registry and
             one of the account's runs is not in a terminal status, or a worker
             still holds a live lease on it; nothing is deleted.
-        ImageRegistryError: The user image registry refused to delete the
-            account's repository, or its settings are set but not usable;
-            nothing in the main database or the step log shards is deleted.
+        ImageRegistryError: The user image registry or Vercel's registry
+            refused to delete the account's repository, or the registry
+            settings are set but not usable; nothing in the main database or
+            the step log shards is deleted.
         TreePurgeError: When the account has tree packs to delete and
             ``SKYNET_TREE_BUCKET`` is not set or the bucket client cannot be
             built (for example, boto3 is missing or no region is set). Also
@@ -800,10 +803,10 @@ def delete_account(
     # with every image and tag, the build cache included, because its layers hold the user's source; a
     # build can push and then stop before it records a row. A deployment with no registry makes no
     # call (SKY-891).
-    # Known gap: Vercel keeps its copy of each image that a Vercel box started from. The Vercel
-    # Sandbox SDK has no call that deletes a copied image, so the copies stay in Vercel's registry.
+    # The Vercel copies come only from this registry, so a deployment with no registry has none (SKY-895).
     if registry is not None:
         registry.delete_repository(image_owner(username))
+        delete_copies(image_owner(username))
 
     # The other step log shards commit here, as the last step before the caller's main commit, so every
     # main-database statement above already ran when they commit. The databases have no two-phase commit:

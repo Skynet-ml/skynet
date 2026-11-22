@@ -139,8 +139,10 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 or one of the account's runs records a shard that this pod's
                 ``STEP_LOG_SHARDS`` does not have. Also when the user image
                 registry refuses to delete the account's repository, or its
-                settings are set but not usable (SKY-891). The main database
-                rows stay, so the account is not deleted.
+                settings are set but not usable (SKY-891). Also when Vercel
+                refuses to delete the account's image copies, or does not
+                answer (SKY-895). The main database rows stay, so the account
+                is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking

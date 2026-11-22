@@ -7,13 +7,16 @@ import base64
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from core.sandbox import vcr_copy
-from core.sandbox.vcr_copy import VcrCopier
+from core.sandbox.image_registry import ImageRegistryError
+from core.sandbox.vcr_copy import VcrCopier, delete_copies
 
 _SOURCE_HOST = "123456789012.dkr.ecr.us-east-2.amazonaws.com"
 _SOURCE_NAME = "skynet-user-images/u-owner"
@@ -271,3 +274,81 @@ def test_copy_raises_on_a_refused_push() -> None:
 def test_repr_hides_the_token() -> None:
     """Check that the copier's representation does not show the Vercel token."""
     assert "vercel-token" not in repr(VcrCopier("vercel-token", "team_1", "prj_1"))
+
+
+_CONFIG = SimpleNamespace(vercel_token=SecretStr("vercel-token"), vercel_team_id="team_1", vercel_project_id="prj_1")
+
+
+@pytest.mark.parametrize("status", [200, 404])
+def test_delete_copies_deletes_the_owner_repository(status: int) -> None:
+    """Check that the delete names the owner's repository, and that a missing one counts as deleted.
+
+    Args:
+        status: The Vercel API answer.
+    """
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the delete.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake response.
+        """
+        requests.append(request)
+        return httpx.Response(status)
+
+    delete_copies("u-owner", _CONFIG, transport=httpx.MockTransport(answer))
+    (request,) = requests
+    assert request.method == "DELETE"
+    assert request.url.path == "/v1/vcr/repository/user-u-owner"
+    assert dict(request.url.params) == {"teamId": "team_1", "projectId": "prj_1"}
+    assert request.headers["Authorization"] == "Bearer vercel-token"
+
+
+def test_delete_copies_raises_on_a_refused_delete() -> None:
+    """Check that a Vercel refusal raises a registry error."""
+    transport = httpx.MockTransport(lambda request: httpx.Response(500))
+    with pytest.raises(ImageRegistryError, match="status 500"):
+        delete_copies("u-owner", _CONFIG, transport=transport)
+
+
+def test_delete_copies_hides_the_request_on_a_network_failure() -> None:
+    """Check that a network failure raises a registry error that names no team or project."""
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        """Fail the connection.
+
+        Args:
+            request: The request.
+
+        Raises:
+            httpx.ConnectError: Always.
+        """
+        raise httpx.ConnectError(f"cannot reach {request.url}")
+
+    with pytest.raises(ImageRegistryError) as caught:
+        delete_copies("u-owner", _CONFIG, transport=httpx.MockTransport(fail))
+    assert "team_1" not in str(caught.value)
+    assert "prj_1" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_delete_copies_makes_no_call_without_vercel_settings() -> None:
+    """Check that a deployment without the Vercel settings sends no request."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        """Fail the test on any request.
+
+        Args:
+            request: The request.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError(request.url)
+
+    config = SimpleNamespace(vercel_token=None, vercel_team_id="team_1", vercel_project_id="prj_1")
+    delete_copies("u-owner", config, transport=httpx.MockTransport(refuse))
