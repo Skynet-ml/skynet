@@ -110,6 +110,12 @@ locals {
       SERVICE_ROLE                      = "worker"
       SKYNET_TREE_BUCKET                = aws_s3_bucket.trees.id
       USER_IMAGES_REPOSITORY_PREFIX_URI = local.user_images_prefix_uri
+      # Without these the worker has no image builder or registry, so a run
+      # with a user Dockerfile or image fails at once (SKY-899).
+      IMAGE_BUILD_PROJECT       = aws_codebuild_project.image_build.name
+      IMAGE_BUILD_SOURCE_BUCKET = aws_s3_bucket.image_build_source.id
+      IMAGE_BUILD_PUSH_ROLE_ARN = aws_iam_role.image_build_push.arn
+      IMAGE_PULL_ROLE_ARN       = aws_iam_role.image_build_pull.arn
     })
     migrate = merge(local.app_common_env, {
       APP_SERVICE_NAME = "migrate"
