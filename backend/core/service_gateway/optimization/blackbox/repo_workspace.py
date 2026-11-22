@@ -968,6 +968,7 @@ class RepoWorkspace:
         self._failure: BaseException | None = None
         self._setup_log = ""
         self._prepared = False
+        self._skipped: tuple[str, ...] = ()
         # Held in the parent: the protected files after setup, and the
         # prepared tree's digest, which every candidate box checks.
         self._protected_baseline: dict[str, str] = {}
@@ -1019,7 +1020,8 @@ class RepoWorkspace:
             on_output: Receives setup output as it streams.
             skip: Roles (``run``, ``metric``) whose setup box does not open. A setup
                 check skips a role with a user image, which only the run builds (SKY-893).
-                A workspace with a skipped role is not prepared, so it scores no version.
+                A workspace with a skipped role is not prepared: opening a candidate or
+                a metric box then raises ``RuntimeError``.
 
         Raises:
             RepoSetupError: When the repository or the metric packages cannot be set up.
@@ -1035,6 +1037,19 @@ class RepoWorkspace:
                 self._failure = error
                 raise
             self._prepared = not skip
+            if skip:
+                self._skipped = skip
+
+    def _prepare_to_score(self) -> None:
+        """Prepare the workspace before a box scores a version.
+
+        Raises:
+            RuntimeError: When a setup check skipped a role, so the workspace
+                does not hold that role's setup (SKY-893).
+        """
+        if self._skipped:
+            raise RuntimeError(f"This workspace skipped the setup of {', '.join(self._skipped)} and scores no version.")
+        self.prepare()
 
     def _prepare(self, on_output: OutputSink | None, skip: tuple[str, ...] = ()) -> None:
         """Split the archive, then save the repository state and the metric state; the caller holds the lock.
@@ -1420,8 +1435,9 @@ class RepoWorkspace:
             RepoSetupError: When the workspace is not prepared or the box does
                 not hold the prepared tree.
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the tree.
+            RuntimeError: When a setup check skipped a role.
         """
-        self.prepare()
+        self._prepare_to_score()
         spec = self._box_spec("candidate", self._run_vcpus, services=True)
         state = self._repo_state
         box = self._open_box(spec, state, "candidate", self._run_grants)
@@ -1476,8 +1492,9 @@ class RepoWorkspace:
             RepoSetupError: When the workspace is not prepared or the box does
                 not hold the metric packages.
             _SnapshotLostError: When a box from a snapshot did not open or did not hold the packages.
+            RuntimeError: When a setup check skipped a role.
         """
-        self.prepare()
+        self._prepare_to_score()
         spec = self._box_spec("metric", self._metric_vcpus, services=False)
         state = self._metric_state
         box = self._open_box(spec, state, "metric", self._metric_grants)

@@ -260,7 +260,7 @@ class PreflightStore:
 
     @staticmethod
     def _after_settlement(row: WizardPreflightModel) -> bool:
-        """Promote only fully performed successful checks after their usage settles.
+        """Promote checks that all succeeded or were skipped, after their usage settles.
 
         Args:
             row: Finished pending attempt with no outstanding paid operations.

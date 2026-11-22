@@ -2144,7 +2144,13 @@ def test_the_metric_setup_command_builds_once_and_each_metric_box_has_the_build(
     [((), ["setup", "metric-setup"]), (("run",), ["metric-setup"]), (("metric",), ["setup"]), (("run", "metric"), [])],
 )
 def test_prepare_opens_no_setup_box_for_a_skipped_role(tmp_path: Path, skip: tuple[str, ...], kinds: list[str]) -> None:
-    """A role with a user image opens no setup box in preflight; the other role still does (SKY-893)."""
+    """A role with a user image opens no setup box in preflight; the other role still does (SKY-893).
+
+    Args:
+        tmp_path: Pytest fixture for a temporary folder.
+        skip: The roles that ``prepare`` must not set up.
+        kinds: The setup boxes that must open.
+    """
     runtime = _Runtime()
     space = _build_space(tmp_path, runtime, "true")
     try:
@@ -2152,6 +2158,30 @@ def test_prepare_opens_no_setup_box_for_a_skipped_role(tmp_path: Path, skip: tup
     finally:
         space.close()
     assert [box.spec.operation_key.split(":")[1].rsplit("-", 1)[0] for box in runtime.boxes] == kinds
+
+
+@pytest.mark.parametrize("skip", [("run",), ("metric",), ("run", "metric")])
+def test_a_workspace_with_a_skipped_role_scores_no_version(tmp_path: Path, skip: tuple[str, ...]) -> None:
+    """Refuse to open a candidate or metric box after a setup check skipped a role (SKY-893).
+
+    Args:
+        tmp_path: Pytest fixture for a temporary folder.
+        skip: The roles that ``prepare`` did not set up.
+    """
+    runtime = _Runtime()
+    space = _build_space(tmp_path, runtime, "true")
+    archive = _archive(tmp_path / "other", {"src/app.py": "SOURCE = 1\n"})
+    try:
+        space.prepare(skip=skip)
+        opened = [box.spec.operation_key for box in runtime.boxes]
+        with pytest.raises(RuntimeError, match="scores no version"):
+            space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
+        with pytest.raises(RuntimeError, match="scores no version"):
+            space.open_metric()
+    finally:
+        space.close()
+    # The refused calls open no box, so no setup runs again for the skipped role.
+    assert [box.spec.operation_key for box in runtime.boxes] == opened
 
 
 def test_a_failed_metric_setup_command_stops_the_run_before_any_candidate_box(tmp_path: Path) -> None:

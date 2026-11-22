@@ -316,7 +316,18 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     def verify(
         gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
     ) -> dict:
-        """Run the measured fixture preflight instead of a sandbox."""
+        """Run the measured fixture preflight instead of a sandbox.
+
+        Args:
+            gateway: The fixture gateway with the measured runtime.
+            payload: The run request to check.
+            scope: The scope of the check, not used.
+            identity: The identity of the check.
+            unchecked: The roles with a user image, not used.
+
+        Returns:
+            The fixture check result.
+        """
         return fixture.verify(gateway.runtime, payload, identity)
 
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)

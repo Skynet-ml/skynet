@@ -202,20 +202,45 @@ def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) 
 def test_a_role_with_a_user_image_reports_its_setup_as_not_checked(
     setup_client, monkeypatch: pytest.MonkeyPatch, sources: dict, unchecked: tuple, codes: list
 ) -> None:
-    """Skip only the setup of a role with a user image, and report it as not checked (SKY-893)."""
+    """Skip only the setup of a role with a user image, and report it as not checked (SKY-893).
+
+    Args:
+        setup_client: The test client, engine and recorded calls.
+        monkeypatch: Pytest fixture that replaces the staging and check steps.
+        sources: The box sources of the staged checkout.
+        unchecked: The roles the check must not set up.
+        codes: The message codes of the skipped setup checks.
+    """
     client, _engine, _calls = setup_client
     stage, verify = wizard_preflight.stage_repository, wizard_preflight._verify_anything
     bound: list[dict] = []
     verified: list[dict] = []
 
     def staged_with_sources(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
-        """Stage the fixture checkout with this case's box sources."""
+        """Stage the fixture checkout with this case's box sources.
+
+        Args:
+            payload: The run request to stage.
+            **kwargs: The other staging arguments.
+
+        Returns:
+            The protected payload and the staged checkout.
+        """
         protected, staged = stage(payload, **kwargs)
         staged.box_sources = sources
         return protected, staged
 
     def recorded_verify(gateway: Any, payload: dict, **kwargs: Any) -> dict:
-        """Record the roles the guest check skips."""
+        """Record the roles the guest check skips.
+
+        Args:
+            gateway: The model gateway of the check.
+            payload: The run request to check.
+            **kwargs: The other check arguments, with ``unchecked``.
+
+        Returns:
+            The result of the real check.
+        """
         verified.append(kwargs)
         return verify(gateway, payload, **kwargs)
 
@@ -239,19 +264,39 @@ def test_a_check_where_both_roles_use_a_user_image_succeeds_on_its_other_checks(
 
     The setups and the sample score are skipped. An execution check still
     runs the engine and model route checks.
+
+    Args:
+        setup_client: The test client, engine and recorded calls.
+        monkeypatch: Pytest fixture that replaces the staging and sandbox steps.
+        scope: The scope of the check.
     """
     client, _engine, _calls = setup_client
     stage = wizard_preflight.stage_repository
     routes: list[bool] = []
 
     def staged_with_images(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
-        """Stage the fixture checkout with a user image for both roles."""
+        """Stage the fixture checkout with a user image for both roles.
+
+        Args:
+            payload: The run request to stage.
+            **kwargs: The other staging arguments.
+
+        Returns:
+            The protected payload and the staged checkout.
+        """
         protected, staged = stage(payload, **kwargs)
         staged.box_sources = {"run": ("image", "run@sha256:" + "a" * 64), "metric": ("dockerfile", "eval/Dockerfile")}
         return protected, staged
 
     def guest(payload: dict, _artifact_id: str, events: Any, _start_method: str) -> None:
-        """Run the real guest check on the payload the parent sends."""
+        """Run the real guest check on the payload the parent sends.
+
+        Args:
+            payload: The guest payload, with its ``_preflight`` settings.
+            _artifact_id: The artifact id, not used.
+            events: The queue that gets the check result.
+            _start_method: The process start method, not used.
+        """
         preflight = payload.pop("_preflight")
         result = verify_anything_in_sandbox(
             payload,
@@ -263,7 +308,15 @@ def test_a_check_where_both_roles_use_a_user_image_succeeds_on_its_other_checks(
         events.put({"type": "preflight_result", "result": result})
 
     def model_routes(_gateway: Any, *, native: bool) -> list[dict]:
-        """Record that the model routes are checked."""
+        """Record that the model routes are checked.
+
+        Args:
+            _gateway: The model gateway, not used.
+            native: Whether the check uses the native engines.
+
+        Returns:
+            One passed model route check.
+        """
         routes.append(native)
         return [{"key": "model.optimization", "status": "succeeded"}]
 
