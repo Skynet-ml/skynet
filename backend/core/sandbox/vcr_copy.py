@@ -9,6 +9,9 @@ bytes do not change, so the copy keeps the source digest.
 VCR takes HTTP Basic auth with the user ``oidc`` and a project OIDC token. The
 Vercel CLI gets the same token from ``POST /projects/<id>/token`` in
 ``vercel vcr login``.
+
+Each owner's copies go to one VCR repository, so an account deletion deletes
+them all with one call (SKY-895).
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ from urllib.parse import urljoin
 
 import httpx
 
-from .image_registry import _IMAGE_INDEX_TYPES, _IMAGE_MANIFEST_TYPES, require_digest
+from core.config import settings
+
+from .image_registry import _IMAGE_INDEX_TYPES, _IMAGE_MANIFEST_TYPES, ImageRegistryError, require_digest
 
 VCR_HOST = "vcr.vercel.com"
 _API = "https://api.vercel.com"
@@ -41,6 +46,46 @@ _PREPARING = "preparing"
 _POLL_SECONDS = 5.0
 # Vercel Sandbox runs linux/amd64 boxes.
 _PLATFORM = {"os": "linux", "architecture": "amd64"}
+
+
+def copy_repository(owner: str) -> str:
+    """Name the VCR repository that holds one owner's image copies.
+
+    Args:
+        owner: The owner's registry name, from ``image_owner``.
+
+    Returns:
+        ``user-<owner>``.
+    """
+    return f"user-{owner}"
+
+
+def delete_copies(owner: str, config: Any = settings, *, transport: httpx.BaseTransport | None = None) -> None:
+    """Delete the owner's VCR repository with every image copy in it (SKY-895).
+
+    A deployment without all three Vercel settings makes no call. A
+    repository that does not exist counts as deleted.
+
+    Args:
+        owner: The owner's registry name, from ``image_owner``.
+        config: The settings that hold the Vercel token, team and project.
+        transport: The HTTP transport; tests pass a mock one.
+
+    Raises:
+        ImageRegistryError: The Vercel API refused the delete or did not answer.
+    """
+    if not (config.vercel_token and config.vercel_team_id and config.vercel_project_id):
+        return
+    params = {"teamId": config.vercel_team_id, "projectId": config.vercel_project_id}
+    headers = {"Authorization": f"Bearer {config.vercel_token.get_secret_value()}"}
+    try:
+        with httpx.Client(transport=transport, timeout=30.0) as http:
+            response = http.delete(f"{_API}/v1/vcr/repository/{copy_repository(owner)}", params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        # The type only: an httpx error message can hold the request URL and its team and project ids.
+        raise ImageRegistryError(f"The Vercel image copy delete failed: {type(exc).__name__}.") from None
+    if response.status_code != httpx.codes.NOT_FOUND and response.is_error:
+        raise ImageRegistryError(f"Vercel refused the image copy delete with status {response.status_code}.")
 
 
 class VcrCopier:
@@ -98,7 +143,7 @@ class VcrCopier:
         source = f"https://{match['host']}/v2/{match['name']}"
         async with httpx.AsyncClient(transport=self._transport, timeout=_TIMEOUT, follow_redirects=True) as http:
             team, project, oidc = await self._scope(http)
-            repository = "user-" + match["name"].rsplit("/", 1)[-1]
+            repository = copy_repository(match["name"].rsplit("/", 1)[-1])
             target_name = f"{team}/{project}/{repository}"
             target = f"https://{VCR_HOST}/v2/{target_name}"
             target_auth = httpx.BasicAuth("oidc", oidc)

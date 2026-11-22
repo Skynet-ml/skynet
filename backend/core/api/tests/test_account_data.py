@@ -518,6 +518,21 @@ class _FakeImageRegistry:
         self.repositories.append(owner)
 
 
+@pytest.fixture(autouse=True)
+def vercel_copy_deletes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record each Vercel copy delete instead of calling Vercel (SKY-895).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+
+    Returns:
+        The owners whose copies the deletion deleted.
+    """
+    owners: list[str] = []
+    monkeypatch.setattr(account_data_service, "delete_copies", owners.append)
+    return owners
+
+
 def _seed_image_builds(engine: Engine) -> None:
     """Give each account a pushed build, and the owner a failed build and a local build.
 
@@ -535,9 +550,9 @@ def _seed_image_builds(engine: Engine) -> None:
 
 @pytest.mark.parametrize("seed", [True, False], ids=["with-builds", "no-builds"])
 def test_delete_removes_the_account_repository_from_the_registry(
-    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, seed: bool
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, seed: bool, vercel_copy_deletes: list[str]
 ) -> None:
-    """Deletion deletes only the account's own repository, with or without build rows (SKY-891).
+    """Deletion deletes only the account's own repository and its Vercel copies, with or without build rows (SKY-891, SKY-895).
 
     A build can push an image or its cache and stop before it records a row,
     so the delete never depends on the rows.
@@ -546,6 +561,7 @@ def test_delete_removes_the_account_repository_from_the_registry(
         harness: The test client and its engine.
         monkeypatch: Pytest monkeypatch.
         seed: Whether the account has build rows.
+        vercel_copy_deletes: The owners whose Vercel copies the deletion deleted.
     """
     if seed:
         _seed_image_builds(harness.engine)
@@ -556,6 +572,7 @@ def test_delete_removes_the_account_repository_from_the_registry(
 
     assert resp.status_code == 200
     assert registry.repositories == [image_owner(_EMAIL)]
+    assert vercel_copy_deletes == [image_owner(_EMAIL)]
 
 
 def _bad_prefix_registry(**_: Any) -> None:
@@ -599,12 +616,15 @@ def test_an_image_registry_failure_answers_503_and_keeps_the_account(
         assert session.scalars(select(ImageBuildModel).where(ImageBuildModel.username == _EMAIL)).all()
 
 
-def test_no_registry_skips_the_registry_delete(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A deployment with no registry prefix deletes the account with no registry call and no AWS client (SKY-891).
+def test_no_registry_skips_the_registry_delete(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, vercel_copy_deletes: list[str]
+) -> None:
+    """A deployment with no registry prefix deletes the account with no registry or Vercel call (SKY-891, SKY-895).
 
     Args:
         harness: The test client and its engine.
         monkeypatch: Pytest monkeypatch.
+        vercel_copy_deletes: The owners whose Vercel copies the deletion deleted.
     """
     _seed_image_builds(harness.engine)
     monkeypatch.setattr(image_registry_module.settings, "user_images_repository_prefix_uri", "")
@@ -615,6 +635,7 @@ def test_no_registry_skips_the_registry_delete(harness: SimpleNamespace, monkeyp
     assert resp.status_code == 200
     with Session(harness.engine) as session:
         assert session.get(UserModel, _EMAIL) is None
+    assert vercel_copy_deletes == []
 
 
 def test_a_refused_registry_delete_keeps_the_account(harness: SimpleNamespace) -> None:
@@ -630,6 +651,39 @@ def test_a_refused_registry_delete_keeps_the_account(harness: SimpleNamespace) -
     with Session(harness.engine) as session:
         assert session.scalars(select(ImageBuildModel).where(ImageBuildModel.username == _EMAIL)).all()
         assert session.scalars(select(UserModel).where(UserModel.email == _EMAIL)).all()
+
+
+def test_a_refused_vercel_copy_delete_answers_503_and_keeps_the_account(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused delete of the Vercel copies is a 503, and the account stays for a retry (SKY-895).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+
+    def refuse(owner: str) -> None:
+        """Refuse the delete, as Vercel does.
+
+        Args:
+            owner: The owner of the copies.
+
+        Raises:
+            ImageRegistryError: Always.
+        """
+        raise ImageRegistryError("refused")
+
+    _seed_image_builds(harness.engine)
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: _FakeImageRegistry())
+    monkeypatch.setattr(account_data_service, "delete_copies", refuse)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "accounts.deletion_storage_unavailable"
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
 
 
 @pytest.mark.parametrize("status", ["pending", "validating", "running"])
