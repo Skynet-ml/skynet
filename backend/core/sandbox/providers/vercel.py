@@ -171,7 +171,12 @@ SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 # inherit the flag and cannot drop it, and the kernel then ignores sudo's
 # setuid bit, so Codex and the [run] entry never reach root (SKY-389, SKY-398).
 # The absolute path keeps a planted `setpriv` earlier on PATH from skipping it.
-NO_NEW_PRIVS = ("/usr/bin/setpriv", "--no-new-privs")
+# Vercel starts every command with all capabilities in its ambient set, so a
+# non-root box user could still write root-owned files (SKY-901). Clearing the
+# inheritable and ambient sets leaves the next exec with none: no_new_privs
+# also ignores file capabilities. The bounding set stays, because dropping it
+# needs CAP_SETPCAP, and a box without it would then fail every command.
+UNPRIVILEGED = ("/usr/bin/setpriv", "--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all")
 # A root command must find programs only in root-owned folders, and no program
 # file in them may be writable by the box user. /app/.venv/bin is writable by
 # the box user. The box's sudo may pass the box PATH through, so every root
@@ -404,7 +409,7 @@ def _bash(args: Sequence[str], *, sudo: bool = False) -> tuple[str, list[str]]:
         script, *rest = args
         return "/bin/bash", [*SHELL_FLAGS, f"export PATH={ROOT_PATH}; {script}", *rest]
     # setpriv looks up a bare name on the box PATH, which the box user can write.
-    return NO_NEW_PRIVS[0], [*NO_NEW_PRIVS[1:], "/bin/bash", *SHELL_FLAGS, *args]
+    return UNPRIVILEGED[0], [*UNPRIVILEGED[1:], "/bin/bash", *SHELL_FLAGS, *args]
 
 
 def _wrapper(inner: str, token: str, *, sudo: bool) -> tuple[str, str, str, str]:
@@ -1348,7 +1353,7 @@ class VercelEnvironment(SandboxEnvironment):
                 command runs, and the rest after it ends. The chunks of one
                 stream join to its full text.
             sudo: Run the command as root. Any other command runs under
-                ``NO_NEW_PRIVS``, so nothing it starts can reach root.
+                ``UNPRIVILEGED``, so nothing it starts can reach root or hold a capability.
 
         Returns:
             The exit code and the captured output.

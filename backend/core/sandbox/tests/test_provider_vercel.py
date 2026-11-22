@@ -780,22 +780,33 @@ async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeC
     await env.start()
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
-    assert [call["command"], *call["args"][:5]] == [*vercel.NO_NEW_PRIVS, "/bin/bash", "--noprofile", "--norc", "-c"]
+    shell = len(vercel.UNPRIVILEGED) - 1
+    assert [call["command"], *call["args"][: shell + 4]] == [
+        *vercel.UNPRIVILEGED,
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+    ]
     assert call["args"][-1].startswith("/bin/bash --noprofile --norc -c ")
     await env.stop()
 
 
 @pytest.mark.parametrize("timeout_sec", [None, 30])
-async def test_a_command_without_sudo_starts_under_no_new_privs(
+async def test_a_command_without_sudo_starts_under_no_new_privs_and_no_capabilities(
     client: FakeClient, log: list[str], timeout_sec: float | None
 ) -> None:
-    """Check that the box's sudo can never raise a non-root command, its timeout wrapper or its children."""
+    """Check that a non-root command, its timeout wrapper and its children never reach root or a capability.
+
+    Vercel gives every command all capabilities in its ambient set, so the
+    box user could write root-owned files without the drop (SKY-901).
+    """
     env = make_env(client, log)
     await env.start()
     await env.exec("echo hello", timeout_sec=timeout_sec)
     call = client.boxes[env.name].create_calls[0]
     assert call["command"] == "/usr/bin/setpriv"
-    assert call["args"][:2] == ["--no-new-privs", "/bin/bash"]
+    assert call["args"][:4] == ["--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all", "/bin/bash"]
     assert "export PATH=" not in call["args"][-1]
     assert call["sudo"] is False
     await env.stop()
@@ -932,8 +943,9 @@ async def test_a_non_root_command_wrapper_ignores_a_bash_planted_on_path(
     await env.exec("echo hello")
     call = client.boxes[env.name].create_calls[0]
     await env.stop()
-    assert call["args"][1] == "/bin/bash"
-    _run_with_planted_tools(call["args"][1:], tmp_path)
+    shell = len(vercel.UNPRIVILEGED) - 1
+    assert call["args"][shell] == "/bin/bash"
+    _run_with_planted_tools(call["args"][shell:], tmp_path)
 
 
 def _run_with_planted_tools(args: list[str], tmp_path: Path) -> None:
@@ -978,11 +990,11 @@ async def test_every_box_script_and_tail_read_starts_under_no_new_privs(client: 
     await asyncio.wait_for(env.exec("guest", on_output=lambda stream, text: None), 5)
     assert session.scripts == ["true"]
     assert session.tail_reads >= 1
-    assert all(launcher == [*vercel.NO_NEW_PRIVS, "/bin/bash"] for launcher in session.launchers)
+    assert all(launcher == [*vercel.UNPRIVILEGED, "/bin/bash"] for launcher in session.launchers)
     await env.stop()
 
 
-@pytest.mark.parametrize(("sudo", "launcher"), [(False, [*vercel.NO_NEW_PRIVS, "/bin/bash"]), (True, ["/bin/bash"])])
+@pytest.mark.parametrize(("sudo", "launcher"), [(False, [*vercel.UNPRIVILEGED, "/bin/bash"]), (True, ["/bin/bash"])])
 async def test_the_output_polls_run_as_the_command_user(
     client: FakeClient, log: list[str], sudo: bool, launcher: list[str]
 ) -> None:

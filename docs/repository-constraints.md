@@ -1061,7 +1061,10 @@ ignores the setuid bit of the box's `sudo`, and the entry cannot get back to
 root. If the supervisor cannot set the flag, it does not start the entry, and
 the case fails. The box image ships `sudo` only for the parent's own root
 commands. The provider starts every other command under
-`setpriv --no-new-privs`, so the same rule applies to them.
+`setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all`, so the same
+rule applies to them. The drop also removes the capabilities that Vercel
+gives every command, so the box user cannot write root-owned files
+(SKY-901).
 A root command finds programs only in root-owned folders, and no program
 file in them is writable by the box user. The box user can write
 `/app/.venv/bin`, so the image's `sudo` rule and the provider both set
