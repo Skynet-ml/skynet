@@ -37,6 +37,8 @@ from core.config import settings
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
+from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
+from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
 from core.worker.repo_gate import GateFailure, check_repository
@@ -49,6 +51,9 @@ PAYLOAD = {
     "max_cost_cents": 20,
     "target": {"kind": "repo", "repo": {"repository": "o/r", "editable_paths": ["src"]}},
 }
+
+# Kept before the fixture replaces it, for tests that need the real parent check.
+_REAL_VERIFY_ANYTHING = wizard_preflight._verify_anything
 
 
 class _Gateway:
@@ -223,6 +228,61 @@ def test_a_role_with_a_user_image_reports_its_setup_as_not_checked(
     skipped = [check for check in body["checks"] if check["status"] == "skipped"]
     assert [(check["key"], check["message_code"]) for check in skipped] == [("setup", code) for code in codes]
     assert [check["message"] for check in skipped] == [wizard_preflight.SETUP_NOT_CHECKED[role] for role in unchecked]
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
+
+
+@pytest.mark.parametrize("scope", ["evaluation", "execution"])
+def test_a_check_where_both_roles_use_a_user_image_succeeds_on_its_other_checks(
+    setup_client, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """Accept an all-image check as passed: the run checks both setups in the images (SKY-893).
+
+    The setups and the sample score are skipped. An execution check still
+    runs the engine and model route checks.
+    """
+    client, _engine, _calls = setup_client
+    stage = wizard_preflight.stage_repository
+    routes: list[bool] = []
+
+    def staged_with_images(payload: dict, **kwargs: Any) -> tuple[dict, SimpleNamespace]:
+        """Stage the fixture checkout with a user image for both roles."""
+        protected, staged = stage(payload, **kwargs)
+        staged.box_sources = {"run": ("image", "run@sha256:" + "a" * 64), "metric": ("dockerfile", "eval/Dockerfile")}
+        return protected, staged
+
+    def guest(payload: dict, _artifact_id: str, events: Any, _start_method: str) -> None:
+        """Run the real guest check on the payload the parent sends."""
+        preflight = payload.pop("_preflight")
+        result = verify_anything_in_sandbox(
+            payload,
+            scope=preflight["scope"],
+            identity=preflight["identity"],
+            runtime=LocalSubprocessRuntime(),
+            unchecked=tuple(preflight["unchecked"]),
+        )
+        events.put({"type": "preflight_result", "result": result})
+
+    def model_routes(_gateway: Any, *, native: bool) -> list[dict]:
+        """Record that the model routes are checked."""
+        routes.append(native)
+        return [{"key": "model.optimization", "status": "succeeded"}]
+
+    monkeypatch.setattr(wizard_preflight, "stage_repository", staged_with_images)
+    monkeypatch.setattr(wizard_preflight, "_verify_anything", _REAL_VERIFY_ANYTHING)
+    monkeypatch.setattr(wizard_preflight, "run_vercel_dspy", guest)
+    monkeypatch.setattr(wizard_preflight, "_verify_model_routes", model_routes)
+    monkeypatch.setattr(
+        wizard_preflight, "_engine_readiness", lambda _request: {"key": "optimizer", "status": "succeeded"}
+    )
+    body = client.post("/wizard/preflight", json={**_request(_budget(client)), "scope": scope}).json()
+    performed = [(check["key"], check["status"]) for check in body["checks"]]
+    skipped = [("setup", "skipped"), ("setup", "skipped"), ("scorer", "skipped")]
+    if scope == "evaluation":
+        assert performed == skipped
+        assert routes == []
+    else:
+        assert performed == [*skipped, ("model.optimization", "succeeded"), ("optimizer", "succeeded")]
+        assert routes == [True]
     assert (body["status"], body["may_advance"]) == ("succeeded", True)
 
 

@@ -243,6 +243,33 @@ def test_confirmed_usage_unblocks_only_genuine_completed_evidence(store: Preflig
     assert all(check["status"] == "succeeded" for check in reused.document["checks"])
 
 
+def test_settled_usage_promotes_a_check_with_skipped_user_image_setup(store: PreflightStore) -> None:
+    """Promote a pending check whose setup and sample score are skipped for user images (SKY-893).
+
+    Args:
+        store: Private setup fixture.
+    """
+    budget_id = _budget(store)
+    claim = _claim(store, budget_id)
+    operation = _reserve(store, budget_id, claim.generation)
+    store.budgets.mark_dispatched(operation.id, "alice")
+    checks = [
+        {"key": "setup", "status": "skipped"},
+        {"key": "scorer", "status": "skipped"},
+        {"key": "usage", "status": "pending"},
+    ]
+    store.finish(claim.document["id"], claim_token=claim.token, status="pending", result={"checks": checks})
+    store.budgets.settle(operation.id, "alice", evidence_key="final", actual_cents="0.3", evidence={"actual": True})
+    reused = _claim(store, budget_id)
+    assert reused.token is None
+    assert (reused.document["status"], reused.document["may_advance"]) == ("succeeded", True)
+    assert [(check["key"], check["status"]) for check in reused.document["checks"]] == [
+        ("setup", "skipped"),
+        ("scorer", "skipped"),
+        ("usage", "succeeded"),
+    ]
+
+
 @pytest.mark.parametrize(
     "checks",
     [

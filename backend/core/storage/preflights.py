@@ -538,6 +538,7 @@ class PreflightStore:
             ):
                 raise BudgetConflictError("The setup attempt is no longer owned.")
             checks = result.get("checks")
+            # A role with a user image is checked by the run itself, so its skipped checks still pass (SKY-893).
             if status == "succeeded" and (
                 not isinstance(checks, list)
                 or not checks
