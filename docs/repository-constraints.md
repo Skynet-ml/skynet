@@ -763,10 +763,10 @@ root `USER`, or a named `USER` such as `USER app`. Skynet cannot confirm
 outside the box that a name is not root, because the image's own
 `/etc/passwd` maps the name to a user id. `USER 1000:1000` also works.
 
-Two limits stay. Only a local Docker run starts a box from a user image now.
-A hosted run cannot copy a user image into its sandbox yet, so a hosted run
-with these keys stops before its first version with a clear error. A
-hardening run does not support a user image yet.
+A hosted run copies the user image into Vercel's registry before its first
+box, and the run budget pays for the copy. The box runs linux/amd64, so an
+index gives only its linux/amd64 image. One limit stays: a hardening run
+does not support a user image yet.
 
 ## The metric: `[metric] entry`
 

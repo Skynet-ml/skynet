@@ -29,6 +29,7 @@ from core.sandbox.metering import USAGE_ADAPTERS
 from core.sandbox.providers import vercel as vercel_provider
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeCopier, FakeUsage, make_env, readback
+from core.sandbox.vcr_copy import VcrCopier
 from core.service_gateway.optimization.blackbox import sandbox_runtime
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec, UserImage
 from core.worker import repo_staging
@@ -189,6 +190,24 @@ def test_async_vercel_runtime_is_protected_and_funded() -> None:
     assert runtime.billable
     assert not runtime.injects_headers
     assert runtime._options == {"budget": _BUDGET}
+
+
+def test_hosted_vercel_runtime_copies_user_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that the hosted Vercel runtime meters the VCR copier, so it accepts user images (SKY-898)."""
+    metered: list[Any] = []
+    monkeypatch.setattr(bridge, "metered_copier", lambda copy_image, budget: metered.append(copy_image) or copy_image)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
+    assert runtime.accepts_user_images
+    assert len(metered) == 1
+    assert isinstance(metered[0], VcrCopier)
+    assert metered[0]._token == "token"
+
+
+def test_vercel_runtime_without_credentials_has_no_copier() -> None:
+    """Check that a Vercel runtime with no Vercel credentials refuses user images."""
+    runtime = bridge.protected_runtime(_settings(), image=_DIGEST, budget=_BUDGET, provider=None)
+    assert runtime.provider == "vercel"
+    assert not runtime.accepts_user_images
 
 
 def test_async_docker_runtime_is_free_and_unfunded() -> None:
