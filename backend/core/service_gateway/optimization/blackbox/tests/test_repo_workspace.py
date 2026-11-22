@@ -2162,7 +2162,7 @@ def test_prepare_opens_no_setup_box_for_a_skipped_role(tmp_path: Path, skip: tup
 
 @pytest.mark.parametrize("skip", [("run",), ("metric",), ("run", "metric")])
 def test_a_workspace_with_a_skipped_role_scores_no_version(tmp_path: Path, skip: tuple[str, ...]) -> None:
-    """Refuse to open a candidate or metric box after a setup check skipped a role (SKY-893).
+    """Refuse to score or to prepare again after a setup check skipped a role (SKY-893).
 
     Args:
         tmp_path: Pytest fixture for a temporary folder.
@@ -2178,6 +2178,10 @@ def test_a_workspace_with_a_skipped_role_scores_no_version(tmp_path: Path, skip:
             space.open_candidate(_patch(tmp_path / "one", archive, {"src/app.py": "SOURCE = 2\n"}))
         with pytest.raises(RuntimeError, match="scores no version"):
             space.open_metric()
+        with pytest.raises(RuntimeError, match="prepares no more"):
+            space.prepare()
+        with pytest.raises(RuntimeError, match="prepares no more"):
+            space.prepare(skip=("metric",))
     finally:
         space.close()
     # The refused calls open no box, so no setup runs again for the skipped role.

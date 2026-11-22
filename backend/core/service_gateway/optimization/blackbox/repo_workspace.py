@@ -1021,16 +1021,22 @@ class RepoWorkspace:
             skip: Roles (``run``, ``metric``) whose setup box does not open. A setup
                 check skips a role with a user image, which only the run builds (SKY-893).
                 A workspace with a skipped role is not prepared: opening a candidate or
-                a metric box then raises ``RuntimeError``.
+                a metric box, or preparing it again, then raises ``RuntimeError``.
 
         Raises:
             RepoSetupError: When the repository or the metric packages cannot be set up.
+            RuntimeError: When an earlier call skipped a role, because a second setup
+                would open a box that already ran or one the check meant to skip.
         """
         with self._lock:
             if self._prepared:
                 return
             if self._failure is not None:
                 raise self._failure
+            if self._skipped:
+                raise RuntimeError(
+                    f"This workspace skipped the setup of {', '.join(self._skipped)} and prepares no more."
+                )
             try:
                 self._prepare(on_output, skip)
             except BaseException as error:
