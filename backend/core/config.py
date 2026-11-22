@@ -576,7 +576,7 @@ class Settings(BaseSettings):
     image_build_project: str | None = Field(
         default=None,
         alias="IMAGE_BUILD_PROJECT",
-        description="CodeBuild project that builds user Dockerfiles. With IMAGE_BUILD_SOURCE_BUCKET, IMAGE_BUILD_PUSH_ROLE_ARN and the user image registry, it selects the CodeBuild builder for a Dockerfile; unset, a cloud Dockerfile fails with a clear error. A hosted Vercel run still refuses user images, because it has no image copier yet (SKY-891).",
+        description="CodeBuild project that builds user Dockerfiles. With IMAGE_BUILD_SOURCE_BUCKET, IMAGE_BUILD_PUSH_ROLE_ARN and the user image registry, it selects the CodeBuild builder for a Dockerfile; unset, a cloud Dockerfile fails with a clear error. A hosted Vercel run copies each user image into Vercel's registry before its first box (SKY-898).",
     )
     image_build_source_bucket: str | None = Field(
         default=None,

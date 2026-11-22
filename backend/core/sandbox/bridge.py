@@ -6,7 +6,7 @@ deployment default (Docker in local mode, Vercel everywhere else), through the
 SBX-11 sync bridge. It also lists the providers a run may choose (SKY-606).
 The Vercel provider reserves and settles each usage slice against the run's
 budget, and the copy of a user image into its registry is reserved before the
-copy and settled on the run too (SKY-891).
+copy and settled on the run too (SKY-891). ``VcrCopier`` makes that copy (SKY-898).
 
 ``core.sandbox.__init__`` never imports this module, because this module
 imports the blackbox runtimes, which import ``core.sandbox``.
@@ -32,6 +32,7 @@ from .errors import SandboxFatalError
 from .factory import PROVIDERS, preflight
 from .image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from .metering import USAGE_ADAPTERS
+from .vcr_copy import VcrCopier
 
 # A fallback English label; the UI shows its own translated name when it has one.
 _LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
@@ -338,4 +339,9 @@ def protected_runtime(
         return ProtectedBridgeRuntime(
             "docker", budget=budget, image=image, docker_bin=settings.docker_bin, recorder=recorder
         )
+    if name == "vercel" and settings.vercel_token and settings.vercel_team_id and settings.vercel_project_id:
+        copier = VcrCopier(
+            settings.vercel_token.get_secret_value(), settings.vercel_team_id, settings.vercel_project_id
+        )
+        return ProtectedBridgeRuntime(name, budget=budget, recorder=recorder, copy_image=copier)
     return ProtectedBridgeRuntime(name, budget=budget, recorder=recorder)
