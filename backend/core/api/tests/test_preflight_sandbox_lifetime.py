@@ -39,7 +39,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, request: WizardPreflightRequest) -> tu
     monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", bind)
     monkeypatch.setattr(preflight_execution, "payload_uses_token_source", lambda *args, **kwargs: False)
     monkeypatch.setattr(
-        preflight_execution, "_verify_anything", lambda gateway, payload, *, scope, identity: dict(PASSED)
+        preflight_execution, "_verify_anything", lambda gateway, payload, *, scope, identity, unchecked: dict(PASSED)
     )
     status, _ = _perform_preflight(
         request,
@@ -68,5 +68,3 @@ def test_anything_check_binds_a_request_sized_sandbox(monkeypatch: pytest.Monkey
 
     assert bound["lifetime_seconds"] == 961
     assert bound["owner_id"] == "setup"
-
-

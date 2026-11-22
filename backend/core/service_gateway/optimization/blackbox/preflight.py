@@ -34,6 +34,8 @@ def _reflection_bases(config: Any) -> dict[str, str | None]:
     return {provider: base} if provider and base else {}
 
 
+SCORER_NOT_CHECKED = "Sample score not checked: the run prepares your image and scores there."
+
 # What a scorer box needs around the evaluator's own timeout: booting and the install.
 _SCORER_BOX_OVERHEAD_SECONDS = 60.0
 # What the outer box spends around its inner boxes: booting, importing the
@@ -106,8 +108,24 @@ def _needs_model(code: str) -> bool:
     return scan_metric_llm(code).uses_llm
 
 
+def _validate_optimizer(payload: dict[str, Any]) -> None:
+    """Validate the run request's optimizer settings without scoring.
+
+    Args:
+        payload: Protected Anything request; only its public keys are read.
+    """
+    public = {key: value for key, value in payload.items() if not key.startswith("_")}
+    typed = BlackboxRunRequest.model_validate(public)
+    validate_blackbox_payload(typed, verify_scorer=False, api_bases=_reflection_bases(typed.reflection_model_settings))
+
+
 def verify_anything_in_sandbox(
-    payload: dict[str, Any], *, scope: str, identity: str, runtime: SandboxRuntime
+    payload: dict[str, Any],
+    *,
+    scope: str,
+    identity: str,
+    runtime: SandboxRuntime,
+    unchecked: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify evaluator, target, and optimizer dependencies in one outer sandbox.
 
@@ -116,6 +134,8 @@ def verify_anything_in_sandbox(
         scope: Evaluation or complete execution readiness.
         identity: Stable preflight evidence identity.
         runtime: Contained command runtime bound to the selected outer sandbox.
+        unchecked: Roles with a user image. A version needs both roles' boxes,
+            so the sample is not scored when any role is here (SKY-893).
 
     Returns:
         Real readiness checks and, when a seed exists, its actual scorer preview.
@@ -137,6 +157,12 @@ def verify_anything_in_sandbox(
                 )
             ]
         }
+    if unchecked:
+        checks = [_check("scorer", "skipped", SCORER_NOT_CHECKED, "scorer")]
+        if scope == "execution":
+            _validate_optimizer(payload)
+            checks.append(_check("optimizer", "succeeded"))
+        return {"checks": checks}
     route = payload.get("_skynet_evaluator_route")
     if not route:
         raise ValueError("Repository scoring requires its protected parent scorer.")
@@ -170,11 +196,7 @@ def verify_anything_in_sandbox(
                 "elapsed_ms": (time.perf_counter() - started) * 1000,
             }
             if scope == "execution":
-                public = {key: value for key, value in payload.items() if not key.startswith("_")}
-                typed = BlackboxRunRequest.model_validate(public)
-                validate_blackbox_payload(
-                    typed, verify_scorer=False, api_bases=_reflection_bases(typed.reflection_model_settings)
-                )
+                _validate_optimizer(payload)
                 checks.append(_check("optimizer", "succeeded"))
         finally:
             try:

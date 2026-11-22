@@ -67,6 +67,44 @@ def test_scorer_model_pending_points_to_metric_code() -> None:
     assert result["checks"][0]["message"] == "Set the model with llm(model=...) in the metric code."
 
 
+def test_a_user_image_role_skips_the_sample_score_without_a_scorer_route() -> None:
+    """A user image skips the sample score, so the check needs no parent scorer route (SKY-893)."""
+    result = verify_anything_in_sandbox(
+        {
+            "scorer": {"kind": "python", "metric_code": "def score(c, case=None):\n    return 1"},
+            "target": {"kind": "repo"},
+        },
+        scope="evaluation",
+        identity="test",
+        runtime=LocalSubprocessRuntime(),
+        unchecked=("metric",),
+    )
+    assert result == {
+        "checks": [
+            {
+                "key": "scorer",
+                "status": "skipped",
+                "message": "Sample score not checked: the run prepares your image and scores there.",
+                "field": "scorer",
+            }
+        ]
+    }
+
+
+def test_without_a_user_image_the_sample_score_still_needs_its_scorer_route() -> None:
+    """With no user image, the check scores the sample as before and needs its parent route (SKY-893)."""
+    with pytest.raises(ValueError, match="requires its protected parent scorer"):
+        verify_anything_in_sandbox(
+            {
+                "scorer": {"kind": "python", "metric_code": "def score(c, case=None):\n    return 1"},
+                "target": {"kind": "repo"},
+            },
+            scope="evaluation",
+            identity="test",
+            runtime=LocalSubprocessRuntime(),
+        )
+
+
 @pytest.mark.parametrize("target", [None, {"kind": "text"}, {"kind": "agent"}])
 def test_the_sandbox_check_refuses_a_text_or_agent_target(target: dict[str, str] | None) -> None:
     """Only a repository scorer runs in the setup check, so a retired target is refused (SKY-834).

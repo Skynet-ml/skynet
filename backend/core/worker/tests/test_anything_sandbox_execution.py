@@ -126,7 +126,9 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
     )
     observed: list[Any] = []
 
-    def verify(payload: dict[str, Any], *, scope: str, identity: str, runtime: Any) -> dict[str, Any]:
+    def verify(
+        payload: dict[str, Any], *, scope: str, identity: str, runtime: Any, unchecked: tuple[str, ...]
+    ) -> dict[str, Any]:
         """Capture the runtime enclosing the guest preflight implementation.
 
         Args:
@@ -134,6 +136,7 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
             scope: The preflight scope.
             identity: The caller identity.
             runtime: The runtime passed to the preflight.
+            unchecked: The user-image roles the check skips.
 
         Returns:
             A preflight answer with no checks.
@@ -163,6 +166,62 @@ def test_anything_guest_binds_contained_runtime_around_preflight(
     assert isinstance(runtime, ContainedSubprocessRuntime)
     assert active is runtime
     assert current_sandbox_runtime() is None
+
+
+def test_the_user_image_roles_reach_the_guest_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass the parent's unchecked user-image roles through the guest request to its check (SKY-893).
+
+    Args:
+        tmp_path: Guest request staging directory.
+        monkeypatch: Supervisor, preflight and argument substitutions.
+    """
+    sent: list[dict[str, Any]] = []
+    received: list[tuple[str, ...]] = []
+
+    def execute(payload: dict[str, Any], _artifact_id: str, events: Any, _start_method: str) -> None:
+        """Record the guest payload the parent sends.
+
+        Args:
+            payload: The setup payload.
+            _artifact_id: The artifact id, which the fake ignores.
+            events: The event sink.
+            _start_method: The process start method, which the fake ignores.
+        """
+        sent.append(payload)
+        events.put({"type": "preflight_result", "result": {"checks": []}})
+
+    def verify(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        """Record the roles the guest check gets.
+
+        Args:
+            payload: The preflight payload.
+            **kwargs: The check's named values.
+
+        Returns:
+            A preflight answer with no checks.
+        """
+        received.append(kwargs["unchecked"])
+        return {"checks": []}
+
+    monkeypatch.setattr(preflight_execution, "run_vercel_dspy", execute)
+    preflight_execution._verify_anything(object(), {}, scope="evaluation", identity="one", unchecked=("metric",))
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "payload": sent[0],
+                "artifact_id": "preflight-one",
+                "nonce": "fixture",
+                "protocol": isolated_runner.SANDBOX_PROTOCOL,
+            }
+        )
+    )
+    monkeypatch.setattr(isolated_runner, "verify_anything_in_sandbox", verify)
+    monkeypatch.setattr(isolated_runner.sys, "argv", ["isolated_runner", str(request)])
+    isolated_runner.main()
+
+    assert sent[0]["_preflight"]["unchecked"] == ["metric"]
+    assert received == [("metric",)]
 
 
 def test_pending_guest_preflight_does_not_run_parent_model_checks(monkeypatch: pytest.MonkeyPatch) -> None:

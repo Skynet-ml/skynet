@@ -51,7 +51,7 @@ def test_setup_check_forbids_a_batched_model_route(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(preflight_execution, "payload_uses_token_source", lambda *args, **kwargs: False)
     monkeypatch.setattr(
-        preflight_execution, "_verify_anything", lambda gateway, payload, *, scope, identity: dict(PASSED)
+        preflight_execution, "_verify_anything", lambda gateway, payload, *, scope, identity, unchecked: dict(PASSED)
     )
     request = WizardPreflightRequest(
         scope="evaluation",

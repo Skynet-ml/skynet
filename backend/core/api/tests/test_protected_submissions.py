@@ -158,7 +158,11 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
     """
     payload["target"]["repo"]["environment"] = {"setup_command": "npm ci"}
     return payload, SimpleNamespace(
-        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+        snapshot=SimpleNamespace(archive=None),
+        secrets={},
+        box_sources={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
     )
 
 
@@ -184,8 +188,21 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
         )
         session.commit()
 
-    def verify_anything(gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
-        """Substitute the physical scorer/runtime adapter with measured fixture execution."""
+    def verify_anything(
+        gateway: _Gateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
+        """Substitute the physical scorer/runtime adapter with measured fixture execution.
+
+        Args:
+            gateway: The fixture gateway with the measured runtime.
+            payload: The run request to check.
+            scope: The scope of the check, not used.
+            identity: The identity of the check.
+            unchecked: The roles with a user image, not used.
+
+        Returns:
+            The fixture check result.
+        """
         return fixture.verify(gateway.runtime, payload, identity)
 
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
@@ -339,7 +356,11 @@ def test_the_setup_check_gates_secret_bindings_and_allowed_hosts(
         """
         payload["target"]["repo"]["secrets"] = []
         return payload, SimpleNamespace(
-            snapshot=SimpleNamespace(archive=archive), secrets=secrets, close_scorers=lambda: None, cleanup=lambda: None
+            snapshot=SimpleNamespace(archive=archive),
+            secrets=secrets,
+            box_sources={},
+            close_scorers=lambda: None,
+            cleanup=lambda: None,
         )
 
     monkeypatch.setattr(preflight_execution, "stage_repository", stage)
@@ -639,8 +660,21 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
         detail: Start of the expected refusal text.
     """
 
-    def stopped(gateway: Any, payload: dict[str, Any], *, scope: str, identity: str) -> dict:
-        """Stop like a limit or a wallet that cannot cover one model call."""
+    def stopped(
+        gateway: Any, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...]
+    ) -> dict:
+        """Stop like a limit or a wallet that cannot cover one model call.
+
+        Args:
+            gateway: The model gateway, not used.
+            payload: The run request, not used.
+            scope: The scope of the check, not used.
+            identity: The identity of the check, not used.
+            unchecked: The roles with a user image, not used.
+
+        Raises:
+            stop: Always, with the limit message.
+        """
         raise stop("The next operation needs more than the limit allows.")
 
     monkeypatch.setattr(preflight_execution, "_verify_anything", stopped)

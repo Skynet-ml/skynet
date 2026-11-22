@@ -186,6 +186,13 @@ _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, Accou
 # about five minutes; covered work still unsettled by then reads as pending.
 SETUP_WAIT_SECONDS = 90
 
+# A setup check runs in Skynet's image and never builds or pulls a user image,
+# so a role with one is reported as not checked instead of passed (SKY-893).
+SETUP_NOT_CHECKED = {
+    "run": "Setup not checked for the [run] box: the run prepares your image and checks the setup there.",
+    "metric": "Setup not checked for the [metric] box: the run prepares your image and checks the setup there.",
+}
+
 
 def _check(key: str, status: str, message: str | None = None, field: str | None = None) -> dict[str, Any]:
     """Build one scoped readiness result without inventing a score."""
@@ -270,7 +277,9 @@ def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[st
     return checks
 
 
-def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict[str, Any]:
+def _verify_anything(
+    gateway: ModelGateway, payload: dict[str, Any], *, scope: str, identity: str, unchecked: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Run complete Anything readiness in its selected outer sandbox.
 
     Args:
@@ -278,6 +287,7 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
         payload: Canonical partial or full Anything request.
         scope: Evaluation or complete execution readiness.
         identity: Stable preflight evidence identity.
+        unchecked: Roles with a user image, whose setup this check skips (SKY-893).
 
     Returns:
         Real checks and, when a seed exists, its actual scorer preview.
@@ -287,7 +297,7 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
     protected = {
         **payload,
         "_optimization_type": OPTIMIZATION_TYPE_BLACKBOX,
-        "_preflight": {"scope": scope, "identity": identity},
+        "_preflight": {"scope": scope, "identity": identity, **({"unchecked": list(unchecked)} if unchecked else {})},
     }
     run_vercel_dspy(protected, f"preflight-{identity}", events, "spawn")
     result = events.evidence(gateway)
@@ -582,6 +592,7 @@ def _perform_preflight(
         # or released hold from an earlier run would block a new dispatch under
         # the same key, so every run of the row carries its own number.
         identity = f"{document['id']}-{attempt}"
+        unchecked: tuple[str, ...] = ()
         if is_repo_payload(protected):
             report_preflight_phase("sandbox")
             # Staging empties the secret list, so read the gate's inputs first.
@@ -604,18 +615,21 @@ def _perform_preflight(
             if gate_failures:
                 raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
+            unchecked = tuple(role for role in SETUP_NOT_CHECKED if role in staged.box_sources)
             bind_repo_scorer(
                 protected,
                 staged,
                 gateway,
                 owner_id=f"preflight-{identity}",
                 managed_key=settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
+                skip_setup=unchecked,
             )
-        result = _verify_anything(gateway, protected, scope=request.scope, identity=identity)
+        result = _verify_anything(gateway, protected, scope=request.scope, identity=identity, unchecked=unchecked)
+        result["checks"][:0] = [_check("setup", "skipped", SETUP_NOT_CHECKED[role]) for role in unchecked]
         if is_repo_payload(protected):
             result["environment"] = protected["target"]["repo"]["environment"]
         states = {check["status"] for check in result["checks"]}
-        if not states or not states.issubset({"failed", "pending", "succeeded"}):
+        if not states or not states.issubset({"failed", "pending", "succeeded", "skipped"}):
             raise ValueError("Setup did not return a complete set of readiness checks.")
         status = "failed" if "failed" in states else "pending" if "pending" in states else "succeeded"
         if status == "pending" and "pending_reason" not in result:
