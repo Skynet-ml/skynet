@@ -61,8 +61,11 @@ from .repo_tree import (
     SAFE_GIT,
     _member_path,
     archive_chunks,
+    archive_links,
     drop_paths,
     inside,
+    link_edits,
+    patch_paths,
     patch_violations,
     strip_archive,
 )
@@ -80,6 +83,10 @@ BASE_DIR = f"{REPO_DIR}/base"
 WORK_DIR = f"{REPO_DIR}/work"
 PREPARED_DIR = f"{REPO_DIR}/prepared"
 PATCH_FILE = f"{REPO_DIR}/version.patch"
+# The paths that the version touches, as one shell-quoted line (SKY-906).
+PATHS_FILE = f"{REPO_DIR}/version.paths"
+# The exit code of the candidate box's link check, which no ``git apply`` or ``cp`` failure gives.
+_LINK_EXIT = 3
 # The compose services run in their own copy of the prepared tree, outside
 # REPO_DIR, so the version's checkout and the services never share files.
 SERVICES_DIR = ".app-services"
@@ -973,6 +980,7 @@ class RepoWorkspace:
         # prepared tree's digest, which every candidate box checks.
         self._protected_baseline: dict[str, str] = {}
         self._prepared_digest: str | None = None
+        self._links: frozenset[str] | None = None
         self.metric_files: str | None = None
         self._requirements: tuple[str, ...] = ()
         self._repo_state: _State | None = None
@@ -1394,6 +1402,8 @@ class RepoWorkspace:
         """Explain how a version breaks the run's path rules, without opening a box.
 
         Edits to hidden paths are not checked: the candidate box drops them.
+        A version that keeps a shipped symlink as a link at a new target or
+        name breaks them too.
 
         Args:
             patch: The version as a git patch against the snapshot.
@@ -1403,7 +1413,17 @@ class RepoWorkspace:
         """
         # The size limit applies to what the guest sent, not to what is left.
         kept = patch if len(patch.encode("utf-8")) > MAX_PATCH_BYTES else drop_paths(patch, self._hidden)
-        return patch_violations(kept, self._editable, self._readonly, self._protected)
+        problems = patch_violations(kept, self._editable, self._readonly, self._protected)
+        if problems:
+            return problems
+        # The candidate box runs ``git apply`` itself, so a shipped link that
+        # the version keeps as a link must be refused here (SKY-906).
+        if self._links is None:
+            self._links = archive_links(self._archive)
+        return [
+            f"Symlinks are not allowed; the change retargets, moves, or copies the symlink {path!r}."
+            for path in link_edits(kept, self._links)
+        ]
 
     def open_candidate(self, patch: str) -> CandidateBox | Checkout:
         """Open a candidate box from the prepared state and lay out one version.
@@ -1457,10 +1477,16 @@ class RepoWorkspace:
                     "The candidate box does not hold the prepared repository."
                 )
             self._start_services(session)
-            session.write_files({PATCH_FILE: patch})
+            # Setup can make links that the shipped tree does not hold, so the
+            # applied tree is checked here too. The paths come from a file, not
+            # the command line, which one large version would make too long
+            # for the kernel (SKY-906).
+            session.write_files({PATCH_FILE: patch, PATHS_FILE: shlex.join(patch_paths(patch))})
             applied = session.run(
                 f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
-                f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
+                f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi;"
+                ' eval "set -- $(cat ../version.paths)"; for path do if [ -L "$path" ]; then'
+                f' echo "Symlinks are not allowed; the change leaves one at $path." >&2; exit {_LINK_EXIT}; fi; done',
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if applied.ok:
@@ -1470,6 +1496,8 @@ class RepoWorkspace:
             raise
         # Outside the try: a budget error of this release must not release the box a second time.
         box.release_failed("The candidate box")
+        if applied.exit_code == _LINK_EXIT and not applied.timed_out:
+            return Checkout(path=None, problems=(_tail(applied),), blocked=True)
         return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
 
     def open_metric(self) -> MetricBox:

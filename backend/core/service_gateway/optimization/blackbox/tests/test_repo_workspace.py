@@ -1620,6 +1620,110 @@ def test_the_metric_box_holds_only_the_metric_files_at_their_repository_paths(tm
         space.close()
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git a/src/link b/src/link\n--- a/src/link\n+++ b/src/link\n@@ -1 +1 @@\n-../x\n"
+        "\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n",
+        "diff --git a/src/link b/src/l3\nsimilarity index 100%\nrename from src/link\nrename to src/l3\n",
+    ],
+    ids=["retarget", "rename"],
+)
+def test_a_version_that_keeps_a_shipped_link_as_a_link_is_refused(tmp_path: Path, patch: str) -> None:
+    """Refuse a hunk or rename of a shipped link before the candidate box runs ``git apply`` (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+        patch: A hunk or rename of ``src/link`` with no mode line.
+    """
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/app.py").write_text("x = 1\n")
+    (source / "src/link").symlink_to("../x")
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        packed.add(source, arcname=".")
+    space = _space(archive, _Runtime(), setup=None)
+    try:
+        deleted = "diff --git a/src/link b/src/link\ndeleted file mode 120000\n"
+        assert space.violations(patch) == [
+            "Symlinks are not allowed; the change retargets, moves, or copies the symlink 'src/link'."
+        ]
+        assert space.violations(deleted) == []
+    finally:
+        space.close()
+
+
+_SETUP_LINK = "src/m a'd$(touch PWNED)"
+_RETARGET = (
+    f"diff --git a/{_SETUP_LINK} b/{_SETUP_LINK}\n--- a/{_SETUP_LINK}\n+++ b/{_SETUP_LINK}\n@@ -1 +1 @@\n-../x\n"
+    "\\ No newline at end of file\n+../secret.txt\n\\ No newline at end of file\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("patch", "left"),
+    [
+        (_RETARGET, _SETUP_LINK),
+        (
+            f"diff --git a/{_SETUP_LINK} b/src/moved\nsimilarity index 100%\nrename from {_SETUP_LINK}\n"
+            "rename to src/moved\n",
+            "src/moved",
+        ),
+        (
+            f"diff --git a/{_SETUP_LINK} b/src/copied\nsimilarity index 100%\ncopy from {_SETUP_LINK}\n"
+            "copy to src/copied\n",
+            _SETUP_LINK,
+        ),
+    ],
+    ids=["retarget", "rename", "copy"],
+)
+def test_a_version_that_keeps_a_link_made_by_setup_as_a_link_is_blocked(tmp_path: Path, patch: str, left: str) -> None:
+    """Block in the candidate box a version that retargets, moves, or copies a link that setup made (SKY-906).
+
+    The link's name holds a space, a quote and a command, so the box shell
+    must test it as one name and run nothing.
+
+    Args:
+        tmp_path: Scratch folder.
+        patch: The version.
+        left: The first touched path that is a link after the apply.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=f"ln -s ../x {shlex.quote(_SETUP_LINK)}")
+    try:
+        assert space.violations(patch) == []
+        opened = space.open_candidate(patch)
+        assert isinstance(opened, Checkout)
+        assert opened.blocked
+        assert opened.problems == (f"Symlinks are not allowed; the change leaves one at {left}.",)
+        assert not list(tmp_path.rglob("PWNED"))
+    finally:
+        space.close()
+
+
+def test_a_version_with_many_paths_passes_the_link_check(tmp_path: Path) -> None:
+    """A version whose path list is larger than one command line still opens (SKY-906).
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    space = _space(archive, _Runtime(), setup=None)
+    names = [f"src/{index:06d}-{'n' * 34}" for index in range(30_000)]
+    patch = "".join(
+        f"diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+x\n"
+        for name in names
+    )
+    assert len(shlex.join(names)) > 1024 * 1024
+    try:
+        box = _open(space, patch)
+        assert box.session.read_file(f"{WORK_DIR}/{names[-1]}") == "x\n"
+        box.close()
+    finally:
+        space.close()
+
+
 def test_a_version_that_edits_a_metric_file_is_scored_with_the_base_metric(tmp_path: Path) -> None:
     """The metric comes from the base commit: a version's edit to it is dropped, its other edits stay (SKY-353)."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/metric.py": "def score(): return 0.1\n"})
