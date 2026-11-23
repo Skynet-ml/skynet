@@ -7,9 +7,11 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from email.message import Message
@@ -28,6 +30,8 @@ MODEL_ENV = "ASCENT_MODEL"
 MODEL_BINDINGS_ENV = "APP_MODEL_BINDINGS"
 # The provider prefixes that a built-in agent puts before ASCENT_MODEL: LiteLLM's and the harness provider's.
 _AGENT_PREFIXES = ("openai/", "app/")
+# The private bindings folder of a guest whose mailbox the box user cannot write.
+BINDINGS_TEMP_PREFIX = ".app-model-bindings-"
 # The box user can write the bindings folder, so the proxy reads only short, one-line names from it.
 _BINDING_MAX_BYTES = 256
 _MODEL_NAME_MAX = 200
@@ -201,13 +205,10 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
+    bindings = None
     if not _runs_as_root():
-        # Resolve only the parent, so the check below sees a link at the folder itself.
-        bindings = response_dir.parent.resolve() / "models"
-        # Without the folder the box only loses the clearer error: the gateway still refuses another model.
-        with contextlib.suppress(OSError):
-            bindings.mkdir(exist_ok=True)
-        if not bindings.is_symlink() and bindings.is_dir():
+        bindings = _bindings_folder(response_dir)
+        if bindings is not None:
             # The handler reads the folder from this process's environment, as it reads ASCENT_MODEL.
             os.environ[MODEL_BINDINGS_ENV] = str(bindings)
     environment = {
@@ -228,6 +229,8 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        if bindings is not None and bindings.name.startswith(BINDINGS_TEMP_PREFIX):
+            shutil.rmtree(bindings, ignore_errors=True)
 
 
 def model_matches(model: object, expected: str) -> bool:
@@ -309,6 +312,32 @@ def _runs_as_root() -> bool:
     """
     geteuid = getattr(os, "geteuid", None)
     return geteuid is not None and geteuid() == 0
+
+
+def _bindings_folder(response_dir: Path) -> Path | None:
+    """Make the folder where built-in agent sessions name their models.
+
+    Args:
+        response_dir: The mailbox's answer folder; the bindings go next to it.
+
+    Returns:
+        The folder, or ``None`` when no safe folder exists. Without it the box
+        only loses the clearer error: the gateway still refuses another model.
+    """
+    # Resolve only the parent, so the check below sees a link at the folder itself.
+    bindings = response_dir.parent.resolve() / "models"
+    with contextlib.suppress(OSError):
+        try:
+            bindings.mkdir(exist_ok=True)
+        except PermissionError:
+            # The box user cannot make entries in a root-made mailbox, so the
+            # parent's file writes there cannot meet its links (SKY-902).
+            # Only ``main`` removes this folder, so a killed proxy leaves it.
+            # It is the box user's own folder, so that is litter, not a leak.
+            bindings = Path(tempfile.mkdtemp(prefix=BINDINGS_TEMP_PREFIX))
+    if bindings.is_symlink() or not bindings.is_dir():
+        return None
+    return bindings
 
 
 def _bound_models(key: str) -> list[str]:
@@ -423,7 +452,7 @@ def service_env_name(name: str) -> str:
 
 
 def _wait(path: Path, timeout: float) -> dict | None:
-    """Read and remove one supervisor response file once it is complete.
+    """Read one supervisor response file once it is complete, and remove it when this user may.
 
     Args:
         path: The response file.
@@ -439,7 +468,12 @@ def _wait(path: Path, timeout: float) -> dict | None:
         except (FileNotFoundError, ValueError):
             time.sleep(0.05)
             continue
-        path.unlink(missing_ok=True)
+        # A root-made guest mailbox does not let the guest remove its answers
+        # (SKY-902), so they stay until root empties the folder when the command
+        # ends. The guest could read them anyway; only disk use grows with the
+        # command's model calls.
+        with contextlib.suppress(PermissionError):
+            path.unlink(missing_ok=True)
         return document
     return None
 

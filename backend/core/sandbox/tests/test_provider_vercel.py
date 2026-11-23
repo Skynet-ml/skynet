@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -33,7 +35,7 @@ from core.exceptions import DETERMINISTIC_FAILURE
 from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
-from core.sandbox.errors import SandboxFatalError, SandboxInfraError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError
 from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
 from core.sandbox.pacing import SYSTEM_CLOCK
 from core.sandbox.providers import vercel
@@ -103,6 +105,49 @@ class FakeClock:
         await asyncio.sleep(0)
 
 
+class FakeFsBatch:
+    """Hold batched writes until the batch ends, as the SDK sends them in one request."""
+
+    def __init__(self, fs: FakeFs, cwd: str) -> None:
+        """Start an empty batch.
+
+        Args:
+            fs: The fake file system that gets the files.
+            cwd: The working directory.
+        """
+        self.fs = fs
+        self.cwd = cwd
+        self.files: dict[str, str] = {}
+
+    async def __aenter__(self) -> FakeFsBatch:
+        """Open the batch.
+
+        Returns:
+            The batch.
+        """
+        return self
+
+    async def __aexit__(self, kind: type[BaseException] | None, *_: object) -> None:
+        """Write the batched files through ``write_text`` when no error ended the batch.
+
+        Args:
+            kind: The type of the error that ended the batch, or ``None``.
+        """
+        if kind is None:
+            self.fs.batches.append(list(self.files))
+            for path, text in self.files.items():
+                await self.fs.write_text(path, text, cwd=self.cwd)
+
+    def write_text(self, path: str, text: str) -> None:
+        """Add one file to the batch.
+
+        Args:
+            path: The file path.
+            text: The file text.
+        """
+        self.files[path] = text
+
+
 class FakeFs:
     """Keep sandbox files in a dict."""
 
@@ -112,6 +157,18 @@ class FakeFs:
         self.dirs: list[str] = []
         self.stopped = False
         self.exists_calls: list[str] = []
+        self.batches: list[list[str]] = []
+
+    def batch(self, *, cwd: str) -> FakeFsBatch:
+        """Start a batch of writes.
+
+        Args:
+            cwd: The working directory.
+
+        Returns:
+            The batch.
+        """
+        return FakeFsBatch(self, cwd)
 
     def _check(self) -> None:
         """Answer 410 after the session stops.
@@ -261,6 +318,10 @@ class FakeSession:
         self.scripts: list[str] = []
         self.script_answers: list[tuple[int, str]] = []
         self.launchers: list[list[str]] = []
+        self.uploads: list[dict[str, Any]] = []
+        self.stage_steps: list[tuple[str, bool]] = []
+        self.upload_code = 0
+        self.stage_errors: list[BaseException] = []
 
     @property
     def fs(self) -> FakeFs:
@@ -290,9 +351,12 @@ class FakeSession:
         return await self.box.create_process(command, args, **kwargs)
 
     async def run_process(self, command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
-        """Answer the output tail read, or give the next planned answer to any other script.
+        """Answer the output tail read, write an upload, or give the next planned answer to any other script.
 
-        The tail read gets one base64 line for each ``start path`` pair.
+        The tail read gets one base64 line for each ``start path`` pair. An
+        upload copy moves each staged file to its path unless ``upload_code``
+        fails it; the stage's root ``mkdir`` and ``rm`` are only recorded, or
+        raise the next ``stage_errors`` entry, and ``rm`` drops the staged files.
 
         Args:
             command: The program.
@@ -309,6 +373,21 @@ class FakeSession:
             raise _gone()
         script = args.index("-c") + 1
         self.launchers.append([command, *args[: script - len(vercel.SHELL_FLAGS)]])
+        if args[script] == vercel.UPLOAD_SCRIPT:
+            stage, *paths = args[script + 2 :]
+            self.uploads.append({"launcher": self.launchers[-1], "stage": stage, "paths": paths, **kwargs})
+            if self.upload_code == 0:
+                for index, path in enumerate(paths):
+                    self.fs.files[path] = self.fs.files[f"{stage}/{index}"]
+            return SimpleNamespace(returncode=self.upload_code, stdout="", stderr="")
+        if vercel.ROOT_UPLOAD_PREFIX in args[script]:
+            self.stage_steps.append((args[script], kwargs.get("sudo", False)))
+            if self.stage_errors:
+                raise self.stage_errors.pop(0)
+            if "/bin/rm" in args[script]:
+                stage = re.search(r"\[ -d (\S+) \]", args[script]).group(1)
+                self.fs.files = {path: text for path, text in self.fs.files.items() if not path.startswith(stage)}
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[script] not in (vercel.TAIL_SCRIPT, f"export PATH={vercel.ROOT_PATH}; {vercel.TAIL_SCRIPT}"):
             self.scripts.append(args[script])
             code, stdout = self.script_answers.pop(0) if self.script_answers else (0, "")
@@ -2016,6 +2095,444 @@ async def test_upload_and_download(client: FakeClient, log: list[str]) -> None:
     assert await env.download_file("/work/none.txt") is None
     assert client.boxes[env.name].fs.dirs == []
     await env.stop()
+
+
+async def test_an_upload_stages_in_a_root_folder_and_copies_as_the_box_user(client: FakeClient, log: list[str]) -> None:
+    """Check that the file API writes only into a root-made stage, and the box user copies from there.
+
+    The file API writes with all capabilities and follows a link that the box
+    user plants, so it could write into /usr/local/lib (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    writes: list[str] = []
+    real_write = box.fs.write_text
+
+    async def record_write(path: str, text: str, *, cwd: str) -> None:
+        """Record one file API write, then do it.
+
+        Args:
+            path: The file path.
+            text: The file text.
+            cwd: The working directory.
+        """
+        writes.append(path)
+        await real_write(path, text, cwd=cwd)
+
+    box.fs.write_text = record_write
+    await env.upload_files({"own/link/evil.txt": "data", "/work/b.txt": "more"})
+    [upload] = session.uploads
+    stage = upload["stage"]
+    assert re.fullmatch(f"{re.escape(vercel.ROOT_UPLOAD_PREFIX)}[0-9a-f]{{32}}", stage)
+    assert writes == [f"{stage}/0", f"{stage}/1"]
+    assert box.fs.batches == [[f"{stage}/0", f"{stage}/1"]]
+    root = f"export PATH={vercel.ROOT_PATH}; "
+    assert session.stage_steps == [
+        (f"{root}/bin/mkdir -m 0755 -- {stage}", True),
+        (
+            f"{root}if [ -d {stage} ] && [ ! -L {stage} ] && [ -O {stage} ]; then "
+            f"if [ -x /usr/bin/find ]; then /usr/bin/find {stage} -mindepth 1 -maxdepth 1 -exec /bin/rm -rf -- {{}} +; "
+            f"else /bin/rm -rf -- {stage}/* {stage}/.[!.]* {stage}/..?*; fi; fi",
+            True,
+        ),
+    ]
+    assert upload["launcher"] == [*vercel.UNPRIVILEGED, "/bin/bash"]
+    assert upload["paths"] == ["own/link/evil.txt", "/work/b.txt"]
+    assert upload["kill_after"] == vercel.UPLOAD_KILL_AFTER
+    assert box.fs.files == {"own/link/evil.txt": "data", "/work/b.txt": "more"}
+    await env.stop()
+
+
+@pytest.mark.parametrize(
+    ("path", "file_api"),
+    [
+        (f"{vercel.ROOT_MODEL_PREFIX}1/responses/a.json", True),
+        (f"{vercel.ROOT_UPLOAD_PREFIX}1/0", False),
+        (f"{vercel.ROOT_MODEL_PREFIX}1/../../usr/local/lib/evil.txt", False),
+        ("/tmp/.app-root-other/evil.txt", False),
+        ("/tmp/.app-rooted/evil.txt", False),
+    ],
+)
+async def test_only_a_root_folder_upload_skips_the_copy(
+    client: FakeClient, log: list[str], path: str, file_api: bool
+) -> None:
+    """Check that the file API writes a path itself only in a root-made /tmp folder.
+
+    The box user cannot plant a link in such a folder; a ``..`` part must not
+    lead the file API out of it (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        path: The upload path.
+        file_api: Whether the file API must write the path itself.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    await env.upload_files({path: "data"})
+    uploads = [upload["paths"] for upload in box.current_session.uploads]
+    if file_api:
+        assert uploads == []
+        assert box.fs.files == {posixpath.normpath(path): "data"}
+        assert box.fs.batches == [[posixpath.normpath(path)]]
+    else:
+        assert uploads == [[path]]
+    await env.stop()
+
+
+async def test_a_root_folder_write_that_never_answers_times_out(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a file API write that hangs ends at its limit, so a mailbox can still empty its folder.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Sets the write limit and slows the write.
+    """
+    env = make_env(client, log)
+    await env.start()
+
+    async def stalled(*_: object) -> None:
+        """Never answer, as a stalled SDK write."""
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(vercel, "WRITE_BATCH_TIMEOUT", 0.05)
+    monkeypatch.setattr(FakeFsBatch, "__aexit__", stalled)
+    with pytest.raises(TimeoutError):
+        await env.upload_files({f"{vercel.ROOT_MODEL_PREFIX}1/responses/a.json": "data"})
+    monkeypatch.undo()
+    await env.stop()
+
+
+async def test_a_slow_staged_upload_has_no_write_limit(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that only mailbox writes get the write limit, so a large staged upload may take longer.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Sets the write limit and slows the write.
+    """
+    env = make_env(client, log)
+    await env.start()
+    finish = FakeFsBatch.__aexit__
+
+    async def slow(self: FakeFsBatch, *args: Any) -> None:
+        """Answer after the patched limit, as a large upload on a slow link.
+
+        Args:
+            self: The batch.
+            *args: The exit arguments.
+        """
+        await asyncio.sleep(0.2)
+        await finish(self, *args)
+
+    monkeypatch.setattr(vercel, "WRITE_BATCH_TIMEOUT", 0.05)
+    monkeypatch.setattr(FakeFsBatch, "__aexit__", slow)
+    await env.upload_files({"a.txt": "data"})
+    monkeypatch.undo()
+    assert client.boxes[env.name].current_session.stage_steps
+    await env.stop()
+
+
+async def test_a_refused_upload_raises_and_empties_the_stage(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that the box user cannot write fails the call, and root still empties the stage.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    session.upload_code = 1
+    with pytest.raises(SandboxRejectedError, match="upload step exited with 1"):
+        await env.upload_files({"/usr/local/lib/evil.txt": "data"})
+    assert box.fs.files == {}
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == ["/bin/mkdir", "if"]
+    await env.stop()
+
+
+async def test_a_stage_mkdir_that_times_out_still_empties_the_stage(client: FakeClient, log: list[str]) -> None:
+    """Check that root empties the stage when the stage's mkdir answer times out (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.stage_errors = [TimeoutError()]
+    with pytest.raises(TimeoutError):
+        await env.upload_files({"/usr/local/lib/evil.txt": "data"})
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == ["/bin/mkdir", "if"]
+    await env.stop()
+
+
+async def test_a_copy_killed_at_its_deadline_is_a_rejected_upload(client: FakeClient, log: list[str]) -> None:
+    """Check that a copy that a planted FIFO holds ends after a short deadline as a rejected upload (SKY-902).
+
+    The same upload fails the same way in a fresh box, so the error must not
+    look like a dead box, which the callers retry in a new paid box.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = vercel.TIMEOUT_CODE
+    with pytest.raises(SandboxRejectedError, match=f"exited with {vercel.TIMEOUT_CODE}"):
+        await env.upload_files({"/work/fifo": "data"})
+    await env.stop()
+
+
+async def test_a_failed_stage_cleanup_logs_and_keeps_the_upload_error(
+    client: FakeClient, log: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a failed ``rm`` of the stage logs a warning and the copy's own error still reaches the caller.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        caplog: The log capture.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = 1
+    calls = 0
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Fail the stage removal, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            RuntimeError: The command is the stage removal.
+        """
+        nonlocal calls
+        calls += 1
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            raise RuntimeError("rm broke")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with caplog.at_level("WARNING", logger=vercel.__name__), pytest.raises(SandboxRejectedError, match="exited with 1"):
+        await env.upload_files({"/work/a.txt": "data"})
+    assert calls == 3
+    assert [record.getMessage() for record in caplog.records if record.levelname == "WARNING"] == [
+        f"Sandbox {env.name} could not empty the upload stage {session.uploads[0]['stage']}."
+    ]
+    await env.stop()
+
+
+async def test_an_upload_tool_missing_from_the_image_names_the_tools(client: FakeClient, log: list[str]) -> None:
+    """Check that exit code 127 names the fixed tool paths that the upload needs (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    client.boxes[env.name].current_session.upload_code = 127
+    with pytest.raises(
+        SandboxRejectedError, match=r"exited with 127: The image must have /usr/bin/timeout, /usr/bin/setpriv"
+    ):
+        await env.upload_files({"/work/a.txt": "data"})
+    await env.stop()
+
+
+async def test_the_stage_cleanup_after_a_failed_upload_gets_one_attempt_limit(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a removal that keeps failing to connect stops at one attempt's limit, not three (SKY-902).
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+        monkeypatch: Shortens the step limit.
+    """
+    monkeypatch.setattr(vercel, "UPLOAD_KILL_AFTER", 0.05)
+    monkeypatch.setattr(vercel, "POLL_SLACK", 0.0)
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.upload_code = 1
+    removals = 0
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Make each stage removal fail to connect after a short wait, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            Exception: The connect error of a stage removal.
+        """
+        nonlocal removals
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            removals += 1
+            await asyncio.sleep(0.04)
+            raise vercel._CONNECT_ERRORS[0]("no route")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with pytest.raises(SandboxRejectedError, match="exited with 1"):
+        await env.upload_files({"/work/a.txt": "data"})
+    assert 1 <= removals < vercel.EXEC_ATTEMPTS
+    await env.stop()
+
+
+async def test_a_failed_stage_cleanup_after_a_good_copy_fails_the_upload(client: FakeClient, log: list[str]) -> None:
+    """Check that a stage that stays after a good copy fails the upload, because the box user can read it.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    real_run = session.run_process
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Fail the stage removal, and run every other command.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            **kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+        """
+        if "/bin/rm -rf -- " in args[args.index("-c") + 1]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="busy")
+        return await real_run(command, args, **kwargs)
+
+    session.run_process = run_process
+    with pytest.raises(SandboxInfraError, match="exited with 1: busy"):
+        await env.upload_files({"/work/a.txt": "data"})
+    await env.stop()
+
+
+async def test_an_upload_step_that_never_reached_the_box_is_sent_again(client: FakeClient, log: list[str]) -> None:
+    """Check that a connect error on a stage step is retried, and the upload still lands.
+
+    Args:
+        client: The fake Vercel client.
+        log: The provider log lines.
+    """
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    session.stage_errors = [httpx.ConnectError("down")]
+    await env.upload_files({"/work/a.txt": "data"})
+    assert [step.split("; ", 1)[1].split(" ", 1)[0] for step, _ in session.stage_steps] == [
+        "/bin/mkdir",
+        "/bin/mkdir",
+        "if",
+    ]
+    assert box.fs.files == {"/work/a.txt": "data"}
+    session.stage_errors = [httpx.ConnectError("down")] * vercel.EXEC_ATTEMPTS
+    with pytest.raises(httpx.ConnectError):
+        await env.upload_files({"/work/b.txt": "more"})
+    await env.stop()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only folder")
+@pytest.mark.skipif(not Path("/usr/bin/timeout").exists(), reason="the script uses the box's /usr/bin/timeout")
+def test_the_upload_script_copies_each_staged_file_to_its_path(tmp_path: Path) -> None:
+    """Run the real upload script in bash: index ``i`` goes to the ``i``-th path, missing folders are made.
+
+    A path whose parent links to a read-only folder makes the script exit
+    non-zero, so the provider reports the refused write. A read-only file
+    that the box user owns and an empty folder are replaced, as the file API did.
+
+    Args:
+        tmp_path: The test folder.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "0").write_text("first")
+    (stage / "1").write_text("second")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (tmp_path / "link").symlink_to(locked)
+    bash = ["bash", "--noprofile", "--norc", "-c", vercel.UPLOAD_SCRIPT, "upload", str(stage)]
+    done = subprocess.run([*bash, "a.txt", "deep/er/b.txt"], cwd=tmp_path, capture_output=True, check=False)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "a.txt").read_text() == "first"
+    assert (tmp_path / "deep" / "er" / "b.txt").read_text() == "second"
+    locked.chmod(0o555)
+    try:
+        refused = subprocess.run([*bash, "link/evil.txt"], cwd=tmp_path, capture_output=True, check=False)
+    finally:
+        locked.chmod(0o755)
+    assert refused.returncode != 0
+    assert not (locked / "evil.txt").exists()
+    (tmp_path / "a.txt").chmod(0o444)
+    (tmp_path / "empty").mkdir()
+    replaced = subprocess.run([*bash, "a.txt", "empty"], cwd=tmp_path, capture_output=True, check=False)
+    assert replaced.returncode == 0, replaced.stderr
+    assert (tmp_path / "a.txt").read_text() == "first"
+    assert (tmp_path / "empty").read_text() == "second"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file in a read-only folder")
+@pytest.mark.skipif(not Path("/usr/bin/timeout").exists(), reason="the script uses the box's /usr/bin/timeout")
+def test_the_upload_script_ends_a_copy_into_a_fifo_at_its_deadline(tmp_path: Path) -> None:
+    """Run the real upload script in bash: a copy into a planted FIFO ends with the kill code (SKY-902).
+
+    The FIFO is in a read-only folder, so the copy cannot remove it first.
+    The test shortens the copy deadline, so it does not wait the real one.
+
+    Args:
+        tmp_path: The test folder.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "0").write_text("data")
+    held = tmp_path / "held"
+    held.mkdir()
+    os.mkfifo(held / "fifo")
+    script = vercel.UPLOAD_SCRIPT.replace(f" {vercel.UPLOAD_COPY_DEADLINE}s ", " 1s ")
+    assert script != vercel.UPLOAD_SCRIPT
+    bash = ["bash", "--noprofile", "--norc", "-c", script, "upload", str(stage), "held/fifo"]
+    held.chmod(0o555)
+    try:
+        done = subprocess.run(bash, cwd=tmp_path, capture_output=True, check=False, timeout=30)
+    finally:
+        held.chmod(0o755)
+    assert done.returncode == vercel.TIMEOUT_CODE
 
 
 async def test_an_output_read_runs_no_box_command(client: FakeClient, log: list[str]) -> None:

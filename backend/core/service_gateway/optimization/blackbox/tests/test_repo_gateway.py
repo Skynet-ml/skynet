@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,7 @@ def score(repo_path, case, output):
 
 
 @pytest.fixture(autouse=True)
-def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
 
     The supervisor then runs as the test's user and starts the entry as that
@@ -115,11 +116,12 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     Args:
         monkeypatch: Restores the local box's run after the test.
 
-    Returns:
+    Yields:
         The commands that asked for root, in order.
     """
     run = LocalSubprocessSession.run
     root_commands: list[str] = []
+    mailboxes: set[Path] = set()
 
     def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
         """Run the command as the test's user, and record a root request.
@@ -137,9 +139,34 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
             root_commands.append(command)
         return run(self, command, **options)
 
+    write_files = LocalSubprocessSession.write_files
+
+    def with_root_mailbox(self: LocalSubprocessSession, files: Mapping[str, str]) -> None:
+        """Write root mailbox files at their /tmp path, as root does in a real box, and the rest in the box.
+
+        A real root box writes the mailbox in sticky /tmp (SKY-902). A local
+        box writes only inside its working folder.
+
+        Args:
+            self: The local box.
+            files: Maps each path to its text content.
+        """
+        boxed = {}
+        for path, text in files.items():
+            if path.startswith(model_mailbox.ROOT_MAILBOX_PREFIX):
+                target = Path(path)
+                mailboxes.add(next(parent for parent in target.parents if parent.parent == Path("/tmp")))
+                target.write_text(text)
+            else:
+                boxed[path] = text
+        write_files(self, boxed)
+
     monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", with_root_mailbox)
     monkeypatch.setattr(model_mailbox, "ROOT_PYTHON", sys.executable)
-    return root_commands
+    yield root_commands
+    for folder in mailboxes:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

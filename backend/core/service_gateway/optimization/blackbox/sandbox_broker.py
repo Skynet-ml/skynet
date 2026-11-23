@@ -147,6 +147,7 @@ class ParentSandboxSession:
         """
         self._session = session
         self.root_has_capabilities: bool = getattr(session, "root_has_capabilities", True)
+        self.root_file_writes: bool = getattr(session, "root_file_writes", False)
         self._command_runner = command_runner
         self._box = box
         self._on_close = on_close
