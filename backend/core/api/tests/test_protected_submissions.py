@@ -954,10 +954,34 @@ def test_the_setup_check_keeps_one_lease_so_submit_accepts_a_limit_it_passes(
     assert harness.count(JobModel) == 1
 
 
-def test_protected_submit_names_the_balance_when_the_setup_check_leaves_it_below_one_lease(
+def test_the_setup_check_keeps_one_lease_of_the_balance_before_it_spends(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Answer 402 at submit, not 409, when the setup check leaves the balance below one lease (SKY-923).
+    """Refuse the setup check on the balance, with nothing spent, when its hold would eat the run's lease (SKY-923).
+
+    Args:
+        harness: Real submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    _set_balance(harness, budgets.CHUNK_CENTS)
+    # The limit leaves one lease beside the 2-cent setup hold, so only the balance blocks the check.
+    budget = harness.budgets.create(harness.username, budgets.CHUNK_CENTS + 2, idempotency_key="balance-keeps-room")
+    payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+
+    checked = _check(harness, payload, budget.id, budget.revision).json()
+
+    assert checked["status"] == "failed", checked
+    assert [(check["key"], check["field"]) for check in checked["checks"]] == [("budget", "balance")]
+    assert checked["budget"]["setup_spent_cents"] == "0"
+    with Session(harness.store.engine) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == budgets.CHUNK_CENTS
+
+
+def test_protected_submit_names_the_balance_when_it_falls_below_one_lease_after_the_check(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answer 402 at submit, not 409, when the balance falls below one lease after a passed check (SKY-923).
 
     A higher limit cannot help here, so the refusal must not ask for one.
 
@@ -966,12 +990,13 @@ def test_protected_submit_names_the_balance_when_the_setup_check_leaves_it_below
         monkeypatch: Restores the real lease size.
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
-    _set_balance(harness, budgets.CHUNK_CENTS)
-    # The limit leaves one lease beside the 2-cent setup hold, so only the balance falls below a lease.
+    _set_balance(harness, budgets.CHUNK_CENTS + 2)
     budget = harness.budgets.create(harness.username, budgets.CHUNK_CENTS + 2, idempotency_key="balance-caps-room")
     payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
     checked = _check(harness, payload, budget.id, budget.revision).json()
     assert checked["status"] == "succeeded", checked
+    # Other spending between the check and submit can still take the balance below a lease.
+    _set_balance(harness, budgets.CHUNK_CENTS - 1)
 
     response = harness.client.post(
         ROUTE,

@@ -796,6 +796,31 @@ def test_setup_runtime_passes_its_kept_room_to_the_ledger(engine: Engine) -> Non
     assert runtime.reserve(_quote(10), operation_key="fits", cost_kind="model").state == "reserved"
 
 
+def test_capped_reservation_keeps_one_lease_of_the_account_funds(engine: Engine) -> None:
+    """Refuse a capped hold that would leave the balance below the kept room (SKY-923)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 1000, idempotency_key="keep-wallet")
+    with pytest.raises(AccountFundsError, match="cannot fund"):
+        _reserve(service, budget.id, "over", max_cents=21, keep_cents=30)
+    assert _reserve(service, budget.id, "fits", max_cents=20, keep_cents=30).state == "reserved"
+
+
+def test_kept_funds_wait_for_covered_work_that_holds_them(engine: Engine) -> None:
+    """Report in-flight work when only a running hold blocks the kept room of the funds (SKY-923)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 1000, idempotency_key="keep-wallet-flight")
+    _reserve(service, budget.id, "running", max_cents=20)
+    with pytest.raises(BudgetInFlightError):
+        _reserve(service, budget.id, "setup", max_cents=20, keep_cents=20)
+
+
+def test_uncapped_budget_keeps_no_room_of_the_account_funds(engine: Engine) -> None:
+    """Let an uncapped hold use the whole balance even when the caller asks to keep room (SKY-923)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 5, idempotency_key="keep-wallet-uncapped", uncapped=True)
+    assert _reserve(service, budget.id, "call", max_cents=50, keep_cents=30).state == "reserved"
+
+
 def test_uncapped_budget_admits_past_its_total_until_the_account_runs_dry(engine: Engine) -> None:
     """Skip the total checks for an uncapped budget while the wallet still gates admission."""
     service = BudgetService(engine=engine)

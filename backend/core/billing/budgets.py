@@ -251,7 +251,7 @@ def _admit(
         username: Authenticated owner.
         scope: Combined scope units the new coverage adds.
         charge: Wallet units the new coverage adds.
-        keep_units: Units of a capped limit that the coverage must leave unused.
+        keep_units: Units of a capped limit, and of the account's funds, that the coverage must leave unused.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
@@ -277,9 +277,11 @@ def _admit(
         - budget.billed_cents
         - budget_wallet_hold(budget)
     )
-    if hold_delta > wallet_balance - held:
+    # Submit also needs one lease of the balance, so a capped check keeps the same room of the funds (SKY-923).
+    keep = 0 if budget.uncapped else ceil_cents(keep_units)
+    if hold_delta + keep > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
-        if after_release <= wallet_balance:
+        if after_release + keep <= wallet_balance:
             raise BudgetInFlightError("Other covered work currently holds the required wallet funds.")
         raise AccountFundsError("The account cannot fund the next operation.")
 
@@ -866,7 +868,7 @@ class BudgetService:
             attempt: Physical retry number; a new billable retry needs a new attempt.
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
-            keep_cents: Cents of a capped limit that this attempt must leave unused.
+            keep_cents: Cents of a capped limit, and of the account's funds, that this attempt must leave unused.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -1414,7 +1416,7 @@ class BudgetService:
             max_cents: Combined scope coverage the operation holds after the extension.
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
-            keep_cents: Cents of a capped limit that the extension must leave unused.
+            keep_cents: Cents of a capped limit, and of the account's funds, that the extension must leave unused.
 
         Returns:
             The operation with its grown coverage and the budget totals.
