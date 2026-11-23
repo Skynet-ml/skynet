@@ -1327,8 +1327,9 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # Its libpam also names /usr/lib/security, a module folder outside the loader
 # folders; stock images do not have it, so it must be missing or root's.
 # /etc/security may hold one level of folders, such as limits.d. Ubuntu's sudo
-# PAM stack reads /etc/default/locale into the root environment. A box user who could change the account files could add
-# itself to the sudo group or set a root password. Shadow files are often
+# PAM stack reads /etc/default/locale into the root environment. A box user
+# who could change the account files could add itself to the sudo group or set
+# a root password. Shadow files are often
 # 0640 root:shadow or 0000, so the check does not need others to read them.
 _SUDO_FILES = (
     "/etc/sudo.conf",
@@ -1353,6 +1354,8 @@ import """
     + ", ".join(_top_level_imports(_ROOT_SCRIPTS))
     + r"""
 import locale
+PAM_ENV_CONF = "/etc/security/pam_env.conf"
+PAM_ENV_FILES = ("/etc/environment", "/etc/default/locale", PAM_ENV_CONF)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1364,6 +1367,29 @@ for name in names:
         if not (value.isascii() and value.isprintable()):
             sys.exit("a locale value is not printable ASCII")
         print("locale", name + "=" + value)
+for file in PAM_ENV_FILES:
+    try:
+        with open(file, encoding="latin-1") as text:
+            rows = text.read().split("\n")
+    except FileNotFoundError:
+        continue
+    for row in rows:
+        row = row.strip()
+        if not row or row.startswith("#"):
+            continue
+        if file == PAM_ENV_CONF:
+            # Its values can expand other variables, so a locale set there counts as unsafe.
+            name, value = row.split()[0], "?"
+        else:
+            name, _, value = (row[7:] if row.startswith("export ") else row).partition("=")
+            name, value = name.strip(), value.replace('"', "").replace("'", "")
+        if not (name.isascii() and name.isprintable()):
+            sys.exit("a PAM environment variable name is not printable ASCII")
+        print("env", name)
+        if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
+            if not (value.isascii() and value.isprintable()):
+                sys.exit("a PAM locale value is not printable ASCII")
+            print("locale", name + "=" + value)
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
@@ -1563,7 +1589,8 @@ _TRUSTED_PYTHON_PROBE = (
     "  case $b in *[![:print:]]*) exit 1;; esac\n"
     '  printf \'pathdir %s\\n\' "$b"; w "$b"\n'
     '  if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi\n'
-    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; break; fi\n'
+    # The mode alone does not show that the box user can run it: a group entry or an ACL may stop the box user.
+    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; [ -x "$b/sudo" ] || exit 1; break; fi\n'
     "done\n"
     "k() {\n"
     '  [ -r "$1" ] && [ -x "$1" ] || exit 1\n'
@@ -1693,7 +1720,11 @@ _VARIABLE_NAME = re.compile(r"[\x20-\x7e]+")
 # Root runs ``/usr/bin/env``, ``/bin/bash --noprofile --norc -c`` and the
 # supervisor with the box's environment, which holds the image ENV. The
 # loader, the shell and libc read these names before ``env -i`` can clear
-# anything, as no root process here is setuid (SKY-737). Each group:
+# anything, as no root process here is setuid (SKY-737). Root steps that start
+# through the image's sudo also get the variables that pam_env reads from
+# /etc/environment, /etc/default/locale and /etc/security/pam_env.conf
+# (Ubuntu's sudo PAM stack), so the probe lists those names too (SKY-912).
+# Each group:
 # - ``LD_*``: the glibc and musl loader search paths, preloads and audit
 #   libraries. An empty ``LD_LIBRARY_PATH`` element means the work folder.
 # - ``GCONV_PATH``, ``LOCPATH``, ``GLIBC_TUNABLES``: iconv modules, locale
@@ -1747,9 +1778,11 @@ _ROOT_VARIABLES = frozenset(
 # A UTF-8 locale name, with no ``/``, so glibc reads it from its own locale files.
 _UTF8_LOCALE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:utf-8|utf8)", re.IGNORECASE)
 ROOT_ENVIRONMENT = (
-    "The [run] image '{image}' sets {names} in its environment. {app} runs its root steps in the box with the"
-    " image environment, and these variables change which code the shell, the system loader or the C library"
-    " runs, or which files and folders they use. Remove them from the image ENV: every LD_*, OPENSSL_* and"
+    "The [run] image '{image}' sets {names} in its environment, /etc/environment, /etc/default/locale or"
+    " /etc/security/pam_env.conf. {app} runs its root steps in the box with the image environment and, through"
+    " sudo, with those files. These variables change which code the shell, the system loader or the C library"
+    " runs, or which files and folders they use. Remove them from the image ENV and from those files: every"
+    " LD_*, OPENSSL_* and"
     " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
     " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
     " are not supported yet."

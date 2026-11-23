@@ -819,7 +819,13 @@ own commands in the setup box and in each candidate box:
   also names `/usr/lib/security` as a module folder. Group and others must
   not be able to write any of them. Linux-PAM does not check who owns its
   files, so the image check does. Ubuntu's
-  `sudo` PAM stack reads `/etc/default/locale` into root's environment. A
+  `sudo` PAM stack reads `/etc/environment` and `/etc/default/locale`
+  into root's environment. So the check also reads the variable names in
+  those two files and in `/etc/security/pam_env.conf`. It refuses there
+  the same names that it refuses in the image `ENV`, such as `LD_PRELOAD`
+  or a locale that is not C, POSIX or UTF-8. Any locale set in
+  `pam_env.conf` is refused, because its values can expand other
+  variables. A
   box user who can change the account files can join the `sudo` group or
   set a root password. Others need not read `/etc/shadow` or
   `/etc/gshadow`, which are often mode 0640 or 0000. An image with no
