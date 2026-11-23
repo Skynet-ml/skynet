@@ -93,7 +93,8 @@ class ModelMailbox:
         config = json.dumps(
             {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
         )
-        if sudo:
+        files = {source_path: source, config_path: config}
+        if sudo and getattr(session, "root_has_capabilities", True):
             # A file write makes missing folders as the box user, who could then
             # swap a root proxy's answers. Root makes both folders first; the
             # parent's file writes still reach a root-owned folder (SKY-901).
@@ -103,7 +104,12 @@ class ModelMailbox:
             )
             if made.exit_code != 0:
                 raise RuntimeError("The sandbox could not make the model mailbox folders.")
-        session.write_files({source_path: source, config_path: config})
+        elif sudo:
+            # Docker writes files as the box user and its root has no capabilities,
+            # so a root-owned folder would refuse the parent's writes, and the root
+            # proxy could not make ``responses`` itself. The parent makes it first.
+            files[f"{response_directory}/.keep"] = ""
+        session.write_files(files)
         pending = {"stdout": "", "stderr": ""}
         visible: dict[str, list[str]] = {"stdout": [], "stderr": []}
         seen: set[str] = set()

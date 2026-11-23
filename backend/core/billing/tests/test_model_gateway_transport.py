@@ -3149,21 +3149,35 @@ def test_the_box_service_variable_matches_the_runner() -> None:
 class _RecordingSession:
     """Record each mailbox command and file write, in order."""
 
-    def __init__(self, mkdir_code: int = 0) -> None:
+    def __init__(self, mkdir_code: int = 0, *, root_has_capabilities: bool = True) -> None:
         """Hold the record and the exit code of the root mkdir.
 
         Args:
             mkdir_code: The exit code the root mkdir returns.
+            root_has_capabilities: Whether the box's root can write any folder, as on Vercel.
         """
         self.mkdir_code = mkdir_code
+        self.root_has_capabilities = root_has_capabilities
         self.calls: list[tuple[str, Any]] = []
 
     def write_files(self, files: dict[str, str]) -> None:
-        """Record the written paths."""
+        """Record the written paths.
+
+        Args:
+            files: Relative path to content.
+        """
         self.calls.append(("write", sorted(files)))
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Record the command and whether it runs as root."""
+        """Record the command and whether it runs as root.
+
+        Args:
+            command: The shell command line.
+            **kwargs: The run options; only ``sudo`` is recorded.
+
+        Returns:
+            A result with the mkdir exit code for the root mkdir, else 0.
+        """
         self.calls.append(("run", (command, kwargs.get("sudo", False))))
         return CommandResult(exit_code=self.mkdir_code if command.startswith("/bin/mkdir") else 0)
 
@@ -3196,3 +3210,13 @@ def test_a_user_mailbox_runs_no_root_command() -> None:
     ModelMailbox(MagicMock()).run(session, "true")
     assert [kind for kind, _ in session.calls] == ["write", "run"]
     assert session.calls[1][1][1] is False
+
+
+def test_a_root_mailbox_without_root_capabilities_has_the_parent_make_its_answer_folder() -> None:
+    """On Docker the file write runs as the box user, so root makes no folder it could not write into."""
+    session = _RecordingSession(root_has_capabilities=False)
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    (write_kind, written), (run_kind, (_, root)) = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert (write_kind, run_kind, root) == ("write", "run", True)
+    assert written == [f"{folder}/config.json", f"{folder}/proxy.py", f"{folder}/responses/.keep"]
