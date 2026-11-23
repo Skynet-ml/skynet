@@ -80,6 +80,9 @@ class ModelMailbox:
 
         Returns:
             The sandbox's original command result.
+
+        Raises:
+            RuntimeError: Root could not make a root mailbox's folders on a box whose root has capabilities.
         """
         nonce = secrets.token_hex(16)
         # Captured here: requests are answered on pool threads, where the caller's scope is gone.
