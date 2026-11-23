@@ -95,8 +95,9 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
 # A rate limit (429) or a busy service (503) refuses the call before the model runs, and often clears in seconds, so
 # a model call tries again on these answers, unless the body names a generation or reports usage: the model dispatch
-# counts such an answer as billed (see model_dispatch's ``refused``). A 502 or 504 can come after the model ran and the provider billed it,
-# and the lease pays one reply only once, so these answers are final, as all other error answers are.
+# counts such an answer as billed (see model_dispatch's ``refused``). A 502 or 504 can come after the model ran and
+# the provider billed it, and the lease pays one reply only once, so these answers are final, as all other error
+# answers are.
 _MODEL_RETRY_STATUSES = frozenset({429, 503})
 # These errors come before the request reaches the provider, so the provider cannot bill the try. A read, write or
 # protocol error can come after the provider got the request, so it gets no new try.
@@ -348,7 +349,8 @@ class LeaseModelClient:
                 answer = self._client.post(url, headers={"Authorization": f"Bearer {self._key}"}, json=body)
             except _MODEL_RETRY_ERRORS as error:
                 failure: httpx.HTTPError = error
-            except httpx.HTTPError as error:
+            except (httpx.HTTPError, ValueError, TypeError) as error:
+                # httpx encodes the JSON body here, and refuses a value such as NaN with a ValueError.
                 raise self._failed(error) from error
             else:
                 if answer.status_code not in _MODEL_RETRY_STATUSES or _maybe_billed(answer):

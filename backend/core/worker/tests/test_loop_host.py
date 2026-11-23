@@ -1574,6 +1574,24 @@ def test_a_custom_byok_call_tries_again_after_a_busy_service_answer(monkeypatch:
     assert (len(requests), waits) == (2, [1.0])
 
 
+def test_a_custom_byok_request_that_cannot_be_encoded_fails_as_a_service_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request httpx cannot encode, such as a NaN value, fails as the documented ServiceError with no request.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(httpx.Response(200, json={}))
+    monkeypatch.setattr(
+        mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("93.184.216.34", 443))]
+    )
+    monkeypatch.setattr(loop_host, "_PinnedTransport", lambda url, address: httpx.MockTransport(provider))
+
+    with pytest.raises(ServiceError, match="ValueError"):
+        _custom_byok()._post("https://llm.example.com/v1/chat/completions", {"temperature": float("nan")})
+    assert (len(requests), waits) == (0, [])
+
+
 def _record_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Client]:
     """Record every HTTP client that the loop host opens.
 
