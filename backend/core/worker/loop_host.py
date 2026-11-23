@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import re
 import shutil
 import tarfile
@@ -100,9 +101,14 @@ _MODEL_RETRY_STATUSES = frozenset({429, 503})
 # These errors come before the request reaches the provider, so the provider cannot bill the try. A read, write or
 # protocol error can come after the provider got the request, so it gets no new try.
 _MODEL_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
-_MODEL_RETRIES = 3
-_MODEL_BACKOFF_SECONDS = 2.0
+# OpenRouter's free models allow some calls each minute, so the waits together pass one minute. With the default
+# stall timeout of 1800 s, a refusal that comes back fast leaves room for all three waits and a last full try in the
+# deadline below.
+_MODEL_BACKOFF_SECONDS = (5.0, 15.0, 40.0)
+_MODEL_RETRIES = len(_MODEL_BACKOFF_SECONDS)
 _MODEL_RETRY_AFTER_CAP_SECONDS = 60.0
+# An epoch reset above this value is in milliseconds, as OpenRouter sends it; below it, the value is in seconds.
+_RESET_MILLISECONDS_ABOVE = 1e11
 # The worker forwards no log of this module, so nothing resets the stall watchdog during a model step. A new try
 # starts only when it can end, at its full timeout, within this fraction of job_stall_timeout_seconds. The rest of the
 # window is for the price read before the first try.
@@ -111,6 +117,7 @@ _PROVIDER_MESSAGE_CHARS = 200
 # Tests replace these, so a retry test does not wait.
 _sleep = time.sleep
 _clock = time.monotonic
+_wall = time.time
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
 _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 _RETRYABLE_STATUSES = frozenset({408, 424, 429})
@@ -204,8 +211,10 @@ class LeaseModelClient:
             self._client.close()
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
-        """Call the model, and try a managed or custom endpoint call again after a rate limit (429), a busy service
-        (503) or a connection error.
+        """Call the model.
+
+        A managed or custom endpoint call gets a new try after a rate limit (429), a busy service (503) or a
+        connection error, see :meth:`_post`.
 
         Args:
             prompt: The prompt text, or the chat messages.
@@ -344,11 +353,13 @@ class LeaseModelClient:
             else:
                 if answer.status_code not in _MODEL_RETRY_STATUSES or _maybe_billed(answer):
                     return answer
+            if attempt == _MODEL_RETRIES:
+                break
             wait = _retry_wait(answer, attempt)
-            if attempt == _MODEL_RETRIES or _clock() - started + wait + MODEL_TIMEOUT_SECONDS > _retry_deadline():
+            if _clock() - started + wait + MODEL_TIMEOUT_SECONDS > _retry_deadline():
                 break
             reason = f"HTTP {answer.status_code}" if answer is not None else type(failure).__name__
-            logger.warning("The model call failed with %s; try %d again in %.1f s.", reason, attempt + 2, wait)
+            logger.warning("The model call failed with %s; starting try %d in %.1f s.", reason, attempt + 2, wait)
             _sleep(wait)
         if answer is None:
             raise self._failed(failure) from failure
@@ -371,7 +382,8 @@ class LeaseModelClient:
         detail = provider_message(answer.content, self._key)
         if detail:
             text = f"{text}: {detail}"
-        # The engine loop records only the error's class, so the job log is where the provider's reason shows.
+        # The engine loop records only the error's class, so the worker process log is where the provider's reason
+        # shows: the job log does not get this module's records.
         logger.warning("%s", text)
         return ServiceError(text)
 
@@ -383,9 +395,13 @@ def _maybe_billed(answer: httpx.Response) -> bool:
         answer: The provider's answer.
 
     Returns:
-        ``True`` when the body names a generation or reports usage.
+        ``True`` when the body names a generation or reports usage, or when the body cannot be read.
     """
-    identity, usage = response_usage(answer.content, answer.headers.get("content-type", ""))
+    try:
+        identity, usage = response_usage(answer.content, answer.headers.get("content-type", ""))
+    except ValueError:
+        # An event stream that is not UTF-8 cannot be read, so it can hide a bill, and a new try could bill twice.
+        return True
     return identity is not None or usage is not None
 
 
@@ -407,15 +423,44 @@ def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
         attempt: The index of the try that failed, from 0.
 
     Returns:
-        The provider's numeric ``Retry-After`` up to its cap, or else an exponential backoff.
+        The provider's numeric ``Retry-After``, or else the time to the rate limit reset in the body, up to their
+        cap; or else the backoff of the try.
+    """
+    asked: float | None = None
+    if answer is not None:
+        try:
+            asked = float(answer.headers["Retry-After"])
+        except (KeyError, ValueError):
+            asked = None
+        if asked is None or not asked >= 0:
+            asked = _rate_limit_reset_wait(answer.content)
+    if asked is not None:
+        return min(asked, _MODEL_RETRY_AFTER_CAP_SECONDS)
+    return _MODEL_BACKOFF_SECONDS[attempt]
+
+
+def _rate_limit_reset_wait(body: bytes) -> float | None:
+    """Return the time until the rate limit resets, from OpenRouter's ``error.metadata.headers`` in the body.
+
+    OpenRouter puts the upstream limit's headers in the 429 body, with ``X-RateLimit-Reset`` as epoch milliseconds,
+    and often sends no ``Retry-After``.
+
+    Args:
+        body: The provider's error answer body.
+
+    Returns:
+        The seconds until the reset, or ``None`` when the body has no usable reset or the reset is past.
     """
     try:
-        asked = float(answer.headers["Retry-After"]) if answer is not None else None
-    except (KeyError, ValueError):
-        asked = None
-    if asked is not None and asked >= 0:
-        return min(asked, _MODEL_RETRY_AFTER_CAP_SECONDS)
-    return _MODEL_BACKOFF_SECONDS * 2**attempt
+        reset = float(json.loads(body)["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not math.isfinite(reset):
+        return None
+    if reset > _RESET_MILLISECONDS_ABOVE:
+        reset /= 1000
+    wait = reset - _wall()
+    return wait if wait > 0 else None
 
 
 def provider_message(body: bytes, secret: str) -> str:

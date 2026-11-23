@@ -230,7 +230,8 @@ def _provider_refusal(response: ModelHTTPResult, token: str) -> str:
 
     Args:
         response: Non-2xx model response returned through the metered route.
-        token: The route's credential, which the summary must never show.
+        token: The route's gateway guest token, not the provider key. It is the credential of the preflight
+            request, so the summary must never show it when the provider or the gateway echoes it.
 
     Returns:
         The HTTP status, followed by the provider's own short message when its body carries one.

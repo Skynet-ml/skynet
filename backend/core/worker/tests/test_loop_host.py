@@ -1086,7 +1086,7 @@ def test_a_rate_limited_managed_call_tries_again_and_costs_once(monkeypatch: pyt
     assert reply.text == "hi"
     assert reply.cost_cents == ChargePolicy("managed_model").convert(Decimal("0.002")).total
     assert len(requests) == 2
-    assert waits == [loop_host._MODEL_BACKOFF_SECONDS]
+    assert waits == [loop_host._MODEL_BACKOFF_SECONDS[0]]
 
 
 def test_a_managed_call_rate_limited_on_every_try_fails_with_the_provider_reason(
@@ -1105,12 +1105,12 @@ def test_a_managed_call_rate_limited_on_every_try_fails_with_the_provider_reason
 
     assert _FAKE_KEY not in str(raised.value)
     assert len(requests) == loop_host._MODEL_RETRIES + 1
-    assert waits == [2.0, 4.0, 8.0]
+    assert waits == [5.0, 15.0, 40.0]
 
 
 @pytest.mark.parametrize(
     ("retry_after", "wait"),
-    [("7", 7.0), ("3600", loop_host._MODEL_RETRY_AFTER_CAP_SECONDS), ("Wed, 21 Oct 2026 07:28:00 GMT", 2.0)],
+    [("7", 7.0), ("3600", loop_host._MODEL_RETRY_AFTER_CAP_SECONDS), ("Wed, 21 Oct 2026 07:28:00 GMT", 5.0)],
     ids=["seconds", "capped", "date-uses-backoff"],
 )
 def test_a_retry_honors_a_numeric_retry_after_up_to_its_cap(
@@ -1129,6 +1129,85 @@ def test_a_retry_honors_a_numeric_retry_after_up_to_its_cap(
     _managed_client(provider)("hello", None)
 
     assert waits == [wait]
+
+
+_NOW = 1_732_400_000.0
+
+
+def _openrouter_rate_limited(reset: object, retry_after: str | None = None) -> httpx.Response:
+    """Answer as OpenRouter does when a free model's per-minute limit refuses a call.
+
+    Args:
+        reset: The ``X-RateLimit-Reset`` value in the body's ``error.metadata.headers``.
+        retry_after: The ``Retry-After`` header, or ``None`` for no header.
+
+    Returns:
+        The 429 answer.
+    """
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    limits = {"X-RateLimit-Limit": "20", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}
+    error = {"code": 429, "message": "Rate limit exceeded: free-models-per-min.", "metadata": {"headers": limits}}
+    return httpx.Response(429, json={"error": error}, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("reset", "retry_after", "wait"),
+    [
+        (str(int((_NOW + 12) * 1000)), None, 12.0),
+        (int((_NOW + 12) * 1000), None, 12.0),
+        (str(int(_NOW + 12)), None, 12.0),
+        (str(int((_NOW + 3600) * 1000)), None, loop_host._MODEL_RETRY_AFTER_CAP_SECONDS),
+        (str(int((_NOW - 10) * 1000)), None, 5.0),
+        ("soon", None, 5.0),
+        ("nan", None, 5.0),
+        (None, None, 5.0),
+        (str(int((_NOW + 12) * 1000)), "7", 7.0),
+    ],
+    ids=[
+        "future-ms",
+        "future-ms-number",
+        "future-seconds",
+        "capped",
+        "past-uses-backoff",
+        "garbage-uses-backoff",
+        "nan-uses-backoff",
+        "null-uses-backoff",
+        "retry-after-wins",
+    ],
+)
+def test_a_retry_waits_for_the_rate_limit_reset_in_an_openrouter_body(
+    reset: object, retry_after: str | None, wait: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no ``Retry-After``, the wait lasts until the body's reset, up to the cap; a bad or past reset uses backoff.
+
+    Args:
+        reset: The body's ``X-RateLimit-Reset`` value.
+        retry_after: The provider's ``Retry-After`` header, or ``None``.
+        wait: The expected wait in seconds.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    monkeypatch.setattr(loop_host, "_wall", lambda: _NOW)
+    provider, requests = _answers(_openrouter_rate_limited(reset, retry_after), _reply(cast(httpx.Request, None)))
+
+    assert _managed_client(provider)("hello", None).text == "hi"
+    assert (len(requests), waits) == (2, [wait])
+
+
+def test_a_retryable_status_with_an_unreadable_event_stream_is_not_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An event stream that is not UTF-8 can hide a bill, so the answer counts as billed and gets no new try.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    busy = httpx.Response(503, content=b"data: \xff\xfe\n\n", headers={"content-type": "text/event-stream"})
+    provider, requests = _answers(busy, _reply(cast(httpx.Request, None)))
+
+    with pytest.raises(ServiceError, match=r"\(HTTP 503\)$"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (1, [])
 
 
 def test_a_client_error_is_not_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1157,7 +1236,7 @@ def test_a_connection_error_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> N
     provider, requests = _answers(httpx.ConnectError("refused"), _reply(cast(httpx.Request, None)))
 
     assert _managed_client(provider)("hello", None).text == "hi"
-    assert (len(requests), waits) == (2, [2.0])
+    assert (len(requests), waits) == (2, [5.0])
 
 
 @pytest.mark.parametrize(
@@ -1218,13 +1297,13 @@ def test_a_busy_service_answer_is_tried_again(monkeypatch: pytest.MonkeyPatch) -
     provider, requests = _answers(busy, _reply(cast(httpx.Request, None)))
 
     assert _managed_client(provider)("hello", None).text == "hi"
-    assert (len(requests), waits) == (2, [2.0])
+    assert (len(requests), waits) == (2, [5.0])
 
 
 def test_a_failed_call_logs_the_provider_reason(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The engine loop keeps only the error's class, so the job log shows the provider's reason, with no key.
+    """The engine loop keeps only the error's class, so the worker process log shows the provider's reason, with no key.
 
     Args:
         monkeypatch: The test's patcher.
@@ -1259,7 +1338,7 @@ def test_a_call_with_no_answer_on_every_try_fails(error: httpx.HTTPError, monkey
         _managed_client(provider)("hello", None)
 
     assert len(requests) == loop_host._MODEL_RETRIES + 1
-    assert waits == [2.0, 4.0, 8.0]
+    assert waits == [5.0, 15.0, 40.0]
 
 
 @pytest.mark.parametrize(
@@ -1297,15 +1376,15 @@ def test_no_new_try_starts_that_could_end_after_the_stall_fraction(monkeypatch: 
     waits = _waits(monkeypatch)
     monkeypatch.setattr(loop_host.settings, "job_stall_timeout_seconds", 1800.0)
     deadline = 1800.0 * loop_host._MODEL_RETRY_STALL_FRACTION
-    # At the second check, a try after the 4 s wait could end 1 s after the deadline.
-    ticks = iter([0.0, 10.0, deadline - loop_host.MODEL_TIMEOUT_SECONDS - 3.0])
+    # At the second check, a try after the 15 s wait could end 5 s after the deadline.
+    ticks = iter([0.0, 10.0, deadline - loop_host.MODEL_TIMEOUT_SECONDS - 10.0])
     monkeypatch.setattr(loop_host, "_clock", lambda: next(ticks))
     provider, requests = _answers(*[_rate_limited() for _ in range(loop_host._MODEL_RETRIES + 1)])
 
     with pytest.raises(ServiceError, match=r"HTTP 429"):
         _managed_client(provider)("hello", None)
 
-    assert (len(requests), waits) == (2, [2.0])
+    assert (len(requests), waits) == (2, [5.0])
 
 
 def test_a_call_with_the_stall_watchdog_off_has_no_retry_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1320,7 +1399,7 @@ def test_a_call_with_the_stall_watchdog_off_has_no_retry_deadline(monkeypatch: p
     provider, requests = _answers(_rate_limited(), _rate_limited(), _rate_limited(), _reply(cast(httpx.Request, None)))
 
     assert _managed_client(provider)("hello", None).text == "hi"
-    assert (len(requests), waits) == (4, [2.0, 4.0, 8.0])
+    assert (len(requests), waits) == (4, [5.0, 15.0, 40.0])
 
 
 @pytest.mark.parametrize(
