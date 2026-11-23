@@ -1334,8 +1334,9 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # refuses pam_motd in a stack that sudo reaches, so sudo reads no motd file:
 # Debian's pam_motd runs /etc/update-motd.d through run-parts as root, and
 # those scripts run tools by name that this probe does not walk (SKY-912).
-# Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, so a
-# box-writable one could give root's steps UMASK 000.
+# Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, and
+# /etc/default/login when login.defs sets no UMASK, so a box-writable one could
+# give root's steps UMASK 000.
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/etc/sudoers",
@@ -1347,6 +1348,7 @@ _SUDO_FILES = (
     "/etc/shadow",
     "/etc/gshadow",
     "/etc/login.defs",
+    "/etc/default/login",
 )
 _SUDO_FOLDERS = (
     "/etc/sudoers.d",
@@ -1957,11 +1959,11 @@ UNTRUSTED_PYTHON = (
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
-    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow"
-    " and /etc/login.defs when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
-    " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
-    " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
-    " sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
+    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow,"
+    " /etc/login.defs and /etc/default/login when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d,"
+    " /usr/lib/security and /etc/security when present, with every entry in them. Others must be able to read"
+    " each sudo and search each of those image PATH folders. Others must be able to run the first sudo on the"
+    " image PATH, and each sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
     " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
     " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"

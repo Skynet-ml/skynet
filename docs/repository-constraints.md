@@ -813,9 +813,11 @@ own commands in the setup box and in each candidate box:
   that holds that `sudo`. Root must own these files
   when they exist: `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
-  `/etc/shadow`, `/etc/gshadow` and `/etc/login.defs`. Ubuntu's
-  `pam_umask` reads `/etc/login.defs` as root in the `sudo` stack, so a
-  box-writable copy could set the umask of root's steps. Root must own
+  `/etc/shadow`, `/etc/gshadow`, `/etc/login.defs` and
+  `/etc/default/login`. Ubuntu's `pam_umask` reads `/etc/login.defs` as
+  root in the `sudo` stack, and `/etc/default/login` when `login.defs`
+  sets no `UMASK`, so a box-writable copy could set the umask of root's
+  steps. Root must own
   `/etc/sudoers.d`,
   `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`
   when they exist, and every entry in them. Debian's Linux-PAM reads a PAM
@@ -1259,7 +1261,8 @@ Residual risk:
   `sudo`. It also walks the `sudo`, PAM and account files:
   `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
-  `/etc/shadow`, `/etc/gshadow`, `/etc/login.defs`, and each entry in
+  `/etc/shadow`, `/etc/gshadow`, `/etc/login.defs`, `/etc/default/login`,
+  and each entry in
   `/etc/sudoers.d`, `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and
   `/etc/security`. It does not
   walk a file that sudoers includes from another folder, or a `sudo.conf`

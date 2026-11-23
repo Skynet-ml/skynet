@@ -6089,6 +6089,7 @@ _CONF = {
     "/etc/shadow": "640 regular file",
     "/etc/gshadow": "640 regular file",
     "/etc/login.defs": "644 regular file",
+    "/etc/default/login": "none",
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/usr/lib/pam.d": "none",
@@ -7864,6 +7865,8 @@ _SUDO_PARTS = _sudo_lines()
         _listing(sudo=_sudo_lines(conf={"/etc/group": _walk("/etc/group", "664 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/gshadow": _walk("/etc/gshadow", "1000 0 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/login.defs": _walk("/etc/login.defs", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "646 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/passwd": _walk("/etc/passwd", "646 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "775 directory")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "1000 755 directory")})),
@@ -7968,6 +7971,8 @@ _SUDO_PARTS = _sudo_lines()
         "group-writable-etc-group",
         "box-owned-etc-gshadow",
         "box-owned-etc-login-defs",
+        "box-owned-etc-default-login",
+        "other-writable-etc-default-login",
         "other-writable-etc-passwd",
         "group-writable-pam-d",
         "box-owned-pam-d",
@@ -8092,6 +8097,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
             )
         ),
         _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "644 regular empty file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "644 regular file")})),
         _listing(
             sudo=_sudo_lines(
                 entries={
@@ -8129,6 +8135,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "no-sudo-conf",
         "no-locale-file-and-a-mode-0-shadow",
         "empty-etc-environment",
+        "root-owned-etc-default-login",
         "files-in-a-security-folder",
         "root-owned-usr-lib-pam-d-and-usr-lib-security",
     ],
