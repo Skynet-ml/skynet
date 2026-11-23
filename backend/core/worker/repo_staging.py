@@ -2079,7 +2079,8 @@ UNTRUSTED_PYTHON = (
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
     " of the folders, and no entry may be a dangling link. The PAM files also have content rules: no module that"
     " runs a program, only stock modules and no other pam_env options in a stack that sudo reaches, and no pam_env"
-    " drop-ins. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the stock"
+    " drop-ins. In such a stack, each include target must be a plain PAM file name, a path may appear only as a"
+    " pam_env file or as motd=/run/motd.dynamic, and no module may take a conf= option. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the stock"
     " Plugin and Path lines."
     " See docs/repository-constraints.md."
 )

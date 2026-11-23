@@ -9158,6 +9158,13 @@ def test_the_probe_reads_the_vendor_pam_and_sudo_folders() -> None:
     assert "/usr/etc/sudo.conf" in repo_staging.UNTRUSTED_PYTHON
 
 
+def test_the_refusal_names_the_pam_content_rules() -> None:
+    """Name each PAM content rule in the refusal, because the probe's own reason never reaches the user (SKY-912)."""
+    assert "plain PAM file name" in repo_staging.UNTRUSTED_PYTHON
+    assert "motd=/run/motd.dynamic" in repo_staging.UNTRUSTED_PYTHON
+    assert "conf= option" in repo_staging.UNTRUSTED_PYTHON
+
+
 _STOCK_SUDO_CONF = (
     "# Default /etc/sudo.conf file\n"
     "#\n"
