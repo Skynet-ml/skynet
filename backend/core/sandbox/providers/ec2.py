@@ -240,8 +240,9 @@ mv -fT -- file "../$name"
 # is swapped in from blocking the open until the time limit. Exit 4 means no
 # regular file is at the path when the walk checks it, and exit 3 means a
 # refusal. Every failure after a check passed is a refusal, not an infra
-# error, because only a swap by the box user makes it fail. Otherwise the box
-# user could pick a retried infra error as the outcome of the attempt.
+# error: a swap by the box user is the likely cause, and an infra error would
+# let that swap pick a retried attempt. A rare disk or pipe error there is
+# also a refusal, and it is not retried.
 _DOWNLOAD_SCRIPT = r"""set -eu
 changed() { echo "download refused: $1 changed during the download" >&2; exit 3; }
 where() { here=$(/bin/pwd -P && echo x) || changed "a folder"; here=${here%?x}; }
@@ -648,7 +649,7 @@ class EC2Environment(SandboxEnvironment):
         Root reads the file in one script that refuses a symbolic link at
         the file or at any parent folder (SKY-911), as an upload refuses it.
         A refused link raises an error and does not read as a missing file.
-        A path part that changes after its check, by any swap, is a refusal too.
+        A swap after a check that makes the read fail is a refusal too.
 
         Args:
             path: The absolute sandbox path.
