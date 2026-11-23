@@ -25,7 +25,10 @@ UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
 # A returned call with no provider request id can never be looked up. A call
 # whose original credential this worker cannot resolve is also not looked up:
 # for a BYOK key no worker can resolve it, and only during a managed-key
-# rotation might another worker still confirm the bill. Both holds are released
+# rotation might another worker still confirm the bill. A worker with no managed
+# key would also release managed holds early, but every deployed app and worker
+# gets OPENROUTER_API_KEY (shared_app_secret_keys in the environment
+# module's secrets.tf). Both holds are released
 # at no further charge one minute after dispatched_at: usage already settled
 # stays billed, and Skynet accepts the gap for the rest, because a 15-minute
 # wait blocks the account's setup check (SKY-914). The minute absorbs clock skew
@@ -100,8 +103,8 @@ class OpenRouterUsageReconciler:
             stored refusal that names no generation.
 
         Raises:
-            UnsettleableUsageError: When the provider request id is missing and no stored
-                refusal exists, or this worker cannot resolve the original credential.
+            UnsettleableUsageError: When a returned call has no provider request id and no
+                stored refusal, or this worker cannot resolve the original credential.
             UsagePendingError: When the operation is not an admitted OpenRouter generation, or
                 final billing evidence or the original policy is unavailable.
         """
@@ -118,6 +121,8 @@ class OpenRouterUsageReconciler:
                 return self.service.reject(
                     operation_id, username, evidence_key=f"openrouter-refusal:{operation_id}", evidence=refusal
                 )
+            if operation.state == "dispatched":
+                raise UsagePendingError("The model call has not returned; its provider request id can still come.")
             raise UnsettleableUsageError("The provider request id is unavailable; no bill can be looked up.")
         digest = prices.get("credential_fingerprint")
         key = self.resolve_key(username, str(digest)) if digest else None
@@ -212,7 +217,9 @@ class OpenRouterUsageReconciler:
                     results.append(ReconciliationResult(operation_id, "pending", str(release_error)))
                     continue
                 if operation.state == "released":
-                    logger.info("Released model hold %s at no further charge: %s", operation_id, error)
+                    # A racing sweep can log a release that another sweep made; the
+                    # row lock still releases the hold only once.
+                    logger.info("Model hold %s is released at no further charge: %s", operation_id, error)
                 results.append(
                     ReconciliationResult(
                         operation_id, operation.state, None if operation.state == "released" else str(error)

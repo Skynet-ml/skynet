@@ -379,6 +379,27 @@ def test_sweep_releases_a_hold_that_can_never_settle_after_one_minute(
         assert len(session.scalars(select(ExecutionUsageEvidenceModel.id)).all()) == 2
 
 
+def test_in_flight_call_without_request_id_is_not_unsettleable(database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a dispatched call with no request id yet as plain pending, never released early (SKY-914).
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Replaces the provider lookup with a failure.
+    """
+    monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: pytest.fail("No lookup is possible."))
+    runtime = _runtime(database)
+    operation_id = _park_model_call(runtime, None)
+    with Session(database) as session:
+        session.get(ExecutionOperationModel, operation_id).state = "dispatched"
+        session.commit()
+    _age_operations(database, 2)
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private")
+    with pytest.raises(UsagePendingError, match="has not returned") as caught:
+        reconciler.reconcile(operation_id, "alice")
+    assert not isinstance(caught.value, UnsettleableUsageError)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["dispatched"]
+
+
 def test_sweep_keeps_a_hold_it_can_still_look_up_for_15_minutes(database, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the SKY-784 window for a request id the original credential can still look up."""
     monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: None)
