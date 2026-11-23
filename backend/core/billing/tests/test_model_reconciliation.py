@@ -141,8 +141,11 @@ def test_truncated_stream_retains_charge_until_original_generation_settles(datab
     assert len([call for call in calls if call.method == "POST"]) == 1
 
 
-def test_rotated_credential_does_not_query_or_release_original_hold(database) -> None:
-    """Keep uncertain usage covered when its original provider credential is unavailable."""
+def test_rotated_credential_never_queries_the_original_generation(database) -> None:
+    """Refuse to look up a generation with any credential other than the original one.
+
+    The sweep releases such a hold after one minute; a separate test covers that.
+    """
     runtime = _runtime(database)
 
     def pending_provider(request: httpx.Request) -> httpx.Response:
