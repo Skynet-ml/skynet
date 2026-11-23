@@ -230,6 +230,42 @@ cat > file
 if [ "$(wc -c < file)" -ne "$size" ]; then echo "upload refused: the content was cut off" >&2; exit 3; fi
 mv -fT -- file "../$name"
 """
+# Root reads one download with this script (SKY-911). test -f and cat follow
+# links, so a link that the box user plants at the name or at a folder would
+# let root read any file. The arguments are the start folder and the path
+# parts, as for _UPLOAD_SCRIPT, and the folder walk is the same, with no
+# mkdir. A link at a part is refused, as an upload refuses it. dd opens the
+# file with O_NOFOLLOW, so a link that the box user swaps in at the name
+# after the -L check makes the open fail. Exit 4 means no regular file is at
+# the path, and exit 3 means a refusal.
+_DOWNLOAD_SCRIPT = r"""set -eu
+where() { here=$(/bin/pwd -P && echo x); here=${here%?x}; }
+cd -P -- "$1" || exit 4
+shift
+while [ "$#" -gt 1 ]; do
+  part=$1
+  shift
+  where
+  if [ "$part" = .. ]; then
+    want=${here%/*}
+    want=${want:-/}
+    next=..
+  else
+    if [ -L "$part" ]; then echo "download refused: $part is a symbolic link" >&2; exit 3; fi
+    [ -d "$part" ] || exit 4
+    want=${here%/}/$part
+    next=./$part
+  fi
+  cd -P -- "$next" || exit 4
+  where
+  if [ "$here" != "$want" ]; then echo "download refused: $part changed during the download" >&2; exit 3; fi
+done
+if [ -L "$1" ]; then echo "download refused: $1 is a symbolic link" >&2; exit 3; fi
+[ -f "$1" ] || exit 4
+dd if="./$1" iflag=nofollow bs=65536 status=none
+"""
+_DOWNLOAD_MISSING = 4
+_DOWNLOAD_REFUSED = 3
 
 # The instances of this process, so that the job sweep can clear their state
 # and find the regions that they run in.
@@ -604,33 +640,46 @@ class EC2Environment(SandboxEnvironment):
     async def download_file(self, path: str) -> str | None:
         """Read one UTF-8 text file from the instance.
 
+        Root reads the file in one script that refuses a symbolic link at
+        the file or at any parent folder (SKY-911), as an upload refuses it.
+        A refused link raises an error and does not read as a missing file.
+
         Args:
             path: The absolute sandbox path.
 
         Returns:
-            The exact file content, or ``None`` when the file does not exist.
+            The exact file content, or ``None`` when no regular file is at the path.
 
         Raises:
-            RuntimeError: The instance is not running.
+            RuntimeError: The instance is not running, or a path part is a
+                symbolic link or changed during the read.
             SandboxInfraError: SSH could not reach the instance, or the read
                 failed or ran past the run phase time limit.
         """
         self._require_running()
-        # A lost connection must not read as a missing file, so the probe
-        # tells the ssh failure code apart from a failed test.
-        probe = await self.exec(f"test -f {shlex.quote(path)}", sudo=True)
-        if probe.timed_out or probe.exit_code == _SSH_FAILED:
-            raise SandboxInfraError(f"The ec2 sandbox could not reach the instance: {probe.stderr}")
-        if not probe.ok:
+        # PurePosixPath drops a last "/" or "." part, and such a path names no regular file.
+        if path.rsplit("/", 1)[-1] in ("", ".", ".."):
             return None
-        script = wrap_script(f"cat {shlex.quote(path)}", env={}, cwd=None, sudo=True)
+        parts = PurePosixPath(path).parts
+        # A path that starts with exactly two slashes keeps "//" as its first part.
+        start, names = ("/", parts[1:]) if parts[0] in ("/", "//") else (".", parts)
+        args = " ".join(shlex.quote(arg) for arg in (start, *names))
+        script = wrap_script(f"set -- {args}; {_DOWNLOAD_SCRIPT}", env={}, cwd=None, sudo=True)
         limit = self._default_timeout
         try:
             code, out, err = await _run_process(self._ssh_argv(script, stdin=False, limit=limit), None, limit)
         except TimeoutError:
             raise SandboxInfraError(f"The ec2 sandbox timed out reading {path}.") from None
+        message = err.decode("utf-8", errors="replace")
+        # A lost connection must not read as a missing file.
+        if code == _SSH_FAILED:
+            raise SandboxInfraError(f"The ec2 sandbox could not reach the instance: {message}")
+        if code == _DOWNLOAD_MISSING:
+            return None
+        if code == _DOWNLOAD_REFUSED:
+            raise RuntimeError(f"The ec2 sandbox could not read {path}: {message}")
         if code != 0:
-            raise SandboxInfraError(f"The ec2 sandbox could not read {path}: {err.decode('utf-8', errors='replace')}")
+            raise SandboxInfraError(f"The ec2 sandbox could not read {path}: {message}")
         return out.decode("utf-8")
 
     @classmethod
