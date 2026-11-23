@@ -1326,9 +1326,8 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # remove /etc/pam.d/sudo and put a box-owned one there (SKY-912 review).
 # Its libpam also names /usr/lib/security, a module folder outside the loader
 # folders; stock images do not have it, so it must be missing or root's.
-# /etc/security may hold one level of folders,
-# such as limits.d. Ubuntu's sudo PAM stack reads /etc/default/locale into the
-# root environment. A box user who could change the account files could add
+# /etc/security may hold one level of folders, such as limits.d. Ubuntu's sudo
+# PAM stack reads /etc/default/locale into the root environment. A box user who could change the account files could add
 # itself to the sudo group or set a root password. Shadow files are often
 # 0640 root:shadow or 0000, so the check does not need others to read them.
 _SUDO_FILES = (
@@ -1771,10 +1770,9 @@ UNTRUSTED_PYTHON = (
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
     " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
-    " /etc/security when present,"
-    " with every"
-    " entry in them. Others must be able to read each sudo and search each of those image PATH folders. The first sudo"
-    " on the image PATH must have an x bit, and each sudo must resolve to an ELF file. Others must be able to"
+    " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
+    " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
+    " sudo must resolve to an ELF file. Others must be able to"
     " list each of those five folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
     " a regular file, except one level of folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
@@ -2726,7 +2724,7 @@ def _trusted_sudo(lines: list[str]) -> bool:
         file that :func:`_readable_file` accepts. Each image PATH folder up to
         the first one with a sudo is missing, or a folder that group and
         others cannot write and others can search, and that sudo is such a
-        file with an x bit. Each of ``_SUDO_FILES`` is missing or a regular
+        file that others can run. Each of ``_SUDO_FILES`` is missing or a regular
         file that group and others cannot write. Each of ``_SUDO_FOLDERS`` is
         missing or a folder that :func:`_trusted_folder` accepts. The listing
         ends with ``_SUDO_DONE``.
@@ -2752,8 +2750,9 @@ def _trusted_sudo(lines: list[str]) -> bool:
         if lines and lines[-1] == f"sudo {folder}/sudo":
             lines.pop()
             entry = _walk(lines, f"{folder}/sudo")
-            # A PATH lookup skips a file with no x bit and goes on to folders that the probe never walks.
-            if entry in (None, _MISSING) or not _readable_file(entry) or not entry[0] & 0o111:
+            # A non-root PATH lookup skips a file it cannot run and goes on to folders that the probe never
+            # walks, so others must be able to run this sudo.
+            if entry in (None, _MISSING) or not _readable_file(entry) or not entry[0] & 0o001:
                 return False
             break
     for path in (*_SUDO_FILES, *_SUDO_FOLDERS):

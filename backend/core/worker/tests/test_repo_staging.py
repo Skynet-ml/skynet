@@ -7809,6 +7809,14 @@ _SUDO_PARTS = _sudo_lines()
                 ]
             )
         ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/opt/bin", "755 directory"),
+                    *_entry("sudo", "/opt/bin/sudo", "4754 regular file"),
+                ]
+            )
+        ),
         _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "1000 440 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "660 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "755 directory")})),
@@ -7931,6 +7939,7 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-sudo-on-the-path",
         "path-sudo-link-into-tmp",
         "unrunnable-path-sudo-before-a-box-folder",
+        "path-sudo-that-others-cannot-run",
         "box-owned-sudoers",
         "group-writable-sudoers",
         "sudoers-is-a-folder",

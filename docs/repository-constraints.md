@@ -816,8 +816,9 @@ own commands in the setup box and in each candidate box:
   `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`
   when they exist, and every entry in them. Debian's Linux-PAM reads a PAM
   file from `/usr/lib/pam.d` when `/etc/pam.d` does not have it, and it
-  also names `/usr/lib/security` as a module folder. Group and others must not be able to write any of them. Linux-PAM
-  does not check who owns its files, so the image check does. Ubuntu's
+  also names `/usr/lib/security` as a module folder. Group and others must
+  not be able to write any of them. Linux-PAM does not check who owns its
+  files, so the image check does. Ubuntu's
   `sudo` PAM stack reads `/etc/default/locale` into root's environment. A
   box user who can change the account files can join the `sudo` group or
   set a root password. Others need not read `/etc/shadow` or
@@ -827,8 +828,9 @@ own commands in the setup box and in each candidate box:
   - Others must be able to read each `sudo`, and to search each folder of
     the image `PATH` up to and with the folder that holds the first
     `sudo`.
-  - The first `sudo` on the image `PATH` must have an x bit. A `PATH`
-    lookup skips a file with no x bit.
+  - Others must be able to run the first `sudo` on the image `PATH`. A
+    `PATH` lookup by a non-root user skips a file that the user cannot
+    run.
   - Each `sudo` must resolve to an ELF file, not a script.
   - Others must be able to list `/etc/sudoers.d`, `/etc/pam.d`,
     `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`.
@@ -1209,7 +1211,11 @@ Residual risk:
   It does not walk a
   file that sudoers includes from another folder, or a `sudo.conf`
   `sudoers_file` setting. Sudo itself refuses such a file when root does
-  not own it, or when others can write it. It does not read the PAM
+  not own it, or when others can write it. The check does not parse
+  sudoers, so it does not walk a file that a sudoers setting names, such
+  as `Defaults env_file=` or `restricted_env_file=`. Sudo reads such a
+  file with no owner check, so a box-owned `env_file` can put
+  `LD_PRELOAD` into root's command. It does not read the PAM
   configuration, so a PAM module or file that it names outside those
   folders is not walked. The PAM modules below the loader folders get only
   the loader-folder check, which needs others to be able to read them.
