@@ -537,8 +537,9 @@ class BudgetRuntime:
                 else:
                     self.service.mark_pending(operation.id, self.username)
                     if cost_kind == "model" and (result is None or not result.provider_request_id):
-                        # Without a request id no lookup can confirm the bill, so the sweep releases the hold at
-                        # no charge after one minute (SKY-914). The reason shows which path loses the bill.
+                        # Without a request id no lookup can confirm the bill. For an OpenRouter hold, the sweep
+                        # releases it at no charge after one minute (SKY-914). The reason shows which path loses
+                        # the bill.
                         # Only OpenRouter names each generation; another route never does, so its missing id
                         # is normal and stays at debug (SKY-923).
                         logger.log(

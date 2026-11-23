@@ -1021,6 +1021,19 @@ def test_the_lease_refusal_compares_the_balance_with_the_room_left_after_setup_s
         assert refused.value.params == {"minimum_total_cents": budgets.CHUNK_CENTS + 60}
 
 
+def test_a_balance_below_one_lease_is_named_even_when_it_covers_the_room_left() -> None:
+    """Name the balance, not the limit, when the balance cannot buy one lease (SKY-923).
+
+    A limit of 150 with 100 spent leaves 50. A balance of 70 covers that room, but a higher
+    limit cannot help, because the balance stays below one lease.
+    """
+    with pytest.raises(DomainError) as refused:
+        execution_budgets.require_funded_lease(150, 70, "managed", spent_units=100 * budgets.CENT_SCALE)
+
+    assert refused.value.status_code == 402
+    assert refused.value.code == "budget.insufficient"
+
+
 @pytest.mark.parametrize(
     ("limit", "status"),
     [(budgets.CHUNK_CENTS, 409), (budgets.CHUNK_CENTS + 1, 200)],
