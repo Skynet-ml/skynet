@@ -404,7 +404,7 @@ def _as_patch(text: str) -> str:
         return patch
     if not patch.endswith("\n"):
         patch += "\n"
-    return patch + "\n" * _stripped_context_lines(patch)
+    return _with_git_headers(patch + "\n" * _stripped_context_lines(patch))
 
 
 def _stripped_context_lines(patch: str) -> int:
@@ -438,6 +438,82 @@ def _stripped_context_lines(patch: str) -> int:
             # so the strip never took a line from a hunk that holds one.
             return 0
     return old_missing if old_missing == new_missing and 0 < old_missing <= _MAX_STRIPPED_LINES else 0
+
+
+def _plain_header_path(old: str, new: str) -> tuple[str, str] | None:
+    """Read the one path and the mode line of a plain ``---``/``+++`` header pair.
+
+    Args:
+        old: The ``---`` line after its marker.
+        new: The ``+++`` line after its marker.
+
+    Returns:
+        The path and the mode line it needs (empty for a changed file), or
+        ``None`` when the pair names no single ``a/``/``b/`` path.
+    """
+    old, new = old.split("\t", 1)[0], new.split("\t", 1)[0]
+    # git apply drops a CR, end whitespace or a date after a space, which the
+    # path checks keep: a CRLF ``a/p.py\r`` would pass a rule on ``p.py`` and
+    # still change it. So a path with any whitespace gets no repair.
+    if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in old + new):
+        return None
+    before = None if old == "/dev/null" else old[2:] if old.startswith("a/") else ""
+    after = None if new == "/dev/null" else new[2:] if new.startswith("b/") else ""
+    if before is None and after:
+        return after, "new file mode 100644"
+    if after is None and before:
+        # A plain diff gives no mode, so git refuses to delete a link or a
+        # submodule with this line ("wrong type"): that fails safe.
+        return before, "deleted file mode 100644"
+    if before and before == after:
+        return before, ""
+    return None
+
+
+def _with_git_headers(patch: str) -> str:
+    """Give each file of a plain unified diff the ``diff --git`` line that the path check needs.
+
+    Models often write ``--- a/X``/``+++ b/X`` with no ``diff --git`` line, and
+    the SKY-353 check refuses any header outside a ``diff --git`` section.
+    Hunk lines are counted, so a hunk line that looks like a header gets none.
+
+    Args:
+        patch: A diff that ends with a newline.
+
+    Returns:
+        The diff with a ``diff --git`` line (and a mode line for a new or
+        deleted file) before each header pair; unchanged when it already has a
+        ``diff --git`` line, any pair names no single ``a/``/``b/`` path or has
+        no hunk right after it, or a hunk line is broken.
+    """
+    if re.search(r"(?m)^diff --git ", patch):
+        return patch
+    lines = patch.split("\n")
+    out: list[str] = []
+    old = new = 0
+    for index, line in enumerate(lines):
+        if old > 0 or new > 0:
+            tag = line[:1] or " "
+            if tag not in " -+\\":
+                return patch
+            old -= tag in " -"
+            new -= tag in " +"
+        elif line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
+            header = _plain_header_path(line[4:], lines[index + 1][4:])
+            # A mode line after the pair would follow the inserted one, and git
+            # takes the last: ``new file mode 120000`` would then make a link.
+            if header is None or not _HUNK_HEADER.match(lines[index + 2]):
+                return patch
+            path, mode = header
+            out.extend([f"diff --git a/{path} b/{path}", *([mode] if mode else [])])
+        # A header with more digits than this regex takes is not a hunk here,
+        # so the repair may mark lines git reads as hunk lines: git then calls
+        # the patch corrupt, and the checker sees every inserted path.
+        elif hunk := _HUNK_HEADER.match(line):
+            old = 1 if hunk.group(1) is None else int(hunk.group(1))
+            new = 1 if hunk.group(2) is None else int(hunk.group(2))
+        out.append(line)
+    return "\n".join(out)
 
 
 def _unescape_backticks(text: str) -> str:
