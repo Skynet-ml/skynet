@@ -110,26 +110,30 @@ MV_SHIM = (
     '#!/bin/sh\nif [ "$1" = "-fT" ] && [ "$(uname)" = Darwin ]; then shift; set -- -fh "$@"; fi\nexec /bin/mv "$@"\n'
 )
 
-# macOS dd has no iflag=nofollow, so on macOS the shim opens the file as GNU dd does: with O_NOFOLLOW
-# only when iflag=nofollow is set. Without it the shim follows a link, so a test that relies on the
-# flag fails, as it would with GNU dd.
+# macOS dd has no iflag=nofollow or iflag=nonblock, so on macOS the shim opens the file as GNU dd
+# does: with O_NOFOLLOW and O_NONBLOCK only when iflag names them. Without a flag the shim follows a
+# link or blocks on a named pipe, so a test that relies on the flag fails, as it would with GNU dd.
 DD_SHIM = textwrap.dedent(
     """
-    import os, shutil, sys
+    import os, sys
 
     if os.uname().sysname != "Darwin":
         os.execv("/bin/dd", ["dd", *sys.argv[1:]])
     ops = dict(arg.split("=", 1) for arg in sys.argv[1:])
     assert set(ops) <= {"if", "iflag", "bs", "status"}, f"the dd shim does not know the operands {ops}"
-    assert ops.get("iflag", "nofollow") == "nofollow", f"the dd shim knows only iflag=nofollow, not {ops}"
-    flags = os.O_RDONLY | (os.O_NOFOLLOW if ops.get("iflag") == "nofollow" else 0)
+    iflags = set(filter(None, ops.get("iflag", "").split(",")))
+    assert iflags <= {"nofollow", "nonblock"}, f"the dd shim does not know the input flags {iflags}"
+    flags = os.O_RDONLY
+    flags |= os.O_NOFOLLOW if "nofollow" in iflags else 0
+    flags |= os.O_NONBLOCK if "nonblock" in iflags else 0
+    # os.read raises EAGAIN as GNU dd fails on it; a buffered read would return None and look like the end.
     try:
         fd = os.open(ops["if"], flags)
+        while chunk := os.read(fd, 65536):
+            sys.stdout.buffer.write(chunk)
     except OSError as error:
-        sys.stderr.write(f"dd: failed to open {ops['if']!r}: {error.strerror}\\n")
+        sys.stderr.write(f"dd: {ops['if']!r}: {error.strerror}\\n")
         sys.exit(1)
-    with os.fdopen(fd, "rb") as source:
-        shutil.copyfileobj(source, sys.stdout.buffer)
     """
 )
 
@@ -971,10 +975,33 @@ async def test_a_download_refuses_a_link_swapped_in_at_the_name_after_the_check(
     monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(check, check + swap))
     async with EC2Environment(_spec()) as env:
         (fake_ec2.state / "root" / env._host / "a.txt").write_text("mine")
-        with pytest.raises(RuntimeError, match=r"a\.txt is a symbolic link") as caught:
+        with pytest.raises(RuntimeError, match=r"a\.txt changed during the download") as caught:
             await env.download_file("a.txt")
-        assert not isinstance(caught.value, SandboxInfraError)
         assert "keep" not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["folder", "pipe"])
+async def test_a_download_refuses_a_folder_or_a_pipe_swapped_in_at_the_name_after_the_check(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Refuse, not fail as infra, when the box user swaps a folder or a named pipe in at the name (SKY-911).
+
+    A named pipe with a writer and no data must not hold the read until the
+    time limit. The test puts the swap into the script just before the read.
+    """
+    check = '[ -f "$1" ] || exit 4\n'
+    make = "/bin/mkdir" if kind == "folder" else "/usr/bin/mkfifo"
+    swap = f'/bin/rm -f -- "$1" && {make} -- "$1"\n'
+    if kind == "pipe":
+        # A writer holds the pipe for ten seconds and never writes. A read without O_NONBLOCK waits,
+        # then reads an empty end and does not raise, so the test fails in about ten seconds.
+        swap += 'exec 9<>"$1"; /bin/sleep 10 </dev/null >/dev/null 2>&1 & exec 9>&-\n'
+    assert check in ec2_provider._DOWNLOAD_SCRIPT
+    monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(check, check + swap))
+    async with EC2Environment(_spec()) as env:
+        (fake_ec2.state / "root" / env._host / "a.txt").write_text("mine")
+        with pytest.raises(RuntimeError, match=r"a\.txt changed during the download"):
+            await env.download_file("a.txt")
 
 
 async def test_a_download_refuses_a_folder_swapped_for_a_link_after_the_check(
@@ -986,7 +1013,7 @@ async def test_a_download_refuses_a_folder_swapped_for_a_link_after_the_check(
     that wins the race would do it.
     """
     outside = _plant_outside(tmp_path)
-    cd = '  cd -P -- "$next" || exit 4\n'
+    cd = '  cd -P -- "$next" || changed "$part"\n'
     swap = f'  /bin/mv -- "$part" "$part.moved" && /bin/ln -s {outside} "$part"\n'
     assert cd in ec2_provider._DOWNLOAD_SCRIPT
     monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(cd, swap + cd))

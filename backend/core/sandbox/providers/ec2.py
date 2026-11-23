@@ -236,11 +236,15 @@ mv -fT -- file "../$name"
 # parts, as for _UPLOAD_SCRIPT, and the folder walk is the same, with no
 # mkdir. A link at a part is refused, as an upload refuses it. dd opens the
 # file with O_NOFOLLOW, so a link that the box user swaps in at the name
-# after the -L check makes the open fail. That failure is a refusal too, not
-# an infra error, so the box user cannot pick the outcome of the attempt.
-# Exit 4 means no regular file is at the path, and exit 3 means a refusal.
+# after the -L check makes the open fail. O_NONBLOCK keeps a named pipe that
+# is swapped in from blocking the open until the time limit. Exit 4 means no
+# regular file is at the path when the walk checks it, and exit 3 means a
+# refusal. Every failure after a check passed is a refusal, not an infra
+# error, because only a swap by the box user makes it fail. Otherwise the box
+# user could pick a retried infra error as the outcome of the attempt.
 _DOWNLOAD_SCRIPT = r"""set -eu
-where() { here=$(/bin/pwd -P && echo x); here=${here%?x}; }
+changed() { echo "download refused: $1 changed during the download" >&2; exit 3; }
+where() { here=$(/bin/pwd -P && echo x) || changed "a folder"; here=${here%?x}; }
 cd -P -- "$1" || exit 4
 shift
 while [ "$#" -gt 1 ]; do
@@ -257,16 +261,13 @@ while [ "$#" -gt 1 ]; do
     want=${here%/}/$part
     next=./$part
   fi
-  cd -P -- "$next" || exit 4
+  cd -P -- "$next" || changed "$part"
   where
-  if [ "$here" != "$want" ]; then echo "download refused: $part changed during the download" >&2; exit 3; fi
+  if [ "$here" != "$want" ]; then changed "$part"; fi
 done
 if [ -L "$1" ]; then echo "download refused: $1 is a symbolic link" >&2; exit 3; fi
 [ -f "$1" ] || exit 4
-dd if="./$1" iflag=nofollow bs=65536 status=none || {
-  if [ -L "$1" ]; then echo "download refused: $1 is a symbolic link" >&2; exit 3; fi
-  exit 1
-}
+dd if="./$1" iflag=nofollow,nonblock bs=65536 status=none || changed "$1"
 """
 _DOWNLOAD_MISSING = 4
 _DOWNLOAD_REFUSED = 3
@@ -647,6 +648,7 @@ class EC2Environment(SandboxEnvironment):
         Root reads the file in one script that refuses a symbolic link at
         the file or at any parent folder (SKY-911), as an upload refuses it.
         A refused link raises an error and does not read as a missing file.
+        A path part that changes after its check, by any swap, is a refusal too.
 
         Args:
             path: The absolute sandbox path.
@@ -655,11 +657,12 @@ class EC2Environment(SandboxEnvironment):
             The exact file content, or ``None`` when no regular file is at the path.
 
         Raises:
-            RuntimeError: The instance is not running, or a path part is a
-                symbolic link, also one that appears during the read, or a
-                folder changed during the read.
-            SandboxInfraError: SSH could not reach the instance, or the read
-                failed or ran past the run phase time limit.
+            RuntimeError: The instance is not running, a path part is a
+                symbolic link, or the file or a folder changed after its
+                check, so the read failed.
+            SandboxInfraError: SSH could not reach the instance, the script
+                failed in another way, or the read ran past the run phase
+                time limit.
         """
         self._require_running()
         # PurePosixPath drops a last "/" or "." part, and such a path names no regular file.
