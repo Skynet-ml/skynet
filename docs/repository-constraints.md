@@ -818,9 +818,8 @@ own commands in the setup box and in each candidate box:
   file from `/usr/lib/pam.d` when `/etc/pam.d` does not have it, and it
   also names `/usr/lib/security` as a module folder. Group and others must
   not be able to write any of them. Linux-PAM does not check who owns its
-  files, so the image check does. Ubuntu's
-  `sudo` PAM stack reads `/etc/environment` and `/etc/default/locale`
-  into root's environment. So the check also reads the variable names in
+  files, so the image check does. Ubuntu's `sudo` PAM stack reads
+  `/etc/environment` and `/etc/default/locale` into root's environment. So the check also reads the variable names in
   those two files and in `/etc/security/pam_env.conf`. It refuses there
   the same names that it refuses in the image `ENV`, such as `LD_PRELOAD`
   or a locale that is not C, POSIX or UTF-8. Any locale set in
@@ -830,13 +829,19 @@ own commands in the setup box and in each candidate box:
   underscores. It refuses an image that has a `pam_env` drop-in folder or
   a vendor copy, such as `/etc/security/pam_env.conf.d`,
   `/etc/environment.d` or `/usr/etc/environment`, because it does not
-  read them. In `/etc/pam.d` and `/usr/lib/pam.d`, a `pam_env` line may
-  name only those three files with `envfile=` or `conffile=`, and may not
-  turn on `user_readenv`, which reads a file in the box user's home. A
+  read them. It also refuses an image when it cannot search the folder of
+  one of those paths. In `/etc/pam.conf`, `/etc/pam.d` and
+  `/usr/lib/pam.d`, a `pam_env` line may name only those three files with
+  `envfile=` or `conffile=`, and may not turn on `user_readenv`, which
+  reads a file in the box user's home. No line in these PAM files may name
+  any other path, such as a module, an `@include` file or a `pam_exec`
+  script outside the module folders. The only other path allowed is
+  `/run/motd.dynamic`, which stock images name. A
   box user who can change the account files can join the `sudo` group or
   set a root password. Others need not read `/etc/shadow` or
   `/etc/gshadow`, which are often mode 0640 or 0000. An image with no
-  `/etc/pam.d` passes; Linux-PAM then reads `/etc/pam.conf`.
+  `/etc/pam.d` passes; Linux-PAM then reads `/etc/pam.conf`, which the
+  check reads too.
 - The check also needs these rules:
   - Others must be able to read each `sudo`, and to search each folder of
     the image `PATH` up to and with the folder that holds the first
@@ -1221,16 +1226,16 @@ Residual risk:
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
   `/etc/shadow`, `/etc/gshadow`, and each entry in `/etc/sudoers.d`,
   `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`.
-  It does not walk a
-  file that sudoers includes from another folder, or a `sudo.conf`
+  It does not walk a file that sudoers includes from another folder, or a
+  `sudo.conf`
   `sudoers_file` setting. Sudo itself refuses such a file when root does
   not own it, or when others can write it. The check does not parse
   sudoers, so it does not walk a file that a sudoers setting names, such
   as `Defaults env_file=` or `restricted_env_file=`. Sudo reads such a
   file with no owner check, so a box-owned `env_file` can put
-  `LD_PRELOAD` into root's command. It does not read the PAM
-  configuration, so a PAM module or file that it names outside those
-  folders is not walked. The PAM modules below the loader folders get only
+  `LD_PRELOAD` into root's command. The PAM configuration may name no path
+  outside a short stock list, so PAM loads modules only from its module
+  folders. The PAM modules below the loader folders get only
   the loader-folder check, which needs others to be able to read them.
   The `sudo` plugins, such as `sudoers.so` and `libsudo_util`, also get
   only the loader-folder check. They get it when the `sudo` RUNPATH names

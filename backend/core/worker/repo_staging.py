@@ -1329,8 +1329,8 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # /etc/security may hold one level of folders, such as limits.d. Ubuntu's sudo
 # PAM stack reads /etc/default/locale into the root environment. A box user
 # who could change the account files could add itself to the sudo group or set
-# a root password. Shadow files are often
-# 0640 root:shadow or 0000, so the check does not need others to read them.
+# a root password. Shadow files are often 0640 root:shadow or 0000, so the
+# check does not need others to read them.
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/etc/sudoers",
@@ -1370,6 +1370,7 @@ PAM_ENV_EXTRA = (
     "/usr/lib/environment.d",
 )
 PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
+PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1382,8 +1383,14 @@ for name in names:
             sys.exit("a locale value is not printable ASCII")
         print("locale", name + "=" + value)
 for extra in PAM_ENV_EXTRA:
-    if os.path.lexists(extra):
-        sys.exit("the image has " + extra + ", which the check does not read")
+    try:
+        os.lstat(extra)
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+    except OSError:
+        # A folder that the box user cannot search could hide a file that root's PAM reads.
+        sys.exit("the check cannot look for " + extra)
+    sys.exit("the image has " + extra + ", which the check does not read")
 for file in PAM_ENV_FILES:
     try:
         with open(file, encoding="latin-1") as text:
@@ -1410,30 +1417,33 @@ for file in PAM_ENV_FILES:
             if not (value.isascii() and value.isprintable()):
                 sys.exit("a PAM locale value is not printable ASCII")
             print("locale", name + "=" + value)
+pam_configs = ["/etc/pam.conf"]
 for stack in PAM_STACKS:
     try:
-        services = sorted(os.listdir(stack))
+        pam_configs += [os.path.join(stack, service) for service in sorted(os.listdir(stack))]
     except FileNotFoundError:
         continue
-    for service in services:
-        try:
-            with open(os.path.join(stack, service), encoding="latin-1") as text:
-                rows = text.read().replace("\\\n", " ").split("\n")
-        except IsADirectoryError:
-            continue
-        for row in rows:
-            words = row.split("#")[0].split()
-            if not any("pam_env" in word for word in words):
-                continue
-            for word in words:
-                key, _, value = word.partition("=")
-                # Another envfile or conffile is a file the check does not read, and user_readenv reads the box user's own file.
-                if (
-                    (key == "envfile" and value not in PAM_ENV_FILES)
-                    or (key == "conffile" and value != PAM_ENV_CONF)
-                    or (key == "user_readenv" and value != "0")
-                ):
-                    sys.exit("the PAM stack " + os.path.join(stack, service) + " gives pam_env " + word)
+for config in pam_configs:
+    try:
+        with open(config, encoding="latin-1") as text:
+            rows = text.read().replace("\\\n", " ").split("\n")
+    except (FileNotFoundError, IsADirectoryError):
+        continue
+    for row in rows:
+        words = row.split("#")[0].split()
+        pam_env = any("pam_env" in word for word in words)
+        for word in words:
+            key, _, value = word.partition("=")
+            # The check does not read another envfile or conffile; user_readenv reads the box user's own file.
+            if pam_env and (
+                (key == "envfile" and value not in PAM_ENV_FILES)
+                or (key == "conffile" and value != PAM_ENV_CONF)
+                or (key == "user_readenv" and value != "0")
+            ):
+                sys.exit("the PAM stack " + config + " gives pam_env " + word)
+            # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
+            if "/" in word and (word if word.startswith("/") else value) not in PAM_PATHS:
+                sys.exit("the PAM configuration " + config + " names " + word)
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
@@ -1826,10 +1836,9 @@ ROOT_ENVIRONMENT = (
     " /etc/security/pam_env.conf. {app} runs its root steps in the box with the image environment and, through"
     " sudo, with those files. These variables change which code the shell, the system loader or the C library"
     " runs, or which files and folders they use. Remove them from the image ENV and from those files: every"
-    " LD_*, OPENSSL_* and"
-    " BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they name C, POSIX or a"
-    " UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such as CUDA images,"
-    " are not supported yet."
+    " LD_*, OPENSSL_* and BASH_FUNC_* variable, and {variables}. LANG, LANGUAGE and LC_* may stay when they"
+    " name C, POSIX or a UTF-8 locale, such as C.UTF-8 or en_US.UTF-8. Images that need LD_LIBRARY_PATH, such"
+    " as CUDA images, are not supported yet."
 )
 _RUN_MODES = ("clean", "box")
 _MISSING = "missing"
@@ -1849,9 +1858,9 @@ UNTRUSTED_PYTHON = (
     " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
     " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
     " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
-    " sudo must resolve to an ELF file. Others must be able to"
-    " list each of those five folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
-    " a regular file, except one level of folders in /etc/security."
+    " sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
+    " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
+    " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
