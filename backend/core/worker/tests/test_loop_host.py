@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import io
 import json
+import logging
 import queue
 import tarfile
 from collections.abc import Iterator
@@ -1149,6 +1150,86 @@ def test_a_connection_error_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert _managed_client(provider)("hello", None).text == "hi"
     assert (len(requests), waits) == (2, [2.0])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("slow"),
+        httpx.RemoteProtocolError("cut"),
+        httpx.WriteError("broken pipe"),
+        httpx.ReadError("reset"),
+    ],
+    ids=["read-timeout", "remote-protocol", "write", "read"],
+)
+def test_an_error_after_the_request_left_is_not_tried_again(
+    error: httpx.HTTPError, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider may have got the request and billed it, so a new try could bill the reply twice.
+
+    Args:
+        error: The transport error after the request left.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(error, _reply(cast(httpx.Request, None)))
+
+    with pytest.raises(ServiceError, match=rf"The model call failed: {type(error).__name__}$"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (1, [])
+
+
+@pytest.mark.parametrize("status", [502, 504])
+def test_a_gateway_answer_that_can_follow_a_billed_call_is_not_tried_again(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 502 or 504 can come after the model ran, so the call fails at once with the provider's reason.
+
+    Args:
+        status: The gateway's status.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(httpx.Response(status, json={"error": {"message": "upstream   timed\nout"}}))
+
+    with pytest.raises(ServiceError, match=rf"\(HTTP {status}\): upstream timed out$"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (1, [])
+
+
+def test_a_busy_service_answer_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 503 refuses the call before the model runs, so a new try is safe.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    busy = httpx.Response(503, json={"error": {"message": "overloaded"}})
+    provider, requests = _answers(busy, _reply(cast(httpx.Request, None)))
+
+    assert _managed_client(provider)("hello", None).text == "hi"
+    assert (len(requests), waits) == (2, [2.0])
+
+
+def test_a_failed_call_logs_the_provider_reason(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The engine loop keeps only the error's class, so the job log shows the provider's reason, with no key.
+
+    Args:
+        monkeypatch: The test's patcher.
+        caplog: The log capture.
+    """
+    _waits(monkeypatch)
+    provider, _ = _answers(*[_rate_limited() for _ in range(loop_host._MODEL_RETRIES + 1)])
+
+    with caplog.at_level(logging.WARNING, logger=loop_host.logger.name), pytest.raises(ServiceError):
+        _managed_client(provider)("hello", None)
+
+    assert "(HTTP 429): Rate limit exceeded: free-models-per-min ([key])" in caplog.text
+    assert _FAKE_KEY not in caplog.text
 
 
 def test_no_new_try_starts_after_the_retry_window(monkeypatch: pytest.MonkeyPatch) -> None:

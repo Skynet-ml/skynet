@@ -92,12 +92,13 @@ STEP_BOX_SECONDS = 900
 _PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
-# A rate limit or a busy gateway often clears in seconds, so a model call tries again on these answers. Any other
-# error answer is final: a new try gets the same answer.
-_MODEL_RETRY_STATUSES = frozenset({429, 502, 503, 504})
-# These errors bring no answer, so the lease never pays one reply twice. A read timeout takes the full model timeout,
-# which is past the retry window below, so a call that the provider may still bill gets no new try.
-_MODEL_RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+# A rate limit (429) or a busy service (503) refuses the call before the model runs, and often clears in seconds, so
+# a model call tries again on these answers. A 502 or 504 can come after the model ran and the provider billed it,
+# and the lease pays one reply only once, so these answers are final, as all other error answers are.
+_MODEL_RETRY_STATUSES = frozenset({429, 503})
+# These errors come before the request reaches the provider, so the provider cannot bill the try. A read, write or
+# protocol error can come after the provider got the request, so it gets no new try.
+_MODEL_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 _MODEL_RETRIES = 3
 _MODEL_BACKOFF_SECONDS = 2.0
 _MODEL_RETRY_AFTER_CAP_SECONDS = 60.0
@@ -313,19 +314,19 @@ class LeaseModelClient:
     def _post(self, url: str, body: Mapping[str, Any]) -> httpx.Response:
         """Post one model call, and try it again after an answer that a short wait can clear.
 
-        Only an error status or no answer leads to a new try, so the provider never bills one reply twice. The
-        loop saves the call's step only after this returns, so a resume does not replay a failure that a new try
-        clears.
+        Only an answer that refuses the call before the model runs, or an error before the request reaches the
+        provider, leads to a new try, so a new try never follows a call that the provider billed. The loop saves
+        the call's step only after this returns, so a resume does not replay a failure that a new try clears.
 
         Args:
             url: The chat completions URL.
             body: The chat request.
 
         Returns:
-            The first answer that is not a retryable status, or the last answer.
+            The first answer that is not a retryable status, or the last retryable answer.
 
         Raises:
-            ServiceError: When no try gets an answer.
+            ServiceError: When the last try gets no answer, or a try fails with an error that gets no new try.
         """
         started = _clock()
         for attempt in range(_MODEL_RETRIES + 1):
@@ -363,8 +364,12 @@ class LeaseModelClient:
         if answer is None or not answer.is_error:
             return ServiceError(text)
         text += f" (HTTP {answer.status_code})"
-        detail = _provider_message(answer, self._key)
-        return ServiceError(f"{text}: {detail}" if detail else text)
+        detail = provider_message(answer.content, self._key)
+        if detail:
+            text = f"{text}: {detail}"
+        # The engine loop records only the error's class, so the job log is where the provider's reason shows.
+        logger.warning("%s", text)
+        return ServiceError(text)
 
 
 def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
@@ -386,26 +391,28 @@ def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
     return _MODEL_BACKOFF_SECONDS * 2**attempt
 
 
-def _provider_message(answer: httpx.Response, key: str) -> str:
-    """Return the provider's ``error.message`` from an error answer, short and with no credential.
+def provider_message(body: bytes, secret: str) -> str:
+    """Return the provider's ``error.message`` from an error answer, short, on one line and with no credential.
 
     Only this field is read: other body text can echo the request, which holds the prompt.
 
     Args:
-        answer: The provider's error answer.
-        key: The call's credential, which the message must never show.
+        body: The provider's error answer body.
+        secret: The call's credential, which the message must never show.
 
     Returns:
         The message, or an empty string when the body has none.
     """
     try:
-        error = answer.json().get("error")
+        error = json.loads(body).get("error")
     except (ValueError, AttributeError):
         return ""
     message = error.get("message") if isinstance(error, dict) else None
     if not isinstance(message, str):
         return ""
-    return " ".join(message.replace(key, "[key]").split())[:_PROVIDER_MESSAGE_CHARS]
+    if secret:
+        message = message.replace(secret, "[key]")
+    return " ".join(message.split())[:_PROVIDER_MESSAGE_CHARS]
 
 
 def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: str) -> str:
