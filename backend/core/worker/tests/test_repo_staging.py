@@ -6088,6 +6088,7 @@ _CONF = {
     "/etc/group": "644 regular file",
     "/etc/shadow": "640 regular file",
     "/etc/gshadow": "640 regular file",
+    "/etc/login.defs": "644 regular file",
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/usr/lib/pam.d": "none",
@@ -7862,6 +7863,7 @@ _SUDO_PARTS = _sudo_lines()
         _listing(sudo=_sudo_lines(conf={"/etc/shadow": _walk("/etc/shadow", "1000 640 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/group": _walk("/etc/group", "664 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/gshadow": _walk("/etc/gshadow", "1000 0 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/login.defs": _walk("/etc/login.defs", "1000 644 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/passwd": _walk("/etc/passwd", "646 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "775 directory")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "1000 755 directory")})),
@@ -7965,6 +7967,7 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-etc-shadow",
         "group-writable-etc-group",
         "box-owned-etc-gshadow",
+        "box-owned-etc-login-defs",
         "other-writable-etc-passwd",
         "group-writable-pam-d",
         "box-owned-pam-d",
@@ -8084,6 +8087,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
                     "/etc/default/locale": _walk("/etc/default/locale", "none"),
                     "/etc/shadow": _walk("/etc/shadow", "0 regular file"),
                     "/etc/gshadow": _walk("/etc/gshadow", "none"),
+                    "/etc/login.defs": _walk("/etc/login.defs", "none"),
                 }
             )
         ),
@@ -8602,6 +8606,7 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
 
 
 _UBUNTU_SUDO_STACK = "session required pam_env.so readenv=1 envfile=LOCALE user_readenv=0\n"
+_STOCK_SSHD_LINE = "session required pam_env.so user_readenv=1 envfile=LOCALE\n"
 
 
 def _run_path_script_with_pam_files(
@@ -8616,6 +8621,7 @@ def _run_path_script_with_pam_files(
     locked: bool = False,
     other_stacks: dict[str, str] | None = None,
     modules: dict[str, str] | None = None,
+    environment_links: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the interpreter script with temporary pam_env and PAM stack files in place of the real ones.
 
@@ -8628,8 +8634,10 @@ def _run_path_script_with_pam_files(
         sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``; ``LOCALE`` names the stand-in locale file.
         pam_conf: The text of the stand-in ``/etc/pam.conf``.
         locked: Whether the stand-in drop-in folder path is in a folder that nobody may search.
-        other_stacks: The text of other stand-in files in ``/etc/pam.d``, by name.
+        other_stacks: The text of other stand-in files in ``/etc/pam.d``, by name; ``LOCALE`` as in ``sudo_stack``.
         modules: Links to make in a stand-in module folder, which then replaces the real ones, by name to target.
+        environment_links: Links to make in a stand-in ``/usr/lib/environment.d``, by name to target;
+            ``ENVIRONMENT`` names the stand-in ``/etc/environment``.
 
     Returns:
         The finished script.
@@ -8644,7 +8652,7 @@ def _run_path_script_with_pam_files(
     stacks.mkdir()
     (stacks / "sudo").write_text(sudo_stack.replace("LOCALE", str(tmp_path / "locale")))
     for name, text in (other_stacks or {}).items():
-        (stacks / name).write_text(text)
+        (stacks / name).write_text(text.replace("LOCALE", str(tmp_path / "locale")))
     script = repo_staging._PATH_SCRIPT.replace('"/etc/security/pam_env.conf.d"', repr(str(folder)))
     if modules:
         (tmp_path / "lib" / "security").mkdir(parents=True)
@@ -8654,6 +8662,11 @@ def _run_path_script_with_pam_files(
         stand_in_libs = f"({str(tmp_path / 'lib')!r},)"
         script = script.replace('("/lib", "/lib64", "/usr/lib", "/usr/lib64")', stand_in_libs)
         assert stand_in_libs in script
+    if environment_links is not None:
+        (tmp_path / "environment.d").mkdir()
+        for name, target in environment_links.items():
+            (tmp_path / "environment.d" / name).symlink_to(target.replace("ENVIRONMENT", str(tmp_path / "environment")))
+        script = script.replace('"/usr/lib/environment.d"', repr(str(tmp_path / "environment.d")))
     stand_in_stacks = f"({str(stacks)!r},)"
     script = script.replace('("/etc/pam.d", "/usr/lib/pam.d")', stand_in_stacks)
     assert stand_in_stacks in script
@@ -8672,7 +8685,7 @@ def _run_path_script_with_pam_files(
 
 
 def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> None:
-    """Debian-style pam_env files with a PATH, a quoted locale and comments, and pam_motd in login, pass (SKY-912).
+    """Stock pam_env files, systemd's environment.d link, and pam_motd and user_readenv in login and sshd pass (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -8691,7 +8704,9 @@ def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> N
         other_stacks={
             "common-session": "session required pam_unix.so\n",
             "login": "session optional pam_motd.so motd=/run/motd.dynamic\nsession optional pam_motd.so noupdate\n",
+            "sshd": _STOCK_SSHD_LINE + "session optional pam_motd.so motd=/run/motd.dynamic\n",
         },
+        environment_links={"99-environment.conf": "ENVIRONMENT"},
     )
 
     assert done.returncode == 0, done.stderr
@@ -8739,6 +8754,7 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         ("", False, "session required pam_env.so \\ \t\n", "", "sudo continues a line"),
         ("", False, "# note \\\nsession optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
         ("", False, "session required pam_env.so readenv=1 user_readenv=1\n", "", "gives pam_env user_readenv=1"),
+        ("", False, _STOCK_SSHD_LINE, "", "sudo gives pam_env user_readenv=1"),
         (
             "",
             False,
@@ -8788,6 +8804,7 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "continued-with-spaces",
         "comment-backslash",
         "user-readenv",
+        "stock-sshd-line-in-sudo",
         "pam-conf",
         "include-path",
         "module-path",
@@ -8860,6 +8877,31 @@ def test_the_path_script_refuses_a_module_that_runs_programs_where_sudo_reaches_
 
     assert done.returncode != 0
     assert reason in done.stderr
+
+
+@pytest.mark.parametrize(
+    "environment_links",
+    [
+        {"99-environment.conf": "ENVIRONMENT", "10-box.conf": "/home/box/env"},
+        {"99-environment.conf": "/etc/default/locale"},
+    ],
+    ids=["one-other-link", "link-to-another-file"],
+)
+def test_the_path_script_refuses_an_environment_d_link_that_is_not_etc_environment(
+    tmp_path: Path, environment_links: dict[str, str]
+) -> None:
+    """/usr/lib/environment.d passes only when each entry resolves to /etc/environment (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        environment_links: Links to make in the stand-in folder, by name to target.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", environment_links=environment_links)
+
+    assert done.returncode != 0
+    assert "environment.d, which the check does not read" in done.stderr
 
 
 def test_the_path_script_refuses_a_pam_environment_path_that_it_cannot_look_for(tmp_path: Path) -> None:

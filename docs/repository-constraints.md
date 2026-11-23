@@ -812,7 +812,10 @@ own commands in the setup box and in each candidate box:
   to and with the folder that holds that `sudo`. Root must own these files
   when they exist: `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
-  `/etc/shadow` and `/etc/gshadow`. Root must own `/etc/sudoers.d`,
+  `/etc/shadow`, `/etc/gshadow` and `/etc/login.defs`. Ubuntu's
+  `pam_umask` reads `/etc/login.defs` as root in the `sudo` stack, so a
+  box-writable copy could set the umask of root's steps. Root must own
+  `/etc/sudoers.d`,
   `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`
   when they exist, and every entry in them. Debian's Linux-PAM reads a PAM
   file from `/usr/lib/pam.d` when `/etc/pam.d` does not have it, and it
@@ -834,12 +837,17 @@ own commands in the setup box and in each candidate box:
   copy, such as
   `/etc/security/pam_env.conf.d`, `/etc/environment.d` or
   `/usr/etc/environment`, because it does not read them. It also refuses
-  an image when it cannot search the folder of one of those paths. In
-  `/etc/pam.conf`, `/etc/pam.d` and `/usr/lib/pam.d`, a `pam_env` line may
-  name only those three files with `envfile=` or `conffile=`, and may not
-  turn on `user_readenv`, which reads a file in the box user's home. The
-  check reads these options on every line, also inside `[...]` brackets,
-  because another module name can load `pam_env`. The check splits words
+  an image when it cannot search the folder of one of those paths.
+  systemd ships `/usr/lib/environment.d` with only a link to
+  `/etc/environment`, so the check accepts that folder when each entry
+  in it resolves to `/etc/environment`. In `/etc/pam.conf`, `/etc/pam.d`
+  and `/usr/lib/pam.d`, a `pam_env` line in a stack that `sudo` reaches
+  may name only those three files with `envfile=` or `conffile=`, and may
+  not turn on `user_readenv`, which reads a file in the target user's
+  home (root's). The check reads these options on every line of those
+  stacks, also inside `[...]` brackets, because another module name can
+  load `pam_env`. Stock `sshd` turns on `user_readenv`, but `sudo` does
+  not reach it. The check splits words
   as Linux-PAM does: only at a space or a tab, and a `[...]` argument ends
   at its first `]` that has no `\` before it, even across spaces. The
   check refuses a `[...]` argument with no closing bracket. It also
@@ -857,7 +865,8 @@ own commands in the setup box and in each candidate box:
   `sudo` and `sudo-i` stacks, `other`, and every file that they include.
   Debian's `pam_motd` runs the scripts in `/etc/update-motd.d` as root,
   and those scripts run programs that the check does not walk. Stock
-  images name `pam_motd` only in `login`, which `sudo` does not reach. The
+  images name `pam_motd` only in `login` and `sshd`, which `sudo` does not
+  reach. The
   check does not read a sudoers `pam_service` setting, which could start
   another stack. A box user who can change the account files can join
   the `sudo` group or set a root
@@ -1246,8 +1255,8 @@ Residual risk:
   `sudo`. It also walks the `sudo`, PAM and account files:
   `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
-  `/etc/shadow`, `/etc/gshadow`, and each entry in `/etc/sudoers.d`,
-  `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and
+  `/etc/shadow`, `/etc/gshadow`, `/etc/login.defs`, and each entry in
+  `/etc/sudoers.d`, `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and
   `/etc/security`. It does not
   walk a file that sudoers includes from another folder, or a `sudo.conf`
   `sudoers_file` setting. Sudo itself refuses such a file when root does

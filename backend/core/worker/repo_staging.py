@@ -1334,6 +1334,8 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # refuses pam_motd in a stack that sudo reaches, so sudo reads no motd file:
 # Debian's pam_motd runs /etc/update-motd.d through run-parts as root, and
 # those scripts run tools by name that this probe does not walk (SKY-912).
+# Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, so a
+# box-writable one could give root's steps UMASK 000.
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/etc/sudoers",
@@ -1344,6 +1346,7 @@ _SUDO_FILES = (
     "/etc/group",
     "/etc/shadow",
     "/etc/gshadow",
+    "/etc/login.defs",
 )
 _SUDO_FOLDERS = (
     "/etc/sudoers.d",
@@ -1398,6 +1401,9 @@ def module_names(word):
         if os.path.exists(os.path.join(folder, word)):
             names.add(os.path.basename(os.path.realpath(os.path.join(folder, word))))
     return names
+def bare(word):
+    # Linux-PAM reads a word in brackets as one argument, and an escaped ] in it as a plain ].
+    return word[1:-1].replace("\\]", "]") if word.startswith("[") else word
 def printable(row):
     # Linux-PAM splits rows only at \n, so a \r or another control byte would make this scan read a row otherwise.
     return all(c == "\t" or " " <= c <= "~" for c in row)
@@ -1415,12 +1421,16 @@ for name in names:
 for extra in PAM_ENV_EXTRA:
     try:
         os.lstat(extra)
+        # systemd ships this folder with only a link to /etc/environment, which the check reads already.
+        links = os.listdir(extra) if extra == "/usr/lib/environment.d" and os.path.isdir(extra) else None
     except (FileNotFoundError, NotADirectoryError):
         continue
     except OSError:
         # A folder that the box user cannot search could hide a file that root's PAM reads.
         sys.exit("the check cannot look for " + extra)
-    sys.exit("the image has " + extra + ", which the check does not read")
+    environment = os.path.realpath(PAM_ENV_FILES[0])
+    if links is None or any(os.path.realpath(os.path.join(extra, link)) != environment for link in links):
+        sys.exit("the image has " + extra + ", which the check does not read")
 for file in PAM_ENV_FILES:
     try:
         with open(file, encoding="latin-1", newline="") as text:
@@ -1490,25 +1500,7 @@ for config in pam_configs:
             words.append(line[start:end])
             start = end
         stack_words[config].append(words)
-        for word in words:
-            bare = word[1:-1].replace("\\]", "]") if word.startswith("[") else word
-            key, _, value = bare.partition("=")
-            # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
-            if any(runner in name for runner in PAM_RUNNERS for name in module_names(word)):
-                sys.exit("the PAM configuration " + config + " runs " + word)
-            # The check does not read another envfile or conffile; user_readenv reads the box user's own file.
-            # Another module name can load pam_env, so the check reads these keys on every line.
-            if (
-                (key == "envfile" and value not in PAM_ENV_FILES)
-                or (key == "conffile" and value != PAM_ENV_CONF)
-                or (key == "user_readenv" and value != "0")
-            ):
-                sys.exit("the PAM stack " + config + " gives pam_env " + word)
-            # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
-            if "/" in bare and (bare if bare.startswith("/") else value) not in PAM_PATHS:
-                sys.exit("the PAM configuration " + config + " names " + word)
 # Sudo starts the sudo or sudo-i service, Linux-PAM falls back to other, and a stack reaches each file it includes.
-# Debian's pam_motd runs /etc/update-motd.d as root, and those scripts run programs that the check does not walk.
 todo, reached = ["/etc/pam.conf"] + [os.path.join(s, n) for s in PAM_STACKS for n in ("sudo", "sudo-i", "other")], set()
 while todo:
     config = todo.pop()
@@ -1519,7 +1511,29 @@ while todo:
         for at, word in enumerate(words):
             if word.lower() in ("@include", "include", "substack") and at + 1 < len(words):
                 todo += [os.path.join(stack, words[at + 1]) for stack in PAM_STACKS]
-            if any("pam_motd" in name for name in module_names(word)):
+for config, rows in stack_words.items():
+    for words in rows:
+        for word in words:
+            plain = bare(word)
+            key, _, value = plain.partition("=")
+            # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
+            if any(runner in name for runner in PAM_RUNNERS for name in module_names(word)):
+                sys.exit("the PAM configuration " + config + " runs " + word)
+            # The check does not read another envfile or conffile, and user_readenv reads a file in the target
+            # user's home (root's). Another module name can load pam_env, so the check reads these keys on every
+            # line of a stack that sudo reaches. Stock sshd sets user_readenv=1, but sudo does not reach it.
+            if config in reached and (
+                (key == "envfile" and value not in PAM_ENV_FILES)
+                or (key == "conffile" and value != PAM_ENV_CONF)
+                or (key == "user_readenv" and value != "0")
+            ):
+                sys.exit("the PAM stack " + config + " gives pam_env " + word)
+            # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
+            if "/" in plain and (plain if plain.startswith("/") else value) not in PAM_PATHS:
+                sys.exit("the PAM configuration " + config + " names " + word)
+            # Debian's pam_motd runs /etc/update-motd.d as root, and those scripts run programs that the check
+            # does not walk.
+            if config in reached and any("pam_motd" in name for name in module_names(word)):
                 sys.exit("the PAM configuration " + config + ", which sudo reaches, runs " + word)
 for entry in sys.path:
     print("path", entry)
@@ -1931,8 +1945,8 @@ UNTRUSTED_PYTHON = (
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
-    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
-    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
+    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow"
+    " and /etc/login.defs when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
     " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
     " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
     " sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
@@ -1941,7 +1955,9 @@ UNTRUSTED_PYTHON = (
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
-    " of the folders, and no entry may be a dangling link."
+    " of the folders, and no entry may be a dangling link. The PAM files also have content rules: no module that"
+    " runs a program, no pam_motd or other pam_env options in a stack that sudo reaches, and no pam_env drop-ins."
+    " See docs/repository-constraints.md."
 )
 NO_ACCOUNT = (
     "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
