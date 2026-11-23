@@ -8728,7 +8728,17 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         ("", False, "@include /home/box/stack\n", "", "names /home/box/stack"),
         ("", False, "session optional /home/box/evil.so\n", "", "names /home/box/evil.so"),
         ("", False, "session optional ../../home/box/evil.so\n", "", "names ../../home/box/evil.so"),
-        ("", False, "session optional pam_exec.so /home/box/x.sh\n", "", "names /home/box/x.sh"),
+        ("", False, "session optional pam_exec.so /home/box/x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session required pam_env.so [envfile=env]\n", "", "gives pam_env [envfile=env]"),
+        (
+            "",
+            False,
+            "session required pam_env.so [envfile=/home/box/my env]\n",
+            "",
+            "gives pam_env [envfile=/home/box/my",
+        ),
+        ("", False, "session required pam_alias.so conffile=c\n", "", "gives pam_env conffile=c"),
     ],
     ids=[
         "line-continuation",
@@ -8742,6 +8752,10 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "module-path",
         "relative-module-path",
         "exec-argument",
+        "exec-relative",
+        "bracket-relative",
+        "bracket-space",
+        "module-alias",
     ],
 )
 def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pam_does(

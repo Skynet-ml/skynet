@@ -1371,6 +1371,7 @@ PAM_ENV_EXTRA = (
 )
 PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
 PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
+PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python")
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1430,19 +1431,23 @@ for config in pam_configs:
     except (FileNotFoundError, IsADirectoryError):
         continue
     for row in rows:
-        words = row.split("#")[0].split()
-        pam_env = any("pam_env" in word for word in words)
-        for word in words:
-            key, _, value = word.partition("=")
+        for word in row.split("#")[0].split():
+            # Linux-PAM drops the brackets around an argument with spaces, so the check compares the text inside.
+            bare = word.strip("[]")
+            key, _, value = bare.partition("=")
+            # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
+            if any(runner in word for runner in PAM_RUNNERS):
+                sys.exit("the PAM configuration " + config + " runs " + word)
             # The check does not read another envfile or conffile; user_readenv reads the box user's own file.
-            if pam_env and (
+            # Another module name can load pam_env, so the check reads these keys on every line.
+            if (
                 (key == "envfile" and value not in PAM_ENV_FILES)
                 or (key == "conffile" and value != PAM_ENV_CONF)
                 or (key == "user_readenv" and value != "0")
             ):
                 sys.exit("the PAM stack " + config + " gives pam_env " + word)
             # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
-            if "/" in word and (word if word.startswith("/") else value) not in PAM_PATHS:
+            if "/" in bare and (bare if bare.startswith("/") else value) not in PAM_PATHS:
                 sys.exit("the PAM configuration " + config + " names " + word)
 for entry in sys.path:
     print("path", entry)
