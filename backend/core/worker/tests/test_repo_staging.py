@@ -8797,6 +8797,8 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         ("", False, "session optional ../../home/box/evil.so\n", "", "names ../../home/box/evil.so"),
         ("", False, "session optional pam_exec.so /home/box/x.sh\n", "", "runs pam_exec.so"),
         ("", False, "session optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session optional pam_xauth.so\n", "", "runs pam_xauth.so"),
+        ("", False, "session optional pam_xauth.so xauthpath=xauth\n", "", "runs pam_xauth.so"),
         ("", False, "session required pam_env.so [envfile=env]\n", "", "gives pam_env [envfile=env]"),
         (
             "",
@@ -8841,6 +8843,8 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "relative-module-path",
         "exec-argument",
         "exec-relative",
+        "xauth",
+        "xauth-relative-path",
         "bracket-relative",
         "bracket-space",
         "bracket-space-stock-prefix",

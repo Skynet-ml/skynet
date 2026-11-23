@@ -864,8 +864,8 @@ own commands in the setup box and in each candidate box:
   No line in these PAM files may name any other path, such as a module or
   an `@include` file outside the module folders. The only other path
   allowed is `/run/motd.dynamic`, which stock images name. The check
-  refuses `pam_exec`, `pam_script` and `pam_python`, which run a program
-  that an argument names, even by a relative name. It also refuses a
+  refuses `pam_exec`, `pam_script`, `pam_python` and `pam_xauth`, which
+  run a program that an argument names, even by a relative name. It also refuses a
   module name that is a link to one of them in a module folder. It
   refuses `pam_motd`, or a link to it, in a stack that `sudo` reaches: the
   `sudo` and `sudo-i` stacks, `other`, and every file that they include.

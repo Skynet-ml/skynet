@@ -1385,7 +1385,7 @@ PAM_ENV_EXTRA = (
 )
 PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
 PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
-PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python")
+PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python", "pam_xauth")
 # Linux-PAM loads a relative module name from its module folder, such as /usr/lib/x86_64-linux-gnu/security.
 PAM_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
 module_folders = []
@@ -1530,7 +1530,8 @@ for config, rows in stack_words.items():
         for word in words:
             plain = bare(word)
             key, _, value = plain.partition("=")
-            # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
+            # These modules run a program that an argument names (pam_xauth: xauthpath=), and a relative name resolves
+            # in sudo's folder.
             if any(runner in name for runner in PAM_RUNNERS for name in module_names(word)):
                 sys.exit("the PAM configuration " + config + " runs " + word)
             # The check does not read another envfile or conffile, and user_readenv reads a file in the target
