@@ -6082,7 +6082,12 @@ _CONF = {
     "/etc/sudo.conf": "644 regular file",
     "/etc/sudoers": "440 regular file",
     "/etc/environment": "644 regular file",
+    "/etc/default/locale": "644 regular file",
     "/etc/pam.conf": "none",
+    "/etc/passwd": "644 regular file",
+    "/etc/group": "644 regular file",
+    "/etc/shadow": "640 regular file",
+    "/etc/gshadow": "640 regular file",
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/etc/security": "755 directory",
@@ -7838,6 +7843,16 @@ _SUDO_PARTS = _sudo_lines()
         _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "1000 644 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "664 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.conf": _walk("/etc/pam.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/locale": _walk("/etc/default/locale", "1000 644 regular file")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/etc/default/locale": _walk("/etc/default/locale", modes={"/etc/default": "1000 755 directory"})}
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/shadow": _walk("/etc/shadow", "1000 640 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/group": _walk("/etc/group", "664 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/gshadow": _walk("/etc/gshadow", "1000 0 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/passwd": _walk("/etc/passwd", "646 regular file")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "775 directory")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "1000 755 directory")})),
         _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "750 directory")})),
@@ -7908,6 +7923,12 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-sudo-conf",
         "group-writable-etc-environment",
         "box-owned-pam-conf",
+        "box-owned-etc-default-locale",
+        "box-owned-etc-default",
+        "box-owned-etc-shadow",
+        "group-writable-etc-group",
+        "box-owned-etc-gshadow",
+        "other-writable-etc-passwd",
         "group-writable-pam-d",
         "box-owned-pam-d",
         "pam-d-that-others-cannot-list",
@@ -8014,6 +8035,15 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
             )
         ),
         _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "none")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/etc/default/locale": _walk("/etc/default/locale", "none"),
+                    "/etc/shadow": _walk("/etc/shadow", "0 regular file"),
+                    "/etc/gshadow": _walk("/etc/gshadow", "none"),
+                }
+            )
+        ),
         _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "644 regular empty file")})),
         _listing(
             sudo=_sudo_lines(
@@ -8038,6 +8068,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "three-sudoers-d-files",
         "no-pam-d-and-no-etc-security",
         "no-sudo-conf",
+        "no-locale-file-and-a-mode-0-shadow",
         "empty-etc-environment",
         "files-in-a-security-folder",
     ],
@@ -8414,12 +8445,17 @@ def _sudo_part(stdout: str) -> list[str]:
 
 
 def test_the_real_probe_passes_the_host_sudo_and_pam_files(tmp_path: Path) -> None:
-    """The real shell walks the host's sudo, sudoers and PAM files, and the judge accepts the root-owned host (SKY-912).
+    """The real shell walks the host's sudo, sudoers and PAM files, and the judge accepts a Debian-style host (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
     """
     python = _fake_python(tmp_path.resolve())
+    # Red Hat ships a mode-4111 sudo, and Red Hat and Alpine a mode-0750 /etc/sudoers.d; the check refuses both by design.
+    for path in (*(f"{folder}/sudo" for folder in repo_staging._ROOT_PATH.split(":")), *repo_staging._SUDO_FOLDERS):
+        need = 0o005 if path in repo_staging._SUDO_FOLDERS else 0o004
+        if Path(path).exists() and Path(path).stat().st_mode & need != need:
+            pytest.skip(f"the host's {path} is a layout that the check refuses by design")
 
     done = _run_probe(python, PATH="/usr/local/bin:/usr/bin:/bin")
 

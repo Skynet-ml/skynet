@@ -1322,8 +1322,21 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # unchecked. Sudo itself checks the owner of any other file that sudoers
 # includes, but not the folders on its way. Linux-PAM reads /etc/pam.conf only
 # when /etc/pam.d is missing. /etc/security may hold one level of folders,
-# such as limits.d.
-_SUDO_FILES = ("/etc/sudo.conf", "/etc/sudoers", "/etc/environment", "/etc/pam.conf")
+# such as limits.d. Ubuntu's sudo PAM stack reads /etc/default/locale into the
+# root environment. A box user who could change the account files could add
+# itself to the sudo group or set a root password. Shadow files are often
+# 0640 root:shadow or 0000, so the check does not need others to read them.
+_SUDO_FILES = (
+    "/etc/sudo.conf",
+    "/etc/sudoers",
+    "/etc/environment",
+    "/etc/default/locale",
+    "/etc/pam.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/shadow",
+    "/etc/gshadow",
+)
 _SUDO_FOLDERS = ("/etc/sudoers.d", "/etc/pam.d", "/etc/security")
 _DEEP_FOLDER = "/etc/security"
 _SUDO_DONE = "sudo checked"
@@ -1749,10 +1762,11 @@ UNTRUSTED_PYTHON = (
     " below that path (except site-packages), and every folder from / down to each of them, must be owned by"
     " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
-    " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH and"
-    " each folder of the image PATH before it, /etc/sudo.conf, /etc/sudoers, /etc/environment and /etc/pam.conf"
-    " when present, and /etc/sudoers.d, /etc/pam.d and /etc/security when present, with every entry in them."
-    " Others must be able to read each sudo and search each folder of the image PATH before it. The first sudo"
+    " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
+    " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
+    " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
+    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d and /etc/security when present, with every"
+    " entry in them. Others must be able to read each sudo and search each of those image PATH folders. The first sudo"
     " on the image PATH must have an x bit, and each sudo must resolve to an ELF file. Others must be able to"
     " list each of those three folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
     " a regular file, except one level of folders in /etc/security."
@@ -2921,7 +2935,8 @@ def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
     # GNU stat names a zero-byte file so, as Debian's own /etc/environment is (SKY-912).
     if len(parts) == 3 and parts[2] == "regular empty file":
         parts[2] = "regular file"
-    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]) or parts[2] not in _FILE_TYPES:
+    # ``%a`` prints a mode-0000 file, such as a Red Hat /etc/shadow, as ``0`` (SKY-912).
+    if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{1,4}", parts[1]) or parts[2] not in _FILE_TYPES:
         return None
     return int(parts[1], 8), parts[2]
 
