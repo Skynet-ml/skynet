@@ -1274,15 +1274,29 @@ def _top_level_imports(sources: tuple[str, ...]) -> list[str]:
 _MAX_LINK_HOPS = 40
 # The programs that root runs by absolute path in a box: the Vercel root
 # wrapper (``/bin/mkdir``, ``/usr/bin/timeout``, ``/bin/bash``), the hash
-# scripts (``/usr/bin/env``) and any shell that a root step starts (``/bin/sh``).
-_ROOT_PROGRAMS = ("/usr/bin/env", "/bin/bash", "/bin/sh", "/bin/mkdir", "/usr/bin/timeout")
+# scripts (``/usr/bin/env``), any shell that a root step starts (``/bin/sh``)
+# and the upload's stage removal (``/bin/rm``). ``/usr/bin/setpriv`` starts
+# every box-user command with no new privileges: a box user who could replace
+# it would run the next one free to use the image's sudo (SKY-902, SKY-907).
+_ROOT_PROGRAMS = (
+    "/usr/bin/env",
+    "/bin/bash",
+    "/bin/sh",
+    "/bin/mkdir",
+    "/usr/bin/timeout",
+    "/bin/rm",
+    "/usr/bin/setpriv",
+)
 # Other paths that root uses in a box. The supervisor reads ``/etc/passwd``
 # itself; ``/etc/nsswitch.conf`` names the NSS modules that glibc loads for
 # any other lookup. ``/tmp`` holds the supervisor's run folder and
 # the Vercel root wrapper's output, so it must be root's, sticky and 1777.
+# Root runs ``/usr/bin/find`` in the upload's stage removal and the model
+# mailbox cleanup when it exists, and falls back without it.
 _ROOT_TMP = "/tmp"
-_OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf"})
-_ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_TMP)
+_ROOT_FIND = "/usr/bin/find"
+_OPTIONAL_ROOT_FILES = frozenset({"/etc/nsswitch.conf", _ROOT_FIND})
+_ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_FIND, _ROOT_TMP)
 # The PATH of every root script on Vercel (``vercel.ROOT_PATH``, which a test
 # keeps equal). Its root output poll runs ``_ROOT_TOOLS`` by name every 0.5 s,
 # so each folder must be out of the box user's reach. Root's lookup is not the
@@ -1375,9 +1389,9 @@ for name in os.listdir("/etc"):
         with open("/etc/" + name, encoding="ascii") as paths:
             folders.update(paths.read().replace(":", "\n").split())
 """
-    + f"programs = {[*_ROOT_PROGRAMS, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + f"programs = {[*_ROOT_PROGRAMS, _ROOT_FIND, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
     + r"""
-for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.lexists(name)}):
+for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.exists(name)}):
     with open(name, "rb") as elf:
         data = elf.read()
     if data[:4] != b"\x7fELF":
@@ -1538,18 +1552,46 @@ _BOX_TOOLS_PURPOSE = {
     "metric": "to install and save the metric files",
 }
 _TOOL_MISSING = 'command -v "$tool" >/dev/null 2>&1 || printf \'%s\\n\' "$tool"'
-# The last line proves both loops ran to their end.
+# Every Vercel file upload runs these by absolute path, as root or as the box
+# user, in both roles (SKY-902). A PATH lookup that finds ``cat`` only in
+# /usr/bin would pass an image whose every upload then exits 127 (SKY-907).
+# The upload ignores a failed ``/bin/rmdir``, so it is not here.
+#
+# This probe checks only that each one is a file the box user can run. The
+# ownership rule of ``_ROOT_PROGRAMS`` applies only to the run role. The metric
+# box user runs only the owner's metric, and root in the offline metric box
+# reaches nothing more than that user: the user already writes the score and
+# makes the metered model calls. So a box-writable setpriv risks only that box.
+#
+# On Vercel, setpriv, timeout and bash also start every box-user command, so a
+# missing one fails the first check command before this probe runs. Vercel
+# refuses the command when setpriv is missing, and setpriv exits 127 when
+# timeout or bash is missing. Docker and Apple Container do not use these
+# paths, so there the probe names the missing one. So an image whose six
+# paths pass locally also has them on Vercel. Its sudo rule shows only there.
+_UPLOAD_PROGRAMS = (
+    "/usr/bin/setpriv",
+    "/usr/bin/timeout",
+    "/bin/bash",
+    "/bin/cat",
+    "/bin/rm",
+    "/bin/mkdir",
+)
+# The last line proves all three loops ran to their end.
 _BOX_TOOLS_DONE = "tools checked"
 # Vercel reads a command's output as it runs with ``_ROOT_TOOLS``, found only on ``_ROOT_PATH``.
 _BOX_TOOLS_PROBE = {
     role: f"for tool in {' '.join(tools)}; do {_TOOL_MISSING}; done;"
     f" (PATH={_ROOT_PATH}; for tool in {' '.join(_ROOT_TOOLS)}; do {_TOOL_MISSING}; done);"
+    f' for tool in {" ".join(_UPLOAD_PROGRAMS)}; do [ -f "$tool" ] && [ -x "$tool" ] || printf \'%s\\n\' "$tool"; done;'
     f" echo {shlex.quote(_BOX_TOOLS_DONE)}"
     for role, tools in _BOX_TOOLS.items()
 }
 # Root commands start through the provider: on Vercel through the image's sudo.
-# Docker and Apple Container reach root with no sudo, so there the probe proves less. The
-# real root call passes the run's variables, so the probe checks that one stays.
+# Docker and Apple Container reach root with no sudo, so there the probe proves less. A
+# run's supervisor gets the run's variables as root, so the run probe checks that one
+# stays. The metric box runs only the upload's root steps, which pass none (SKY-902),
+# so its probe checks only that the command ran as root.
 _ROOT_VARIABLE = "APP_ROOT_PROBE"
 # Bash builtins only, so the probe needs no program that a real run does not use.
 _ROOT_PROBE = f'printf \'%s\\n\' "$EUID" "${_ROOT_VARIABLE}"'
@@ -1648,12 +1690,12 @@ _MISSING = "missing"
 UNTRUSTED_PYTHON = (
     "The [run] image '{image}' has no trusted Python at {python}. {app} hashes the protected files with it."
     " The image must hold it as an executable regular file, or as a chain of links to one, outside a"
-    " virtual environment. Every program that root runs by path ({programs}), /etc/passwd and"
-    " /etc/nsswitch.conf (when present), every tail, head, base64 and tr in a folder of root's PATH"
-    " ({path}), each folder of that PATH that exists, every file that Python loads, the locale trees,"
-    " each folder on its import path and every file and folder below that path (except site-packages), and"
-    " every folder from / down to each of them, must be"
-    " owned by root and not writable by group or others. Others must be able to read each of those files,"
+    " virtual environment. Every program that root, or the start of a box-user command, runs by"
+    " path ({programs}), /etc/passwd, plus /etc/nsswitch.conf and /usr/bin/find when present, every tail,"
+    " head, base64 and tr in a folder of root's PATH ({path}), each folder of that PATH that exists, every"
+    " file that Python loads, the locale trees, each folder on its import path and every file and folder"
+    " below that path (except site-packages), and every folder from / down to each of them, must be owned by"
+    " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
@@ -1667,12 +1709,39 @@ NO_ACCOUNT = (
 
 MISSING_TOOLS = (
     "The [{role}] image '{image}' has no {missing}. {app} runs these programs by name on the box user's PATH"
-    " {purpose}: {tools}. It also runs {poll} from {path} to read a command's output. Install them in the image."
+    " {purpose}: {tools}. It also runs {poll} from {path} to read a command's output, and {upload} by these"
+    " exact paths to start box commands and write files into the box. Install them in the image."
 )
-NO_ROOT = (
-    "The [run] image '{image}' did not run a command as root with the run's variables. {app} runs its supervisor"
-    " as root, through the image's sudo on a hosted run. Install sudo, give the box user a NOPASSWD rule for all"
-    " commands, keep the caller's variables, and set its secure_path to {path}."
+NO_ROOT = {
+    "run": (
+        "The [run] image '{image}' did not run a command as root with the run's variables. {app} runs every"
+        " file upload's first and last steps, and the run's supervisor, as root, through the image's sudo on a"
+        " hosted run. Install sudo, give the box user a NOPASSWD rule for all commands, keep the caller's"
+        " variables, and set its secure_path to {path}."
+    ),
+    "metric": (
+        "The [metric] image '{image}' did not run a command as root. {app} runs every file upload's first and"
+        " last steps as root, through the image's sudo on a hosted run. Install sudo and give the box user a"
+        " NOPASSWD rule for all commands."
+    ),
+}
+# On Vercel, every box-user command starts with /usr/bin/setpriv, so its
+# refusal can only mean that setpriv is missing; a missing ascent exits 127.
+NO_SETPRIV = (
+    "The [{role}] image '{image}' has no /usr/bin/setpriv, so the box could not start"
+    " `ascent check --image --role {check_role}`. {app} starts every box command and every file upload with"
+    " these exact paths, so the image must have them: {upload}."
+)
+# On Vercel, setpriv exits 127 when timeout or bash is missing.
+MISSING_UPLOAD_HINT = (
+    "\n\nThe image has no {missing}. Also check that the image has `ascent` (the openascent package)."
+    " {app} starts every box command and every file upload with these exact paths, so the image must have"
+    " them: {upload}."
+)
+NOT_FOUND_HINT = (
+    "\n\nThe box found no program to run. Check that the image has `ascent`"
+    " (the openascent package). {app} also starts every box command and every file upload with these"
+    " exact paths, so the image must have them: {upload}."
 )
 WORKDIR_NOT_WRITABLE = (
     "The [{role}] image '{image}' starts in {folder}, and the box user cannot make a folder there. {app} keeps"
@@ -2178,10 +2247,23 @@ def _check_box_image(
         )
     )
     try:
-        result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        try:
+            result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        except _NOT_IMAGE_ERRORS:
+            raise
+        except Exception as error:
+            if not _program_refused(error):
+                raise
+            raise BoxImageError(
+                NO_SETPRIV.format(
+                    role=role, image=image, check_role=check_role, app=APP_NAME, upload=", ".join(_UPLOAD_PROGRAMS)
+                )
+            ) from error
         probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
-        tools = session.run(_BOX_TOOLS_PROBE[role], timeout_seconds=_CHECK_TIMEOUT_SECONDS)
-        root = _run_root_probe(session) if role == "run" else None
+        # No timeout: on Vercel the wrapper then starts no /usr/bin/timeout, so the
+        # probe can name it. The probe runs only shell builtins, and the box lifetime bounds it.
+        tools = session.run(_BOX_TOOLS_PROBE[role])
+        root = _run_root_probe(session, role)
         workdir = session.run(_WORKDIR_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
         report = _check_report(result.stdout)
         python = report.get("python") if report is not None else None
@@ -2210,16 +2292,6 @@ def _check_box_image(
         uid = _missing_account(probe) if probe is not None else None
         if uid is not None:
             raise BoxImageError(NO_ACCOUNT.format(image=image, uid=uid, app=APP_NAME))
-        if probe is not None and not _trusted_python(probe):
-            raise BoxImageError(
-                UNTRUSTED_PYTHON.format(
-                    image=image,
-                    python=BASE_PYTHON,
-                    app=APP_NAME,
-                    programs=", ".join(_ROOT_PROGRAMS),
-                    path=_ROOT_PATH,
-                )
-            )
         missing = _missing_tools(tools, role)
         if missing:
             raise BoxImageError(
@@ -2232,10 +2304,22 @@ def _check_box_image(
                     tools=", ".join(_BOX_TOOLS[role]),
                     poll=", ".join(_ROOT_TOOLS),
                     path=_ROOT_PATH,
+                    upload=", ".join(_UPLOAD_PROGRAMS),
                 )
             )
-        if role == "run" and (root is None or root.exit_code != 0 or root.stdout.split() != _ROOT_PROBE_OUTPUT):
-            raise BoxImageError(NO_ROOT.format(image=image, app=APP_NAME, path=_ROOT_PATH))
+        if probe is not None and not _trusted_python(probe):
+            raise BoxImageError(
+                UNTRUSTED_PYTHON.format(
+                    image=image,
+                    python=BASE_PYTHON,
+                    app=APP_NAME,
+                    programs=", ".join(_ROOT_PROGRAMS),
+                    path=_ROOT_PATH,
+                )
+            )
+        expected = _ROOT_PROBE_OUTPUT if role == "run" else _ROOT_PROBE_OUTPUT[:1]
+        if root is None or root.exit_code != 0 or root.stdout.split() != expected:
+            raise BoxImageError(NO_ROOT[role].format(image=image, app=APP_NAME, path=_ROOT_PATH))
         folder = _unwritable_workdir(workdir)
         if folder is not None:
             raise BoxImageError(WORKDIR_NOT_WRITABLE.format(role=role, image=image, folder=folder, app=APP_NAME))
@@ -2249,20 +2333,29 @@ def _check_box_image(
         if isinstance(check, dict) and check.get("ok") is not True
     ]
     output = "\n".join(failed) or (result.stdout + result.stderr).strip()[-_CHECK_OUTPUT_CHARS:]
+    hint = ""
+    if result.exit_code == 127:
+        missing = _missing_upload_programs(tools)
+        hint = (
+            MISSING_UPLOAD_HINT.format(missing=", ".join(missing), app=APP_NAME, upload=", ".join(_UPLOAD_PROGRAMS))
+            if missing
+            else NOT_FOUND_HINT.format(app=APP_NAME, upload=", ".join(_UPLOAD_PROGRAMS))
+        )
     raise BoxImageError(
         f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
-        f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
+        f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}{hint}"
     )
 
 
-def _run_root_probe(session: Any) -> Any:
-    """Run :data:`_ROOT_PROBE` as root with one run variable.
+def _run_root_probe(session: Any, role: str) -> Any:
+    """Run :data:`_ROOT_PROBE` as root, with one run variable in the run role.
 
     A provider can refuse a root command that the image cannot start, for
     example when Vercel finds no sudo. That counts as a failed probe.
 
     Args:
         session: The image check box.
+        role: ``run`` or ``metric``.
 
     Returns:
         The probe's result, or ``None`` when the provider refused the root command.
@@ -2273,20 +2366,38 @@ def _run_root_probe(session: Any) -> Any:
     """
     try:
         return session.run(
-            _ROOT_PROBE, env={_ROOT_VARIABLE: _ROOT_PROBE_OUTPUT[1]}, timeout_seconds=_CHECK_TIMEOUT_SECONDS, sudo=True
+            _ROOT_PROBE,
+            env={_ROOT_VARIABLE: _ROOT_PROBE_OUTPUT[1]} if role == "run" else None,
+            timeout_seconds=_CHECK_TIMEOUT_SECONDS,
+            sudo=True,
         )
     except _NOT_IMAGE_ERRORS:
         raise
     except Exception as error:
         # Only a refusal of the command itself says the image has no usable root.
-        # Vercel answers a box with no sudo with this 400 code (checked on a real box).
-        # Other providers reach root with no sudo, and the bridge turns their
-        # refusals into ``ServiceError``, so they have no image refusal to match.
-        api = sandbox_api_error(error)
-        if getattr(api, "status_code", None) != 400 or getattr(api, "code", None) != "executable_not_found":
+        if not _program_refused(error):
             raise
         logger.info("The image check box could not start a root command.", exc_info=True)
         return None
+
+
+def _program_refused(error: BaseException) -> bool:
+    """Tell whether the provider refused a command because the image lacks its program.
+
+    Vercel answers with a 400 ``executable_not_found`` error when the image has
+    no sudo (checked on a real box), and so also when it has no setpriv, the
+    first program of every box-user command. Other providers start commands with no such
+    program, and the bridge turns their refusals into ``ServiceError``, so they
+    have no image refusal to match.
+
+    Args:
+        error: The error that the command raised.
+
+    Returns:
+        ``True`` for Vercel's ``executable_not_found`` answer.
+    """
+    api = sandbox_api_error(error)
+    return getattr(api, "status_code", None) == 400 and getattr(api, "code", None) == "executable_not_found"
 
 
 def _unwritable_workdir(result: Any) -> str | None:
@@ -2306,21 +2417,41 @@ def _unwritable_workdir(result: Any) -> str | None:
 
 
 def _missing_tools(result: Any, role: str) -> list[str]:
-    """Name the box tools that the box user's PATH does not find.
+    """Name the box tools that the box user's PATH does not find, and the upload programs it cannot run.
 
     Args:
         result: The result of the role's :data:`_BOX_TOOLS_PROBE`.
         role: ``run`` or ``metric``.
 
     Returns:
-        The missing tools, in :data:`_BOX_TOOLS` and then :data:`_ROOT_TOOLS` order. All of them when the
-        probe did not run to its end.
+        The missing tools, in :data:`_BOX_TOOLS`, :data:`_ROOT_TOOLS` and then
+        :data:`_UPLOAD_PROGRAMS` order. All of them when the probe did not run to its end.
     """
-    tools = list(dict.fromkeys((*_BOX_TOOLS[role], *_ROOT_TOOLS)))
+    tools = list(dict.fromkeys((*_BOX_TOOLS[role], *_ROOT_TOOLS, *_UPLOAD_PROGRAMS)))
     lines = result.stdout.splitlines()
     if result.exit_code != 0 or not lines or lines[-1] != _BOX_TOOLS_DONE:
         return tools
     return [tool for tool in tools if tool in lines[:-1]]
+
+
+def _missing_upload_programs(result: Any) -> list[str]:
+    """Name the upload programs that the box tools probe found missing, for a check that exited 127.
+
+    The probe runs only shell builtins. So when it also exits 127 with no output,
+    the box found no shell: setpriv exits 127 on Vercel when ``/bin/bash`` is missing.
+
+    Args:
+        result: The result of the role's :data:`_BOX_TOOLS_PROBE`.
+
+    Returns:
+        The missing upload programs in :data:`_UPLOAD_PROGRAMS` order, or an empty list when the probe names none.
+    """
+    lines = result.stdout.splitlines()
+    if result.exit_code == 0 and lines and lines[-1] == _BOX_TOOLS_DONE:
+        return [program for program in _UPLOAD_PROGRAMS if program in lines[:-1]]
+    if result.exit_code == 127 and not result.stdout.strip():
+        return ["/bin/bash"]
+    return []
 
 
 def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, role: str, username: str) -> None:
@@ -2419,8 +2550,8 @@ def _trusted_python(probe: Any) -> bool:
     Returns:
         True when ``BASE_PYTHON`` resolves to a root-owned regular file that
         group and others cannot write and others can read and run, each of
-        ``_ROOT_PROGRAMS``, ``/etc/passwd`` and ``/etc/nsswitch.conf`` (when
-        present) resolves to one that group and others cannot write and others can read,
+        ``_ROOT_PROGRAMS``, ``/etc/passwd``, and ``/etc/nsswitch.conf`` and
+        ``/usr/bin/find`` (when present) resolves to one that group and others cannot write and others can read,
         ``/tmp`` is a root-owned 1777 folder, each ``_ROOT_PATH`` folder is
         missing or one that group and others cannot write and others can
         search, the probe reports each folder and tool pair once, every entry of
