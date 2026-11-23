@@ -145,6 +145,9 @@ def test_rotated_credential_never_queries_the_original_generation(database) -> N
     """Refuse to look up a generation with any credential other than the original one.
 
     The sweep releases such a hold after one minute; a separate test covers that.
+
+    Args:
+        database: Ledger database.
     """
     runtime = _runtime(database)
 
