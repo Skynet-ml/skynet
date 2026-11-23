@@ -805,6 +805,14 @@ own commands in the setup box and in each candidate box:
   use the rule.
 - `/usr/local/bin/python3` must be a trusted Python. The error of the
   image check lists the file and folder rules.
+- The box user must not be able to change the `sudo` that runs root's
+  commands (SKY-912). Root must own each `sudo` in a folder of
+  `secure_path`, and the first `sudo` on the image `PATH`. Root must also
+  own each folder of the image `PATH` before that `sudo`, `/etc/sudoers`,
+  `/etc/sudoers.d` and every entry in it. Group and others must not be able
+  to write any of them. Others must be able to read each `sudo` and to list
+  `/etc/sudoers.d`. The Debian `sudo` package meets these rules. Red Hat
+  images do not: their `sudo` is mode 4111 and `/etc/sudoers.d` is 0750.
 
 The image check refuses an image that breaks one of these rules, before
 the first version. A minimal `[run]` image:
@@ -1159,8 +1167,18 @@ Residual risk:
   `/app/.venv/bin` would get root. The image puts a root-only guard folder,
   `/usr/local/libexec/skynet-path-guard`, first on its `PATH` and in its
   login shell `PATH`. That folder holds only a link to `/usr/bin/sudo`.
-  How the agent finds `sudo` is not verified on a real box. A real-box check
-  must confirm it before the sandbox image is pinned.
+  A real staging box (SKY-912, Debian 13) showed that the agent starts
+  `sudo` by its bare name, and the process ran `/usr/bin/sudo`. A
+  box-user `sudo` first on the command's own `PATH` did not run. A root
+  `sudo` in `/usr/local/bin` did not run either, although that folder
+  comes before `/usr/bin` on root's `PATH`. So the agent runs a fixed path
+  or looks `sudo` up on its own `PATH`, probably the image `PATH`. The
+  check did not prove which. So the image check walks both: every `sudo`
+  in a folder of root's `PATH`, and the image `PATH` up to its first
+  `sudo`. It also walks `/etc/sudoers` and each entry in `/etc/sudoers.d`.
+  It does not walk a file that sudoers includes from another folder, or a
+  `sudo.conf` `sudoers_file` setting. Sudo itself refuses such a file when
+  root does not own it, or when others can write it.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).

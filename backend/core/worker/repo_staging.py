@@ -1309,6 +1309,20 @@ _ROOT_PATHS = (*_ROOT_PROGRAMS, "/etc/passwd", "/etc/nsswitch.conf", _ROOT_FIND,
 # it would hide entries that root runs.
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROOT_TOOLS = ("tail", "head", "base64", "tr")
+# Vercel's init starts every ``sudo: true`` command as a bare ``sudo`` (SKY-912,
+# real box). The command's own PATH did not change which sudo ran, and a sudo
+# in /usr/local/bin did not win over /usr/bin/sudo. So Vercel runs a fixed path
+# or looks sudo up on the image PATH. A box user who could replace that sudo
+# would run every later root step, and get the run's variables. So the probe
+# walks each ``sudo`` in a folder of ``_ROOT_PATH``, and each folder of the box
+# PATH up to and with its first ``sudo``, which must be root's. Sudo reads
+# ``/etc/sudoers`` and every entry in ``/etc/sudoers.d`` as root, so they must
+# be root's too, and others must be able to list the folder so that no entry
+# goes unchecked. Sudo itself checks the owner of any other file that sudoers
+# includes, but not the folders on its way.
+_SUDOERS = "/etc/sudoers"
+_SUDOERS_DIR = "/etc/sudoers.d"
+_SUDO_DONE = "sudo checked"
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
     r"""import os
@@ -1389,8 +1403,12 @@ for name in os.listdir("/etc"):
         with open("/etc/" + name, encoding="ascii") as paths:
             folders.update(paths.read().replace(":", "\n").split())
 """
-    + f"programs = {[*_ROOT_PROGRAMS, _ROOT_FIND, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in _ROOT_TOOLS)]!r}"
+    + f"programs = {[*_ROOT_PROGRAMS, _ROOT_FIND, *(f'{b}/{t}' for b in _ROOT_PATH.split(':') for t in (*_ROOT_TOOLS, 'sudo'))]!r}"
     + r"""
+for folder in os.environ.get("PATH", "").split(":"):
+    if folder.startswith("/") and os.path.lexists(os.path.join(folder, "sudo")):
+        programs.append(os.path.join(folder, "sudo"))
+        break
 for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.exists(name)}):
     with open(name, "rb") as elf:
         data = elf.read()
@@ -1509,6 +1527,30 @@ _TRUSTED_PYTHON_PROBE = (
     f"for b in {_ROOT_PATH.replace(':', ' ')}; do for t in {' '.join(_ROOT_TOOLS)}; do\n"
     '  if [ -e "$b/$t" ] || [ -h "$b/$t" ]; then printf \'tool %s\\n\' "$b/$t"; w "$b/$t"; else printf \'notool %s\\n\' "$b/$t"; fi\n'
     "done; done\n"
+    f"for b in {_ROOT_PATH.replace(':', ' ')}; do\n"
+    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; else printf \'nosudo %s\\n\' "$b/sudo"; fi\n'
+    "done\n"
+    # Vercel may look sudo up on the image PATH, which the box commands inherit.
+    "p=$PATH:\n"
+    'while [ -n "$p" ]; do\n'
+    "  b=${p%%:*}; p=${p#*:}\n"
+    "  case $b in /*) ;; *) exit 1;; esac\n"
+    "  case $b in *[![:print:]]*) exit 1;; esac\n"
+    '  printf \'pathdir %s\\n\' "$b"; w "$b"\n'
+    '  if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi\n'
+    '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; break; fi\n'
+    "done\n"
+    f'for b in {_SUDOERS} {_SUDOERS_DIR}; do printf \'sudoers %s\\n\' "$b"; w "$b"; done\n'
+    f"if [ -d {_SUDOERS_DIR} ]; then\n"
+    f"  [ -r {_SUDOERS_DIR} ] && [ -x {_SUDOERS_DIR} ] || exit 1\n"
+    f"  for e in {_SUDOERS_DIR}/* {_SUDOERS_DIR}/.[!.]* {_SUDOERS_DIR}/..?*; do\n"
+    '    if [ -e "$e" ] || [ -h "$e" ]; then\n'
+    "      case $e in *[![:print:]]*) exit 1;; esac\n"
+    '      printf \'sudoer %s\\n\' "$e"; w "$e"\n'
+    "    fi\n"
+    "  done\n"
+    "fi\n"
+    f"printf '%s\\n' '{_SUDO_DONE}'\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
     '  if [ $m = clean ]; then o=$(/usr/bin/env -i OPENSSL_CONF=/dev/null "$s" -I -S -c "$y") || exit 1\n'
@@ -1697,6 +1739,9 @@ UNTRUSTED_PYTHON = (
     " below that path (except site-packages), and every folder from / down to each of them, must be owned by"
     " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
+    " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH and"
+    " each folder of the image PATH before it, /etc/sudoers, /etc/sudoers.d and every entry in it. Others must"
+    " be able to read each sudo and to list /etc/sudoers.d, for example with chmod 755 /etc/sudoers.d."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
@@ -2556,9 +2601,10 @@ def _trusted_python(probe: Any) -> bool:
         missing or one that group and others cannot write and others can
         search, the probe reports each folder and tool pair once, every entry of
         ``_ROOT_TOOLS`` in those folders resolves to such a file and each
-        tool has one, both runs find a passwd line for the box user, and both runs
-        list at least one ``path``, ``file`` and ``dir`` entry, each of which
-        passes :func:`_walk` with the file type that its tag allows, every
+        tool has one, :func:`_trusted_sudo` accepts the sudo part, both runs
+        find a passwd line for the box user, and both runs list at least one
+        ``path``, ``file`` and ``dir`` entry, each of which passes
+        :func:`_walk` with the file type that its tag allows, every
         regular file among them is readable by others, and every ``absent``
         entry is missing.
     """
@@ -2603,7 +2649,7 @@ def _trusted_python(probe: Any) -> bool:
             if entry in (None, _MISSING) or not _readable_file(entry):
                 return False
             found.add(tool)
-    if found != set(_ROOT_TOOLS):
+    if found != set(_ROOT_TOOLS) or not _trusted_sudo(lines):
         return False
     for mode in _RUN_MODES:
         if not lines or lines.pop() != f"run {mode}":
@@ -2630,6 +2676,69 @@ def _trusted_python(probe: Any) -> bool:
         if not {"account", "path", "file", "dir"} <= tags:
             return False
     return not lines
+
+
+def _trusted_sudo(lines: list[str]) -> bool:
+    """Tell whether every sudo that Vercel may run, and the sudoers files it reads, are out of the box user's reach.
+
+    Args:
+        lines: The probe's remaining lines, last line first; the check pops
+            the sudo part of the listing.
+
+    Returns:
+        True when all of these hold. The probe reports the sudo of each
+        ``_ROOT_PATH`` folder once, and each one that exists resolves to a
+        file that :func:`_readable_file` accepts. Each image PATH folder up to
+        the first one with a sudo is missing, or a folder that group and
+        others cannot write and others can search, and that sudo is such a
+        file with an x bit. ``/etc/sudoers`` is missing or a regular file that group and
+        others cannot write. ``/etc/sudoers.d`` is missing or such a folder
+        that others can also list, and each entry in it is such a regular
+        file. The listing ends with ``_SUDO_DONE``.
+    """
+    for folder in _ROOT_PATH.split(":"):
+        line = lines.pop() if lines else ""
+        if line == f"nosudo {folder}/sudo":
+            continue
+        if line != f"sudo {folder}/sudo":
+            return False
+        entry = _walk(lines, f"{folder}/sudo")
+        if entry in (None, _MISSING) or not _readable_file(entry):
+            return False
+    while lines and lines[-1].startswith("pathdir "):
+        folder = lines.pop().removeprefix("pathdir ")
+        if not _PRINTABLE_PATH.fullmatch(folder):
+            return False
+        entry = _walk(lines, folder)
+        if entry is None or (
+            entry != _MISSING and (entry[1] != "directory" or entry[0] & 0o022 or not entry[0] & 0o001)
+        ):
+            return False
+        if lines and lines[-1] == f"sudo {folder}/sudo":
+            lines.pop()
+            entry = _walk(lines, f"{folder}/sudo")
+            # A PATH lookup skips a file with no x bit and goes on to folders that the probe never walks.
+            if entry in (None, _MISSING) or not _readable_file(entry) or not entry[0] & 0o111:
+                return False
+            break
+    for path, kind in ((_SUDOERS, "regular file"), (_SUDOERS_DIR, "directory")):
+        if not lines or lines.pop() != f"sudoers {path}":
+            return False
+        entry = _walk(lines, path)
+        if entry is None or (entry != _MISSING and (entry[1] != kind or entry[0] & 0o022)):
+            return False
+        # Sudo reads every entry as root, so the box user must see them all.
+        if entry != _MISSING and kind == "directory" and entry[0] & 0o005 != 0o005:
+            return False
+    while lines and lines[-1].startswith("sudoer "):
+        path = lines.pop().removeprefix("sudoer ")
+        name = path.removeprefix(f"{_SUDOERS_DIR}/")
+        if name in (path, "", ".", "..") or "/" in name or not _PRINTABLE_PATH.fullmatch(path):
+            return False
+        entry = _walk(lines, path)
+        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+            return False
+    return bool(lines) and lines.pop() == _SUDO_DONE
 
 
 def _readable_file(entry: tuple[int, str]) -> bool:

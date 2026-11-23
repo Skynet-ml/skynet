@@ -6069,6 +6069,50 @@ _ENTRIES = [
 ]
 
 
+# The image PATH part of the sudo listing: ``/usr/local/bin:/usr/bin``, with sudo in ``/usr/bin``.
+_SUDO_PATH = [
+    *_entry("pathdir", "/usr/local/bin", "755 directory"),
+    *_entry("pathdir", "/usr/bin", "755 directory"),
+    *_entry("sudo", "/usr/bin/sudo", "4755 regular file"),
+]
+
+
+def _sudo_lines(
+    root: dict[str, list[str] | None] | None = None,
+    path: list[str] = _SUDO_PATH,
+    sudoers: dict[str, list[str]] | None = None,
+    entries: list[str] | None = None,
+    done: bool = True,
+) -> list[str]:
+    """Write the sudo part of the probe's output, as a Debian image with sudo prints it.
+
+    Args:
+        root: The walks of ``folder/sudo`` for root's PATH folders that differ from one root-owned
+            4755 ``/usr/bin/sudo``, by entry; ``None`` makes an entry a ``nosudo`` line.
+        path: The ``pathdir`` and ``sudo`` lines of the image PATH.
+        sudoers: The walks of ``/etc/sudoers`` and ``/etc/sudoers.d`` that differ from a root-owned
+            0440 file and a root-owned 755 folder, by path.
+        entries: The ``sudoer`` lines and walks; the default is one root-owned 0440 ``box`` file.
+        done: Whether the part ends with its last line.
+
+    Returns:
+        The lines.
+    """
+    found = {"/usr/bin/sudo": _walk("/usr/bin/sudo", "4755 regular file")} | (root or {})
+    lines = []
+    for folder in repo_staging._ROOT_PATH.split(":"):
+        walk = found.get(f"{folder}/sudo")
+        lines += [f"nosudo {folder}/sudo"] if walk is None else [f"sudo {folder}/sudo", *walk]
+    lines += path
+    files = {
+        "/etc/sudoers": _walk("/etc/sudoers", "440 regular file"),
+        "/etc/sudoers.d": _walk("/etc/sudoers.d", "755 directory"),
+    } | (sudoers or {})
+    lines += [line for name, walk in files.items() for line in (f"sudoers {name}", *walk)]
+    lines += _entry("sudoer", "/etc/sudoers.d/box", "440 regular file") if entries is None else entries
+    return [*lines, repo_staging._SUDO_DONE] if done else lines
+
+
 def _listing(
     clean: list[str] = _ENTRIES,
     box: list[str] = _ENTRIES,
@@ -6076,6 +6120,7 @@ def _listing(
     programs: dict[str, list[str]] | None = None,
     folders: dict[str, list[str]] | None = None,
     tools: dict[str, list[str] | None] | None = None,
+    sudo: list[str] | None = None,
 ) -> str:
     """Write the probe's whole standard output.
 
@@ -6088,6 +6133,7 @@ def _listing(
         folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
         tools: The walks of ``folder/tool`` entries that differ from one root-owned file in ``/usr/bin``
             for each tool, by entry; ``None`` makes an entry a ``notool`` line.
+        sudo: The sudo part; the default is :func:`_sudo_lines` with no changes.
 
     Returns:
         The probe's standard output.
@@ -6102,6 +6148,7 @@ def _listing(
         for name in repo_staging._ROOT_TOOLS:
             walk = found.get(f"{folder}/{name}")
             fixed += [f"notool {folder}/{name}"] if walk is None else [f"tool {folder}/{name}", *walk]
+    fixed += _sudo_lines() if sudo is None else sudo
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
@@ -7664,6 +7711,239 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
     """
     assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
     assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
+
+
+_BOX_SUDO = _listing(
+    sudo=_sudo_lines(root={"/usr/local/bin/sudo": _walk("/usr/local/bin/sudo", "1000 755 regular file")})
+)
+_SUDO_PARTS = _sudo_lines()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _BOX_SUDO,
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4775 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4757 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4711 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                root={
+                    "/usr/local/sbin/sudo": [
+                        *_walk("/usr/local/sbin/sudo", "777 symbolic link"),
+                        "link /tmp/sudo",
+                        *_walk("/tmp/sudo", modes={"/tmp": "1777 directory"}),
+                    ]
+                }
+            )
+        ),
+        _listing(sudo=_sudo_lines(root={"/sbin/sudo": _walk("/sbin/sudo", "none")})),
+        _listing(sudo=_SUDO_PARTS[1:]),
+        _listing(sudo=["sudo /usr/local/sbin/sudo", *_SUDO_PARTS[1:]]),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry(
+                        "pathdir",
+                        "/home/box/bin",
+                        "none",
+                        {"/home": "755 directory", "/home/box": "1000 755 directory"},
+                    ),
+                    *_SUDO_PATH,
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "775 directory"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "750 directory"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "755 regular file"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=["pathdir bin", *_SUDO_PATH])),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/bin", "755 directory"),
+                    *_entry("sudo", "/usr/bin/sudo", "1000 755 regular file"),
+                ]
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/local/libexec/guard", "755 directory"),
+                    *_entry("sudo", "/usr/local/libexec/guard/sudo", "777 symbolic link"),
+                    "link /tmp/sudo",
+                    *_walk("/tmp/sudo", modes={"/tmp": "1777 directory"}),
+                    *_SUDO_PATH,
+                ]
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/opt/bin", "755 directory"),
+                    *_entry("sudo", "/opt/bin/sudo", "644 regular file"),
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "1000 440 regular file")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "660 regular file")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "755 directory")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "775 directory")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1777 directory")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1000 755 directory")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "750 directory")})),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "440 regular file")})),
+        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "1000 440 regular file"))),
+        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "660 regular file"))),
+        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "755 directory"))),
+        _listing(
+            sudo=_sudo_lines(
+                entries=[
+                    *_entry("sudoer", "/etc/sudoers.d/box", "777 symbolic link"),
+                    "link gone",
+                    "none /etc/sudoers.d/gone",
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/a/b", "440 regular file"))),
+        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/other", "440 regular file"))),
+        _listing(sudo=_sudo_lines(entries=["sudoer /etc/sudoers.d/box"])),
+        _listing(sudo=_sudo_lines(done=False)),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "sudoers /etc/sudoers"]),
+    ],
+    ids=[
+        "box-owned-sudo-before-usr-bin",
+        "group-writable-sudo",
+        "other-writable-sudo",
+        "sudo-that-others-cannot-read",
+        "sudo-is-a-folder",
+        "sudo-link-into-tmp",
+        "sudo-line-for-a-missing-sudo",
+        "no-line-for-usr-local-sbin-sudo",
+        "sudo-line-without-its-walk",
+        "box-owned-path-folder-before-sudo",
+        "group-writable-path-folder-before-sudo",
+        "path-folder-that-others-cannot-search",
+        "path-folder-is-a-file",
+        "relative-path-folder",
+        "box-owned-sudo-on-the-path",
+        "path-sudo-link-into-tmp",
+        "unrunnable-path-sudo-before-a-box-folder",
+        "box-owned-sudoers",
+        "group-writable-sudoers",
+        "sudoers-is-a-folder",
+        "group-writable-sudoers-d",
+        "other-writable-sudoers-d",
+        "box-owned-sudoers-d",
+        "sudoers-d-that-others-cannot-list",
+        "sudoers-d-is-a-file",
+        "box-owned-file-in-sudoers-d",
+        "group-writable-file-in-sudoers-d",
+        "folder-in-sudoers-d",
+        "dangling-link-in-sudoers-d",
+        "nested-sudoers-d-entry",
+        "sudoer-outside-sudoers-d",
+        "sudoer-without-its-walk",
+        "no-sudo-done-line",
+        "no-sudoers-line",
+    ],
+)
+def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
+    """A sudo or sudoers file that the box user could change, or a short sudo listing, refuses (SKY-912).
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert not repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
+
+
+def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The image check stops a ``[run]`` image whose sudo the box user owns, and names the sudo rule (SKY-912).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_BOX_SUDO)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"(?s)has no trusted Python.*/etc/sudoers\.d"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _listing(sudo=_sudo_lines(entries=[])),
+        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "none")}, entries=[])),
+        _listing(
+            sudo=_sudo_lines(
+                root={"/usr/bin/sudo": None},
+                path=[
+                    *_entry("pathdir", "/usr/local/bin", "755 directory"),
+                    *_entry("pathdir", "/usr/bin", "755 directory"),
+                ],
+                sudoers={
+                    "/etc/sudoers": _walk("/etc/sudoers", "none"),
+                    "/etc/sudoers.d": _walk("/etc/sudoers.d", "none"),
+                },
+                entries=[],
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                root={
+                    "/bin/sudo": [
+                        *_walk("/bin", "777 symbolic link"),
+                        "link usr/bin",
+                        "0 755 directory /usr",
+                        "0 755 directory /usr/bin",
+                        "0 4755 regular file /usr/bin/sudo",
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/local/libexec/guard", "755 directory"),
+                    *_entry("sudo", "/usr/local/libexec/guard/sudo", "777 symbolic link"),
+                    "link /usr/bin/sudo",
+                    *_walk("/usr/bin/sudo", "4755 regular file"),
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/tools/bin", "none"), *_SUDO_PATH])),
+        _listing(
+            sudo=_sudo_lines(
+                entries=[
+                    *_entry("sudoer", "/etc/sudoers.d/.hidden", "440 regular file"),
+                    *_entry("sudoer", "/etc/sudoers.d/README", "440 regular file"),
+                    *_entry("sudoer", "/etc/sudoers.d/box", "440 regular file"),
+                ]
+            )
+        ),
+    ],
+    ids=[
+        "empty-sudoers-d",
+        "no-sudoers-d",
+        "no-sudo-at-all",
+        "merged-usr-bin-sudo",
+        "guard-link-first-on-the-path",
+        "missing-path-folder-before-sudo",
+        "three-sudoers-d-files",
+    ],
+)
+def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:
+    """Root-owned sudo and sudoers files pass, and a missing sudo leaves the refusal to the root probe (SKY-912).
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
 
 
 @pytest.mark.parametrize(
