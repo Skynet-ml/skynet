@@ -21,12 +21,14 @@ from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
 # no charge, so the user never pays for it or waits on it (Gilad, SKY-784).
 UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
 # A returned call with no provider request id can never be looked up. A call
-# whose original credential this worker cannot resolve might still be confirmed
-# by another worker, for example during a key rotation. Both holds are released
-# at no charge after one minute, and Skynet accepts that revenue gap, because a
-# 15-minute wait blocks the account's setup check (SKY-914). The minute absorbs
-# clock skew between workers. The sweep then releases the hold on its next pass
-# that reaches it; a long queue of pending holds can delay that.
+# whose original credential this worker cannot resolve is also not looked up:
+# for a BYOK key no worker can resolve it, and only during a managed-key
+# rotation might another worker still confirm the bill. Both holds are released
+# at no further charge one minute after dispatched_at: usage already settled
+# stays billed, and Skynet accepts the gap for the rest, because a 15-minute
+# wait blocks the account's setup check (SKY-914). The minute absorbs clock skew
+# between workers. The sweep releases the hold on its next pass that reaches
+# it; a long queue of pending holds can delay that.
 UNSETTLEABLE_RELEASE_AFTER = timedelta(minutes=1)
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 class UnsettleableUsageError(UsagePendingError):
     """Report a pending model bill that this worker cannot confirm with the provider.
 
-    The hold is released at no charge; Skynet accepts the revenue gap (SKY-914).
+    The hold is released at no further charge; Skynet accepts the revenue gap (SKY-914).
     """
 
 
@@ -95,7 +97,8 @@ class OpenRouterUsageReconciler:
 
         Raises:
             UnsettleableUsageError: When the provider identity or original credential is unavailable.
-            UsagePendingError: When final billing evidence or the original policy is unavailable.
+            UsagePendingError: When the operation is not an admitted OpenRouter generation, or
+                final billing evidence or the original policy is unavailable.
         """
         record = self.service.get_reconciliation(operation_id, username)
         operation, prices = record.operation, record.price_snapshot
@@ -163,14 +166,17 @@ class OpenRouterUsageReconciler:
         )
 
     def sweep(self, *, limit: int = 100, after_id: str | None = None) -> ReconciliationPage:
-        """Reconcile one bounded page while leaving every unknown operation covered.
+        """Reconcile one bounded page and release, at no further charge, holds whose bill stays unknown.
+
+        A hold that cannot be looked up is released 1 minute after dispatch; a
+        hold that can still be looked up is released after 15 minutes.
 
         Args:
             limit: Maximum number of operations visited.
             after_id: Previous page cursor, if any.
 
         Returns:
-            Confirmed or pending results and the next non-starving page cursor.
+            Settled, released or pending results and the next non-starving page cursor.
         """
         attempts = self.service.unsettled_operations(
             provider="openrouter",

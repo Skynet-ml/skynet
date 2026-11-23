@@ -15,10 +15,10 @@ from sqlalchemy.orm import Session
 from core.billing.budget_amounts import wallet_reserved_cents
 from core.billing.budgets import BudgetConflictError
 from core.billing.model_dispatch import OpenRouterDispatcher, generation_charge
-from core.billing.model_reconciliation import OpenRouterUsageReconciler
+from core.billing.model_reconciliation import OpenRouterUsageReconciler, UnsettleableUsageError
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy, json_fingerprint
-from core.billing.runtime import PaidResult, UsagePendingError
+from core.billing.runtime import BudgetRuntime, PaidResult, UsagePendingError
 from core.billing.tests.test_protected_dispatch import CATALOG, REQUEST, _runtime
 from core.billing.tests.test_protected_dispatch import database as _database_fixture
 from core.config import settings
@@ -176,7 +176,7 @@ def test_rotated_credential_never_queries_the_original_generation(database) -> N
 
     with httpx.Client(transport=httpx.MockTransport(forbidden)) as client:
         reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "rotated")
-        with pytest.raises(UsagePendingError):
+        with pytest.raises(UnsettleableUsageError, match="credential"):
             reconciler.reconcile(operation_id, "alice", client=client)
     assert runtime.service.get(runtime.budget_id, "alice").pending_operations == 1
 
@@ -290,7 +290,7 @@ def test_sweep_releases_a_hold_whose_bill_stays_unconfirmed_for_15_minutes(datab
     assert reconciler.sweep(limit=4).results == ()
 
 
-def _park_model_call(runtime, request_id: str | None) -> str:
+def _park_model_call(runtime: BudgetRuntime, request_id: str | None) -> str:
     """Leave one returned managed model call pending without a usable bill.
 
     Args:
@@ -340,11 +340,22 @@ def _age_operations(database, minutes: int) -> None:
 def test_sweep_releases_a_hold_that_can_never_settle_after_one_minute(
     database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, request_id, resolved_key, reason
 ) -> None:
-    """Release at no charge, and log, a hold with no request id or no credential (SKY-914)."""
+    """Release at no charge, and log, a hold with no request id or no credential (SKY-914).
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Replaces the provider lookup with a failure.
+        caplog: Captures the release log line.
+        request_id: Provider request id the parked call returned, or None.
+        resolved_key: Credential the resolver returns for the original fingerprint, or None.
+        reason: Text the pending reason and the release log line must contain.
+    """
     monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: pytest.fail("No lookup is possible."))
     runtime = _runtime(database)
     operation_id = _park_model_call(runtime, request_id)
     reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: resolved_key)
+    with pytest.raises(UnsettleableUsageError, match=reason):
+        reconciler.reconcile(operation_id, "alice")
     page = reconciler.sweep(limit=4)
     assert [(result.state, reason in result.reason) for result in page.results] == [("pending", True)]
     _age_operations(database, 2)
