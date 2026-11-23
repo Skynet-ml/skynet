@@ -1,0 +1,86 @@
+{
+  "timeline": {
+    "title": "",
+    "alt": "A timeline from 2026 to 2036 with eight guesses: Elon Musk 2026, Dario Amodei 2027, Sam Altman 2028, Shane Legg 2028, Ray Kurzweil 2029, Demis Hassabis 2030, Dwarkesh Patel 2032, Andrej Karpathy 2035.",
+    "width": 720,
+    "height": 312
+  },
+  "levers": {
+    "title": "Six levers that shape an AI's result in a given task",
+    "alt": "Three agents inside a harness, inside an environment: Claude, Gemini, and GPT, each with a reasoning effort. The harness has tools and context management. The environment holds the harness and the metric. The metric is a way to score and measure a result.",
+    "width": 720,
+    "height": 591
+  },
+  "arcmodels": {
+    "title": "Leading models on ARC-AGI-3 with the standard harness",
+    "alt": "",
+    "width": 720,
+    "height": 470
+  },
+  "arc": {
+    "title": "GPT-6 Astra on ARC-AGI-3, by harness and reasoning effort",
+    "alt": "ARC-AGI-3 scores of GPT-6 Astra in two harnesses at six reasoning effort levels. Standard harness scores range from 17.5% to 62.7%; OpenAI harness scores range from 96.7% to 99.9%.",
+    "width": 720,
+    "height": 401
+  },
+  "venn": {
+    "title": "Fable and Astra solve different Terminal-Bench 4.1 tasks",
+    "alt": "Venn diagram of 66 Terminal-Bench 4.1 tasks: 36 solved by both models, 9 by Claude Fable 5.2 only, 4 by GPT-6.2 Astra only",
+    "width": 720,
+    "height": 649
+  },
+  "comms": {
+    "title": "How agents communicate can help by 81% or hurt by 70%",
+    "alt": "Multi-agent performance change versus a single agent: Finance-Agent +57% to +80.8%, WorkBench -11% to +6%, SWE-bench Verified -15% to -2%, PlanCraft -70% to -39%.",
+    "width": 720,
+    "height": 434
+  },
+  "env": {
+    "title": "Changing the desktop interface doubles success on OSWorld",
+    "alt": "OSWorld success rates moving from raw screenshots to structured interfaces: GPT-4V 5.26% to 12.17%, GPT-4o 5.03% to 11.36%, Claude 3 Opus 2.42% to 6.72%.",
+    "width": 720,
+    "height": 313
+  },
+  "metric": {
+    "title": "Extra attempts only scale when a metric can verify them",
+    "alt": "SWE-bench Lite with unit tests rises from 15.9% at 1 attempt to 56% at 250 attempts, beating the 43% single-try record. On MATH from 100 to 10,000 samples, the oracle ceiling rises from 82.9% to 98.44%, while majority voting and reward models stall from 40.50% to 41.41%.",
+    "width": 720,
+    "height": 331
+  },
+  "nvidia": {
+    "title": "Nvidia's harness takes Claude Opus 5 from 30% to 100% on ARC-AGI-3",
+    "alt": "Without the harness the agent goes into a dead end, comes back and tries it again, and does not solve the task.",
+    "width": 720,
+    "height": 429
+  },
+  "problems": {
+    "title": "",
+    "alt": "One shot",
+    "width": 720,
+    "height": 285
+  },
+  "price": {
+    "title": "How much cheaper each technology gets per year",
+    "alt": "The average price decline per year of AI and of four older technologies, on a log scale.",
+    "width": 720,
+    "height": 350
+  },
+  "shift": {
+    "title": "Both the one-shot and bespoke buckets grow together",
+    "alt": "Schematic showing the three problem buckets shifting as models improve and intelligence gets cheaper: both the one-shot bucket and the bespoke-solution bucket grow while the unsolvable bucket shrinks.",
+    "width": 720,
+    "height": 329
+  },
+  "loop": {
+    "title": "",
+    "alt": "A loop: a goal and a metric, a swarm of agents, a measurement, and insights that go into the next round.",
+    "width": 720,
+    "height": 327
+  },
+  "skynet": {
+    "title": "From your goal and budget to a verifiable solution",
+    "alt": "Skynet in the center of a ring of the six levers: the model, the reasoning effort, attempts and agents, the harness, the environment, and the metric. The goal and a budget go in, and a verifiable solution comes out.",
+    "width": 720,
+    "height": 318
+  }
+}

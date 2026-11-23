@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { BLOG_POSTS, blogHref } from "@/features/blog";
 import { DOCS_LOCALES, DOCS_PAGES, docsHref } from "@/features/docs";
 import { getSiteUrl } from "@/shared/lib/site-config";
 
@@ -13,6 +14,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${siteUrl}/tagger`, lastModified: now, changeFrequency: "weekly", priority: 0.6 },
     { url: `${siteUrl}/terms`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
     { url: `${siteUrl}/privacy`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${siteUrl}${blogHref()}`, lastModified: now, changeFrequency: "weekly", priority: 0.6 },
+    ...BLOG_POSTS.map((post) => ({
+      url: `${siteUrl}${blogHref(post.slug)}`,
+      lastModified: new Date(`${post.date}T00:00:00Z`),
+      changeFrequency: "monthly" as const,
+      priority: 0.6,
+    })),
     ...DOCS_PAGES.flatMap((page) =>
       DOCS_LOCALES.map((locale) => ({
         url: `${siteUrl}${docsHref(page.slug, locale)}`,

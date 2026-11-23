@@ -1,5 +1,6 @@
 /** /llms.txt: a short map of the docs for language models (https://llmstxt.org). */
 
+import { BLOG_POSTS, blogHref } from "@/features/blog";
 import { DOCS_LOCALES, DOCS_PAGES, DOCS_SECTIONS, docsMarkdownHref } from "@/features/docs";
 import { getSiteUrl, serviceUrls } from "@/shared/lib/site-config";
 
@@ -19,6 +20,10 @@ export async function GET() {
     `Every page below is Markdown. The full docs are in one file at ${site}/llms-full.txt. The hosted MCP server is at ${serviceUrls(site).mcp}. Other languages are under ${site}/docs/<locale>, for these locales: ${DOCS_LOCALES.filter((l) => l !== "en").join(", ")}.`,
     "",
     ...sections.flatMap((s) => [s, ""]),
+    "## Blog",
+    "",
+    ...BLOG_POSTS.map((post) => `- [${post.title}](${site}${blogHref(post.slug)}): ${post.summary}`),
+    "",
   ].join("\n");
   return new Response(body, {
     headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600" },

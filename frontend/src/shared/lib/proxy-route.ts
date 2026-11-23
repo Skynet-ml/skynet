@@ -52,9 +52,11 @@ export function isRefusedLocalHost(
 // too: signed-out pages load the bundled fonts, and a gated font request
 // gets the /login HTML back instead of the woff2. ``sw.js`` (the web push
 // service worker) is fetched by the browser itself on registration and
-// update checks, and a /login redirect would fail its registration.
+// update checks, and a /login redirect would fail its registration. The bare
+// ``/`` (the leading ``$``) is public too: a signed-out visitor gets the
+// landing page there and a signed-in one the dashboard (SKY-922).
 export const AUTH_GATED_PATTERN =
-  "/((?!login|terms|privacy|docs|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
+  "/((?!$|login|terms|privacy|docs|blog|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
 const authGated = new RegExp(`^${AUTH_GATED_PATTERN}$`);
 
 /**
