@@ -2073,8 +2073,11 @@ def test_a_version_cannot_write_past_its_editable_paths_through_a_shipped_symlin
     assert (tmp_path / "checkout/scoring/metric.py").read_text() == "SCORE = 1\n"
 
 
-def test_a_version_cannot_write_outside_the_checkout_through_a_seeded_symlink(tmp_path: Path) -> None:
+def test_a_version_cannot_write_outside_the_checkout_through_a_planted_symlink(tmp_path: Path) -> None:
     """Refuse a write through a symlink to a folder outside the checkout, before any file is written.
+
+    The seed apply now refuses a link itself (SKY-906), so the test plants
+    the link in the checkout to reach this later guard.
 
     Args:
         tmp_path: Scratch folder.
@@ -2085,10 +2088,9 @@ def test_a_version_cannot_write_outside_the_checkout_through_a_seeded_symlink(tm
     (source / "src").mkdir(parents=True)
     (source / "src/app.py").write_text("x = 1\n")
     bundle = shinka_bundle.RepoBundle.prepare(
-        {"chunks": _ship(tmp_path, source), "editable_paths": ["src"]},
-        _symlink_patch(str(outside)),
-        tmp_path / "checkout",
+        {"chunks": _ship(tmp_path, source), "editable_paths": ["src"]}, "", tmp_path / "checkout"
     )
+    (bundle.checkout / "src/link").symlink_to(outside)
     shinka_runner.guard_materialize(bundle)
 
     with pytest.raises(ValueError, match="outside the repository"):
@@ -2209,7 +2211,7 @@ def test_git_summary_of_a_mode_change_to_a_symlink_is_refused(monkeypatch: pytes
 def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse the checkout when the applied seed made a symlink the shipped tree did not have.
+    """Refuse the seed when its apply made a symlink the shipped tree did not have (SKY-906).
 
     Args:
         tmp_path: Scratch folder.
@@ -2220,7 +2222,7 @@ def test_a_symlink_that_the_patch_check_misses_is_refused_after_the_seed_is_appl
     monkeypatch.setattr(shinka_runner, "ShinkaEvolveRunner", object)
     monkeypatch.setattr(shinka_runner, "refuse_unsafe_patch", lambda patch: None)
 
-    with pytest.raises(ValueError, match="adds or changes the symlink 'src/link'"):
+    with pytest.raises(RuntimeError, match="Symlinks are not allowed; the change leaves one at 'src/link'"):
         shinka_runner.execute(_repo_payload(tmp_path, _symlink_patch("/etc"), chunks))
 
 
