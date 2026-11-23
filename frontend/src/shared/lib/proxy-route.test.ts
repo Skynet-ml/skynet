@@ -73,3 +73,11 @@ test("signed-out pages load the brand icons and artwork", () => {
 test("an optimization share link stays gated", () => {
   assert.equal(proxyRoute("staging.skynetml.com", "/share/abc123", {}), "auth");
 });
+
+test("only the plain hosted root is public; links with a query and the desktop root log in", () => {
+  assert.equal(proxyRoute("staging.skynetml.com", "/", {}), "pass");
+  assert.equal(proxyRoute("staging.skynetml.com", "/", {}, ""), "pass");
+  assert.equal(proxyRoute("staging.skynetml.com", "/", {}, "?settings=notifications"), "auth");
+  assert.equal(proxyRoute("127.0.0.1:48120", "/", desktop), "auth");
+  assert.equal(proxyRoute("127.0.0.1:48120", "/blog", desktop), "pass");
+});

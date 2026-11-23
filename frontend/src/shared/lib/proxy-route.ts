@@ -68,7 +68,12 @@ export function proxyRoute(
   host: string | null,
   pathname: string,
   env: Record<string, string | undefined> = process.env,
+  search = "",
 ): "refuse" | "pass" | "auth" {
   if (isRefusedLocalHost(host, env)) return "refuse";
+  // Only the plain hosted "/" is the landing page. App and email links such as
+  // "/?settings=…" need the login bounce to keep their callbackUrl, and the
+  // desktop app signs its one local user in on /login.
+  if (pathname === "/" && (search !== "" || env.APP_LOCAL_MODE === "1")) return "auth";
   return authGated.test(pathname) ? "auth" : "pass";
 }
