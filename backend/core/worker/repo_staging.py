@@ -1330,9 +1330,10 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # PAM stack reads /etc/default/locale into the root environment. A box user
 # who could change the account files could add itself to the sudo group or set
 # a root password. Shadow files are often 0640 root:shadow or 0000, so the
-# check does not need others to read them. A stack that sudo reaches can name
-# pam_motd, which reads the motd files and folders as root, and Debian's
-# pam_motd runs each script in /etc/update-motd.d as root (SKY-912 review).
+# check does not need others to read them. The PAM part of ``_PATH_SCRIPT``
+# refuses pam_motd in a stack that sudo reaches, so sudo reads no motd file:
+# Debian's pam_motd runs /etc/update-motd.d through run-parts as root, and
+# those scripts run tools by name that this probe does not walk (SKY-912).
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/etc/sudoers",
@@ -1343,10 +1344,6 @@ _SUDO_FILES = (
     "/etc/group",
     "/etc/shadow",
     "/etc/gshadow",
-    "/etc/motd",
-    "/run/motd",
-    "/usr/lib/motd",
-    "/run/motd.dynamic",
 )
 _SUDO_FOLDERS = (
     "/etc/sudoers.d",
@@ -1354,10 +1351,6 @@ _SUDO_FOLDERS = (
     "/usr/lib/pam.d",
     "/usr/lib/security",
     "/etc/security",
-    "/etc/motd.d",
-    "/run/motd.d",
-    "/usr/lib/motd.d",
-    "/etc/update-motd.d",
 )
 _DEEP_FOLDER = "/etc/security"
 _SUDO_DONE = "sudo checked"
@@ -1388,6 +1381,26 @@ PAM_ENV_EXTRA = (
 PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
 PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
 PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python")
+# Linux-PAM loads a relative module name from its module folder, such as /usr/lib/x86_64-linux-gnu/security.
+PAM_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+module_folders = []
+for lib in PAM_LIBS:
+    module_folders.append(lib + "/security")
+    try:
+        module_folders += [os.path.join(lib, arch, "security") for arch in sorted(os.listdir(lib))]
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+module_folders = [folder for folder in module_folders if os.path.isdir(folder)]
+def module_names(word):
+    # A module link loads its target, so the check reads the real file's name too.
+    names = {word}
+    for folder in module_folders:
+        if os.path.exists(os.path.join(folder, word)):
+            names.add(os.path.basename(os.path.realpath(os.path.join(folder, word))))
+    return names
+def printable(row):
+    # Linux-PAM splits rows only at \n, so a \r or another control byte would make this scan read a row otherwise.
+    return all(c == "\t" or " " <= c <= "~" for c in row)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1410,11 +1423,13 @@ for extra in PAM_ENV_EXTRA:
     sys.exit("the image has " + extra + ", which the check does not read")
 for file in PAM_ENV_FILES:
     try:
-        with open(file, encoding="latin-1") as text:
+        with open(file, encoding="latin-1", newline="") as text:
             rows = text.read().split("\n")
     except FileNotFoundError:
         continue
     for row in rows:
+        if not printable(row):
+            sys.exit("a PAM environment file has a character that is not printable ASCII")
         row = row.strip()
         if not row or row.startswith("#"):
             continue
@@ -1434,7 +1449,7 @@ for file in PAM_ENV_FILES:
             if not (value.isascii() and value.isprintable()):
                 sys.exit("a PAM locale value is not printable ASCII")
             print("locale", name + "=" + value)
-pam_configs = ["/etc/pam.conf"]
+pam_configs, stack_words = ["/etc/pam.conf"], {}
 for stack in PAM_STACKS:
     try:
         pam_configs += [os.path.join(stack, service) for service in sorted(os.listdir(stack))]
@@ -1442,11 +1457,14 @@ for stack in PAM_STACKS:
         continue
 for config in pam_configs:
     try:
-        with open(config, encoding="latin-1") as text:
+        with open(config, encoding="latin-1", newline="") as text:
             rows = text.read().split("\n")
     except (FileNotFoundError, IsADirectoryError):
         continue
+    stack_words[config] = []
     for row in rows:
+        if not printable(row):
+            sys.exit("the PAM configuration " + config + " has a character that is not printable ASCII")
         # Linux-PAM joins a line that ends in a backslash with the next one, but versions differ on a comment or a
         # blank line after it. A # ends the line before any backslash, in all of them.
         if "#" not in row and row.rstrip(" \t").endswith("\\"):
@@ -1471,11 +1489,12 @@ for config in pam_configs:
                     end += 1
             words.append(line[start:end])
             start = end
+        stack_words[config].append(words)
         for word in words:
             bare = word[1:-1].replace("\\]", "]") if word.startswith("[") else word
             key, _, value = bare.partition("=")
             # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
-            if any(runner in word for runner in PAM_RUNNERS):
+            if any(runner in name for runner in PAM_RUNNERS for name in module_names(word)):
                 sys.exit("the PAM configuration " + config + " runs " + word)
             # The check does not read another envfile or conffile; user_readenv reads the box user's own file.
             # Another module name can load pam_env, so the check reads these keys on every line.
@@ -1488,6 +1507,20 @@ for config in pam_configs:
             # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
             if "/" in bare and (bare if bare.startswith("/") else value) not in PAM_PATHS:
                 sys.exit("the PAM configuration " + config + " names " + word)
+# Sudo starts the sudo or sudo-i service, Linux-PAM falls back to other, and a stack reaches each file it includes.
+# Debian's pam_motd runs /etc/update-motd.d as root, and those scripts run programs that the check does not walk.
+todo, reached = ["/etc/pam.conf"] + [os.path.join(s, n) for s in PAM_STACKS for n in ("sudo", "sudo-i", "other")], set()
+while todo:
+    config = todo.pop()
+    if config in reached:
+        continue
+    reached.add(config)
+    for words in stack_words.get(config, ()):
+        for at, word in enumerate(words):
+            if word.lower() in ("@include", "include", "substack") and at + 1 < len(words):
+                todo += [os.path.join(stack, words[at + 1]) for stack in PAM_STACKS]
+            if any("pam_motd" in name for name in module_names(word)):
+                sys.exit("the PAM configuration " + config + ", which sudo reaches, runs " + word)
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
@@ -1899,11 +1932,10 @@ UNTRUSTED_PYTHON = (
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
-    " /etc/gshadow, /etc/motd, /run/motd, /usr/lib/motd and /run/motd.dynamic when present, and /etc/sudoers.d,"
-    " /etc/pam.d, /usr/lib/pam.d, /usr/lib/security, /etc/security, /etc/motd.d, /run/motd.d, /usr/lib/motd.d and"
-    " /etc/update-motd.d when present, with every entry in them. Others must be able to read each sudo and search"
+    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
+    " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
     " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
-    " sudo must resolve to an ELF file. Others must be able to list each of those nine folders,"
+    " sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
     " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
     " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"

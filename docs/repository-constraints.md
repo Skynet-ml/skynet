@@ -816,23 +816,22 @@ own commands in the setup box and in each candidate box:
   `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and `/etc/security`
   when they exist, and every entry in them. Debian's Linux-PAM reads a PAM
   file from `/usr/lib/pam.d` when `/etc/pam.d` does not have it, and it
-  also names `/usr/lib/security` as a module folder. Root must also own
-  the files and folders that `pam_motd` reads as root when they exist:
-  `/etc/motd`, `/run/motd`, `/usr/lib/motd`, `/run/motd.dynamic`,
-  `/etc/motd.d`, `/run/motd.d` and `/usr/lib/motd.d`. Root must own
-  `/etc/update-motd.d` and every entry in it, because Debian's `pam_motd`
-  runs those scripts as root. Group and others must not be able to write
-  any of them. Linux-PAM does not check who owns its files, so the image
-  check does. Ubuntu's `sudo` PAM stack reads `/etc/environment` and
+  also names `/usr/lib/security` as a module folder. Group and others
+  must not be able to write any of them. Linux-PAM does not check who
+  owns its files, so the image check does. Ubuntu's `sudo` PAM stack
+  reads `/etc/environment` and
   `/etc/default/locale` into root's environment. So the check also reads
   the variable names in those two files and in
   `/etc/security/pam_env.conf`. It refuses there the same names that it
   refuses in the image `ENV`, such as `LD_PRELOAD` or a locale that is not
   C, POSIX or UTF-8. Any locale set in `pam_env.conf` is refused, because
   its values can expand other variables. The check also refuses a line in
-  these files that ends in a backslash, and a variable name that is not
-  letters, digits and underscores. It refuses an image that has a
-  `pam_env` drop-in folder or a vendor copy, such as
+  these files that ends in a backslash, a variable name that is not
+  letters, digits and underscores, and a line with a character that is not
+  printable ASCII, such as a carriage return. Linux-PAM ends a line only
+  at a line feed, so a carriage return could hide a path from the check.
+  It refuses an image that has a `pam_env` drop-in folder or a vendor
+  copy, such as
   `/etc/security/pam_env.conf.d`, `/etc/environment.d` or
   `/usr/etc/environment`, because it does not read them. It also refuses
   an image when it cannot search the folder of one of those paths. In
@@ -846,12 +845,22 @@ own commands in the setup box and in each candidate box:
   check refuses a `[...]` argument with no closing bracket. It also
   refuses a PAM line that ends in a backslash outside a comment, because
   Linux-PAM versions join such a line with the next one in different ways.
+  It refuses a PAM line with a character that is not printable ASCII,
+  except a tab.
   No line in these PAM files may name any other path, such as a module or
   an `@include` file outside the module folders. The only other path
   allowed is `/run/motd.dynamic`, which stock images name. The check
   refuses `pam_exec`, `pam_script` and `pam_python`, which run a program
-  that an argument names, even by a relative name. A box user who can
-  change the account files can join the `sudo` group or set a root
+  that an argument names, even by a relative name. It also refuses a
+  module name that is a link to one of them in a module folder. It
+  refuses `pam_motd`, or a link to it, in a stack that `sudo` reaches: the
+  `sudo` and `sudo-i` stacks, `other`, and every file that they include.
+  Debian's `pam_motd` runs the scripts in `/etc/update-motd.d` as root,
+  and those scripts run programs that the check does not walk. Stock
+  images name `pam_motd` only in `login`, which `sudo` does not reach. The
+  check does not read a sudoers `pam_service` setting, which could start
+  another stack. A box user who can change the account files can join
+  the `sudo` group or set a root
   password. Others need not read `/etc/shadow` or `/etc/gshadow`, which
   are often mode 0640 or 0000. An image with no `/etc/pam.d` passes;
   Linux-PAM then reads `/etc/pam.conf`, which the check reads too.
@@ -1237,9 +1246,9 @@ Residual risk:
   `sudo`. It also walks the `sudo`, PAM and account files:
   `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
-  `/etc/shadow`, `/etc/gshadow`, the motd files, and each entry in
-  `/etc/sudoers.d`, `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security`,
-  `/etc/security`, the motd folders and `/etc/update-motd.d`. It does not
+  `/etc/shadow`, `/etc/gshadow`, and each entry in `/etc/sudoers.d`,
+  `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/lib/security` and
+  `/etc/security`. It does not
   walk a file that sudoers includes from another folder, or a `sudo.conf`
   `sudoers_file` setting. Sudo itself refuses such a file when root does
   not own it, or when others can write it. The check does not parse
