@@ -2004,13 +2004,17 @@ async def test_unprotected_box_gets_full_lifetime(client: FakeClient, log: list[
 
 
 async def test_upload_and_download(client: FakeClient, log: list[str]) -> None:
-    """Check text file transfer and the missing-file answer."""
+    """Check text file transfer, the missing-file answer, and that an upload makes no folder itself.
+
+    The SDK's ``fs.mkdir`` gives the folder to uid 1000, which an image user
+    with another uid cannot write (SKY-901).
+    """
     env = make_env(client, log)
     await env.start()
     await env.upload_files({"/work/a.txt": "data"})
     assert await env.download_file("/work/a.txt") == "data"
     assert await env.download_file("/work/none.txt") is None
-    assert client.boxes[env.name].fs.dirs == ["/work"]
+    assert client.boxes[env.name].fs.dirs == []
     await env.stop()
 
 
