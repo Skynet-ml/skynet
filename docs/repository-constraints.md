@@ -807,9 +807,10 @@ own commands in the setup box and in each candidate box:
   image check lists the file and folder rules.
 - The box user must not be able to change the `sudo` that runs root's
   commands, or the files that `sudo` reads as root (SKY-912). Root must
-  own each `sudo` in a folder of `secure_path`, and the first `sudo` on
-  the image `PATH`. Root must also own each folder of the image `PATH` up
-  to and with the folder that holds that `sudo`. Root must own these files
+  own each `sudo` in a folder of root's `PATH` (the same folders as
+  `secure_path`), and the first `sudo` on the image `PATH`. Root must
+  also own each folder of the image `PATH` up to and with the folder
+  that holds that `sudo`. Root must own these files
   when they exist: `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
   `/etc/shadow`, `/etc/gshadow` and `/etc/login.defs`. Ubuntu's
@@ -839,10 +840,13 @@ own commands in the setup box and in each candidate box:
   `/usr/etc/environment`, because it does not read them. It also refuses
   an image when it cannot search the folder of one of those paths.
   systemd ships `/usr/lib/environment.d` with only a link to
-  `/etc/environment`, so the check accepts that folder when each entry
-  in it resolves to `/etc/environment`. In `/etc/pam.conf`, `/etc/pam.d`
+  `/etc/environment`, so the check accepts that folder when root owns it,
+  group and others cannot write it, and each entry in it is a link that
+  root owns and that resolves to `/etc/environment`. Otherwise the box
+  user could add a file there later. In `/etc/pam.conf`, `/etc/pam.d`
   and `/usr/lib/pam.d`, a `pam_env` line in a stack that `sudo` reaches
-  may name only those three files with `envfile=` or `conffile=`, and may
+  may name only those three files with `envfile=`, and only
+  `/etc/security/pam_env.conf` with `conffile=`. It may
   not turn on `user_readenv`, which reads a file in the target user's
   home (root's). The check reads these options on every line of those
   stacks, also inside `[...]` brackets, because another module name can

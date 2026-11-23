@@ -1418,18 +1418,30 @@ for name in names:
         if not (value.isascii() and value.isprintable()):
             sys.exit("a locale value is not printable ASCII")
         print("locale", name + "=" + value)
+ROOT_UID = 0
 for extra in PAM_ENV_EXTRA:
     try:
-        os.lstat(extra)
-        # systemd ships this folder with only a link to /etc/environment, which the check reads already.
-        links = os.listdir(extra) if extra == "/usr/lib/environment.d" and os.path.isdir(extra) else None
+        info = os.lstat(extra)
+        # systemd ships this folder with only root's link to /etc/environment, which the check reads already.
+        # The box user could add a file later to a folder that is not root's, or that the group or others may write.
+        accepted = (
+            extra == "/usr/lib/environment.d"
+            and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == ROOT_UID
+            and not info.st_mode & 0o022
+            and all(
+                entry.is_symlink()
+                and entry.stat(follow_symlinks=False).st_uid == ROOT_UID
+                and os.path.realpath(entry.path) == os.path.realpath(PAM_ENV_FILES[0])
+                for entry in os.scandir(extra)
+            )
+        )
     except (FileNotFoundError, NotADirectoryError):
         continue
     except OSError:
         # A folder that the box user cannot search could hide a file that root's PAM reads.
         sys.exit("the check cannot look for " + extra)
-    environment = os.path.realpath(PAM_ENV_FILES[0])
-    if links is None or any(os.path.realpath(os.path.join(extra, link)) != environment for link in links):
+    if not accepted:
         sys.exit("the image has " + extra + ", which the check does not read")
 for file in PAM_ENV_FILES:
     try:
@@ -2891,7 +2903,7 @@ def _trusted_python(probe: Any) -> bool:
 
 
 def _trusted_sudo(lines: list[str]) -> bool:
-    """Tell whether every sudo that Vercel may run, and the sudo and PAM files it reads, are out of the box user's reach.
+    """Tell whether every sudo that Vercel may run, and the sudo and PAM files it reads, are safe from the box user.
 
     Args:
         lines: The probe's remaining lines, last line first; the check pops

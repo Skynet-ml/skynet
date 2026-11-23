@@ -8511,7 +8511,8 @@ def test_the_real_probe_passes_the_host_sudo_and_pam_files(tmp_path: Path) -> No
         tmp_path: Pytest temporary folder.
     """
     python = _fake_python(tmp_path.resolve())
-    # Red Hat ships a mode-4111 sudo, and Red Hat and Alpine a mode-0750 /etc/sudoers.d; the check refuses both by design.
+    # Red Hat ships a mode-4111 sudo, and Red Hat and Alpine a mode-0750 /etc/sudoers.d.
+    # The check refuses both by design.
     for path in (*(f"{folder}/sudo" for folder in repo_staging._ROOT_PATH.split(":")), *repo_staging._SUDO_FOLDERS):
         need = 0o005 if path in repo_staging._SUDO_FOLDERS else 0o004
         if Path(path).exists() and Path(path).stat().st_mode & need != need:
@@ -8607,6 +8608,7 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
 
 _UBUNTU_SUDO_STACK = "session required pam_env.so readenv=1 envfile=LOCALE user_readenv=0\n"
 _STOCK_SSHD_LINE = "session required pam_env.so user_readenv=1 envfile=LOCALE\n"
+_MOTD_LINE = "session optional pam_motd.so noupdate\n"
 
 
 def _run_path_script_with_pam_files(
@@ -8622,6 +8624,9 @@ def _run_path_script_with_pam_files(
     other_stacks: dict[str, str] | None = None,
     modules: dict[str, str] | None = None,
     environment_links: dict[str, str] | None = None,
+    environment_mode: int = 0o755,
+    environment_box_owns: str = "",
+    vendor_stacks: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the interpreter script with temporary pam_env and PAM stack files in place of the real ones.
 
@@ -8638,6 +8643,10 @@ def _run_path_script_with_pam_files(
         modules: Links to make in a stand-in module folder, which then replaces the real ones, by name to target.
         environment_links: Links to make in a stand-in ``/usr/lib/environment.d``, by name to target;
             ``ENVIRONMENT`` names the stand-in ``/etc/environment``.
+        environment_mode: The mode of the stand-in ``/usr/lib/environment.d``.
+        environment_box_owns: ``folder``, or a link name in ``environment_links``, that the box user (uid 1000)
+            owns in place of root; only root can give it away.
+        vendor_stacks: The text of stand-in files in a second stack folder, ``/usr/lib/pam.d``, by name.
 
     Returns:
         The finished script.
@@ -8663,11 +8672,25 @@ def _run_path_script_with_pam_files(
         script = script.replace('("/lib", "/lib64", "/usr/lib", "/usr/lib64")', stand_in_libs)
         assert stand_in_libs in script
     if environment_links is not None:
-        (tmp_path / "environment.d").mkdir()
+        environment_d = tmp_path / "environment.d"
+        environment_d.mkdir()
+        environment_d.chmod(environment_mode)
         for name, target in environment_links.items():
-            (tmp_path / "environment.d" / name).symlink_to(target.replace("ENVIRONMENT", str(tmp_path / "environment")))
-        script = script.replace('"/usr/lib/environment.d"', repr(str(tmp_path / "environment.d")))
+            (environment_d / name).symlink_to(target.replace("ENVIRONMENT", str(tmp_path / "environment")))
+        if environment_box_owns:
+            owned = environment_d if environment_box_owns == "folder" else environment_d / environment_box_owns
+            os.lchown(owned, 1000, 1000)
+        script = script.replace('"/usr/lib/environment.d"', repr(str(environment_d)))
+        # A test that does not run as root stands in its own user for root, as the shell probe tests do.
+        script = script.replace("ROOT_UID = 0\n", f"ROOT_UID = {os.geteuid()}\n")
+        assert f"ROOT_UID = {os.geteuid()}\n" in script
     stand_in_stacks = f"({str(stacks)!r},)"
+    if vendor_stacks is not None:
+        vendor = tmp_path / "vendor-pam.d"
+        vendor.mkdir()
+        for name, text in vendor_stacks.items():
+            (vendor / name).write_text(text)
+        stand_in_stacks = f"({str(stacks)!r}, {str(vendor)!r})"
     script = script.replace('("/etc/pam.d", "/usr/lib/pam.d")', stand_in_stacks)
     assert stand_in_stacks in script
     files = {"/etc/environment": environment, "/etc/default/locale": default_locale}
@@ -8685,7 +8708,7 @@ def _run_path_script_with_pam_files(
 
 
 def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> None:
-    """Stock pam_env files, systemd's environment.d link, and pam_motd and user_readenv in login and sshd pass (SKY-912).
+    """Stock pam_env files, systemd's environment.d link, pam_motd, and user_readenv in login and sshd pass (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -8717,7 +8740,7 @@ def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> N
 
 
 def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_path: Path) -> None:
-    """A loader variable in /etc/environment and a locale in pam_env.conf reach root, so the check refuses them (SKY-912).
+    """A loader variable in /etc/environment and a pam_env.conf locale reach root, so the check refuses them (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -8902,6 +8925,72 @@ def test_the_path_script_refuses_an_environment_d_link_that_is_not_etc_environme
 
     assert done.returncode != 0
     assert "environment.d, which the check does not read" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "box_owns"),
+    [(0o775, ""), (0o757, ""), (0o755, "folder"), (0o755, "99-environment.conf")],
+    ids=["group-writable-folder", "other-writable-folder", "box-folder", "box-link"],
+)
+def test_the_path_script_refuses_an_environment_d_that_the_box_user_could_change(
+    tmp_path: Path, mode: int, box_owns: str
+) -> None:
+    """/usr/lib/environment.d passes only when root owns the folder and each link, and only root may write it (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        mode: The mode of the stand-in folder.
+        box_owns: ``folder``, or the link name, that the box user owns; empty when root owns both.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    if box_owns and os.geteuid() != 0:
+        pytest.skip("only root can give a file to another user")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        "",
+        "",
+        "",
+        environment_links={"99-environment.conf": "ENVIRONMENT"},
+        environment_mode=mode,
+        environment_box_owns=box_owns,
+    )
+
+    assert done.returncode != 0
+    assert "environment.d, which the check does not read" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("sudo_stack", "vendor_stacks", "refusal"),
+    [
+        ("@include common-motd\n", {"common-motd": _MOTD_LINE}, "vendor-pam.d/common-motd, which sudo reaches"),
+        ("", {"other": _MOTD_LINE}, "vendor-pam.d/other, which sudo reaches"),
+        ("", {"sudo-i": _MOTD_LINE}, "vendor-pam.d/sudo-i, which sudo reaches"),
+        ("", {"login": _MOTD_LINE, "common-motd": _MOTD_LINE}, None),
+    ],
+    ids=["included-vendor-file", "vendor-other", "vendor-sudo-i", "unreached-vendor-files"],
+)
+def test_the_path_script_follows_sudo_into_the_vendor_pam_folder(
+    tmp_path: Path, sudo_stack: str, vendor_stacks: dict[str, str], refusal: str | None
+) -> None:
+    """Sudo reaches a stack that only /usr/lib/pam.d has, so a program-running module there counts (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``.
+        vendor_stacks: The text of stand-in files in ``/usr/lib/pam.d``, by name.
+        refusal: The text that the refusal names, or None when the check passes.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_stack=sudo_stack, vendor_stacks=vendor_stacks)
+
+    if refusal is None:
+        assert done.returncode == 0, done.stderr
+    else:
+        assert done.returncode != 0
+        assert refusal in done.stderr
+        assert "runs pam_motd.so" in done.stderr
 
 
 def test_the_path_script_refuses_a_pam_environment_path_that_it_cannot_look_for(tmp_path: Path) -> None:
