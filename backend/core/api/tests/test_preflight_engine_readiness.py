@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from core.api import preflight_execution
+from core.billing.model_dispatch import ModelHTTPResult
 from core.models import BlackboxRunRequest
 from core.service_gateway.optimization.blackbox import native_runtime
 
@@ -133,3 +134,24 @@ def test_model_route_checks_run_before_the_engine_check(monkeypatch: pytest.Monk
         ("model.optimization", "succeeded"),
         ("optimizer", "failed"),
     ]
+
+
+class _RateLimitedGateway(_Gateway):
+    """Answer every model route check with OpenRouter's rate limit refusal."""
+
+    def dispatch_guest(self, _token: str, _path: str, _body: dict[str, Any], _headers: dict[str, str]) -> Any:
+        """Refuse the setup request as OpenRouter does.
+
+        Returns:
+            A 429 response with the provider's message.
+        """
+        body = b'{"error": {"message": "Rate limit exceeded: free-models-per-min", "code": 429}}'
+        return ModelHTTPResult(status=429, content_type="application/json", body=body)
+
+
+def test_a_model_route_refusal_shows_the_provider_message() -> None:
+    """The setup refusal reads the provider's own reason from the response body (SKY-924)."""
+    [check] = preflight_execution._verify_model_routes(_RateLimitedGateway(), native=False)
+
+    assert check["status"] == "failed"
+    assert "HTTP 429: Rate limit exceeded: free-models-per-min" in check["message"]

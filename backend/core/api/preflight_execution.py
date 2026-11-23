@@ -235,7 +235,7 @@ def _provider_refusal(response: ModelHTTPResult) -> str:
         The HTTP status, followed by the provider's own message when its body carries one.
     """
     try:
-        error = json.loads(response.content).get("error")
+        error = json.loads(response.body).get("error")
     except (ValueError, AttributeError):
         error = None
     detail = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None

@@ -23,6 +23,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -91,6 +92,22 @@ STEP_BOX_SECONDS = 900
 _PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
+# A rate limit or a busy gateway often clears in seconds, so a model call tries again on these answers. Any other
+# error answer is final: a new try gets the same answer.
+_MODEL_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+# These errors bring no answer, so the lease never pays one reply twice. A read timeout takes the full model timeout,
+# which is past the retry window below, so a call that the provider may still bill gets no new try.
+_MODEL_RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+_MODEL_RETRIES = 3
+_MODEL_BACKOFF_SECONDS = 2.0
+_MODEL_RETRY_AFTER_CAP_SECONDS = 60.0
+# No new try starts after this time from the first one. With one try's timeout, a call then stays far below the
+# watchdog's job_stall_timeout_seconds (1800 s).
+_MODEL_RETRY_WINDOW_SECONDS = 300.0
+_PROVIDER_MESSAGE_CHARS = 200
+# Tests replace these, so a retry test does not wait.
+_sleep = time.sleep
+_clock = time.monotonic
 _TREE_ID = re.compile(r"[0-9a-f]{64}")
 _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 _RETRYABLE_STATUSES = frozenset({408, 424, 429})
@@ -184,7 +201,7 @@ class LeaseModelClient:
             self._client.close()
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
-        """Call the model once.
+        """Call the model, and try a managed or custom endpoint call again after a rate limit or gateway error.
 
         Args:
             prompt: The prompt text, or the chat messages.
@@ -213,14 +230,7 @@ class LeaseModelClient:
         except (httpx.HTTPError, json.JSONDecodeError) as error:
             raise ServiceError(f"The model price read failed: {type(error).__name__}") from error
         body = self._bounded(apply_data_policy(request, self._data_policy), catalog)
-        try:
-            answer = self._client.post(
-                OPENROUTER_CHAT_URL,
-                headers={"Authorization": f"Bearer {self._key}"},
-                json={**body, "usage": {"include": True}},
-            )
-        except httpx.HTTPError as error:
-            raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+        answer = self._post(OPENROUTER_CHAT_URL, {**body, "usage": {"include": True}})
         if answer.status_code == 404 and b"data policy" in answer.content.lower():
             # No provider meets the setting, so every later call fails too: the loop stops with the reason.
             refusal = json.loads(data_policy_refusal(self._model, self._data_policy))
@@ -229,7 +239,7 @@ class LeaseModelClient:
             answer.raise_for_status()
             body = answer.json()
         except (httpx.HTTPError, ValueError) as error:
-            raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+            raise self._failed(error, answer) from error
         usd = usage_charge(body.get("usage") or {})
         if usd is None:
             raise ServiceError("The model reply gave no complete cost.")
@@ -292,15 +302,110 @@ class LeaseModelClient:
             response = litellm.completion(api_key=self._key, api_base=self._api_base, **request)
             message = response.choices[0].message.model_dump()
         else:
+            answer = self._post(self._custom_url, request)
             try:
-                answer = self._client.post(
-                    self._custom_url, headers={"Authorization": f"Bearer {self._key}"}, json=request
-                )
                 answer.raise_for_status()
                 message = answer.json()["choices"][0]["message"]
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as error:
-                raise ServiceError(f"The model call failed: {type(error).__name__}") from error
+                raise self._failed(error, answer) from error
         return ModelReply(str(message.get("content") or ""), Decimal(0), tool_calls_from_openai(message))
+
+    def _post(self, url: str, body: Mapping[str, Any]) -> httpx.Response:
+        """Post one model call, and try it again after an answer that a short wait can clear.
+
+        Only an error status or no answer leads to a new try, so the provider never bills one reply twice. The
+        loop saves the call's step only after this returns, so a resume does not replay a failure that a new try
+        clears.
+
+        Args:
+            url: The chat completions URL.
+            body: The chat request.
+
+        Returns:
+            The first answer that is not a retryable status, or the last answer.
+
+        Raises:
+            ServiceError: When no try gets an answer.
+        """
+        started = _clock()
+        for attempt in range(_MODEL_RETRIES + 1):
+            answer: httpx.Response | None = None
+            try:
+                answer = self._client.post(url, headers={"Authorization": f"Bearer {self._key}"}, json=body)
+            except _MODEL_RETRY_ERRORS as error:
+                failure: httpx.HTTPError = error
+            except httpx.HTTPError as error:
+                raise self._failed(error) from error
+            else:
+                if answer.status_code not in _MODEL_RETRY_STATUSES:
+                    return answer
+            wait = _retry_wait(answer, attempt)
+            if attempt == _MODEL_RETRIES or _clock() - started + wait > _MODEL_RETRY_WINDOW_SECONDS:
+                break
+            reason = f"HTTP {answer.status_code}" if answer is not None else type(failure).__name__
+            logger.warning("The model call failed with %s; try %d again in %.1f s.", reason, attempt + 2, wait)
+            _sleep(wait)
+        if answer is None:
+            raise self._failed(failure) from failure
+        return answer
+
+    def _failed(self, error: Exception, answer: httpx.Response | None = None) -> ServiceError:
+        """Describe a failed model call with its status and the provider's own short message.
+
+        Args:
+            error: The call's error.
+            answer: The provider's answer, when one came back.
+
+        Returns:
+            The error for the loop to record.
+        """
+        text = f"The model call failed: {type(error).__name__}"
+        if answer is None or not answer.is_error:
+            return ServiceError(text)
+        text += f" (HTTP {answer.status_code})"
+        detail = _provider_message(answer, self._key)
+        return ServiceError(f"{text}: {detail}" if detail else text)
+
+
+def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
+    """Return the wait before the next try of a model call.
+
+    Args:
+        answer: The retryable answer, or ``None`` when no answer came back.
+        attempt: The index of the try that failed, from 0.
+
+    Returns:
+        The provider's numeric ``Retry-After`` up to its cap, or else an exponential backoff.
+    """
+    try:
+        asked = float(answer.headers["Retry-After"]) if answer is not None else None
+    except (KeyError, ValueError):
+        asked = None
+    if asked is not None and asked >= 0:
+        return min(asked, _MODEL_RETRY_AFTER_CAP_SECONDS)
+    return _MODEL_BACKOFF_SECONDS * 2**attempt
+
+
+def _provider_message(answer: httpx.Response, key: str) -> str:
+    """Return the provider's ``error.message`` from an error answer, short and with no credential.
+
+    Only this field is read: other body text can echo the request, which holds the prompt.
+
+    Args:
+        answer: The provider's error answer.
+        key: The call's credential, which the message must never show.
+
+    Returns:
+        The message, or an empty string when the body has none.
+    """
+    try:
+        error = answer.json().get("error")
+    except (ValueError, AttributeError):
+        return ""
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str):
+        return ""
+    return " ".join(message.replace(key, "[key]").split())[:_PROVIDER_MESSAGE_CHARS]
 
 
 def tree_patch(trees: TreeStore, run_id: str, base_tree: str, candidate_tree: str) -> str:

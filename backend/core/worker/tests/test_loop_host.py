@@ -997,9 +997,175 @@ def test_a_billed_reply_that_cannot_be_read_gives_its_cost() -> None:
 
 
 def test_a_provider_error_fails_the_call_with_no_provider_text() -> None:
-    """The provider's error text can hold request data, so the error names only its type."""
-    with pytest.raises(ServiceError, match=r"^The model call failed: HTTPStatusError$"):
+    """The provider's error text can hold request data, so the error names only its type and status."""
+    with pytest.raises(ServiceError, match=r"^The model call failed: HTTPStatusError \(HTTP 500\)$"):
         _managed_client(lambda request: httpx.Response(500, text=f"key {_FAKE_KEY}"))("hello", None)
+
+
+def _waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record each retry wait of the model client, with no real sleep.
+
+    Args:
+        monkeypatch: The test's patcher.
+
+    Returns:
+        The list that gets each wait in seconds.
+    """
+    waits: list[float] = []
+    monkeypatch.setattr(loop_host, "_sleep", waits.append)
+    return waits
+
+
+def _answers(*replies: httpx.Response | Exception) -> tuple[Any, list[httpx.Request]]:
+    """Build a fake chat provider that gives each reply in turn.
+
+    Args:
+        *replies: The answers, or the transport errors to raise, in order.
+
+    Returns:
+        The provider and the list of the chat requests that it got.
+    """
+    requests: list[httpx.Request] = []
+    queue_ = list(replies)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Record the call and give the next reply.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The next reply.
+
+        Raises:
+            Exception: The next transport error.
+        """
+        requests.append(request)
+        reply = queue_.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return provider, requests
+
+
+def _rate_limited(retry_after: str | None = None) -> httpx.Response:
+    """Answer as OpenRouter does when it rate limits a call.
+
+    Args:
+        retry_after: The ``Retry-After`` header, or ``None`` for no header.
+
+    Returns:
+        The 429 answer, whose message also echoes the key.
+    """
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    error = {"error": {"message": f"Rate limit exceeded: free-models-per-min ({_FAKE_KEY})", "code": 429}}
+    return httpx.Response(429, json=error, headers=headers)
+
+
+def test_a_rate_limited_managed_call_tries_again_and_costs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One 429 does not fail the call: a new try gets the reply, and the call costs one reply (SKY-924).
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(_rate_limited(), _reply(cast(httpx.Request, None)))
+
+    reply = _managed_client(provider)("hello", None)
+
+    assert reply.text == "hi"
+    assert reply.cost_cents == ChargePolicy("managed_model").convert(Decimal("0.002")).total
+    assert len(requests) == 2
+    assert waits == [loop_host._MODEL_BACKOFF_SECONDS]
+
+
+def test_a_managed_call_rate_limited_on_every_try_fails_with_the_provider_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the last try the error keeps the status and OpenRouter's message, with no key.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(*[_rate_limited() for _ in range(loop_host._MODEL_RETRIES + 1)])
+
+    with pytest.raises(ServiceError, match=r"\(HTTP 429\): Rate limit exceeded: free-models-per-min") as raised:
+        _managed_client(provider)("hello", None)
+
+    assert _FAKE_KEY not in str(raised.value)
+    assert len(requests) == loop_host._MODEL_RETRIES + 1
+    assert waits == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "wait"),
+    [("7", 7.0), ("3600", loop_host._MODEL_RETRY_AFTER_CAP_SECONDS), ("Wed, 21 Oct 2026 07:28:00 GMT", 2.0)],
+    ids=["seconds", "capped", "date-uses-backoff"],
+)
+def test_a_retry_honors_a_numeric_retry_after_up_to_its_cap(
+    retry_after: str, wait: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait before a new try is the provider's own ``Retry-After``, but never longer than the cap.
+
+    Args:
+        retry_after: The provider's header.
+        wait: The expected wait in seconds.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, _ = _answers(_rate_limited(retry_after), _reply(cast(httpx.Request, None)))
+
+    _managed_client(provider)("hello", None)
+
+    assert waits == [wait]
+
+
+def test_a_client_error_is_not_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 400 gets the same answer on each try, so the call fails at once with the provider's reason.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    refusal = httpx.Response(400, json={"error": {"message": "max_tokens is too large"}})
+    provider, requests = _answers(refusal)
+
+    with pytest.raises(ServiceError, match=r"\(HTTP 400\): max_tokens is too large$"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (1, [])
+
+
+def test_a_connection_error_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No answer came back, so the provider billed nothing, and a new try is safe.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(httpx.ConnectError("refused"), _reply(cast(httpx.Request, None)))
+
+    assert _managed_client(provider)("hello", None).text == "hi"
+    assert (len(requests), waits) == (2, [2.0])
+
+
+def test_no_new_try_starts_after_the_retry_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Slow tries stop the retries early, so the call stays far below the stall timeout.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    ticks = iter([0.0, 10.0, loop_host._MODEL_RETRY_WINDOW_SECONDS])
+    monkeypatch.setattr(loop_host, "_clock", lambda: next(ticks))
+    provider, requests = _answers(*[_rate_limited() for _ in range(loop_host._MODEL_RETRIES + 1)])
+
+    with pytest.raises(ServiceError, match=r"HTTP 429"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (2, [2.0])
 
 
 @pytest.mark.parametrize(
@@ -1154,6 +1320,24 @@ def test_a_custom_byok_call_goes_to_the_checked_address(monkeypatch: pytest.Monk
         "messages": [{"role": "user", "content": "hello"}],
         "reasoning_effort": "low",
     }
+
+
+def test_a_custom_byok_call_tries_again_after_a_gateway_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user's own endpoint gets the same retries as OpenRouter (SKY-924).
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    reply = httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "own"}}]})
+    provider, requests = _answers(httpx.Response(503, headers={"Retry-After": "1"}), reply)
+    monkeypatch.setattr(
+        mcp_broker.socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, "", ("93.184.216.34", 443))]
+    )
+    monkeypatch.setattr(loop_host, "_PinnedTransport", lambda url, address: httpx.MockTransport(provider))
+
+    assert _custom_byok()([{"role": "user", "content": "hello"}], None).text == "own"
+    assert (len(requests), waits) == (2, [1.0])
 
 
 def _record_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Client]:
