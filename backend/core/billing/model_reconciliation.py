@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -16,9 +17,35 @@ from .runtime import BudgetRuntime, UsagePendingError
 from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
 
 # A model call runs at most 10 minutes and OpenRouter confirms its bill soon
-# after. A bill still missing at 15 minutes is absorbed: the hold is released at
-# no charge, so the user never pays for it or waits on it (Gilad, SKY-784).
+# after. A bill still missing 15 minutes after dispatched_at is absorbed: the
+# hold is released at no further charge, so the user never pays for it or
+# waits on it (Gilad, SKY-784). This window covers every pending reason except
+# UnsettleableUsageError.
 UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
+# A returned call with no provider request id can never be looked up. A call
+# whose original credential this worker cannot resolve is also not looked up:
+# for a BYOK key no worker can resolve it, and only during a managed-key
+# rotation might another worker still confirm the bill. A worker with no managed
+# key would also release managed holds early, but every deployed app and worker
+# gets OPENROUTER_API_KEY (shared_app_secret_keys in the environment
+# module's secrets.tf). Both holds are released
+# at no further charge one minute after dispatched_at: usage already settled
+# stays billed, and Skynet accepts the gap for the rest, because a 15-minute
+# wait blocks the account's setup check (SKY-914). The minute absorbs clock skew
+# between workers. The sweep releases the hold on its next pass that reaches
+# it; a long queue of pending holds can delay that.
+UNSETTLEABLE_RELEASE_AFTER = timedelta(minutes=1)
+
+logger = logging.getLogger(__name__)
+
+
+class UnsettleableUsageError(UsagePendingError):
+    """Report a pending model bill that this worker cannot confirm with the provider.
+
+    This error releases nothing. ``sweep`` releases the hold at no further charge
+    1 minute after dispatch, but only a returned (pending) hold with no
+    quarantine evidence. Skynet accepts the revenue gap (SKY-914).
+    """
 
 
 def _stored_refusal(documents: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -76,7 +103,11 @@ class OpenRouterUsageReconciler:
             stored refusal that names no generation.
 
         Raises:
-            UsagePendingError: When identity, credentials, or final billing evidence is unavailable.
+            UnsettleableUsageError: When a returned call has no provider request id and no
+                stored refusal, or this worker cannot resolve the original credential.
+            UsagePendingError: When the operation is not an admitted OpenRouter generation, the
+                model call has not returned, or final billing evidence or the original policy
+                is unavailable.
         """
         record = self.service.get_reconciliation(operation_id, username)
         operation, prices = record.operation, record.price_snapshot
@@ -91,10 +122,15 @@ class OpenRouterUsageReconciler:
                 return self.service.reject(
                     operation_id, username, evidence_key=f"openrouter-refusal:{operation_id}", evidence=refusal
                 )
+            if operation.state == "dispatched":
+                raise UsagePendingError("The model call has not returned; its provider request id can still come.")
+            raise UnsettleableUsageError("The provider request id is unavailable; no bill can be looked up.")
         digest = prices.get("credential_fingerprint")
         key = self.resolve_key(username, str(digest)) if digest else None
-        if not identity or not key or json_fingerprint(key) != digest:
-            raise UsagePendingError("Original provider identity or credential is unavailable; coverage is retained.")
+        if not key or json_fingerprint(key) != digest:
+            raise UnsettleableUsageError(
+                "The original provider credential is unavailable; this worker cannot look up the bill."
+            )
         values = prices.get("policy") or {}
         if values.get("version") != "skynet-operation-pricing-v1":
             raise UsagePendingError("The original conversion policy is unavailable.")
@@ -141,14 +177,20 @@ class OpenRouterUsageReconciler:
         )
 
     def sweep(self, *, limit: int = 100, after_id: str | None = None) -> ReconciliationPage:
-        """Reconcile one bounded page while leaving every unknown operation covered.
+        """Reconcile one bounded page and release, at no further charge, holds whose bill stays unknown.
+
+        Only a returned (pending) hold with no quarantine evidence is released. A
+        dispatched (in-flight) hold is never released. The release comes 1 minute
+        after dispatched_at for UnsettleableUsageError: no provider request id and
+        no stored refusal, or this worker cannot resolve the original credential.
+        It comes 15 minutes after dispatched_at for every other pending reason.
 
         Args:
             limit: Maximum number of operations visited.
             after_id: Previous page cursor, if any.
 
         Returns:
-            Confirmed or pending results and the next non-starving page cursor.
+            Settled, released or pending results and the next non-starving page cursor.
         """
         attempts = self.service.unsettled_operations(
             provider="openrouter",
@@ -157,19 +199,28 @@ class OpenRouterUsageReconciler:
             after_id=after_id,
         )
         results = []
-        dispatched_before = datetime.now(UTC) - UNCONFIRMED_RELEASE_AFTER
+        now = datetime.now(UTC)
         for operation_id, username in attempts:
             try:
                 operation = self.reconcile(operation_id, username)
                 results.append(ReconciliationResult(operation_id, operation.state))
             except UsagePendingError as error:
+                wait = (
+                    UNSETTLEABLE_RELEASE_AFTER
+                    if isinstance(error, UnsettleableUsageError)
+                    else UNCONFIRMED_RELEASE_AFTER
+                )
                 try:
                     operation = self.service.release_unconfirmed(
-                        operation_id, username, dispatched_before=dispatched_before, reason=str(error)
+                        operation_id, username, dispatched_before=now - wait, reason=str(error)
                     )
                 except BudgetError as release_error:
                     results.append(ReconciliationResult(operation_id, "pending", str(release_error)))
                     continue
+                if operation.state == "released":
+                    # A racing sweep can log a release that another sweep made; the
+                    # row lock still releases the hold only once.
+                    logger.info("Model hold %s is released at no further charge: %s", operation_id, error)
                 results.append(
                     ReconciliationResult(
                         operation_id, operation.state, None if operation.state == "released" else str(error)
