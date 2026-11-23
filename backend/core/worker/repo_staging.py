@@ -1338,9 +1338,10 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # 1.7 also reads service files from /usr/etc/pam.d. Sudo reads /etc/sudo.conf,
 # and Tumbleweed's sudo reads /usr/etc/sudo.conf when that is missing. Its
 # ``developer_mode`` lets sudo load a plugin that root does not own, so
-# ``_PATH_SCRIPT`` also reads these files. Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, and
-# /etc/default/login when login.defs sets no UMASK, so a box-writable one could
-# give root's steps UMASK 000.
+# ``_PATH_SCRIPT`` also reads these files. Ubuntu's pam_umask reads
+# /etc/login.defs as root in the sudo stack, and /etc/default/login when
+# login.defs sets no UMASK, so a box-writable one could give root's steps
+# UMASK 000.
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/usr/etc/sudo.conf",
@@ -1575,8 +1576,9 @@ while todo:
     reached.add(config)
     for words in stack_words.get(config, ()):
         for at, word in enumerate(words):
-            if word.lower() in ("@include", "include", "substack") and at + 1 < len(words):
-                # Linux-PAM takes the brackets off a target, as off an argument, and opens a path as written.
+            # Linux-PAM takes the brackets off every word, so [include] is an include too, and it opens a path as
+            # written.
+            if bare(word).lower() in ("@include", "include", "substack") and at + 1 < len(words):
                 target = bare(words[at + 1])
                 if "/" in target:
                     sys.exit(
@@ -1590,7 +1592,7 @@ for config, rows in stack_words.items():
             key, _, value = plain.partition("=")
             # These modules run a program that an argument names (pam_xauth: xauthpath=), and a relative name resolves
             # in sudo's folder.
-            if any(runner in name for runner in PAM_RUNNERS for name in module_names(word)):
+            if any(runner in name for runner in PAM_RUNNERS for name in module_names(plain)):
                 sys.exit("the PAM configuration " + config + " runs " + word)
             # The check does not read another envfile or conffile, and user_readenv reads a file in the target
             # user's home (root's). Another module name can load pam_env, so the check reads these keys on every
@@ -1612,7 +1614,7 @@ for config in sorted(reached & stack_words.keys()):
     for words in stack_words[config]:
         # A pam.conf line starts with the service name. An include line names a file, not a module.
         words = words[1:] if config == "/etc/pam.conf" else words
-        if len(words) < 3 or words[0].lower() == "@include" or words[1].lower() in ("include", "substack"):
+        if len(words) < 3 or bare(words[0]).lower() == "@include" or bare(words[1]).lower() in ("include", "substack"):
             continue
         # Linux-PAM loads the word as written from its module folder, with no ".so" added, and a link loads its target.
         if words[2] not in PAM_MODULES or not module_names(words[2]) <= set(PAM_MODULES):
@@ -2069,8 +2071,9 @@ UNTRUSTED_PYTHON = (
     " /usr/etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow,"
     " /etc/login.defs and /etc/default/login when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d,"
-    " /usr/etc/pam.d, /usr/lib/security and /etc/security when present, with every entry in them. Others must be able to read"
-    " each sudo and search each of those image PATH folders. Others must be able to run the first sudo on the"
+    " /usr/etc/pam.d, /usr/lib/security and /etc/security when present, with every entry in them."
+    " Others must be able to read each sudo and search each of those image PATH folders. Others must be"
+    " able to run the first sudo on the"
     " image PATH, and each sudo must resolve to an ELF file. Others must be able to list each of those six folders,"
     " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
     " folders in /etc/security."
@@ -2079,9 +2082,10 @@ UNTRUSTED_PYTHON = (
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
     " of the folders, and no entry may be a dangling link. The PAM files also have content rules: no module that"
     " runs a program, only stock modules and no other pam_env options in a stack that sudo reaches, and no pam_env"
-    " drop-ins. In such a stack, each include target must be a plain PAM file name, a path may appear only as a"
-    " pam_env file or as motd=/run/motd.dynamic, and no module may take a conf= option. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the stock"
-    " Plugin and Path lines."
+    " drop-ins. In every PAM file, a path may appear only as a pam_env file or as motd=/run/motd.dynamic, so"
+    " each include target must be a plain PAM file name. In a stack that sudo reaches, no module may take a"
+    " conf= option. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the"
+    " stock Plugin and Path lines."
     " See docs/repository-constraints.md."
 )
 NO_ACCOUNT = (

@@ -8964,7 +8964,17 @@ def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pa
         ("-session optional pam_new.so\n", {}, {}, "loads pam_new.so, which is not a stock module"),
         ("session [default=ignore] pam_new.so\n", {}, {}, "loads pam_new.so"),
         ("session optional pam_unix.so\n", {}, {"pam_unix.so": "pam_motd.so"}, "loads pam_unix.so"),
-        ("session [include] pam_new.so\n", {}, {}, "loads pam_new.so"),
+        (
+            "session [include] pam_new.so\n",
+            {"pam_new.so": _MOTD_LINE},
+            {},
+            "pam_new.so, which sudo reaches, loads pam_motd",
+        ),
+        ("session [include] pam_unix.so\n", {"pam_unix.so": _MOTD_LINE}, {}, "pam_unix.so, which sudo reaches, loads"),
+        ("session [substack] pam_env.so\n", {"pam_env.so": _MOTD_LINE}, {}, "pam_env.so, which sudo reaches, loads"),
+        ("[@include] box1\n", {"box1": _MOTD_LINE}, {}, "box1, which sudo reaches, loads pam_motd.so"),
+        ("[@include] box1\n", {"box1": "@include box2\n", "box2": _MOTD_LINE}, {}, "box2, which sudo reaches, loads"),
+        ("session optional [pam_foo.so]\n", {}, {"pam_foo.so": "pam_exec.so"}, "runs [pam_foo.so]"),
         ("auth include [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
         ("auth substack [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
         ("@include [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
@@ -8984,6 +8994,11 @@ def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pa
         "unknown-module-after-a-bracket",
         "stock-name-linked-to-motd",
         "bracketed-include-control",
+        "bracketed-include-control-stock-name",
+        "bracketed-substack-control-stock-name",
+        "bracketed-debian-include",
+        "bracketed-debian-include-chain",
+        "bracketed-exec-link",
         "bracketed-include-target",
         "bracketed-substack-target",
         "bracketed-debian-include-target",
@@ -9160,6 +9175,7 @@ def test_the_probe_reads_the_vendor_pam_and_sudo_folders() -> None:
 
 def test_the_refusal_names_the_pam_content_rules() -> None:
     """Name each PAM content rule in the refusal, because the probe's own reason never reaches the user (SKY-912)."""
+    assert "In every PAM file, a path may appear only" in repo_staging.UNTRUSTED_PYTHON
     assert "plain PAM file name" in repo_staging.UNTRUSTED_PYTHON
     assert "motd=/run/motd.dynamic" in repo_staging.UNTRUSTED_PYTHON
     assert "conf= option" in repo_staging.UNTRUSTED_PYTHON

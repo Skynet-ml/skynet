@@ -870,8 +870,9 @@ own commands in the setup box and in each candidate box:
   allowed is `/run/motd.dynamic`, and only as the `motd=` value, which
   stock images name. An `include`, `substack` or `@include` target in a
   stack that `sudo` reaches must be a plain file name, with no `/`.
-  Linux-PAM takes the brackets off a target, so the check follows
-  `include [name]` to the file `name` in the PAM folders. In those stacks
+  Linux-PAM takes the brackets off every word, so the check follows
+  `include [name]` and `[include] name` to the file `name` in the PAM
+  folders. In those stacks
   the check also refuses a `conf=` option, because `pam_limits` reads a
   relative `conf=` file in the working folder of the box user. The check
   refuses `pam_exec`, `pam_script`, `pam_python` and `pam_xauth`, which
@@ -907,11 +908,12 @@ own commands in the setup box and in each candidate box:
   The `sudo.conf` files (`/etc/sudo.conf` and `/usr/etc/sudo.conf`) may
   hold only comments, `Set` lines that do not turn on `developer_mode`,
   `Plugin` lines that load the stock `sudoers.so` by its stock path, and
-  the stock `Path` lines of the stock images. `developer_mode` stops `sudo` from checking who owns a plugin.
-  The check refuses a `Debug` line, an `askpass` path, a plugin with
-  arguments, a line that ends in a backslash, a `#` after a setting, and
-  a character that is not printable ASCII. It refuses a `sudo.conf` that
-  exists but that it cannot read. A missing `sudo.conf` passes.
+  the stock `Path` lines of the stock images. `developer_mode` stops
+  `sudo` from checking who owns a plugin. The check refuses a `Debug`
+  line, an `askpass` path, a plugin with arguments, a line that ends in
+  a backslash, a `#` after a setting, and a character that is not
+  printable ASCII. It refuses a `sudo.conf` that exists but that it
+  cannot read. A missing `sudo.conf` passes.
   A box user who can change the account files can join
   the `sudo` group or set a root
   password. Others need not read `/etc/shadow` or `/etc/gshadow`, which
