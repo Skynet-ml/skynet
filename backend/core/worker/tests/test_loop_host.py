@@ -1161,6 +1161,7 @@ def _openrouter_rate_limited(reset: object, retry_after: str | None = None) -> h
         ("soon", None, 5.0),
         ("nan", None, 5.0),
         (None, None, 5.0),
+        (10**400, None, 5.0),
         (str(int((_NOW + 12) * 1000)), "7", 7.0),
     ],
     ids=[
@@ -1172,6 +1173,7 @@ def _openrouter_rate_limited(reset: object, retry_after: str | None = None) -> h
         "garbage-uses-backoff",
         "nan-uses-backoff",
         "null-uses-backoff",
+        "too-large-uses-backoff",
         "retry-after-wins",
     ],
 )

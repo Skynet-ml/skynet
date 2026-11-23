@@ -455,7 +455,7 @@ def _rate_limit_reset_wait(body: bytes) -> float | None:
     """
     try:
         reset = float(json.loads(body)["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, OverflowError):
         return None
     if not math.isfinite(reset):
         return None
