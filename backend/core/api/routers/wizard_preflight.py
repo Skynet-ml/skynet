@@ -168,9 +168,7 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
     return response.model_copy(update=update)
 
 
-def _require_budget_lease(
-    request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any, token_source: str
-) -> None:
+def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any) -> None:
     """Refuse a budget whose unspent room cannot buy the run's first lease, as submit would.
 
     An uncapped budget has no limit floor, but its first lease still draws on the balance.
@@ -179,7 +177,6 @@ def _require_budget_lease(
         request: The check request, with its budget.
         user: Budget owner.
         job_store: Store whose engine holds the budget and the wallet.
-        token_source: The run's ``"managed"`` or ``"byok"`` source.
 
     Raises:
         DomainError: The budget's lookup error, or the refusal of
@@ -197,7 +194,7 @@ def _require_budget_lease(
         None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
     )
     if not budget.uncapped:
-        require_funded_lease(budget.total_cents, spendable, token_source, spent_units=spent)
+        require_funded_lease(budget.total_cents, spendable, spent_units=spent)
     elif spendable is not None:
         require_one_lease(spendable, from_balance=True)
 
@@ -244,7 +241,6 @@ def checked_preflight(
         novelty = bool(typed.shinka and typed.shinka.novelty)
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
         payload = typed.model_dump(mode="json", by_alias=True)
-        token_source = typed.token_source
     else:
         # The evaluation check skips the full run request, but the sandbox
         # still reads every scorer field, so it gets the run's defaults and limits.
@@ -283,9 +279,8 @@ def checked_preflight(
         shinka = payload.get("shinka")
         novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
-        token_source = payload.get("token_source", "managed")
     # Submit refuses this run, so it must not pay for a setup check first (SKY-923).
-    _require_budget_lease(request, user, job_store, token_source)
+    _require_budget_lease(request, user, job_store)
     return run_preflight(request.model_copy(update={"payload": payload}), user, job_store)
 
 

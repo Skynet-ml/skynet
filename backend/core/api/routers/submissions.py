@@ -155,11 +155,10 @@ def _ensure_api_budget(
             budget = service.create(user.username, total, idempotency_key=budget_creation_key, uncapped=True)
         elif budget is None:
             spendable = _enforce_balance(job_store, user.username, payload.token_source)
-            ceiling = cost_ceiling_budget(spendable or 0, payload.token_source)
             total = payload.max_cost_cents
             if total is None:
-                total = ceiling
-            require_funded_lease(total, spendable, payload.token_source)
+                total = cost_ceiling_budget(spendable or 0, payload.token_source)
+            require_funded_lease(total, spendable)
             budget = service.create(user.username, total, idempotency_key=budget_creation_key)
     except BudgetError as error:
         raise budget_http_error(error) from error
@@ -230,8 +229,7 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
         # The same gate as the wizard check: the setup check spends from this limit, so the first
-        # lease needs the room it left, and it draws on a balance that can fall after the check.
-        # The balance is named when it is what caps that room (SKY-923).
+        # lease needs the room it left, and it draws on a balance that can fall after the check (SKY-923).
         spendable = (
             None
             if settings.local_mode
@@ -239,7 +237,7 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
         )
         if not budget.uncapped:
             spent = service.spent_units(budget.id, payload.username)
-            require_funded_lease(budget.total_cents, spendable, payload.token_source, spent_units=spent)
+            require_funded_lease(budget.total_cents, spendable, spent_units=spent)
         elif spendable is not None:
             require_one_lease(spendable, from_balance=True)
         canonical = _persistable_payload(payload, job_store)

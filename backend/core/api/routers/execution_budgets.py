@@ -21,7 +21,6 @@ from ...billing.budgets import (
     BudgetSnapshot,
     BudgetTotalConflictError,
 )
-from ...billing.service import cost_ceiling_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 
@@ -133,37 +132,25 @@ def require_one_lease(total_cents: int, *, from_balance: bool = False, spent_uni
     )
 
 
-def require_funded_lease(
-    total_cents: int, spendable_cents: int | None, token_source: str, *, spent_units: int = 0
-) -> None:
-    """Refuse a capped run whose limit or balance cannot buy the run's first budget lease.
+def require_funded_lease(total_cents: int, spendable_cents: int | None, *, spent_units: int = 0) -> None:
+    """Refuse a capped run whose balance or limit cannot buy the run's first budget lease.
 
     Args:
         total_cents: The run's approved spending limit.
         spendable_cents: The account's spendable balance, or ``None`` when no
             balance applies.
-        token_source: ``"managed"`` or ``"byok"``.
         spent_units: Settled spending already charged to this limit, in
             budget units.
 
     Raises:
-        DomainError: 402 ``budget.insufficient`` when the balance is the
-            reason, or 409 ``budget.below_minimum`` when the user's own limit is.
+        DomainError: 402 ``budget.insufficient`` when the balance is below one
+            lease, or 409 ``budget.below_minimum`` when the limit's room is.
     """
-    if spendable_cents is None:
-        require_one_lease(total_cents, spent_units=spent_units)
-        return
-    # A BYOK ceiling ignores the balance, but every run's first lease holds one full lease of it (SKY-923).
-    # This check runs first: a higher limit cannot help a balance below one lease, so no 409 asks for one.
-    require_one_lease(spendable_cents, from_balance=True)
-    # Submit lowers a user's limit to what the balance backs, so a limit at that ceiling is the balance's.
-    # Setup spend leaves only the limit's room, so the balance sets the limit only when it is below that room (SKY-923).
-    balance_units = cost_ceiling_budget(spendable_cents, token_source) * CENT_SCALE
-    require_one_lease(
-        total_cents,
-        from_balance=balance_units <= total_cents * CENT_SCALE - spent_units,
-        spent_units=spent_units,
-    )
+    # Every run's first lease holds one full lease of the balance, also for BYOK. A higher limit cannot help a
+    # balance below that, so the balance is checked first (SKY-923).
+    if spendable_cents is not None:
+        require_one_lease(spendable_cents, from_balance=True)
+    require_one_lease(total_cents, spent_units=spent_units)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

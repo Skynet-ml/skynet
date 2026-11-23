@@ -951,10 +951,10 @@ def test_protected_submit_refuses_a_limit_whose_setup_spend_leaves_less_than_one
         assert response.json()["detail"] == _BELOW_ONE_LEASE
 
 
-def test_protected_submit_names_the_balance_when_it_caps_the_room_setup_spend_left(
+def test_protected_submit_names_the_balance_when_the_setup_check_leaves_it_below_one_lease(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Answer 402 at submit, not 409, when the balance left after the setup check caps the limit's room (SKY-923).
+    """Answer 402 at submit, not 409, when the setup check leaves the balance below one lease (SKY-923).
 
     A higher limit cannot help here, so the refusal must not ask for one.
 
@@ -996,42 +996,31 @@ def test_the_room_refusal_names_the_limit_that_buys_one_lease_after_spending() -
 
 
 @pytest.mark.parametrize(
-    ("spendable", "status", "code"),
-    [(140, 409, "budget.below_minimum"), (80, 402, "budget.insufficient")],
-    ids=["balance-above-room", "balance-below-room"],
+    ("spendable", "spent", "status", "code"),
+    [(140, 60, 409, "budget.below_minimum"), (70, 100, 402, "budget.insufficient")],
+    ids=["balance-of-one-lease", "balance-below-one-lease"],
 )
-def test_the_lease_refusal_compares_the_balance_with_the_room_left_after_setup_spend(
-    spendable: int, status: int, code: str
+def test_the_lease_refusal_names_the_balance_only_when_it_is_below_one_lease(
+    spendable: int, spent: int, status: int, code: str
 ) -> None:
-    """Name the limit when the balance covers the room that setup spend left, else the balance (SKY-923).
+    """Name the balance when it cannot buy one lease, else the limit's room after setup spend (SKY-923).
 
-    A limit of 150 with 60 spent leaves 90. A balance of 140 covers that room, so a higher limit helps.
+    A limit of 150 with 60 spent leaves 90, and a balance of 140 buys a lease, so a higher limit
+    helps. With 100 spent the room is 50, and a balance of 70 covers it but cannot buy a lease.
 
     Args:
         spendable: The account's spendable balance.
+        spent: Cents that setup checks already spent from the limit.
         status: The expected refusal status.
         code: The expected refusal code.
     """
     with pytest.raises(DomainError) as refused:
-        execution_budgets.require_funded_lease(150, spendable, "managed", spent_units=60 * budgets.CENT_SCALE)
+        execution_budgets.require_funded_lease(150, spendable, spent_units=spent * budgets.CENT_SCALE)
 
     assert refused.value.status_code == status
     assert refused.value.code == code
     if status == 409:
-        assert refused.value.params == {"minimum_total_cents": budgets.CHUNK_CENTS + 60}
-
-
-def test_a_balance_below_one_lease_is_named_even_when_it_covers_the_room_left() -> None:
-    """Name the balance, not the limit, when the balance cannot buy one lease (SKY-923).
-
-    A limit of 150 with 100 spent leaves 50. A balance of 70 covers that room, but a higher
-    limit cannot help, because the balance stays below one lease.
-    """
-    with pytest.raises(DomainError) as refused:
-        execution_budgets.require_funded_lease(150, 70, "managed", spent_units=100 * budgets.CENT_SCALE)
-
-    assert refused.value.status_code == 402
-    assert refused.value.code == "budget.insufficient"
+        assert refused.value.params == {"minimum_total_cents": budgets.CHUNK_CENTS + spent}
 
 
 @pytest.mark.parametrize(
