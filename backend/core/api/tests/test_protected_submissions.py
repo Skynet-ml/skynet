@@ -1164,26 +1164,40 @@ def test_the_wizard_check_refuses_an_uncapped_budget_whose_balance_is_below_one_
     assert harness.count(WizardPreflightModel) == 0
 
 
-@pytest.mark.parametrize("local_mode", [False, True], ids=["hosted", "local"])
-def test_the_wizard_check_passes_an_uncapped_budget_the_balance_or_local_mode_covers(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, local_mode: bool
+@pytest.mark.parametrize(
+    ("local_mode", "balance", "status"),
+    [(False, budgets.CHUNK_CENTS + 2, "succeeded"), (False, budgets.CHUNK_CENTS, "failed"), (True, 30, "succeeded")],
+    ids=["hosted-funded", "hosted-short", "local"],
+)
+def test_the_wizard_check_keeps_one_lease_of_the_balance_for_an_uncapped_budget(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, local_mode: bool, balance: int, status: str
 ) -> None:
-    """Run a "no limit" setup check when the balance funds one lease, or in local mode at any balance (SKY-923).
+    """Run a "no limit" setup check only when the balance funds it and one lease, or in local mode (SKY-923).
+
+    The 2-cent check hold must leave one lease of the balance, because submit refuses an uncapped run below it.
 
     Args:
         harness: Real wizard check routes and spending authority.
         monkeypatch: Restores the real lease size and sets local mode.
         local_mode: Whether the server runs in local mode, which has no balance gate.
+        balance: The account balance before the check.
+        status: The expected check status.
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     monkeypatch.setattr(submissions.settings, "local_mode", local_mode)
-    _set_balance(harness, 30 if local_mode else budgets.CHUNK_CENTS)
+    _set_balance(harness, balance)
 
     response, _payload_body = _uncapped_check(harness, _SUBSCRIPTION if local_mode else None)
 
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "succeeded", response.json()
-    assert len(harness.calls) == harness.count(WizardPreflightModel) == 1
+    checked = response.json()
+    assert checked["status"] == status, checked
+    if status == "failed":
+        assert [(check["key"], check["field"]) for check in checked["checks"]] == [("budget", "balance")]
+        assert checked["budget"]["setup_spent_cents"] == "0"
+    else:
+        assert len(harness.calls) == 1
+    assert harness.count(WizardPreflightModel) == 1
 
 
 @pytest.mark.parametrize("uncapped", [False, True], ids=["capped", "uncapped"])

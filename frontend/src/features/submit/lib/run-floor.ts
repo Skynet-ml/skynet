@@ -8,7 +8,9 @@
  * first calls and the calibration that prices the rest. One call's hold
  * (its prompt bytes plus its output cap at list price) is usually a few
  * cents, so a dollar of spare covers it; a model whose single call holds more
- * raises the spare to that hold.
+ * raises the spare to that hold. Outside local mode the limit also needs one
+ * budget lease on top: the setup check keeps it unused, and submit refuses a
+ * run without it (SKY-923).
  */
 
 import { python } from "@codemirror/lang-python";
@@ -20,6 +22,9 @@ import type { OptimizerSlice } from "./wizard-v2";
 
 /** Spare room above the boxes' opening holds, in cents. */
 export const RUN_SPARE_CENTS = 100;
+
+/** One budget lease, in cents; the server's `CHUNK_CENTS`. */
+export const RUN_LEASE_CENTS = 100;
 
 /** The limit a fresh budget starts at, unless the floor is higher. */
 export const DEFAULT_LIMIT_CENTS = 500;
@@ -40,12 +45,14 @@ export interface RunFloorInput {
 export interface RunFloor {
   boxHoldCents: number;
   spareCents: number;
+  /** The lease a run takes first; local mode takes none. */
+  leaseCents: number;
   /** The least the limit can be, in whole cents. */
   floorCents: number;
   unpriced: boolean;
 }
 
-/** Add the boxes' opening holds to the spare the first calls need. */
+/** Add the boxes' opening holds, the spare the first calls need and the run's first lease. */
 export function runFloor({
   boxHoldCents,
   callHoldCents,
@@ -53,8 +60,15 @@ export function runFloor({
   unknownModel,
 }: RunFloorInput): RunFloor {
   const boxes = Math.ceil(Math.max(0, boxHoldCents ?? 0));
+  const lease = isLocalMode() ? 0 : RUN_LEASE_CENTS;
   if (tokenSource === "subscription")
-    return { boxHoldCents: boxes, spareCents: 0, floorCents: boxes, unpriced: !!unknownModel };
+    return {
+      boxHoldCents: boxes,
+      spareCents: 0,
+      leaseCents: lease,
+      floorCents: boxes + lease,
+      unpriced: !!unknownModel,
+    };
   const dearestCall = callHoldCents.reduce<number>(
     (max, hold) => (typeof hold === "number" && hold > max ? hold : max),
     0,
@@ -63,7 +77,8 @@ export function runFloor({
   return {
     boxHoldCents: boxes,
     spareCents: spare,
-    floorCents: boxes + spare,
+    leaseCents: lease,
+    floorCents: boxes + spare + lease,
     unpriced: !!unknownModel || callHoldCents.some((hold) => hold === null),
   };
 }
@@ -205,7 +220,8 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       const isImportError =
         exception?.name === "VariableName"
           ? code.slice(exception.from, exception.to) === "ImportError"
-          : (exception?.name === "TupleExpression" || exception?.name === "ParenthesizedExpression") &&
+          : (exception?.name === "TupleExpression" ||
+              exception?.name === "ParenthesizedExpression") &&
             exception
               .getChildren("VariableName")
               .some((n) => code.slice(n.from, n.to) === "ImportError");
@@ -453,8 +469,11 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         while (ancestor && ancestor.name !== "ImportStatement") ancestor = ancestor.parent;
         if (
           !ancestor &&
-          !(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
-            code.slice(current.nextSibling.from, current.nextSibling.to) === "=") &&
+          !(
+            parent?.name === "ArgList" &&
+            current.nextSibling?.name === "AssignOp" &&
+            code.slice(current.nextSibling.from, current.nextSibling.to) === "="
+          ) &&
           parent?.name !== "ScopeStatement" &&
           !(
             parent?.name === "MemberExpression" &&
@@ -479,8 +498,11 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         isHelper(current) &&
         !allowedFallbacks.has(current.from) &&
         current.parent?.name !== "ScopeStatement" &&
-        !(current.parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
-          code.slice(current.nextSibling.from, current.nextSibling.to) === "=")
+        !(
+          current.parent?.name === "ArgList" &&
+          current.nextSibling?.name === "AssignOp" &&
+          code.slice(current.nextSibling.from, current.nextSibling.to) === "="
+        )
       ) {
         let parent = current.parent;
         let callable = current;

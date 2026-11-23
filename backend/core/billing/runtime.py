@@ -112,7 +112,8 @@ class BudgetRuntime:
             phase: Setup or run attribution.
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
-            keep_cents: Cents of a capped limit, and of the account's funds, that this runtime's work must leave unused.
+            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
+                this runtime's work must leave unused.
         """
         self.service = service
         self.username = username
