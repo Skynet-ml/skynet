@@ -48,3 +48,21 @@ test("no storage and a throwing storage both read as no goal", () => {
   saveLandingGoal("goal", broken);
   assert.equal(takeLandingGoal(broken), "");
 });
+
+test("a goal older than an hour is dropped and cleared", () => {
+  const storage = memoryStorage();
+  saveLandingGoal("Cut my API latency", storage, 0);
+  assert.equal(takeLandingGoal(storage, 60 * 60 * 1000 + 1), "");
+  assert.equal(storage.size(), 0);
+  saveLandingGoal("Cut my API latency", storage, 0);
+  assert.equal(takeLandingGoal(storage, 60 * 60 * 1000), "Cut my API latency");
+});
+
+test("a malformed stored value reads as no goal and is cleared", () => {
+  const storage = memoryStorage();
+  for (const raw of ["plain text", "{}", '{"goal":1,"savedAt":0}', '{"goal":"x"}']) {
+    storage.setItem("skynet.landing-goal", raw);
+    assert.equal(takeLandingGoal(storage), "", raw);
+    assert.equal(storage.size(), 0, raw);
+  }
+});

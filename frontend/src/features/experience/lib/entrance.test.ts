@@ -45,6 +45,8 @@ test("the setup never covers the sign-in or public pages", () => {
     "/share/abc",
     "/docs",
     "/docs/he/start",
+    "/blog",
+    "/blog/the-most-valuable-skill-of-this-century",
     "/desktop/link",
     "/mcp/authorize",
   ]) {
