@@ -218,6 +218,22 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
     assert "The candidate gets only input" in json.dumps(schema)
 
 
+def test_limit_argument_says_the_setup_check_spends_from_it(harness: Any) -> None:
+    """Tell the agent that the setup check spends from the limit and submit needs one lease after it (SKY-923).
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+    """
+    client, _engine, _calls = harness
+    resp = _rpc(client, "tools/list", {}, WRITE_TOKEN, None)
+    assert resp.status_code == 200, resp.text
+    tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+    for name in ("repo_draft_preflight", "repo_draft_submit"):
+        description = tools[name]["inputSchema"]["properties"]["max_cost_cents"]["description"]
+        assert "The setup check spends from it" in description
+        assert f"{CHUNK_CENTS} cents of it left after that check" in description
+
+
 def test_budget_tool_has_no_stop_score_argument(harness: Any) -> None:
     """The stop score comes from ``[outcome] target`` in ascent.toml, so the budget step does not take one."""
     client, _engine, _calls = harness

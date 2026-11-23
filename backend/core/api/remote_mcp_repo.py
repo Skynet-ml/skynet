@@ -117,6 +117,12 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 # default limit is at least five dollars.
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
+# The setup check spends from the same limit, and submit refuses a capped limit that leaves less
+# than one lease, so a client that picks the bare minimum would pay for the check twice (SKY-923).
+_LIMIT_DESCRIPTION = (
+    "Spending limit of this run, in cents. The setup check spends from it, and submit needs "
+    f"{CHUNK_CENTS} cents of it left after that check. Use suggested_max_cost_cents from repo_draft_review."
+)
 _PENDING_RETRY_SECONDS = 5
 # A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
 # in_progress at this bound while the score continues in the background.
@@ -1690,7 +1696,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
     )
     def repo_draft_preflight(
         draft_id: Annotated[str, Field(max_length=64)],
-        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description="Spending limit of this run, in cents.")],
+        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description=_LIMIT_DESCRIPTION)],
         confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
         hardening_job_id: Annotated[
             str | None, Field(min_length=1, max_length=36, description="A metric-hardening job of this account.")
@@ -1734,7 +1740,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
     )
     def repo_draft_submit(
         draft_id: Annotated[str, Field(max_length=64)],
-        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description="Spending limit of this run, in cents.")],
+        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description=_LIMIT_DESCRIPTION)],
         confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
         idempotency_key: Annotated[
             str | None, Field(max_length=128, description="Send the same key to retry without a second run.")
