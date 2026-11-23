@@ -6091,6 +6091,7 @@ _CONF = {
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/usr/lib/pam.d": "none",
+    "/usr/lib/security": "none",
     "/etc/security": "755 directory",
 }
 _CONF_ENTRIES = {
@@ -7902,6 +7903,13 @@ _SUDO_PARTS = _sudo_lines()
                 }
             )
         ),
+        _listing(sudo=_sudo_lines(conf={"/usr/lib/security": _walk("/usr/lib/security", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/lib/security": _walk("/usr/lib/security", "755 directory")},
+                entries={"/usr/lib/security": _entry("entry", "/usr/lib/security/pam_box.so", "1000 755 regular file")},
+            )
+        ),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/lib/pam.d"]),
     ],
@@ -7962,6 +7970,8 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-usr-lib-pam-d",
         "box-owned-file-in-usr-lib-pam-d",
         "usr-lib-pam-d-link-to-a-box-folder",
+        "box-owned-usr-lib-security",
+        "box-owned-module-in-usr-lib-security",
         "no-pam-d-line",
         "no-usr-lib-pam-d-line",
     ],
@@ -8083,8 +8093,14 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         ),
         _listing(
             sudo=_sudo_lines(
-                conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory")},
-                entries={"/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "644 regular file")},
+                conf={
+                    "/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory"),
+                    "/usr/lib/security": _walk("/usr/lib/security", "755 directory"),
+                },
+                entries={
+                    "/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "644 regular file"),
+                    "/usr/lib/security": _entry("entry", "/usr/lib/security/pam_vendor.so", "644 regular file"),
+                },
             )
         ),
     ],
@@ -8101,7 +8117,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "no-locale-file-and-a-mode-0-shadow",
         "empty-etc-environment",
         "files-in-a-security-folder",
-        "root-owned-usr-lib-pam-d",
+        "root-owned-usr-lib-pam-d-and-usr-lib-security",
     ],
 )
 def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:

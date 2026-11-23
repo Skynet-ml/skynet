@@ -1324,6 +1324,8 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # when /etc/pam.d is missing. Debian's Linux-PAM reads a service or @include
 # file from /usr/lib/pam.d when /etc/pam.d does not have it, so an image could
 # remove /etc/pam.d/sudo and put a box-owned one there (SKY-912 review).
+# Its libpam also names /usr/lib/security, a module folder outside the loader
+# folders; stock images do not have it, so it must be missing or root's.
 # /etc/security may hold one level of folders,
 # such as limits.d. Ubuntu's sudo PAM stack reads /etc/default/locale into the
 # root environment. A box user who could change the account files could add
@@ -1340,7 +1342,7 @@ _SUDO_FILES = (
     "/etc/shadow",
     "/etc/gshadow",
 )
-_SUDO_FOLDERS = ("/etc/sudoers.d", "/etc/pam.d", "/usr/lib/pam.d", "/etc/security")
+_SUDO_FOLDERS = ("/etc/sudoers.d", "/etc/pam.d", "/usr/lib/pam.d", "/usr/lib/security", "/etc/security")
 _DEEP_FOLDER = "/etc/security"
 _SUDO_DONE = "sudo checked"
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
@@ -1768,11 +1770,12 @@ UNTRUSTED_PYTHON = (
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
-    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d and /etc/security when present,"
+    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
+    " /etc/security when present,"
     " with every"
     " entry in them. Others must be able to read each sudo and search each of those image PATH folders. The first sudo"
     " on the image PATH must have an x bit, and each sudo must resolve to an ELF file. Others must be able to"
-    " list each of those four folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
+    " list each of those five folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
     " a regular file, except one level of folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
