@@ -825,7 +825,11 @@ own commands in the setup box and in each candidate box:
   the same names that it refuses in the image `ENV`, such as `LD_PRELOAD`
   or a locale that is not C, POSIX or UTF-8. Any locale set in
   `pam_env.conf` is refused, because its values can expand other
-  variables. A
+  variables. The check also refuses a line in these files that ends in a
+  backslash, and a variable name that is not letters, digits and
+  underscores. It refuses an image that has a `pam_env` drop-in folder or
+  a vendor copy, such as `/etc/security/pam_env.conf.d` or
+  `/usr/etc/environment`, because it does not read them. A
   box user who can change the account files can join the `sudo` group or
   set a root password. Others need not read `/etc/shadow` or
   `/etc/gshadow`, which are often mode 0640 or 0000. An image with no

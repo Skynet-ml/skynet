@@ -1356,6 +1356,16 @@ import """
 import locale
 PAM_ENV_CONF = "/etc/security/pam_env.conf"
 PAM_ENV_FILES = ("/etc/environment", "/etc/default/locale", PAM_ENV_CONF)
+# Newer Linux-PAM builds also read drop-in folders and vendor copies. The check does not parse them, so it refuses them.
+PAM_ENV_EXTRA = (
+    "/etc/security/pam_env.conf.d",
+    "/usr/etc/security/pam_env.conf",
+    "/usr/etc/security/pam_env.conf.d",
+    "/usr/etc/environment",
+    "/usr/lib/security/pam_env.conf",
+    "/usr/lib/security/pam_env.conf.d",
+    "/usr/lib/environment",
+)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1367,6 +1377,9 @@ for name in names:
         if not (value.isascii() and value.isprintable()):
             sys.exit("a locale value is not printable ASCII")
         print("locale", name + "=" + value)
+for extra in PAM_ENV_EXTRA:
+    if os.path.lexists(extra):
+        sys.exit("the image has " + extra + ", which the check does not read")
 for file in PAM_ENV_FILES:
     try:
         with open(file, encoding="latin-1") as text:
@@ -1377,14 +1390,17 @@ for file in PAM_ENV_FILES:
         row = row.strip()
         if not row or row.startswith("#"):
             continue
+        if row.endswith("\\"):
+            # pam_env joins a line that ends in a backslash with the next line, so a name could span two rows.
+            sys.exit("a PAM environment file continues a line")
         if file == PAM_ENV_CONF:
             # Its values can expand other variables, so a locale set there counts as unsafe.
             name, value = row.split()[0], "?"
         else:
             name, _, value = (row[7:] if row.startswith("export ") else row).partition("=")
             name, value = name.strip(), value.replace('"', "").replace("'", "")
-        if not (name.isascii() and name.isprintable()):
-            sys.exit("a PAM environment variable name is not printable ASCII")
+        if not (name and all(c == "_" or (c.isascii() and c.isalnum()) for c in name)):
+            sys.exit("a PAM environment variable name is not letters, digits and underscores")
         print("env", name)
         if name in ("LANG", "LANGUAGE") or name.startswith("LC_"):
             if not (value.isascii() and value.isprintable()):
