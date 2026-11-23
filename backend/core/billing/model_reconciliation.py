@@ -212,7 +212,7 @@ class OpenRouterUsageReconciler:
                     results.append(ReconciliationResult(operation_id, "pending", str(release_error)))
                     continue
                 if operation.state == "released":
-                    logger.info("Released model hold %s at no charge: %s", operation_id, error)
+                    logger.info("Released model hold %s at no further charge: %s", operation_id, error)
                 results.append(
                     ReconciliationResult(
                         operation_id, operation.state, None if operation.state == "released" else str(error)

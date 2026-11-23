@@ -340,7 +340,7 @@ def _age_operations(database, minutes: int) -> None:
 def test_sweep_releases_a_hold_that_can_never_settle_after_one_minute(
     database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, request_id, resolved_key, reason
 ) -> None:
-    """Release at no charge, and log, a hold with no request id or no credential (SKY-914).
+    """Release at no further charge, and log, a hold with no request id or no credential (SKY-914).
 
     Args:
         database: Ledger database.
