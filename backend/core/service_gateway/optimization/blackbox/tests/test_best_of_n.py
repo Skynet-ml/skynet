@@ -38,7 +38,7 @@ from ..harness import GatewayConfig
 from ..harness_bridge import hidden_hashes
 from ..native_runtime import NativeOptions
 from ..protocol import EngineContext, ModelReply, RepoSeed, Task
-from ..repo_tree import apply_patch
+from ..repo_tree import apply_patch, patch_violations
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_contract import SandboxSession
 from ..tree_sandbox import RuntimeBoxSource
@@ -1047,7 +1047,8 @@ def test_a_repository_brief_spells_each_backtick_run_as_a_token_inside_a_plain_f
 
 # A diff that edits fenced code in README.md: a 3-backtick block with a tag, and a 4-backtick fence.
 _README_DIFF = (
-    "--- a/README.md\n+++ b/README.md\n@@ -1,6 +1,7 @@\n intro\n ```python\n code\n+more code\n ```\n ````\n end"
+    "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n"
+    "@@ -1,6 +1,7 @@\n intro\n ```python\n code\n+more code\n ```\n ````\n end"
 )
 
 
@@ -1055,7 +1056,7 @@ def test_upstream_cuts_a_raw_diff_at_its_first_backtick_run() -> None:
     """Pin the upstream parser that the token form works around: a raw fenced diff keeps only its header."""
     assert (
         _parse_candidate(f"```diff\n{_README_DIFF}\n```")
-        == "--- a/README.md\n+++ b/README.md\n@@ -1,6 +1,7 @@\n intro\n "
+        == "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,6 +1,7 @@\n intro\n "
     )
 
 
@@ -1438,7 +1439,7 @@ def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
         trees: The tree store.
         tmp_path: Pytest's temporary folder.
     """
-    diff = "--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,3 @@\n <<3 backticks>> and a << b\n ```\n+new"
+    diff = "diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,3 @@\n <<3 backticks>> and a << b\n ```\n+new"
     repo_tree = _repo(trees)
     reply = _escape_backticks(diff)
     loop, _, _ = _loop(owner, engine, step_log, trees, tmp_path, [f"```diff\n{reply}\n```"], generation=1)
@@ -1450,3 +1451,119 @@ def test_a_file_that_holds_a_literal_token_reaches_the_scorer_as_the_exact_diff(
 
     assert scored == [(diff + "\n", case) for case in _CASES]
     assert result.best_candidate == diff + "\n"
+
+
+def test_a_plain_unified_diff_gets_git_headers_so_the_path_check_accepts_it_and_it_applies(tmp_path: Path) -> None:
+    """A sample with no ``diff --git`` line, as run b7b8e3ca's model wrote, passes the check and applies (SKY-905).
+
+    The hunk removes a line that reads ``-- a/gone``, so its body holds a
+    header-like ``--- a/gone`` line, which gets no header.
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    sample = (
+        "--- a/src/solve.py\n+++ b/src/solve.py\n@@ -1,2 +1,2 @@\n-x = 1\n--- a/gone\n+x = 2\n+ok\n"
+        "--- /dev/null\n+++ b/src/new.py\n@@ -0,0 +1 @@\n+y = 1\n"
+        "--- a/src/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-z = 1"
+    )
+    patch = _as_patch(sample)
+
+    assert patch == (
+        "diff --git a/src/solve.py b/src/solve.py\n--- a/src/solve.py\n+++ b/src/solve.py\n"
+        "@@ -1,2 +1,2 @@\n-x = 1\n--- a/gone\n+x = 2\n+ok\n"
+        "diff --git a/src/new.py b/src/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.py\n"
+        "@@ -0,0 +1 @@\n+y = 1\n"
+        "diff --git a/src/old.py b/src/old.py\ndeleted file mode 100644\n--- a/src/old.py\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-z = 1\n"
+    )
+    assert patch_violations(sample + "\n", ["src"])
+    assert patch_violations(patch, ["src"]) == []
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "src" / "solve.py").write_text("x = 1\n-- a/gone\n")
+    (checkout / "src" / "old.py").write_text("z = 1\n")
+    apply_patch(checkout, patch)
+    assert (checkout / "src" / "solve.py").read_text() == "x = 2\nok\n"
+    assert (checkout / "src" / "new.py").read_text() == "y = 1\n"
+    assert not (checkout / "src" / "old.py").exists()
+
+
+def test_a_repaired_plain_diff_to_a_forbidden_path_is_still_refused() -> None:
+    """The repair names each path in its own ``diff --git`` line, so the path rules still see it (SKY-905).
+
+    A ``diff -u`` date after a tab does not change the path.
+    """
+    dated = "--- a/src/x.py\t2020-01-01 00:00:00\n+++ b/src/x.py\t2020-01-01 00:00:01\n@@ -1 +1 @@\n-a\n+b\n"
+    assert _as_patch(dated).startswith("diff --git a/src/x.py b/src/x.py\n")
+    assert patch_violations(_as_patch(dated), ["src"]) == []
+    assert patch_violations(_as_patch("--- a/secret.txt\n+++ b/secret.txt\n@@ -1 +1 @@\n-a\n+b\n"), ["src"])
+    protected = _as_patch("--- a/src/p.py\n+++ b/src/p.py\n@@ -1 +1 @@\n-a\n+b\n")
+    assert patch_violations(protected, ["src"], protected_paths=["src/p.py"])
+
+
+def test_an_empty_context_line_and_a_no_newline_marker_keep_the_next_pair_found(tmp_path: Path) -> None:
+    """An empty context line counts as context and a ``\\`` marker does not break the hunk, as in git (SKY-905).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    patch = _as_patch(
+        "--- a/src/x.py\n+++ b/src/x.py\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n"
+        "--- a/src/y.py\n+++ b/src/y.py\n@@ -1 +1 @@\n-d\n\\ No newline at end of file\n+e\n"
+        "--- a/src/z.py\n+++ b/src/z.py\n@@ -1 +1 @@\n-f\n+g\n"
+    )
+    assert patch.count("diff --git ") == 3
+    assert patch_violations(patch, ["src"]) == []
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+    for name, text in (("x.py", "a\n\nb\n"), ("y.py", "d"), ("z.py", "f\n")):
+        (checkout / "src" / name).write_text(text)
+    apply_patch(checkout, patch)
+    for name, text in (("x.py", "a\n\nc\n"), ("y.py", "e\n"), ("z.py", "g\n")):
+        assert (checkout / "src" / name).read_text() == text
+
+
+def test_mode_lines_before_a_plain_pair_do_not_make_a_link(tmp_path: Path) -> None:
+    """Mode lines before a plain pair stay before the inserted ``diff --git`` line, where git ignores them (SKY-905).
+
+    Args:
+        tmp_path: Pytest's temporary folder.
+    """
+    patch = _as_patch(
+        "old mode 100644\nnew mode 120000\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+        "new file mode 120000\n--- /dev/null\n+++ b/src/y.py\n@@ -0,0 +1 @@\n+../secret.txt\n"
+    )
+    assert patch.count("diff --git ") == 2
+    assert patch_violations(patch, ["src"]) == []
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "src" / "x.py").write_text("a\n")
+    apply_patch(checkout, patch)
+    for name, text in (("x.py", "b\n"), ("y.py", "../secret.txt\n")):
+        assert not (checkout / "src" / name).is_symlink()
+        assert (checkout / "src" / name).read_text() == text
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "--- a/src/x.py\n+++ b/src/y.py\n@@ -1 +1 @@\n-a\n+b\n",
+        "--- src/x.py\n+++ src/x.py\n@@ -1 +1 @@\n-a\n+b\n",
+        "--- /dev/null\n+++ /dev/null\n@@ -1 +1 @@\n-a\n+b\n",
+        "--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-a\n+b\n" + _HEAD + "@@ -1 +1 @@\n-a\n+b\n",
+        "--- a/src/x.py\n+++ b/src/x.py\n@@ -1,2 +1,2 @@\n-a\nnot a diff line\n+b\n",
+        "--- a/src/p.py\r\n+++ b/src/p.py\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n",
+        "--- a/src/p.py \n+++ b/src/p.py \n@@ -1 +1 @@\n-a\n+b\n",
+        "--- /dev/null\n+++ b/src/n.py 2020-01-01 00:00:00.000000000 +0000\n@@ -0,0 +1 @@\n+y\n",
+        "--- /dev/null\n+++ b/src/link\nnew file mode 120000\n@@ -0,0 +1 @@\n+../secret.txt\n",
+        "--- a/src/x.py\n+++ b/src/x.py\n",
+    ],
+)
+def test_a_diff_whose_headers_name_no_single_path_keeps_its_text(sample: str) -> None:
+    """Bad header paths, a ``diff --git`` line, no hunk after a pair, or a broken hunk keep the sample (SKY-905).
+
+    Args:
+        sample: A sample the repair must not change.
+    """
+    assert _as_patch(sample) == sample
