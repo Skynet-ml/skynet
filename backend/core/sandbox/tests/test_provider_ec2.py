@@ -110,7 +110,9 @@ MV_SHIM = (
     '#!/bin/sh\nif [ "$1" = "-fT" ] && [ "$(uname)" = Darwin ]; then shift; set -- -fh "$@"; fi\nexec /bin/mv "$@"\n'
 )
 
-# macOS dd has no iflag=nofollow, so on macOS the shim opens the file with O_NOFOLLOW as GNU dd does.
+# macOS dd has no iflag=nofollow, so on macOS the shim opens the file as GNU dd does: with O_NOFOLLOW
+# only when iflag=nofollow is set. Without it the shim follows a link, so a test that relies on the
+# flag fails, as it would with GNU dd.
 DD_SHIM = textwrap.dedent(
     """
     import os, shutil, sys
@@ -118,9 +120,11 @@ DD_SHIM = textwrap.dedent(
     if os.uname().sysname != "Darwin":
         os.execv("/bin/dd", ["dd", *sys.argv[1:]])
     ops = dict(arg.split("=", 1) for arg in sys.argv[1:])
-    assert ops["iflag"] == "nofollow" and ops["status"] == "none", ops
+    assert set(ops) <= {"if", "iflag", "bs", "status"}, f"the dd shim does not know the operands {ops}"
+    assert ops.get("iflag", "nofollow") == "nofollow", f"the dd shim knows only iflag=nofollow, not {ops}"
+    flags = os.O_RDONLY | (os.O_NOFOLLOW if ops.get("iflag") == "nofollow" else 0)
     try:
-        fd = os.open(ops["if"], os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(ops["if"], flags)
     except OSError as error:
         sys.stderr.write(f"dd: failed to open {ops['if']!r}: {error.strerror}\\n")
         sys.exit(1)
@@ -955,7 +959,7 @@ async def test_a_download_refuses_a_link_at_a_parent_folder(fake_ec2: FakeEC2, t
 async def test_a_download_refuses_a_link_swapped_in_at_the_name_after_the_check(
     fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail the open of a link that appears at the name after the link check, so root does not read it (SKY-911).
+    """Refuse a link that appears at the name after the link check, so root does not read it (SKY-911).
 
     The test puts the swap into the script just before the read, as a box
     user that wins the race would do it.
@@ -967,8 +971,9 @@ async def test_a_download_refuses_a_link_swapped_in_at_the_name_after_the_check(
     monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(check, check + swap))
     async with EC2Environment(_spec()) as env:
         (fake_ec2.state / "root" / env._host / "a.txt").write_text("mine")
-        with pytest.raises(SandboxInfraError, match=r"could not read a\.txt") as caught:
+        with pytest.raises(RuntimeError, match=r"a\.txt is a symbolic link") as caught:
             await env.download_file("a.txt")
+        assert not isinstance(caught.value, SandboxInfraError)
         assert "keep" not in str(caught.value)
 
 
