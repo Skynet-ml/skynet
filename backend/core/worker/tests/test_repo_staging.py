@@ -8826,6 +8826,13 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
             "sudo has a character that is not printable",
         ),
         ("LANG=C.UTF-8\rLD_PRELOAD=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "", "file has a character"),
+        (
+            "",
+            False,
+            "session optional pam_permit.so " + "x" * 992 + "@include box\n",
+            "",
+            "sudo has a line longer than 1022 characters",
+        ),
     ],
     ids=[
         "line-continuation",
@@ -8854,6 +8861,7 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "vertical-tab",
         "carriage-return-in-envfile",
         "carriage-return-in-environment",
+        "long-line",
     ],
 )
 def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pam_does(

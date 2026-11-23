@@ -834,8 +834,10 @@ own commands in the setup box and in each candidate box:
   its values can expand other variables. The check also refuses a line in
   these files that ends in a backslash, a variable name that is not
   letters, digits and underscores, and a line with a character that is not
-  printable ASCII, such as a carriage return. Linux-PAM ends a line only
-  at a line feed, so a carriage return could hide a path from the check.
+  printable ASCII, such as a carriage return, because such a character
+  could hide a path from the check. It refuses a PAM configuration line
+  longer than 1022 characters, because Linux-PAM 1.5 reads the rest of
+  that line as a new line.
   It refuses an image that has a `pam_env` drop-in folder or a vendor
   copy, such as
   `/etc/security/pam_env.conf.d`, `/etc/environment.d` or

@@ -1407,7 +1407,7 @@ def bare(word):
     # Linux-PAM reads a word in brackets as one argument, and an escaped ] in it as a plain ].
     return word[1:-1].replace("\\]", "]") if word.startswith("[") else word
 def printable(row):
-    # Linux-PAM splits rows only at \n, so a \r or another control byte would make this scan read a row otherwise.
+    # A \r or another control byte could make this scan read a row otherwise than Linux-PAM does.
     return all(c == "\t" or " " <= c <= "~" for c in row)
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
@@ -1489,6 +1489,9 @@ for config in pam_configs:
     for row in rows:
         if not printable(row):
             sys.exit("the PAM configuration " + config + " has a character that is not printable ASCII")
+        # Linux-PAM 1.5 reads a configuration line in 1023-byte parts, so the rest of a longer row is its own line.
+        if len(row) > 1022:
+            sys.exit("the PAM configuration " + config + " has a line longer than 1022 characters")
         # Linux-PAM joins a line that ends in a backslash with the next one, but versions differ on a comment or a
         # blank line after it. A # ends the line before any backslash, in all of them.
         if "#" not in row and row.rstrip(" \t").endswith("\\"):
