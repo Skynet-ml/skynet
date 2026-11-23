@@ -101,7 +101,7 @@ from ._helpers import (
     stable_seed,
     strip_api_key,
 )
-from .execution_budgets import budget_http_error
+from .execution_budgets import budget_http_error, require_one_lease
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,7 @@ def _ensure_api_budget(
             total = payload.max_cost_cents
             if total is None:
                 total = cost_ceiling_budget(spendable or 0, payload.token_source)
+            require_one_lease(total)
             budget = service.create(user.username, total, idempotency_key=budget_creation_key)
     except BudgetError as error:
         raise budget_http_error(error) from error
@@ -226,6 +227,8 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
         budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
+        if not budget.uncapped:
+            require_one_lease(budget.total_cents)
         canonical = _persistable_payload(payload, job_store)
         PreflightStore(job_store.engine).require_current(
             username=payload.username,

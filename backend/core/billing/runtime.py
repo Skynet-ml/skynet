@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import Counter
@@ -25,6 +26,8 @@ from .operation_pricing import ChargePolicy, OperationQuote, json_fingerprint
 from .signals import BudgetStopLatch
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 _OPERATION_KEY_LIMIT = 128
 
@@ -533,7 +536,40 @@ class BudgetRuntime:
                     )
                 else:
                     self.service.mark_pending(operation.id, self.username)
+                    if cost_kind == "model" and (result is None or not result.provider_request_id):
+                        # Without a request id no lookup can confirm the bill, so the sweep releases the hold at
+                        # no charge after one minute (SKY-914). The reason shows which path loses the bill.
+                        logger.warning(
+                            "Model operation %s is held with no provider request id: %s "
+                            "(role=%s, state=%s, interrupted=%s, status=%s).",
+                            operation.id,
+                            _missing_request_id_reason(result, exc),
+                            role,
+                            current.state,
+                            result.evidence.get("interrupted") if result is not None else None,
+                            result.evidence.get("status") if result is not None else None,
+                        )
             raise
         finally:
             with self._changed:
                 self._changed.notify_all()
+
+
+def _missing_request_id_reason(result: PaidResult[Any] | None, error: BaseException) -> str:
+    """Say why a held model call has no provider request id, with no secret and no prompt text.
+
+    Args:
+        result: The dispatch's result, or ``None`` when the dispatch raised.
+        error: The error that ends the execution.
+
+    Returns:
+        A short reason built only from the error type and the answer's status fields.
+    """
+    if result is None:
+        return f"dispatch raised {type(error).__name__} before any answer"
+    if result.evidence.get("interrupted") is True:
+        return "the answer ended before it was complete"
+    status = result.evidence.get("status")
+    if isinstance(status, int) and status >= 400:
+        return f"the provider sent an error answer (HTTP {status})"
+    return "the provider answer carried no request id"

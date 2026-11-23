@@ -25,6 +25,7 @@ from core.billing.budgets import (
     BudgetInFlightError,
     BudgetService,
 )
+from core.billing.signals import BudgetReached
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
@@ -858,7 +859,8 @@ def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engi
         try:
             for _ in range(3):
                 agent.step("model", 1, work)
-        except LeaseExhaustedError:
+        # The spent cap gives BudgetReached; holds of other agents in flight give LeaseExhaustedError (SKY-914).
+        except (LeaseExhaustedError, BudgetReached):
             pass
         finally:
             agent.close()

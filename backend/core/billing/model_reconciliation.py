@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 
 from .budgets import BudgetError, BudgetService, OperationSnapshot
-from .model_dispatch import OpenRouterDispatcher
+from .model_dispatch import GenerationNotFoundError, OpenRouterDispatcher
 from .operation_pricing import ChargePolicy, exact_nonnegative, json_fingerprint
 from .runtime import BudgetRuntime, UsagePendingError
 from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
@@ -35,6 +35,13 @@ UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
 # between workers. The sweep releases the hold on its next pass that reaches
 # it; a long queue of pending holds can delay that.
 UNSETTLEABLE_RELEASE_AFTER = timedelta(minutes=1)
+# OpenRouter answers a generation lookup with HTTP 404 for a short time while it
+# indexes the bill (SKY-657); settle() already asked four times over about 3.5
+# seconds. A 404 that lasts 5 minutes after the call returned means OpenRouter
+# has no bill to give, so the hold is released at no further charge with a log
+# line. The window counts from the return (the operation's last change), not
+# from dispatched_at, because a call can run 10 minutes.
+GENERATION_NOT_FOUND_RELEASE_AFTER = timedelta(minutes=5)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +112,7 @@ class OpenRouterUsageReconciler:
         Raises:
             UnsettleableUsageError: When a returned call has no provider request id and no
                 stored refusal, or this worker cannot resolve the original credential.
+            GenerationNotFoundError: When OpenRouter's generation lookup answers HTTP 404.
             UsagePendingError: When the operation is not an admitted OpenRouter generation, the
                 model call has not returned, or final billing evidence or the original policy
                 is unavailable.
@@ -183,6 +191,7 @@ class OpenRouterUsageReconciler:
         dispatched (in-flight) hold is never released. The release comes 1 minute
         after dispatched_at for UnsettleableUsageError: no provider request id and
         no stored refusal, or this worker cannot resolve the original credential.
+        It comes 5 minutes after the call returned for GenerationNotFoundError.
         It comes 15 minutes after dispatched_at for every other pending reason.
 
         Args:
@@ -205,14 +214,21 @@ class OpenRouterUsageReconciler:
                 operation = self.reconcile(operation_id, username)
                 results.append(ReconciliationResult(operation_id, operation.state))
             except UsagePendingError as error:
-                wait = (
-                    UNSETTLEABLE_RELEASE_AFTER
-                    if isinstance(error, UnsettleableUsageError)
-                    else UNCONFIRMED_RELEASE_AFTER
-                )
+                returned_before = None
+                if isinstance(error, UnsettleableUsageError):
+                    wait = UNSETTLEABLE_RELEASE_AFTER
+                elif isinstance(error, GenerationNotFoundError):
+                    wait = GENERATION_NOT_FOUND_RELEASE_AFTER
+                    returned_before = now - wait
+                else:
+                    wait = UNCONFIRMED_RELEASE_AFTER
                 try:
                     operation = self.service.release_unconfirmed(
-                        operation_id, username, dispatched_before=now - wait, reason=str(error)
+                        operation_id,
+                        username,
+                        dispatched_before=now - wait,
+                        reason=str(error),
+                        returned_before=returned_before,
                     )
                 except BudgetError as release_error:
                     results.append(ReconciliationResult(operation_id, "pending", str(release_error)))

@@ -20,6 +20,7 @@ from ...billing.budgets import (
     BudgetSnapshot,
     BudgetTotalConflictError,
 )
+from ...worker.loop_host import CHUNK_CENTS
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 
@@ -99,6 +100,22 @@ def budget_http_error(error: BudgetError) -> HTTPException:
     else:
         status, code = 422, "budget.invalid"
     return DomainError(code, status=status)
+
+
+def require_one_lease(total_cents: int) -> None:
+    """Refuse a run limit that cannot buy the run's first budget lease.
+
+    A run takes its budget in leases of :data:`CHUNK_CENTS`, so a smaller
+    limit ends the run before its first paid step (SKY-914).
+
+    Args:
+        total_cents: The run's approved spending limit.
+
+    Raises:
+        DomainError: 409 ``budget.below_minimum`` when the limit is below one lease.
+    """
+    if total_cents < CHUNK_CENTS:
+        raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

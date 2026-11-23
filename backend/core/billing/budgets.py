@@ -1295,6 +1295,7 @@ class BudgetService:
         *,
         dispatched_before: datetime,
         reason: str,
+        returned_before: datetime | None = None,
     ) -> OperationSnapshot:
         """Release, at no further charge, the hold of started work whose final bill never came.
 
@@ -1308,16 +1309,22 @@ class BudgetService:
             username: Authenticated owner.
             dispatched_before: Only work dispatched before this time is released.
             reason: Why the final usage is still unknown; recorded as evidence.
+            returned_before: Also require the operation's last change before
+                this time; ``None`` for no such check. A pending operation's
+                last change is its return or later.
 
         Returns:
             The released operation, or the unchanged one when it is not
-            unconfirmed pending work older than ``dispatched_before``.
+            unconfirmed pending work older than ``dispatched_before`` and
+            ``returned_before``.
         """
         with self._transaction() as session:
             wallet, budget, operation = self._operation(session, operation_id, username)
             started = operation.dispatched_at or operation.created_at
             # SQLite returns naive datetimes; every stored time is UTC.
             started = started if started.tzinfo else started.replace(tzinfo=UTC)
+            changed = operation.updated_at
+            changed = changed if changed.tzinfo else changed.replace(tzinfo=UTC)
             # A known bill held for a funding or bound problem is not unconfirmed.
             quarantined = session.scalar(
                 select(ExecutionUsageEvidenceModel.id)
@@ -1330,7 +1337,12 @@ class BudgetService:
             )
             # Only "pending" work has returned; "dispatched" work may still be a
             # live stream or batch that outlasts the release window.
-            if operation.state != "pending" or started >= dispatched_before or quarantined is not None:
+            if (
+                operation.state != "pending"
+                or started >= dispatched_before
+                or (returned_before is not None and changed >= returned_before)
+                or quarantined is not None
+            ):
                 return self._operation_snapshot(session, operation, budget, wallet)
             now = datetime.now(UTC)
             document = {"reason": reason[:500], "dispatched_at": started.isoformat()}

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_billing import normalize_model_token_sources
-from core.api.routers import submissions, wizard_preflight
+from core.api.routers import execution_budgets, submissions, wizard_preflight
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.api.routers.optimizations_meta import create_optimizations_meta_router
 from core.api.routers.wizard_preflight import create_wizard_preflight_router
@@ -40,6 +40,7 @@ from core.billing.protected_credentials import scrub_execution_credentials
 from core.billing.runtime import BudgetRuntime, PaidResult
 from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
+from core.i18n_en import ENGLISH_MESSAGES
 from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
 from core.models.blackbox import TARGET_RETIRED
@@ -54,7 +55,7 @@ from core.storage.models import (
 )
 from core.storage.preflights import PreflightStore, WizardPreflightModel
 from core.storage.remote import RemoteDBJobStore
-from core.worker import repo_gate
+from core.worker import loop_host, repo_gate
 
 ROUTE = "/blackbox/run"
 
@@ -216,6 +217,8 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     # Holds here are sized against tight budgets in raw provider cost; the markup is pricing policy, tested in core/billing.
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
+    # These fixtures size budgets in cents to test holds, so the one-lease floor of a run limit stays out of the way.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
     monkeypatch.setattr(submissions.settings, "submissions_paused", False)
     monkeypatch.setattr(submissions.settings, "max_concurrent_jobs_per_user", 0)
@@ -681,6 +684,57 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
     response = harness.client.post(ROUTE, json=_payload(total=1))
     assert response.status_code == 409, response.text
     assert response.json()["detail"].startswith(detail)
+    assert harness.count(JobModel) == 0
+
+
+_BELOW_ONE_LEASE = ENGLISH_MESSAGES["budget.below_minimum"]
+
+
+def test_a_run_limit_below_one_lease_is_refused_before_paid_setup(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a limit that cannot buy the run's first lease, before the paid setup check (SKY-914).
+
+    Before, the run started, and its first lease failed with an internal error.
+
+    Args:
+        harness: Real legacy submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+
+    response = harness.client.post(ROUTE, json=_payload(total=loop_host.CHUNK_CENTS - 1))
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == _BELOW_ONE_LEASE
+    assert harness.calls == []
+    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
+
+
+@pytest.mark.parametrize("uncapped", [False, True])
+def test_a_wizard_run_limit_below_one_lease_is_refused(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, uncapped: bool
+) -> None:
+    """Refuse a capped wizard budget below one lease; an uncapped budget has no floor (SKY-914).
+
+    Args:
+        harness: Real submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+        uncapped: Whether the wizard budget is uncapped.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    budget = harness.budgets.create(
+        harness.username, loop_host.CHUNK_CENTS - 1, idempotency_key="small-wizard", uncapped=uncapped
+    )
+
+    response = harness.client.post(
+        ROUTE,
+        json={**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision},
+    )
+
+    # Without setup evidence the uncapped run still fails, but not on the floor.
+    assert response.status_code == 409, response.text
+    assert (response.json()["detail"] == _BELOW_ONE_LEASE) is not uncapped
     assert harness.count(JobModel) == 0
 
 

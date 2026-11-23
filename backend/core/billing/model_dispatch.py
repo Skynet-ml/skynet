@@ -35,7 +35,7 @@ from .operation_pricing import (
     operation_quote,
 )
 from .responses_adapter import price_responses_request, responses_failure, responses_receipt
-from .runtime import BudgetRuntime, PaidResult
+from .runtime import BudgetRuntime, PaidResult, UsagePendingError
 from .usage_tags import BOX_KEY, FOR_BOX_KEY, header_tags
 
 MODEL_ATTEMPT_HEADER = "x-app-model-attempt-id"
@@ -78,6 +78,15 @@ BYOK_FUNDS_EXHAUSTED = "byok_funds_exhausted"
 # prompt and demos for every example, so marking them turns repeats into reads
 # at a tenth of the input price.
 _EPHEMERAL = {"type": "ephemeral"}
+
+
+class GenerationNotFoundError(UsagePendingError):
+    """Report that OpenRouter's generation lookup answered HTTP 404 for a returned call.
+
+    OpenRouter can answer 404 while it still indexes a bill (SKY-657), so this
+    error releases nothing. The reconciliation sweep gives the hold a shorter
+    grace window that counts from the call's return.
+    """
 
 
 class ByteStream(Protocol):
@@ -777,12 +786,17 @@ class ProviderDispatcher:
 
         Returns:
             Measured USD and usage-only evidence, or None while the bill is unavailable.
+
+        Raises:
+            GenerationNotFoundError: When the lookup answers HTTP 404.
         """
         reconciled, reason, _ = self._lookup_generation(generation_id)
         if reconciled is None:
             logger.info(
                 "No confirmed cost for %s generation %s yet: the lookup gave %s.", self.model, generation_id, reason
             )
+        if reason == "HTTP 404":
+            raise GenerationNotFoundError(f"OpenRouter does not find generation {generation_id} (HTTP 404).")
         return reconciled
 
     def _lookup_generation(self, generation_id: str) -> tuple[tuple[Decimal, dict[str, Any]] | None, str, bool]:
@@ -797,52 +811,70 @@ class ProviderDispatcher:
         """
         if self.upstream != OPENROUTER:
             return None, "no lookup for this provider", False
-        try:
-            response = self._client.get(
-                "https://openrouter.ai/api/v1/generation",
-                params={"id": generation_id},
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
-            )
-            status = response.status_code
-            if not response.is_success:
-                return None, f"HTTP {status}", status in {404, 408, 425, 429} or status >= 500
-            record = response.json().get("data")
-        except httpx.HTTPError as error:
-            return None, f"a transport error ({type(error).__name__})", True
-        except ValueError:
-            return None, "a response that is not JSON", False
-        if not isinstance(record, dict):
-            return None, "no generation record", False
-        if record.get("id") != generation_id:
-            return None, "an id mismatch", False
-        if record.get("model") != self.model:
-            return None, f"a model mismatch ({str(record.get('model'))[:128]!r})", False
-        if record.get("total_cost") is None:
-            return None, "no total_cost", True
-        safe = {
-            key: record[key]
-            for key in (
-                "id",
-                "model",
-                "provider_name",
-                "total_cost",
-                "upstream_inference_cost",
-                "native_tokens_prompt",
-                "native_tokens_completion",
-                "native_tokens_reasoning",
-                "num_search_results",
-                "is_byok",
-            )
-            if key in record
-        }
-        try:
-            amount = generation_charge(record)
-        except UnpricedOperationError:
-            return None, "an invalid total_cost", False
-        if amount is None:
-            return None, "an ambiguous billing scope", False
-        return (amount, safe), "a confirmed cost", False
+        return lookup_generation(self._client, self._api_key, generation_id, self.model)
+
+
+def lookup_generation(
+    client: httpx.Client, api_key: str, generation_id: str, model: str
+) -> tuple[tuple[Decimal, dict[str, Any]] | None, str, bool]:
+    """Ask OpenRouter once for a generation's final bill, and say why it gave none.
+
+    Args:
+        client: HTTP client for the lookup.
+        api_key: The OpenRouter key that paid for the generation.
+        generation_id: Identity returned by the original paid request.
+        model: The exact model slug that the generation must name.
+
+    Returns:
+        Measured USD and usage-only evidence, or None; a short reason that
+        holds no secret or prompt text; and whether a later lookup can help.
+    """
+    try:
+        response = client.get(
+            "https://openrouter.ai/api/v1/generation",
+            params={"id": generation_id},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
+        )
+        status = response.status_code
+        if not response.is_success:
+            return None, f"HTTP {status}", status in {404, 408, 425, 429} or status >= 500
+        record = response.json().get("data")
+    except httpx.HTTPError as error:
+        return None, f"a transport error ({type(error).__name__})", True
+    except ValueError:
+        return None, "a response that is not JSON", False
+    if not isinstance(record, dict):
+        return None, "no generation record", False
+    if record.get("id") != generation_id:
+        return None, "an id mismatch", False
+    if record.get("model") != model:
+        return None, f"a model mismatch ({str(record.get('model'))[:128]!r})", False
+    if record.get("total_cost") is None:
+        return None, "no total_cost", True
+    safe = {
+        key: record[key]
+        for key in (
+            "id",
+            "model",
+            "provider_name",
+            "total_cost",
+            "upstream_inference_cost",
+            "native_tokens_prompt",
+            "native_tokens_completion",
+            "native_tokens_reasoning",
+            "num_search_results",
+            "is_byok",
+        )
+        if key in record
+    }
+    try:
+        amount = generation_charge(record)
+    except UnpricedOperationError:
+        return None, "an invalid total_cost", False
+    if amount is None:
+        return None, "an ambiguous billing scope", False
+    return (amount, safe), "a confirmed cost", False
 
 
 OpenRouterDispatcher = ProviderDispatcher
