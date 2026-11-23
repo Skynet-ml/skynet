@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from core.billing.budgets import BudgetError
+from core.billing.model_mailbox import root_empty_command
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
@@ -73,7 +74,7 @@ from core.config import settings
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
 from ..egress_record import LOG_BYTES, LOG_LINES, PROXY_SOURCE, READY_MARKER, VERCEL_SOURCE, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
-from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
+from ..errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError, StartTimeoutError
 from ..image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
@@ -163,6 +164,40 @@ OUTPUT_PREFIX = "/tmp/.app-output-"
 # or link at a /tmp name before root's redirect opens it. In sticky /tmp it
 # cannot plant into, rename or remove root's own 0755 folder (TU-1).
 ROOT_OUTPUT_PREFIX = "/tmp/.app-root-output-"
+# Only root makes a folder with one of these prefixes: the caller makes each
+# folder of the path with a root ``mkdir`` that fails on anything already at the
+# name, before it uploads there. The box user cannot plant into, rename or
+# remove such a folder in sticky /tmp, so the file API can write there. The
+# file API replaces a link, FIFO or empty folder at the last part of the path
+# with its own file; it follows only a link in an earlier part (SKY-902).
+ROOT_MODEL_PREFIX = "/tmp/.app-root-model-"
+ROOT_UPLOAD_PREFIX = "/tmp/.app-root-upload-"
+DIRECT_WRITE_PREFIXES = (ROOT_MODEL_PREFIX,)
+# The file API writes with all capabilities and follows a link that the box
+# user plants, so it reached /usr/local/lib (SKY-902). So it writes every other
+# upload into a root-made folder under ``ROOT_UPLOAD_PREFIX``, and this script
+# copies each file to its path as the box user with no capability: the kernel
+# then refuses any write that the box user could not make itself, through a
+# link too. Not stdin: a 1000-byte stdin upload took 341 s in a real box. A
+# planted FIFO blocks the open of a path, so each copy runs under the box's own
+# ``timeout``: in a real box the SDK's ``kill_after`` did not end such a step.
+# A copy is a small local file, so a short deadline is enough, and a FIFO
+# costs one short wait. ``UPLOAD_KILL_AFTER`` is only the backstop of a step.
+# Each copy first removes the target, as the file API did, so a read-only file
+# that the box user owns (for example a runner that a version made 0444) is
+# still replaced, and a link, FIFO or empty folder at the name goes away when
+# it can. ``rmdir`` refuses a link, so it removes only a real empty folder.
+UPLOAD_COPY_DEADLINE = 10
+UPLOAD_SCRIPT = (
+    'stage="$1"; shift; index=0; for path in "$@"; do '
+    'case "$path" in */*) folder="${path%/*}"; [ -z "$folder" ] || /bin/mkdir -p -- "$folder" || exit 1;; esac; '
+    f"/usr/bin/timeout --signal=KILL {UPLOAD_COPY_DEADLINE}s /bin/bash --noprofile --norc -c "
+    '\'/bin/rmdir -- "$2" 2>/dev/null; /bin/rm -f -- "$2" 2>/dev/null; /bin/cat -- "$1" > "$2"\' copy "$stage/$index" "$path" || exit; index=$((index + 1)); done'
+)
+UPLOAD_KILL_AFTER = 120.0
+# A model mailbox empties its folder only after every answer write ends, so a
+# file API write that never answers must not hold the command open (SKY-902).
+WRITE_BATCH_TIMEOUT = 60.0
 # ``timeout --signal=KILL`` gives only 137. A command's own 124 is its real code.
 TIMEOUT_CODE = 137
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
@@ -319,6 +354,8 @@ def _error_types(*names: str) -> tuple[type[BaseException], ...]:
 
 # Only errors where the request never reached the box are safe to resend:
 # a resent create_process after a read error could start the command twice.
+# httpx raises these three before it sends a byte: no connection opened, or
+# none came free in the pool. A failure after the send is a read or write error.
 _CONNECT_ERRORS = _error_types("ConnectError", "ConnectTimeout", "PoolTimeout")
 _TRANSPORT_ERRORS = _error_types("TransportError")
 _WAIT_ERRORS = _TRANSPORT_ERRORS + tuple(error for error in (SandboxStreamError, SandboxResponseError) if error)
@@ -577,6 +614,9 @@ class VercelEnvironment(SandboxEnvironment):
     """
 
     capabilities = VERCEL_CAPABILITIES
+    # The file API writes with root rights, so a guest model mailbox can keep
+    # its folders in sticky /tmp, where the box user cannot swap them (SKY-902).
+    root_file_writes = True
 
     def __init__(
         self,
@@ -1663,15 +1703,122 @@ class VercelEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The session stopped.
+            SandboxRejectedError: The box user could not write a file, or a
+                copy did not end by its deadline, for example at a planted FIFO.
+            TimeoutError: The SDK did not answer an upload command in time, or
+                a direct write did not end in ``WRITE_BATCH_TIMEOUT``.
         """
         session = self._require_session()
         cwd = self._cwd(session)
         with self._stop_guard():
+            direct = {}
+            copies = {}
             for path, text in files.items():
-                # No ``fs.mkdir``: it gives the folder to uid 1000, an image user
-                # with another uid cannot write there, and no capability now hides
-                # that (SKY-901). The write makes missing folders as the box user.
-                await session.fs.write_text(path, text, cwd=cwd)
+                normal = posixpath.normpath(path)
+                if normal.startswith(DIRECT_WRITE_PREFIXES):
+                    direct[normal] = text
+                else:
+                    copies[path] = text
+            if direct:
+                async with asyncio.timeout(WRITE_BATCH_TIMEOUT):
+                    await self._write_batch(session, cwd, direct)
+            if copies:
+                await self._upload_as_box_user(session, cwd, copies)
+
+    async def _write_batch(self, session: Any, cwd: str, files: Mapping[str, str]) -> None:
+        """Write files with the file API in one request.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            files: Maps each sandbox path to its text content.
+        """
+        async with session.fs.batch(cwd=cwd) as batch:
+            for path, text in files.items():
+                batch.write_text(path, text)
+
+    async def _upload_as_box_user(self, session: Any, cwd: str, files: Mapping[str, str]) -> None:
+        """Write files through a root-made stage folder, then copy each one to its path as the box user.
+
+        No ``fs.mkdir``: it gives the folder to uid 1000, an image user with
+        another uid cannot write there (SKY-901). The copy makes missing
+        folders as the box user.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            files: Maps each sandbox path to its text content.
+        """
+        stage = f"{ROOT_UPLOAD_PREFIX}{uuid.uuid4().hex}"
+        # Root empties the stage and keeps it: the kept root folder holds the
+        # name, so a write that ends late cannot land in a folder that the box
+        # user made there (SKY-902).
+        remove = [root_empty_command(stage)]
+        try:
+            # Inside the try: the cleanup must empty a stage that the box made,
+            # also when the mkdir answer timed out.
+            await self._run_upload_step(session, cwd, [f"/bin/mkdir -m 0755 -- {stage}"], sudo=True)
+            await self._write_batch(
+                session, cwd, {f"{stage}/{index}": text for index, text in enumerate(files.values())}
+            )
+            await self._run_upload_step(session, cwd, [UPLOAD_SCRIPT, "upload", stage, *files], sudo=False)
+        except BaseException:
+            try:
+                # One attempt's limit, not three: a cancelled upload must not keep
+                # a box that does not answer busy for minutes.
+                async with asyncio.timeout(UPLOAD_KILL_AFTER + POLL_SLACK):
+                    await self._run_upload_step(session, cwd, remove, sudo=True)
+            except Exception:
+                # The upload already failed, and its own error matters more.
+                logger.warning("Sandbox %s could not empty the upload stage %s.", self.name, stage, exc_info=True)
+            raise
+        # The box user can read a left stage, which can hold a model key, so a
+        # failed cleanup fails the upload before any later command runs.
+        await self._run_upload_step(session, cwd, remove, sudo=True)
+
+    async def _run_upload_step(self, session: Any, cwd: str, args: Sequence[str], *, sudo: bool) -> None:
+        """Run one upload command in the box, and send it again when it never reached the box.
+
+        Args:
+            session: The SDK runtime session.
+            cwd: The working directory.
+            args: The script, then its ``$0`` and parameters.
+            sudo: The command runs as root.
+
+        Raises:
+            SandboxRejectedError: The box user's copy failed or the box killed
+                it at its deadline, for example because the box user could not
+                write a path. The same upload fails the same way in a fresh
+                box, so the bridge does not retry it in one.
+            SandboxInfraError: A root step failed: a box problem, which a
+                fresh box can fix.
+            TimeoutError: The SDK did not answer in time.
+        """
+        for attempt in range(1, EXEC_ATTEMPTS + 1):
+            if self._pacing is not None:
+                await self._pacing.reads.acquire()
+            try:
+                async with asyncio.timeout(UPLOAD_KILL_AFTER + POLL_SLACK):
+                    done = await session.run_process(
+                        *_bash(args, sudo=sudo), cwd=cwd, sudo=sudo, capture_output=True, kill_after=UPLOAD_KILL_AFTER
+                    )
+            except _CONNECT_ERRORS:
+                if attempt == EXEC_ATTEMPTS:
+                    raise
+                continue
+            if done.returncode != 0:
+                error = SandboxInfraError if sudo else SandboxRejectedError
+                # 127: the image lacks one of the fixed tool paths the upload runs.
+                missing = (
+                    [
+                        "The image must have /usr/bin/timeout, /usr/bin/setpriv, /bin/bash, /bin/cat, /bin/rm and /bin/mkdir."
+                    ]
+                    if done.returncode == 127
+                    else []
+                )
+                detail = " ".join([done.stderr.strip(), *missing]).strip()
+                raise error(f"A sandbox upload step exited with {done.returncode}: {detail}")
+            return
 
     async def download_file(self, path: str) -> str | None:
         """Read one text file from the box.

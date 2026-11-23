@@ -462,6 +462,7 @@ class AsyncBridgeSession:
         spec = session.environment.spec
         # Static provider knowledge, never box output, so a version cannot change it (TS-1).
         self.root_has_capabilities: bool = getattr(type(session.environment), "root_has_capabilities", True)
+        self.root_file_writes: bool = getattr(type(session.environment), "root_file_writes", False)
         # ``logged_command`` redacts these values and routes the output to the job.
         self._env = dict(spec.env)
         self.log_owner = spec.tags.get(JOB_TAG)
