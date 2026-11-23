@@ -745,6 +745,7 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir openascent==0.4.5 numpy==2.1.0
 RUN useradd --uid 1000 --create-home box
 USER 1000
+WORKDIR /home/box
 ```
 
 ```toml
@@ -762,6 +763,51 @@ for example `USER 1000`. The setup check refuses an image with no `USER`, a
 root `USER`, or a named `USER` such as `USER app`. Skynet cannot confirm
 outside the box that a name is not root, because the image's own
 `/etc/passwd` maps the name to a user id. `USER 1000:1000` also works.
+The box user must be able to make a folder in the image's working folder,
+because Skynet keeps its files there. Set `WORKDIR` to a folder that the box
+user owns, for example `/home/box`. With no `WORKDIR`, a hosted box starts in `/`,
+and the image check refuses the image. In a `[metric]` image, the box user
+must also find `tar`, `gzip`, `split`, `base64`, `cat`, `ls`, `rm`,
+`mkdir`, `find`, `xargs` and `touch` on its `PATH`. Skynet runs them to
+install and save the metric files. Both images also need `tail`, `head`, `base64` and `tr` in
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, because a
+hosted run reads a command's output with them. `python:3.12-slim` has all
+of them.
+
+A `[run]` image needs other tools and more rules, because Skynet runs its
+own commands in the setup box and in each candidate box:
+
+- The box user must find `env`, `git`, `tar`, `gzip`, `split`, `base64`,
+  `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `find`, `grep`, `sed`, `mktemp`,
+  `chmod`, `bash`, `setsid`, `nohup`, `seq` and `sleep` on its `PATH`.
+  Skynet runs them to unpack, save and score each version, and to copy,
+  start and stop its Compose services. `python:3.12-slim` has all
+  of them except `git`.
+- Root must be able to run a command with the run's variables. On a hosted
+  run, Skynet starts its root commands through the image's `sudo`. Install
+  `sudo`, give the box user a `NOPASSWD` rule for all commands, turn off
+  `env_reset`, turn on `always_set_home` so that root does not use the box
+  user's home, and set `secure_path` to
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. Every
+  other command starts with `no_new_privs`, so the version's code cannot
+  use the rule.
+- `/usr/local/bin/python3` must be a trusted Python. The error of the
+  image check lists the file and folder rules.
+
+The image check refuses an image that breaks one of these rules, before
+the first version. A minimal `[run]` image:
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git sudo \
+  && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir openascent==0.4.5
+RUN useradd --uid 1000 --create-home box \
+  && printf 'Defaults always_set_home\nDefaults !env_reset\nDefaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\nbox ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/box \
+  && chmod 0440 /etc/sudoers.d/box
+USER 1000
+WORKDIR /home/box
+```
 
 A hosted run copies the user image into Vercel's registry before its first
 box, and the run budget pays for the copy. The box runs linux/amd64, so an

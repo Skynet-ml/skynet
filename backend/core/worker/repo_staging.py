@@ -33,15 +33,16 @@ from sqlalchemy.orm import Session
 from .. import run_log
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..api.routers.package_registry import package_registry_for
+from ..billing.budgets import BudgetError
 from ..billing.host_agent import HOST_AGENT_TOKEN_KEY, _proposer_model_extra
 from ..billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
-from ..billing.operation_pricing import ChargePolicy, image_build_usd, operation_quote
+from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError, image_build_usd, operation_quote
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     repo_secret_allowed_hosts,
     resolve_repo_secrets,
 )
-from ..billing.runtime import PaidResult
+from ..billing.runtime import PaidResult, UsagePendingError
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, proposer_hosts
 from ..brand import APP_NAME
 from ..config import settings
@@ -65,7 +66,7 @@ from ..connectors.github_repo import (
 from ..connectors.repo_drafts import DraftFileError, apply_to_archive
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
-from ..exceptions import ServiceError
+from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
     BLACKBOX_ENGINE_META_HARNESS,
@@ -76,6 +77,7 @@ from ..models.blackbox import (
 )
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
+from ..sandbox.errors import SandboxInfraError, SandboxTransientError, sandbox_api_error
 from ..sandbox.image_build import (
     CODEBUILD_PLATFORM,
     BuildLimits,
@@ -1521,6 +1523,49 @@ _BOX_UID = re.compile(r"account ok ([0-9]+)")
 _NUMERIC_USER = re.compile(r"[0-9]+(?::[0-9]+)?")
 # The metric role runs no trusted-Python probe, so this gives its box uid (SKY-891).
 _BOX_UID_PROBE = 'import os; print("account ok", os.getuid())'
+# Each role's boxes call these by name on the box user's PATH, to unpack, save
+# and score each candidate, to copy, start and stop its Compose services, and
+# to install and save the metric files (SKY-903).
+_BOX_TOOLS = {
+    "run": (
+        "env", "git", "tar", "gzip", "split", "base64", "cat", "ls", "cp", "mv", "rm", "mkdir", "find",
+        "grep", "sed", "mktemp", "chmod", "bash", "setsid", "nohup", "seq", "sleep",
+    ),
+    "metric": ("tar", "gzip", "split", "base64", "cat", "ls", "rm", "mkdir", "find", "xargs", "touch"),
+}  # fmt: skip
+_BOX_TOOLS_PURPOSE = {
+    "run": "to unpack, save and score each version, and to copy, start and stop its Compose services",
+    "metric": "to install and save the metric files",
+}
+_TOOL_MISSING = 'command -v "$tool" >/dev/null 2>&1 || printf \'%s\\n\' "$tool"'
+# The last line proves both loops ran to their end.
+_BOX_TOOLS_DONE = "tools checked"
+# Vercel reads a command's output as it runs with ``_ROOT_TOOLS``, found only on ``_ROOT_PATH``.
+_BOX_TOOLS_PROBE = {
+    role: f"for tool in {' '.join(tools)}; do {_TOOL_MISSING}; done;"
+    f" (PATH={_ROOT_PATH}; for tool in {' '.join(_ROOT_TOOLS)}; do {_TOOL_MISSING}; done);"
+    f" echo {shlex.quote(_BOX_TOOLS_DONE)}"
+    for role, tools in _BOX_TOOLS.items()
+}
+# Root commands start through the provider: on Vercel through the image's sudo.
+# Docker and Apple Container reach root with no sudo, so there the probe proves less. The
+# real root call passes the run's variables, so the probe checks that one stays.
+_ROOT_VARIABLE = "APP_ROOT_PROBE"
+# Bash builtins only, so the probe needs no program that a real run does not use.
+_ROOT_PROBE = f'printf \'%s\\n\' "$EUID" "${_ROOT_VARIABLE}"'
+_ROOT_PROBE_OUTPUT = ["0", "kept"]
+# These say nothing about the image, so the root probe lets them stop the run.
+_NOT_IMAGE_ERRORS = (
+    BudgetError,
+    UsagePendingError,
+    UnpricedOperationError,
+    SandboxInfraError,
+    SandboxTransientError,
+    InfrastructureInterruptionError,
+)
+# Both boxes keep their own folders in the working folder, as the box user.
+_WORKDIR_DONE = "working folder writable"
+_WORKDIR_PROBE = f'pwd; d=".app-write-check-$$"; mkdir "$d" && rm -r "$d" && echo {shlex.quote(_WORKDIR_DONE)}'
 _FILE_TYPES = frozenset({"directory", "symbolic link", "regular file"})
 # The file types that each tagged path may have; ``path``, ``opt`` and ``lib`` may also be missing.
 # An ``absent`` path is a CPython build or venv landmark, and it must be missing.
@@ -1618,6 +1663,21 @@ UNTRUSTED_PYTHON = (
 NO_ACCOUNT = (
     "The [run] image '{image}' has no /etc/passwd line for the box user (uid {uid})."
     " {app}'s root supervisor finds the box user's name and home there. Add a line with seven fields for that uid."
+)
+
+MISSING_TOOLS = (
+    "The [{role}] image '{image}' has no {missing}. {app} runs these programs by name on the box user's PATH"
+    " {purpose}: {tools}. It also runs {poll} from {path} to read a command's output. Install them in the image."
+)
+NO_ROOT = (
+    "The [run] image '{image}' did not run a command as root with the run's variables. {app} runs its supervisor"
+    " as root, through the image's sudo on a hosted run. Install sudo, give the box user a NOPASSWD rule for all"
+    " commands, keep the caller's variables, and set its secure_path to {path}."
+)
+WORKDIR_NOT_WRITABLE = (
+    "The [{role}] image '{image}' starts in {folder}, and the box user cannot make a folder there. {app} keeps"
+    " its files in the working folder. Set WORKDIR to a folder that the box user owns, for example"
+    " `WORKDIR /home/box` after `USER`."
 )
 
 
@@ -2099,6 +2159,9 @@ def _check_box_image(
     try:
         result = session.run(f"ascent check --image --role {check_role}", timeout_seconds=_CHECK_TIMEOUT_SECONDS)
         probe = session.run(_TRUSTED_PYTHON_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS) if role == "run" else None
+        tools = session.run(_BOX_TOOLS_PROBE[role], timeout_seconds=_CHECK_TIMEOUT_SECONDS)
+        root = _run_root_probe(session) if role == "run" else None
+        workdir = session.run(_WORKDIR_PROBE, timeout_seconds=_CHECK_TIMEOUT_SECONDS)
         report = _check_report(result.stdout)
         python = report.get("python") if report is not None else None
         absolute = isinstance(python, str) and python.startswith("/")
@@ -2136,6 +2199,25 @@ def _check_box_image(
                     path=_ROOT_PATH,
                 )
             )
+        missing = _missing_tools(tools, role)
+        if missing:
+            raise BoxImageError(
+                MISSING_TOOLS.format(
+                    role=role,
+                    image=image,
+                    missing=", ".join(missing),
+                    app=APP_NAME,
+                    purpose=_BOX_TOOLS_PURPOSE[role],
+                    tools=", ".join(_BOX_TOOLS[role]),
+                    poll=", ".join(_ROOT_TOOLS),
+                    path=_ROOT_PATH,
+                )
+            )
+        if role == "run" and (root is None or root.exit_code != 0 or root.stdout.split() != _ROOT_PROBE_OUTPUT):
+            raise BoxImageError(NO_ROOT.format(image=image, app=APP_NAME, path=_ROOT_PATH))
+        folder = _unwritable_workdir(workdir)
+        if folder is not None:
+            raise BoxImageError(WORKDIR_NOT_WRITABLE.format(role=role, image=image, folder=folder, app=APP_NAME))
         if uid_probe is None or _root_box_user(uid_probe):
             raise BoxImageError(ROOT_BOX_USER.format(role=role, image=image, app=APP_NAME))
         _check_image_user(registry, user_image, role, username)
@@ -2150,6 +2232,74 @@ def _check_box_image(
         f"The [{role}] image '{image}' failed `ascent check --image --role {check_role}`"
         f" (exit code {result.exit_code}).\n\n{output or 'The check printed nothing.'}"
     )
+
+
+def _run_root_probe(session: Any) -> Any:
+    """Run :data:`_ROOT_PROBE` as root with one run variable.
+
+    A provider can refuse a root command that the image cannot start, for
+    example when Vercel finds no sudo. That counts as a failed probe.
+
+    Args:
+        session: The image check box.
+
+    Returns:
+        The probe's result, or ``None`` when the provider refused the root command.
+
+    Raises:
+        Exception: Any other error, for example a budget error, a stopped box, a
+            failed connection or another provider answer; it is not an image fault.
+    """
+    try:
+        return session.run(
+            _ROOT_PROBE, env={_ROOT_VARIABLE: _ROOT_PROBE_OUTPUT[1]}, timeout_seconds=_CHECK_TIMEOUT_SECONDS, sudo=True
+        )
+    except _NOT_IMAGE_ERRORS:
+        raise
+    except Exception as error:
+        # Only a refusal of the command itself says the image has no usable root.
+        # Vercel answers a box with no sudo with this 400 code (checked on a real box).
+        # Other providers reach root with no sudo, and the bridge turns their
+        # refusals into ``ServiceError``, so they have no image refusal to match.
+        api = sandbox_api_error(error)
+        if getattr(api, "status_code", None) != 400 or getattr(api, "code", None) != "executable_not_found":
+            raise
+        logger.info("The image check box could not start a root command.", exc_info=True)
+        return None
+
+
+def _unwritable_workdir(result: Any) -> str | None:
+    """Name the working folder when :data:`_WORKDIR_PROBE` shows the box user cannot write it.
+
+    Args:
+        result: The result of :data:`_WORKDIR_PROBE`.
+
+    Returns:
+        The folder, or ``the working folder`` when the box did not report it; ``None`` when it is writable.
+    """
+    lines = result.stdout.splitlines()
+    if result.exit_code == 0 and lines and lines[-1] == _WORKDIR_DONE:
+        return None
+    folder = lines[0] if lines else ""
+    return folder if _PRINTABLE_PATH.fullmatch(folder) else "the working folder"
+
+
+def _missing_tools(result: Any, role: str) -> list[str]:
+    """Name the box tools that the box user's PATH does not find.
+
+    Args:
+        result: The result of the role's :data:`_BOX_TOOLS_PROBE`.
+        role: ``run`` or ``metric``.
+
+    Returns:
+        The missing tools, in :data:`_BOX_TOOLS` and then :data:`_ROOT_TOOLS` order. All of them when the
+        probe did not run to its end.
+    """
+    tools = list(dict.fromkeys((*_BOX_TOOLS[role], *_ROOT_TOOLS)))
+    lines = result.stdout.splitlines()
+    if result.exit_code != 0 or not lines or lines[-1] != _BOX_TOOLS_DONE:
+        return tools
+    return [tool for tool in tools if tool in lines[:-1]]
 
 
 def _check_image_user(registry: ImageRegistry | None, user_image: UserImage, role: str, username: str) -> None:
