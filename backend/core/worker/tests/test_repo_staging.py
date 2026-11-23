@@ -6088,11 +6088,19 @@ _CONF = {
     "/etc/group": "644 regular file",
     "/etc/shadow": "640 regular file",
     "/etc/gshadow": "640 regular file",
+    "/etc/motd": "644 regular file",
+    "/run/motd": "none",
+    "/usr/lib/motd": "none",
+    "/run/motd.dynamic": "none",
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/usr/lib/pam.d": "none",
     "/usr/lib/security": "none",
     "/etc/security": "755 directory",
+    "/etc/motd.d": "none",
+    "/run/motd.d": "none",
+    "/usr/lib/motd.d": "none",
+    "/etc/update-motd.d": "755 directory",
 }
 _CONF_ENTRIES = {
     "/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "440 regular file"),
@@ -6101,6 +6109,7 @@ _CONF_ENTRIES = {
         *_entry("entry", "/etc/security/limits.conf", "644 regular file"),
         *_entry("entry", "/etc/security/limits.d", "755 directory"),
     ],
+    "/etc/update-motd.d": _entry("entry", "/etc/update-motd.d/10-uname", "755 regular file"),
 }
 
 
@@ -7920,6 +7929,13 @@ _SUDO_PARTS = _sudo_lines()
         ),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/lib/pam.d"]),
+        _listing(sudo=_sudo_lines(conf={"/etc/motd": _walk("/etc/motd", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/run/motd.d": _walk("/run/motd.d", "1777 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                entries={"/etc/update-motd.d": _entry("entry", "/etc/update-motd.d/10-uname", "1000 755 regular file")}
+            )
+        ),
     ],
     ids=[
         "box-owned-sudo-before-usr-bin",
@@ -7983,6 +7999,9 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-module-in-usr-lib-security",
         "no-pam-d-line",
         "no-usr-lib-pam-d-line",
+        "box-owned-etc-motd",
+        "other-writable-run-motd-d",
+        "box-owned-update-motd-script",
     ],
 )
 def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
@@ -8717,7 +8736,9 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         ("LD_PRELOAD#=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "", "not letters, digits and underscores"),
         ("", True, _UBUNTU_SUDO_STACK, "", "which the check does not read"),
         ("", False, "session required pam_env.so envfile=/home/box/env\n", "", "gives pam_env envfile=/home/box/env"),
-        ("", False, "session required pam_env.so \\\n conffile=/tmp/c\n", "", "gives pam_env conffile=/tmp/c"),
+        ("", False, "session required pam_env.so \\\n conffile=/tmp/c\n", "", "sudo continues a line"),
+        ("", False, "session required pam_env.so \\ \t\n", "", "sudo continues a line"),
+        ("", False, "# note \\\nsession optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
         ("", False, "session required pam_env.so readenv=1 user_readenv=1\n", "", "gives pam_env user_readenv=1"),
         (
             "",
@@ -8757,6 +8778,8 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "drop-in-folder",
         "other-envfile",
         "continued-conffile",
+        "continued-with-spaces",
+        "comment-backslash",
         "user-readenv",
         "pam-conf",
         "include-path",

@@ -1330,7 +1330,9 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # PAM stack reads /etc/default/locale into the root environment. A box user
 # who could change the account files could add itself to the sudo group or set
 # a root password. Shadow files are often 0640 root:shadow or 0000, so the
-# check does not need others to read them.
+# check does not need others to read them. A stack that sudo reaches can name
+# pam_motd, which reads the motd files and folders as root, and Debian's
+# pam_motd runs each script in /etc/update-motd.d as root (SKY-912 review).
 _SUDO_FILES = (
     "/etc/sudo.conf",
     "/etc/sudoers",
@@ -1341,8 +1343,22 @@ _SUDO_FILES = (
     "/etc/group",
     "/etc/shadow",
     "/etc/gshadow",
+    "/etc/motd",
+    "/run/motd",
+    "/usr/lib/motd",
+    "/run/motd.dynamic",
 )
-_SUDO_FOLDERS = ("/etc/sudoers.d", "/etc/pam.d", "/usr/lib/pam.d", "/usr/lib/security", "/etc/security")
+_SUDO_FOLDERS = (
+    "/etc/sudoers.d",
+    "/etc/pam.d",
+    "/usr/lib/pam.d",
+    "/usr/lib/security",
+    "/etc/security",
+    "/etc/motd.d",
+    "/run/motd.d",
+    "/usr/lib/motd.d",
+    "/etc/update-motd.d",
+)
 _DEEP_FOLDER = "/etc/security"
 _SUDO_DONE = "sudo checked"
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
@@ -1427,10 +1443,14 @@ for stack in PAM_STACKS:
 for config in pam_configs:
     try:
         with open(config, encoding="latin-1") as text:
-            rows = text.read().replace("\\\n", " ").split("\n")
+            rows = text.read().split("\n")
     except (FileNotFoundError, IsADirectoryError):
         continue
     for row in rows:
+        # Linux-PAM joins a line that ends in a backslash with the next one, but versions differ on a comment or a
+        # blank line after it. A # ends the line before any backslash, in all of them.
+        if "#" not in row and row.rstrip(" \t").endswith("\\"):
+            sys.exit("the PAM configuration " + config + " continues a line")
         # This scan copies Linux-PAM's: only a space or a tab splits words, a word that starts with [ ends at the
         # first ] that has no \ before it, also inside a word, and the text after that ] starts the next word.
         words, line, start = [], row.split("#")[0], 0
@@ -1879,10 +1899,11 @@ UNTRUSTED_PYTHON = (
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
     " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow and"
-    " /etc/gshadow when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d, /usr/lib/security and"
-    " /etc/security when present, with every entry in them. Others must be able to read each sudo and search"
+    " /etc/gshadow, /etc/motd, /run/motd, /usr/lib/motd and /run/motd.dynamic when present, and /etc/sudoers.d,"
+    " /etc/pam.d, /usr/lib/pam.d, /usr/lib/security, /etc/security, /etc/motd.d, /run/motd.d, /usr/lib/motd.d and"
+    " /etc/update-motd.d when present, with every entry in them. Others must be able to read each sudo and search"
     " each of those image PATH folders. Others must be able to run the first sudo on the image PATH, and each"
-    " sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
+    " sudo must resolve to an ELF file. Others must be able to list each of those nine folders,"
     " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
     " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
