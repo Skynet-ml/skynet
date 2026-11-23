@@ -133,8 +133,8 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(wizard_preflight, "_verify_anything", verify)
     monkeypatch.setattr(preflight_router, "enforce_submission_rate", lambda username: None)
     monkeypatch.setattr(wizard_preflight.settings, "openrouter_api_key", SecretStr("test-only"))
-    # These scenarios size budgets in cents to test setup holds,
-    # so the one-lease floor of a run limit stays out of the way.
+    # These scenarios size budgets in cents to test setup holds, so the one-lease floor of a run
+    # limit, and the lease a check must leave of it, stay out of the way.
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     app = FastAPI()
 
@@ -754,3 +754,27 @@ def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
     assert [check.get("message_code") for check in body["checks"]] == ["repo_gate.missing_secret"]
     assert [(kwargs["bindings"], kwargs["allowed_hosts"]) for kwargs in seen] == [({}, {})]
     assert not calls
+
+
+def test_setup_check_refuses_before_it_spends_into_the_runs_first_lease(
+    setup_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a setup charge that would leave less than one lease of the limit, before it spends (SKY-923)."""
+    client, _engine, calls = setup_client
+    # The 2-cent setup hold fits the 20-cent limit, but not with 19 cents kept for the run.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 19)
+    budget = _budget(client)
+
+    response = client.post("/wizard/preflight", json=_request(budget))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["may_advance"] is False
+    assert [(check["key"], check["message_code"]) for check in body["checks"]] == [
+        ("budget", "submit.preflight.budget_limit")
+    ]
+    assert body["checks"][0]["message_params"]["needed"] == "$0.21"
+    assert body["budget"]["setup_spent_cents"] == "0"
+    assert body["budget"]["reserved_cents"] == "0"
+    assert len(calls) == 1

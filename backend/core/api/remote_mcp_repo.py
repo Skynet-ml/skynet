@@ -117,11 +117,11 @@ _DRAFT_MAX_AGE = timedelta(days=7)
 # default limit is at least five dollars.
 _MIN_CALL_HOLD_CENTS = 100
 _MIN_SUGGESTED_LIMIT_CENTS = 500
-# The setup check spends from the same limit, and submit refuses a capped limit that leaves less
-# than one lease, so a client that picks the bare minimum would pay for the check twice (SKY-923).
+# The setup check spends from the same limit and must leave one lease of it for the run, so a
+# client that picks a bare minimum gets a refused check (SKY-923).
 _LIMIT_DESCRIPTION = (
-    "Spending limit of this run, in cents. The setup check spends from it. Outside local mode, submit needs "
-    f"{CHUNK_CENTS} cents of it left after that check. Use suggested_max_cost_cents from repo_draft_review."
+    "Spending limit of this run, in cents. The setup check spends from it. Outside local mode, the check "
+    f"must leave {CHUNK_CENTS} cents of it for the run. Use suggested_max_cost_cents from repo_draft_review."
 )
 _PENDING_RETRY_SECONDS = 5
 # A score can take minutes, longer than an MCP client waits for one tool call, so the tool answers
@@ -918,10 +918,10 @@ def review_draft(
         validate_job(request)
     except ServiceError as error:
         issues.append(str(error))
-    # A capped run takes its budget in leases, so submit refuses a limit below one lease;
-    # a local run's budget is uncapped, and a judge session charges each scored call
-    # directly and takes no lease, so neither has that floor (SKY-923).
-    minimum = floor if settings.local_mode or judge_session else max(floor, CHUNK_CENTS)
+    # A capped run takes its budget in leases, and the setup check may not spend the first one,
+    # so the limit needs the check's floor plus one lease; a local run's budget is uncapped, and
+    # a judge session charges each scored call directly and takes no lease (SKY-923).
+    minimum = floor if settings.local_mode or judge_session else floor + CHUNK_CENTS
     price = {
         "min_max_cost_cents": minimum,
         "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, minimum),

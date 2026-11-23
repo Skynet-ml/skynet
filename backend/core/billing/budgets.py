@@ -240,6 +240,7 @@ def _admit(
     username: str,
     scope: int,
     charge: int,
+    keep_units: int = 0,
 ) -> None:
     """Check that new coverage fits the budget's limit and the account's funds.
 
@@ -250,6 +251,7 @@ def _admit(
         username: Authenticated owner.
         scope: Combined scope units the new coverage adds.
         charge: Wallet units the new coverage adds.
+        keep_units: Units of a capped limit that the coverage must leave unused.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
@@ -257,14 +259,16 @@ def _admit(
     """
     if not budget.uncapped:
         remaining = budget.total_cents * CENT_SCALE - budget.settled_units
-        if scope > remaining:
+        # The room to keep counts as part of what the operation needs, so the refusal keeps its known text.
+        needed = scope + keep_units
+        if needed > remaining:
             raise BudgetInsufficientError(
-                f"The next operation needs up to {usd_text(ceil_cents(scope))}, but only "
+                f"The next operation needs up to {usd_text(ceil_cents(needed))}, but only "
                 f"{usd_text(max(remaining, 0) // CENT_SCALE)} of the {usd_text(budget.total_cents)} limit remain."
             )
-        if scope > remaining - budget.reserved_units:
+        if needed > remaining - budget.reserved_units:
             raise BudgetInFlightError(
-                "Covered work must settle before this operation can fit.", scope_units=scope, room_units=remaining
+                "Covered work must settle before this operation can fit.", scope_units=needed, room_units=remaining
             )
     held = account_committed_cents(session, username)
     wallet_balance = int(wallet.balance_cents) + int(wallet.grant_remaining or 0)
@@ -844,6 +848,7 @@ class BudgetService:
         attempt: int = 0,
         role: str | None = None,
         session: Session | None = None,
+        keep_cents: int = 0,
     ) -> OperationSnapshot:
         """Admit one physical attempt under its verified scope and wallet bounds.
 
@@ -861,6 +866,7 @@ class BudgetService:
             attempt: Physical retry number; a new billable retry needs a new attempt.
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
+            keep_cents: Cents of a capped limit that this attempt must leave unused.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -914,7 +920,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope, charge)
+            _admit(session, wallet, budget, username, scope, charge, keep_cents * CENT_SCALE)
             now = datetime.now(UTC)
             operation = ExecutionOperationModel(
                 id=str(uuid4()),
@@ -1392,6 +1398,7 @@ class BudgetService:
         max_cents: Decimal | str | int | float,
         max_wallet_cents: Decimal | str | int | float,
         evidence: Mapping[str, Any],
+        keep_cents: int = 0,
     ) -> OperationSnapshot:
         """Grow a running sandbox's coverage before the provider is asked to keep it alive longer.
 
@@ -1407,6 +1414,7 @@ class BudgetService:
             max_cents: Combined scope coverage the operation holds after the extension.
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
+            keep_cents: Cents of a capped limit that the extension must leave unused.
 
         Returns:
             The operation with its grown coverage and the budget totals.
@@ -1451,6 +1459,7 @@ class BudgetService:
                 username,
                 scope - operation.max_units,
                 charge - operation.max_wallet_units,
+                keep_cents * CENT_SCALE,
             )
             now = datetime.now(UTC)
             session.add(

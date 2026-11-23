@@ -910,28 +910,33 @@ def _check(harness: _Harness, payload: dict[str, Any], budget_id: str, revision:
 
 @pytest.mark.parametrize(
     ("limit", "status"),
-    [(budgets.CHUNK_CENTS, 409), (budgets.CHUNK_CENTS + 1, 201)],
-    ids=["room-below-one-lease", "room-of-one-lease"],
+    [(budgets.CHUNK_CENTS + 1, None), (budgets.CHUNK_CENTS + 2, 201)],
+    ids=["hold-into-the-lease", "hold-beside-the-lease"],
 )
-def test_protected_submit_refuses_a_limit_whose_setup_spend_leaves_less_than_one_lease(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, status: int
+def test_the_setup_check_keeps_one_lease_so_submit_accepts_a_limit_it_passes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, status: int | None
 ) -> None:
-    """Refuse a run whose setup check spent the limit below one lease, before a job exists (SKY-923).
+    """Refuse a setup charge that would spend into the run's first lease, so a passed check never leaves a refused run.
 
-    Before, the run started, and its first lease stopped it on the limit after the user paid for setup.
-    The fixture's setup check settles 1 cent, so a limit one cent above a lease leaves exactly one lease.
+    Before, the check spent into the lease and submit then refused the run after the user paid for setup (SKY-923).
+    The fixture's setup check holds 2 cents and settles 1 cent.
 
     Args:
         harness: Real submission routes and spending authority.
         monkeypatch: Restores the real lease size.
         limit: The budget's limit.
-        status: The expected submit status.
+        status: The expected submit status, or ``None`` when the setup check must refuse.
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     _set_balance(harness, 1_000)
     budget = harness.budgets.create(harness.username, limit, idempotency_key="setup-spends-room")
     payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
     checked = _check(harness, payload, budget.id, budget.revision).json()
+    if status is None:
+        assert checked["status"] == "failed", checked
+        assert [check["key"] for check in checked["checks"]] == ["budget"]
+        assert harness.budgets.spent_units(budget.id, harness.username) == 0
+        return
     assert checked["status"] == "succeeded", checked
     assert harness.budgets.spent_units(budget.id, harness.username) == budgets.CENT_SCALE
 
@@ -946,9 +951,7 @@ def test_protected_submit_refuses_a_limit_whose_setup_spend_leaves_less_than_one
     )
 
     assert response.status_code == status, response.text
-    assert harness.count(JobModel) == (status == 201)
-    if status == 409:
-        assert response.json()["detail"] == _BELOW_ONE_LEASE
+    assert harness.count(JobModel) == 1
 
 
 def test_protected_submit_names_the_balance_when_the_setup_check_leaves_it_below_one_lease(
@@ -964,7 +967,8 @@ def test_protected_submit_names_the_balance_when_the_setup_check_leaves_it_below
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     _set_balance(harness, budgets.CHUNK_CENTS)
-    budget = harness.budgets.create(harness.username, budgets.CHUNK_CENTS, idempotency_key="balance-caps-room")
+    # The limit leaves one lease beside the 2-cent setup hold, so only the balance falls below a lease.
+    budget = harness.budgets.create(harness.username, budgets.CHUNK_CENTS + 2, idempotency_key="balance-caps-room")
     payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
     checked = _check(harness, payload, budget.id, budget.revision).json()
     assert checked["status"] == "succeeded", checked
@@ -1024,33 +1028,32 @@ def test_the_lease_refusal_names_the_balance_only_when_it_is_below_one_lease(
 
 
 @pytest.mark.parametrize(
-    ("limit", "status"),
-    [(budgets.CHUNK_CENTS, 409), (budgets.CHUNK_CENTS + 1, 200)],
-    ids=["room-below-one-lease", "room-of-one-lease"],
+    ("limit", "first_status"),
+    [(budgets.CHUNK_CENTS + 1, "failed"), (budgets.CHUNK_CENTS + 2, "succeeded")],
+    ids=["hold-into-the-lease", "hold-beside-the-lease"],
 )
-def test_the_wizard_check_refuses_a_budget_whose_earlier_setup_spend_leaves_less_than_one_lease(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, status: int
+def test_a_repeat_wizard_check_is_accepted_after_any_check_that_spent(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, first_status: str
 ) -> None:
-    """Refuse a repeat setup check when an earlier check spent the limit below one lease (SKY-923).
+    """Never let a wizard check spend the limit below one lease, so a repeat check is never refused for it (SKY-923).
 
     Args:
         harness: Real wizard check routes and spending authority.
         monkeypatch: Restores the real lease size.
         limit: The budget's limit.
-        status: The expected status of the repeat check.
+        first_status: The expected status of the first check.
     """
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     _set_balance(harness, 1_000)
     budget = harness.budgets.create(harness.username, limit, idempotency_key="repeat-check")
     first = _check(harness, _payload(), budget.id, budget.revision).json()
-    assert first["status"] == "succeeded", first
+    assert first["status"] == first_status, first
+    assert first["budget"]["setup_spent_cents"] == ("0" if first_status == "failed" else "1")
 
     response = _check(harness, _payload(), budget.id, first["budget"]["revision"])
 
-    assert response.status_code == status, response.text
-    assert len(harness.calls) == harness.count(WizardPreflightModel) == 1
-    if status == 409:
-        assert response.json()["detail"] == _BELOW_ONE_LEASE
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == first_status
 
 
 def _set_balance(harness: _Harness, cents: int) -> None:

@@ -219,7 +219,7 @@ def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
 
 
 def test_limit_argument_says_the_setup_check_spends_from_it(harness: Any) -> None:
-    """Tell the agent that the setup check spends from the limit and submit needs one lease after it (SKY-923).
+    """Tell the agent that the setup check spends from the limit and must leave one lease of it (SKY-923).
 
     Args:
         harness: MCP client, database engine and recorded calls.
@@ -231,7 +231,7 @@ def test_limit_argument_says_the_setup_check_spends_from_it(harness: Any) -> Non
     for name in ("repo_draft_preflight", "repo_draft_submit"):
         description = tools[name]["inputSchema"]["properties"]["max_cost_cents"]["description"]
         assert "The setup check spends from it" in description
-        assert f"{CHUNK_CENTS} cents of it left after that check" in description
+        assert f"must leave {CHUNK_CENTS} cents of it for the run" in description
 
 
 def test_budget_tool_has_no_stop_score_argument(harness: Any) -> None:
@@ -291,12 +291,12 @@ def test_another_account_cannot_load_the_draft(harness: Any) -> None:
 
 
 def test_review_prices_a_complete_draft(harness: Any) -> None:
-    """Price the floor as the boxes' hold plus one call of the dearest model."""
+    """Price the minimum as the boxes' hold, one call of the dearest model, and the run's first lease."""
     client, _engine, _calls = harness
     draft_id = _complete_draft(client)
     body = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}, token=READ_TOKEN))
     assert body["ready"] is True
-    assert body["min_max_cost_cents"] == 41 + 151
+    assert body["min_max_cost_cents"] == 41 + 151 + CHUNK_CENTS
     assert body["suggested_max_cost_cents"] == 500
     assert body["spendable_cents"] == 2500
     assert body["next_tool"] == "repo_draft_submit"
@@ -600,16 +600,14 @@ def test_submit_refuses_a_limit_below_the_floor(harness: Any) -> None:
     )
     assert json.loads(text) == {
         "code": "budget.below_minimum",
-        "detail": "max_cost_cents 100 is below this run's minimum of 192 cents.",
-        "min_max_cost_cents": 192,
+        "detail": "max_cost_cents 100 is below this run's minimum of 292 cents.",
+        "min_max_cost_cents": 41 + 151 + CHUNK_CENTS,
     }
     assert calls["submits"] == []
 
 
-def test_review_and_submit_name_one_lease_when_the_floor_is_below_it(
-    harness: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Name one lease as the minimum of a capped run whose floor is smaller, as the submit refuses it (SKY-923).
+def test_review_and_submit_add_one_lease_to_a_small_floor(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Add one lease to a capped run's floor, as the setup check must leave that lease (SKY-923).
 
     Args:
         harness: MCP client, database engine and recorded calls.
@@ -622,11 +620,11 @@ def test_review_and_submit_name_one_lease_when_the_floor_is_below_it(
 
     review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
     text = _error_text(
-        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 50, "confirm": True})
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 129, "confirm": True})
     )
 
-    assert review["min_max_cost_cents"] == CHUNK_CENTS
-    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS
+    assert review["min_max_cost_cents"] == 30 + CHUNK_CENTS
+    assert json.loads(text)["min_max_cost_cents"] == 30 + CHUNK_CENTS
     assert calls["submits"] == []
 
 

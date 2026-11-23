@@ -53,6 +53,7 @@ from .agent_engine import fill_proposer_host_cli
 from .errors import DomainError
 from .model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from .preflight_progress import report_preflight_phase
+from .routers import execution_budgets
 from .routers.execution_budgets import ExecutionBudgetResponse, budget_http_error, budget_response
 
 logger = logging.getLogger(__name__)
@@ -567,6 +568,9 @@ def _perform_preflight(
                 generation=snapshot.generation,
                 phase="setup",
                 wait_timeout=SETUP_WAIT_SECONDS,
+                # Submit needs one lease of the limit left after the check, so the check
+                # must not spend into it and leave a run that submit refuses (SKY-923).
+                keep_cents=execution_budgets.CHUNK_CENTS,
             )
         )
         # The box's hold is priced on its whole lifetime, so a check gets the

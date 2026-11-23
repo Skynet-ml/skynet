@@ -100,6 +100,7 @@ class BudgetRuntime:
         phase: str,
         stop: BudgetStopLatch | None = None,
         wait_timeout: float = 600,
+        keep_cents: int = 0,
     ) -> None:
         """Bind the spending context without passing database credentials to guest code.
 
@@ -111,6 +112,7 @@ class BudgetRuntime:
             phase: Setup or run attribution.
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
+            keep_cents: Cents of a capped limit that this runtime's work must leave unused.
         """
         self.service = service
         self.username = username
@@ -119,6 +121,7 @@ class BudgetRuntime:
         self.phase = phase
         self.stop = stop or BudgetStopLatch()
         self.wait_timeout = wait_timeout
+        self.keep_cents = keep_cents
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
@@ -347,6 +350,7 @@ class BudgetRuntime:
                     max_wallet_cents=quote.maximum.wallet,
                     attempt=attempt,
                     role=role,
+                    keep_cents=self.keep_cents,
                 )
             except BudgetUnreconciledError as error:
                 raise UsagePendingError(
@@ -412,6 +416,7 @@ class BudgetRuntime:
                     max_cents=quote.maximum.total,
                     max_wallet_cents=quote.maximum.wallet,
                     evidence=evidence,
+                    keep_cents=self.keep_cents,
                 )
             except BudgetInFlightError as error:
                 refusal = self._wait_cannot_help(error)
