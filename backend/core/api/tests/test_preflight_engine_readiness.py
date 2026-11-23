@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from core.api import preflight_execution
+from core.billing.model_dispatch import ModelHTTPResult
 from core.models import BlackboxRunRequest
 from core.service_gateway.optimization.blackbox import native_runtime
 
@@ -133,3 +135,37 @@ def test_model_route_checks_run_before_the_engine_check(monkeypatch: pytest.Monk
         ("model.optimization", "succeeded"),
         ("optimizer", "failed"),
     ]
+
+
+_ROUTE_TOKEN = "route-token-for-the-check"
+
+
+class _RateLimitedGateway(_Gateway):
+    """Answer every model route check with OpenRouter's rate limit refusal."""
+
+    def model_routes(self) -> list[dict[str, str]]:
+        """Return one route whose token the refusal echoes.
+
+        Returns:
+            The optimization route.
+        """
+        return [{"role": "optimization", "model": "fixture/model", "token": _ROUTE_TOKEN}]
+
+    def dispatch_guest(self, _token: str, _path: str, _body: dict[str, Any], _headers: dict[str, str]) -> Any:
+        """Refuse the setup request as OpenRouter does, with a message over two lines that echoes the token.
+
+        Returns:
+            A 429 response with the provider's message.
+        """
+        message = f"Rate limit exceeded:\n  free-models-per-min ({_ROUTE_TOKEN})"
+        body = json.dumps({"error": {"message": message, "code": 429}}).encode()
+        return ModelHTTPResult(status=429, content_type="application/json", body=body)
+
+
+def test_a_model_route_refusal_shows_the_provider_message() -> None:
+    """The setup refusal reads the provider's own reason from the body, on one line and with no token (SKY-924)."""
+    [check] = preflight_execution._verify_model_routes(_RateLimitedGateway(), native=False)
+
+    assert check["status"] == "failed"
+    assert "(HTTP 429: Rate limit exceeded: free-models-per-min ([key]))." in check["message"]
+    assert _ROUTE_TOKEN not in check["message"]

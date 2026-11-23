@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import math
 from collections.abc import Callable, Iterator
@@ -39,6 +38,7 @@ from ..models import BlackboxRunRequest
 from ..service_gateway.optimization.blackbox.native_runtime import check_native_runtime
 from ..service_gateway.optimization.blackbox.preflight import judge_lifetime_seconds, preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
+from ..worker.loop_host import provider_message
 from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
@@ -225,22 +225,19 @@ def _mark_usage_pending(result: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _provider_refusal(response: ModelHTTPResult) -> str:
+def _provider_refusal(response: ModelHTTPResult, token: str) -> str:
     """Summarize a provider's error answer for the check report.
 
     Args:
         response: Non-2xx model response returned through the metered route.
+        token: The route's gateway guest token, not the provider key. It is the credential of the preflight
+            request, so the summary must never show it when the provider or the gateway echoes it.
 
     Returns:
-        The HTTP status, followed by the provider's own message when its body carries one.
+        The HTTP status, followed by the provider's own short message when its body carries one.
     """
-    try:
-        error = json.loads(response.content).get("error")
-    except (ValueError, AttributeError):
-        error = None
-    detail = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None
-    summary = f"HTTP {response.status}"
-    return f"{summary}: {str(detail)[:200]}" if detail else summary
+    detail = provider_message(response.body, token)
+    return f"HTTP {response.status}: {detail}" if detail else f"HTTP {response.status}"
 
 
 def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[str, Any]]:
@@ -265,12 +262,15 @@ def _verify_model_routes(gateway: ModelGateway, *, native: bool) -> list[dict[st
             {"anthropic-version": "2023-06-01"} if anthropic else {},
         )
         ok = 200 <= response.status < 300
-        detail = f"The selected {route['role']} model rejected its setup request ({_provider_refusal(response)})."
+        detail = None
+        if not ok:
+            refusal = _provider_refusal(response, route["token"])
+            detail = f"The selected {route['role']} model rejected its setup request ({refusal})."
         checks.append(
             _check(
                 f"model.{route['role']}",
                 "succeeded" if ok else "failed",
-                None if ok else detail,
+                detail,
                 route["role"],
             )
         )
