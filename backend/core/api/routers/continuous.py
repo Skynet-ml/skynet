@@ -42,9 +42,6 @@ from ._helpers import get_job_no_payload
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
 _HISTORY_LIMIT = 50
-# Each check's setup spends from the cycle budget, so a budget near one lease (CHUNK_CENTS) pays for setups whose
-# runs submit then refuses. Five dollars leaves room for setup and the first lease (SKY-923).
-_MIN_CYCLE_BUDGET_CENTS = 500
 _UPCOMING_CHECKS = 3
 _IN_FLIGHT = frozenset(
     {OptimizationStatus.pending.value, OptimizationStatus.validating.value, OptimizationStatus.running.value}
@@ -454,8 +451,8 @@ def create_continuous_router(*, job_store) -> APIRouter:
         if cycle_budget is None:
             raise DomainError("continuous.not_eligible", status=409)
         # A local check's run gets an uncapped budget, which has no lease floor (SKY-923).
-        if not settings.local_mode and cycle_budget < _MIN_CYCLE_BUDGET_CENTS:
-            raise DomainError("budget.below_minimum", status=409, minimum_total_cents=_MIN_CYCLE_BUDGET_CENTS)
+        if not settings.local_mode and cycle_budget < engine_mod.MIN_CYCLE_BUDGET_CENTS:
+            raise DomainError("budget.below_minimum", status=409, minimum_total_cents=engine_mod.MIN_CYCLE_BUDGET_CENTS)
         now = datetime.now(UTC)
         plan = ContinuousPlanModel(
             username=current_user.username,

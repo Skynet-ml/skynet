@@ -279,7 +279,8 @@ def checked_preflight(
         shinka = payload.get("shinka")
         novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
-    # Submit refuses this run, so it must not pay for a setup check first (SKY-923).
+    # Submit refuses this run, so it must not pay for a setup check first (SKY-923). Like submit, the
+    # check comes after the rate limit and the request checks, so both routes give the same refusal.
     _require_budget_lease(request, user, job_store)
     return run_preflight(request.model_copy(update={"payload": payload}), user, job_store)
 
