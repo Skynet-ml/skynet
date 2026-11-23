@@ -401,7 +401,12 @@ def test_in_flight_call_without_request_id_is_not_unsettleable(database, monkeyp
 
 
 def test_sweep_keeps_a_hold_it_can_still_look_up_for_15_minutes(database, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the SKY-784 window for a request id the original credential can still look up."""
+    """Keep the SKY-784 window for a request id the original credential can still look up.
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Replaces the provider lookup with one that finds no bill yet.
+    """
     monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: None)
     runtime = _runtime(database)
     _park_model_call(runtime, "gen-late")
@@ -413,7 +418,12 @@ def test_sweep_keeps_a_hold_it_can_still_look_up_for_15_minutes(database, monkey
 
 
 def test_late_receipt_after_release_bills_nothing(database, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse a bill that arrives after the hold was released, so the user pays nothing."""
+    """Refuse a bill that arrives after the hold was released, so the user pays nothing.
+
+    Args:
+        database: Ledger database.
+        monkeypatch: Replaces the provider lookup with one that returns a late bill.
+    """
     runtime = _runtime(database)
     operation_id = _park_model_call(runtime, "gen-after")
     _age_operations(database, 2)

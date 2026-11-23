@@ -105,8 +105,9 @@ class OpenRouterUsageReconciler:
         Raises:
             UnsettleableUsageError: When a returned call has no provider request id and no
                 stored refusal, or this worker cannot resolve the original credential.
-            UsagePendingError: When the operation is not an admitted OpenRouter generation, or
-                final billing evidence or the original policy is unavailable.
+            UsagePendingError: When the operation is not an admitted OpenRouter generation, the
+                model call has not returned, or final billing evidence or the original policy
+                is unavailable.
         """
         record = self.service.get_reconciliation(operation_id, username)
         operation, prices = record.operation, record.price_snapshot
