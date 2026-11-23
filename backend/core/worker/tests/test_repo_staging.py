@@ -6080,6 +6080,7 @@ _SUDO_PATH = [
 # The sudo and PAM files that a Debian image with sudo has, in probe order, and the entries of its folders.
 _CONF = {
     "/etc/sudo.conf": "644 regular file",
+    "/usr/etc/sudo.conf": "none",
     "/etc/sudoers": "440 regular file",
     "/etc/environment": "644 regular file",
     "/etc/default/locale": "644 regular file",
@@ -6093,6 +6094,7 @@ _CONF = {
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
     "/usr/lib/pam.d": "none",
+    "/usr/etc/pam.d": "none",
     "/usr/lib/security": "none",
     "/etc/security": "755 directory",
 }
@@ -7925,6 +7927,15 @@ _SUDO_PARTS = _sudo_lines()
         ),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/lib/pam.d"]),
+        _listing(sudo=_sudo_lines(conf={"/usr/etc/sudo.conf": _walk("/usr/etc/sudo.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/usr/etc/pam.d": _walk("/usr/etc/pam.d", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/etc/pam.d": _walk("/usr/etc/pam.d", "755 directory")},
+                entries={"/usr/etc/pam.d": _entry("entry", "/usr/etc/pam.d/sudo", "1000 644 regular file")},
+            )
+        ),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/etc/pam.d"]),
     ],
     ids=[
         "box-owned-sudo-before-usr-bin",
@@ -7991,6 +8002,10 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-module-in-usr-lib-security",
         "no-pam-d-line",
         "no-usr-lib-pam-d-line",
+        "box-owned-vendor-sudo-conf",
+        "box-owned-usr-etc-pam-d",
+        "box-owned-file-in-usr-etc-pam-d",
+        "no-usr-etc-pam-d-line",
     ],
 )
 def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
@@ -8122,6 +8137,15 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
                 },
             )
         ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/usr/etc/sudo.conf": _walk("/usr/etc/sudo.conf", "644 regular file"),
+                    "/usr/etc/pam.d": _walk("/usr/etc/pam.d", "755 directory"),
+                },
+                entries={"/usr/etc/pam.d": _entry("entry", "/usr/etc/pam.d/sudo", "644 regular file")},
+            )
+        ),
     ],
     ids=[
         "empty-sudoers-d",
@@ -8138,6 +8162,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "root-owned-etc-default-login",
         "files-in-a-security-folder",
         "root-owned-usr-lib-pam-d-and-usr-lib-security",
+        "root-owned-vendor-sudo-conf-and-usr-etc-pam-d",
     ],
 )
 def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:
@@ -8634,6 +8659,9 @@ def _run_path_script_with_pam_files(
     environment_mode: int = 0o755,
     environment_box_owns: str = "",
     vendor_stacks: dict[str, str] | None = None,
+    sudo_conf: str | None = None,
+    vendor_sudo_conf: str | None = None,
+    sudo_conf_folder: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run the interpreter script with temporary pam_env and PAM stack files in place of the real ones.
 
@@ -8654,6 +8682,9 @@ def _run_path_script_with_pam_files(
         environment_box_owns: ``folder``, or a link name in ``environment_links``, that the box user (uid 1000)
             owns in place of root; only root can give it away.
         vendor_stacks: The text of stand-in files in a second stack folder, ``/usr/lib/pam.d``, by name.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``; ``None`` leaves it missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``; ``None`` leaves it missing.
+        sudo_conf_folder: Whether the stand-in ``/etc/sudo.conf`` is a folder, which the script cannot read.
 
     Returns:
         The finished script.
@@ -8698,8 +8729,18 @@ def _run_path_script_with_pam_files(
         for name, text in vendor_stacks.items():
             (vendor / name).write_text(text)
         stand_in_stacks = f"({str(stacks)!r}, {str(vendor)!r})"
-    script = script.replace('("/etc/pam.d", "/usr/lib/pam.d")', stand_in_stacks)
+    script = script.replace('("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")', stand_in_stacks)
     assert stand_in_stacks in script
+    # The host's own sudo.conf files must not decide a test.
+    sudo_confs = (tmp_path / "sudo.conf", tmp_path / "vendor-sudo.conf")
+    for stand_in, text in zip(sudo_confs, (sudo_conf, vendor_sudo_conf), strict=True):
+        if text is not None:
+            stand_in.write_text(text)
+    if sudo_conf_folder:
+        sudo_confs[0].mkdir()
+    stand_in_confs = f"SUDO_CONFS = ({str(sudo_confs[0])!r}, {str(sudo_confs[1])!r})"
+    script = script.replace('SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")', stand_in_confs)
+    assert stand_in_confs in script
     files = {"/etc/environment": environment, "/etc/default/locale": default_locale}
     files["/etc/security/pam_env.conf"] = conf
     files["/etc/pam.conf"] = pam_conf
@@ -8730,7 +8771,7 @@ def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> N
         sudo_stack=_UBUNTU_SUDO_STACK
         + "@include common-session\n"
         + "auth [success=1 default=ignore] pam_unix.so nullok\n",
-        pam_conf="# PAM configuration file\n",
+        pam_conf="# PAM configuration file\nsudo session required pam_unix.so\n",
         other_stacks={
             "common-session": "session required pam_unix.so\n",
             "login": "session optional pam_motd.so motd=/run/motd.dynamic\nsession optional pam_motd.so noupdate\n",
@@ -8792,6 +8833,13 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
             "sudo session required pam_env.so envfile=/home/box/env\n",
             "pam.conf gives pam_env envfile=/home/box/env",
         ),
+        (
+            "",
+            False,
+            _UBUNTU_SUDO_STACK,
+            "sudo session optional pam_mkhomedir.so\n",
+            "pam.conf, which sudo reaches, loads pam_mkhomedir.so",
+        ),
         ("", False, "@include /home/box/stack\n", "", "names /home/box/stack"),
         ("", False, "session optional /home/box/evil.so\n", "", "names /home/box/evil.so"),
         ("", False, "session optional ../../home/box/evil.so\n", "", "names ../../home/box/evil.so"),
@@ -8845,6 +8893,7 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "user-readenv",
         "stock-sshd-line-in-sudo",
         "pam-conf",
+        "pam-conf-module",
         "include-path",
         "module-path",
         "relative-module-path",
@@ -8890,19 +8939,42 @@ def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pa
 @pytest.mark.parametrize(
     ("sudo_stack", "other_stacks", "modules", "reason"),
     [
-        ("session optional pam_motd.so\n", {}, {}, "sudo, which sudo reaches, runs pam_motd.so"),
-        ("@include common-session\n", {"common-session": "session optional pam_motd.so\n"}, {}, "runs pam_motd.so"),
+        ("session optional pam_motd.so\n", {}, {}, "sudo, which sudo reaches, loads pam_motd.so"),
+        ("@include common-session\n", {"common-session": "session optional pam_motd.so\n"}, {}, "loads pam_motd.so"),
         ("session substack box\n", {"box": "session optional pam_motd.so\n"}, {}, "box, which sudo reaches"),
         (_UBUNTU_SUDO_STACK, {"other": "session optional pam_motd.so\n"}, {}, "other, which sudo reaches"),
         ("session optional pam_foo.so x.sh\n", {}, {"pam_foo.so": "pam_exec.so"}, "runs pam_foo.so"),
-        ("session optional pam_bar.so\n", {}, {"pam_bar.so": "pam_motd.so"}, "runs pam_bar.so"),
+        ("session optional pam_bar.so\n", {}, {"pam_bar.so": "pam_motd.so"}, "loads pam_bar.so"),
+        ("session optional pam_evil\n", {}, {}, "loads pam_evil, which is not a stock module"),
+        ("session optional pam_permit\n", {}, {}, "loads pam_permit, which is not a stock module"),
+        ("session optional pam_mkhomedir.so\n", {}, {}, "loads pam_mkhomedir.so, which is not a stock module"),
+        ("session required pam_namespace.so\n", {}, {}, "loads pam_namespace.so, which is not a stock module"),
+        ("-session optional pam_new.so\n", {}, {}, "loads pam_new.so, which is not a stock module"),
+        ("session [default=ignore] pam_new.so\n", {}, {}, "loads pam_new.so"),
+        ("session optional pam_unix.so\n", {}, {"pam_unix.so": "pam_motd.so"}, "loads pam_unix.so"),
+        ("session [include] pam_new.so\n", {}, {}, "loads pam_new.so"),
     ],
-    ids=["motd-in-sudo", "motd-in-an-include", "motd-in-a-substack", "motd-in-other", "exec-link", "motd-link"],
+    ids=[
+        "motd-in-sudo",
+        "motd-in-an-include",
+        "motd-in-a-substack",
+        "motd-in-other",
+        "exec-link",
+        "motd-link",
+        "name-without-so",
+        "stock-name-without-so",
+        "mkhomedir",
+        "namespace",
+        "unknown-module",
+        "unknown-module-after-a-bracket",
+        "stock-name-linked-to-motd",
+        "bracketed-include-control",
+    ],
 )
-def test_the_path_script_refuses_a_module_that_runs_programs_where_sudo_reaches_it(
+def test_the_path_script_refuses_a_module_that_is_not_stock_where_sudo_reaches_it(
     tmp_path: Path, sudo_stack: str, other_stacks: dict[str, str], modules: dict[str, str], reason: str
 ) -> None:
-    """pam_motd in a stack that sudo reaches, or a module link to pam_exec, fails the script (SKY-912).
+    """A module outside the stock list, by name or by its link target, in a stack that sudo reaches fails (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -8992,7 +9064,7 @@ def test_the_path_script_refuses_an_environment_d_that_the_box_user_could_change
 def test_the_path_script_follows_sudo_into_the_vendor_pam_folder(
     tmp_path: Path, sudo_stack: str, vendor_stacks: dict[str, str], refusal: str | None
 ) -> None:
-    """Sudo reaches a stack that only /usr/lib/pam.d has, so a program-running module there counts (SKY-912).
+    """Sudo reaches a stack that only a vendor folder such as /usr/lib/pam.d has, so a module there counts (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -9009,7 +9081,166 @@ def test_the_path_script_follows_sudo_into_the_vendor_pam_folder(
     else:
         assert done.returncode != 0
         assert refusal in done.stderr
-        assert "runs pam_motd.so" in done.stderr
+        assert "loads pam_motd.so" in done.stderr
+
+
+@pytest.mark.parametrize(("length", "passes"), [(1022, True), (1023, False)], ids=["1022", "1023"])
+def test_the_path_script_takes_a_pam_line_of_up_to_1022_characters(tmp_path: Path, length: int, passes: bool) -> None:
+    """Linux-PAM 1.5 reads 1023-byte parts, so a 1022-character line passes and a 1023-character line fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        length: The length of the line, without its newline.
+        passes: Whether the script passes.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    line = "session optional pam_permit.so "
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_stack=line + "x" * (length - len(line)) + "\n")
+
+    if passes:
+        assert done.returncode == 0, done.stderr
+    else:
+        assert done.returncode != 0
+        assert "sudo has a line longer than 1022 characters" in done.stderr
+
+
+def test_the_path_script_lists_each_module_file_that_sudo_loads(tmp_path: Path) -> None:
+    """The script prints the exact module file that Linux-PAM opens, so the probe walks its owners (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        "",
+        "",
+        "",
+        sudo_stack="@include common-session\nsession optional pam_permit.so\n",
+        other_stacks={"common-session": "session required pam_unix.so\n", "login": "session optional pam_deny.so\n"},
+        modules={"pam_permit.so": "pam_unix.so", "pam_deny.so": "pam_warn.so"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    lines = set(done.stdout.split("\n"))
+    security = tmp_path / "lib" / "security"
+    assert {f"file {security / 'pam_unix.so'}", f"file {security / 'pam_permit.so'}"} <= lines
+    assert f"file {security / 'pam_deny.so'}" not in lines
+
+
+def test_the_probe_reads_the_vendor_pam_and_sudo_folders() -> None:
+    """Linux-PAM 1.7 reads /usr/etc/pam.d, and Tumbleweed's sudo reads /usr/etc/sudo.conf, so the probe does (SKY-912)."""
+    assert 'PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")' in repo_staging._PATH_SCRIPT
+    assert 'SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")' in repo_staging._PATH_SCRIPT
+    assert "/usr/etc/pam.d" in repo_staging._SUDO_FOLDERS
+    assert "/usr/etc/sudo.conf" in repo_staging._SUDO_FILES
+    assert "/usr/etc/pam.d" in repo_staging.UNTRUSTED_PYTHON
+    assert "/usr/etc/sudo.conf" in repo_staging.UNTRUSTED_PYTHON
+
+
+_STOCK_SUDO_CONF = (
+    "# Default /etc/sudo.conf file\n"
+    "#\n"
+    "#Path askpass /usr/X11R6/bin/ssh-askpass\n"
+    "  # Plugin sudoers_policy sudoers.so\n"
+    "\n"
+    "Plugin sudoers_policy sudoers.so\n"
+    "Plugin sudoers_io /usr/libexec/sudo/sudoers.so\n"
+    "Path noexec /usr/libexec/sudo/sudo_noexec.so\n"
+    "Set disable_coredump false\n"
+    "set developer_mode Off\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("sudo_conf", "vendor_sudo_conf"),
+    [(None, None), (_STOCK_SUDO_CONF, None), (None, _STOCK_SUDO_CONF), ("", "")],
+    ids=["no-sudo-conf", "stock-sudo-conf", "stock-vendor-sudo-conf", "empty-sudo-confs"],
+)
+def test_the_path_script_passes_a_stock_or_missing_sudo_conf(
+    tmp_path: Path, sudo_conf: str | None, vendor_sudo_conf: str | None
+) -> None:
+    """Comments, stock Plugin and Path lines, other Set lines and developer_mode off pass, and so does no file (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``, or None when it is missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``, or None when it is missing.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_conf=sudo_conf, vendor_sudo_conf=vendor_sudo_conf)
+
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize(
+    ("sudo_conf", "vendor_sudo_conf", "folder", "reason"),
+    [
+        ("Set developer_mode true\n", None, False, "sudo.conf turns on developer_mode"),
+        ("SET Developer_Mode yes\n", None, False, "sudo.conf turns on developer_mode"),
+        (None, "Set developer_mode 1\n", False, "vendor-sudo.conf turns on developer_mode"),
+        ("Set developer_mode\n", None, False, "Set developer_mode, which is not a stock setting"),
+        ("Plugin sudoers_policy /home/box/p.so\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy ../../home/box/p.so\n", None, False, "which is not a stock setting"),
+        ("Plugin group_plugin group_file.so\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so sudoers_file=/home/box/s\n", None, False, "not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so sudoers_uid=1000\n", None, False, "not a stock setting"),
+        ("Path noexec /home/box/n.so\n", None, False, "Path noexec /home/box/n.so, which is not a stock"),
+        ("Path plugin_dir /home/box\n", None, False, "which is not a stock setting"),
+        ("Path sesh /home/box/sesh\n", None, False, "which is not a stock setting"),
+        ("Path askpass /usr/bin/ssh-askpass\n", None, False, "which is not a stock setting"),
+        ("Debug sudo /var/log/sudo_debug all@debug\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so # stock\n", None, False, "has a # after a setting"),
+        ("Set disable_coredump \\\nfalse\n", None, False, "sudo.conf continues a line"),
+        ("# Set developer_mode false \\\nSet developer_mode true\n", None, False, "continues a line"),
+        ("Set developer_mode\rtrue\n", None, False, "not printable ASCII"),
+        (None, None, True, "the check cannot read"),
+    ],
+    ids=[
+        "developer-mode",
+        "developer-mode-any-case",
+        "vendor-developer-mode",
+        "developer-mode-without-a-value",
+        "box-plugin",
+        "relative-box-plugin",
+        "other-plugin",
+        "sudoers-file-option",
+        "sudoers-uid-option",
+        "box-noexec",
+        "box-plugin-dir",
+        "box-sesh",
+        "askpass",
+        "debug-log",
+        "comment-after-a-setting",
+        "continued-line",
+        "continued-comment",
+        "carriage-return",
+        "unreadable",
+    ],
+)
+def test_the_path_script_refuses_a_sudo_conf_that_could_load_a_box_file(
+    tmp_path: Path, sudo_conf: str | None, vendor_sudo_conf: str | None, folder: bool, reason: str
+) -> None:
+    """developer_mode, a line that is not stock, a line sudo could read otherwise, or an unreadable file fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``, or None when it is missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``, or None when it is missing.
+        folder: Whether the stand-in ``/etc/sudo.conf`` is a folder, which the script cannot read.
+        reason: Text that the script's error must contain.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path, "", "", "", sudo_conf=sudo_conf, vendor_sudo_conf=vendor_sudo_conf, sudo_conf_folder=folder
+    )
+
+    assert done.returncode != 0
+    assert reason in done.stderr
 
 
 def test_the_path_script_refuses_a_pam_environment_path_that_it_cannot_look_for(tmp_path: Path) -> None:

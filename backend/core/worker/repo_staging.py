@@ -1331,14 +1331,19 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # who could change the account files could add itself to the sudo group or set
 # a root password. Shadow files are often 0640 root:shadow or 0000, so the
 # check does not need others to read them. The PAM part of ``_PATH_SCRIPT``
-# refuses pam_motd in a stack that sudo reaches, so sudo reads no motd file:
-# Debian's pam_motd runs /etc/update-motd.d through run-parts as root, and
-# those scripts run tools by name that this probe does not walk (SKY-912).
-# Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, and
+# lets a stack that sudo reaches load only the stock modules in its
+# ``PAM_MODULES`` list. Modules such as pam_motd, pam_mkhomedir and
+# pam_namespace run a program as root that this probe does not walk, and a
+# module name with no ".so" escapes the loader scan (SKY-912 review). Linux-PAM
+# 1.7 also reads service files from /usr/etc/pam.d. Sudo reads /etc/sudo.conf,
+# and Tumbleweed's sudo reads /usr/etc/sudo.conf when that is missing. Its
+# ``developer_mode`` lets sudo load a plugin that root does not own, so
+# ``_PATH_SCRIPT`` also reads these files. Ubuntu's pam_umask reads /etc/login.defs as root in the sudo stack, and
 # /etc/default/login when login.defs sets no UMASK, so a box-writable one could
 # give root's steps UMASK 000.
 _SUDO_FILES = (
     "/etc/sudo.conf",
+    "/usr/etc/sudo.conf",
     "/etc/sudoers",
     "/etc/environment",
     "/etc/default/locale",
@@ -1354,6 +1359,7 @@ _SUDO_FOLDERS = (
     "/etc/sudoers.d",
     "/etc/pam.d",
     "/usr/lib/pam.d",
+    "/usr/etc/pam.d",
     "/usr/lib/security",
     "/etc/security",
 )
@@ -1383,9 +1389,45 @@ PAM_ENV_EXTRA = (
     "/usr/etc/environment.d",
     "/usr/lib/environment.d",
 )
-PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
+PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")
 PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
 PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python", "pam_xauth")
+# The only modules that a stack which sudo reaches may load: all that the sudo stacks of python:3.12-slim, Debian 12,
+# Ubuntu 24.04 and Tumbleweed use. None runs a program as root, and each file it reads is one that the probe walks.
+PAM_MODULES = (
+    # Accounts from /etc/passwd and /etc/shadow. It runs unix_chkpwd only when it does not run as root, and sudo is root.
+    "pam_unix.so",
+    # A fixed answer, or a syslog line.
+    "pam_permit.so",
+    "pam_deny.so",
+    "pam_warn.so",
+    # PAM_ENV_FILES, which this script reads, with the options that it checks below.
+    "pam_env.so",
+    # /etc/security/limits.conf and limits.d, which the probe walks.
+    "pam_limits.so",
+    # /etc/login.defs and /etc/default/login, which the probe walks.
+    "pam_umask.so",
+    # Kernel keyring calls only.
+    "pam_keyinit.so",
+    # A D-Bus call to logind, which runs outside the box.
+    "pam_systemd.so",
+)
+# Sudo reads its own configuration as root, and Tumbleweed's sudo reads the vendor copy when /etc has none.
+SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")
+# The stock sudoers plugin, by name in plugin_dir or by its full path on Debian, Ubuntu and Tumbleweed.
+SUDO_PLUGINS = ("sudoers.so", "/usr/libexec/sudo/sudoers.so", "/usr/lib/sudo/sudoers.so", "/usr/libexec/sudo/sudo/sudoers.so")
+# The stock values of the Path settings that run or load a file as root.
+SUDO_PATHS = (
+    ("plugin_dir", "/usr/libexec/sudo"),
+    ("plugin_dir", "/usr/lib/sudo"),
+    ("plugin_dir", "/usr/libexec/sudo/sudo"),
+    ("noexec", "/usr/libexec/sudo/sudo_noexec.so"),
+    ("noexec", "/usr/lib/sudo/sudo_noexec.so"),
+    ("intercept", "/usr/libexec/sudo/sudo_intercept.so"),
+    ("intercept", "/usr/lib/sudo/sudo_intercept.so"),
+    ("sesh", "/usr/libexec/sudo/sesh"),
+    ("sesh", "/usr/lib/sudo/sesh"),
+)
 # Linux-PAM loads a relative module name from its module folder, such as /usr/lib/x86_64-linux-gnu/security.
 PAM_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
 module_folders = []
@@ -1549,10 +1591,52 @@ for config, rows in stack_words.items():
             # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
             if "/" in plain and (plain if plain.startswith("/") else value) not in PAM_PATHS:
                 sys.exit("the PAM configuration " + config + " names " + word)
-            # Debian's pam_motd runs /etc/update-motd.d as root, and those scripts run programs that the check
-            # does not walk.
-            if config in reached and any("pam_motd" in name for name in module_names(word)):
-                sys.exit("the PAM configuration " + config + ", which sudo reaches, runs " + word)
+for config in sorted(reached & stack_words.keys()):
+    for words in stack_words[config]:
+        # A pam.conf line starts with the service name. An include line names a file, not a module.
+        words = words[1:] if config == "/etc/pam.conf" else words
+        if len(words) < 3 or words[0].lower() == "@include" or words[1].lower() in ("include", "substack"):
+            continue
+        # Linux-PAM loads the word as written from its module folder, with no ".so" added, and a link loads its target.
+        if words[2] not in PAM_MODULES or not module_names(words[2]) <= set(PAM_MODULES):
+            sys.exit("the PAM stack " + config + ", which sudo reaches, loads " + words[2] + ", which is not a stock module")
+        for folder in module_folders:
+            if os.path.lexists(os.path.join(folder, words[2])):
+                print("file", os.path.join(folder, words[2]))
+for conf in SUDO_CONFS:
+    try:
+        with open(conf, encoding="latin-1", newline="") as text:
+            rows = text.read().split("\n")
+    except FileNotFoundError:
+        continue
+    except OSError:
+        sys.exit("the check cannot read " + conf)
+    for row in rows:
+        if not printable(row):
+            sys.exit(conf + " has a character that is not printable ASCII")
+        # Sudo joins a line that ends in a backslash with the next one, also after a comment.
+        if row.rstrip(" \t").endswith("\\"):
+            sys.exit(conf + " continues a line")
+        words = row.split()
+        if not words or words[0].startswith("#"):
+            continue
+        # A # after a word may or may not start a comment, so the check takes no such line.
+        if "#" in row:
+            sys.exit(conf + " has a # after a setting")
+        key = words[0].lower()
+        if key == "set" and len(words) == 3 and words[1].lower() == "developer_mode":
+            if words[2].lower() not in ("false", "off", "no", "0"):
+                # It lets sudo load a plugin that root does not own.
+                sys.exit(conf + " turns on developer_mode")
+        elif key == "set" and len(words) == 3:
+            continue
+        elif key == "plugin" and len(words) == 3 and words[2] in SUDO_PLUGINS:
+            # More words would be plugin options, such as sudoers_file=, that move what sudo reads as root.
+            continue
+        elif key == "path" and len(words) == 3 and (words[1], words[2]) in SUDO_PATHS:
+            continue
+        else:
+            sys.exit(conf + " has the line " + row.strip() + ", which is not a stock setting")
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
@@ -1962,19 +2046,22 @@ UNTRUSTED_PYTHON = (
     " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH, each"
-    " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf, /etc/sudoers,"
+    " folder of the image PATH up to and with the folder that holds that sudo, /etc/sudo.conf,"
+    " /usr/etc/sudo.conf, /etc/sudoers,"
     " /etc/environment, /etc/default/locale, /etc/pam.conf, /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow,"
     " /etc/login.defs and /etc/default/login when present, and /etc/sudoers.d, /etc/pam.d, /usr/lib/pam.d,"
-    " /usr/lib/security and /etc/security when present, with every entry in them. Others must be able to read"
+    " /usr/etc/pam.d, /usr/lib/security and /etc/security when present, with every entry in them. Others must be able to read"
     " each sudo and search each of those image PATH folders. Others must be able to run the first sudo on the"
-    " image PATH, and each sudo must resolve to an ELF file. Others must be able to list each of those five folders,"
+    " image PATH, and each sudo must resolve to an ELF file. Others must be able to list each of those six folders,"
     " for example with chmod 755 /etc/sudoers.d. Each entry in them must be a regular file, except one level of"
     " folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
     " of the folders, and no entry may be a dangling link. The PAM files also have content rules: no module that"
-    " runs a program, no pam_motd or other pam_env options in a stack that sudo reaches, and no pam_env drop-ins."
+    " runs a program, only stock modules and no other pam_env options in a stack that sudo reaches, and no pam_env"
+    " drop-ins. The sudo.conf files may hold only Set lines that do not turn on developer_mode, and the stock"
+    " Plugin and Path lines."
     " See docs/repository-constraints.md."
 )
 NO_ACCOUNT = (
