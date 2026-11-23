@@ -1982,7 +1982,9 @@ def _dockerfile_image(
 
     Raises:
         BoxImageError: When there is no builder, the context is invalid, or the build fails.
-        ImageBuildCancelledError: When ``cancelled`` stopped the build; it keeps no build record.
+        ImageBuildCancelledError: When ``cancelled`` stopped the build. If CodeBuild started the
+            build, it keeps only the started record with its CodeBuild id, which account deletion
+            checks (SKY-896).
     """
     if builder is None:
         raise BoxImageError(DOCKERFILE_UNSUPPORTED.format(role=role))
@@ -2015,6 +2017,15 @@ def _dockerfile_image(
             "build_log": f"image-build:{found['id']}",
         }
     limits = BuildLimits.from_settings()
+    pending: list[str] = []
+
+    def record_start(codebuild_id: str) -> None:
+        """Store the started build's id before the wait, so account deletion can stop it (SKY-896).
+
+        Args:
+            codebuild_id: The CodeBuild build id.
+        """
+        pending.append(store.start_image_build(username, input_hash, builder=kind, codebuild_id=codebuild_id))
 
     def build() -> PaidResult[BuildResult | ImageBuildError]:
         """Run the build once and charge its started minutes, also for a failed build.
@@ -2026,7 +2037,7 @@ def _dockerfile_image(
         """
         started = time.monotonic()
         try:
-            value: BuildResult | ImageBuildError = builder.build(request, cancelled=cancelled)
+            value: BuildResult | ImageBuildError = builder.build(request, cancelled=cancelled, on_start=record_start)
         except ImageBuildError as error:
             value = error
         seconds = time.monotonic() - started
@@ -2054,17 +2065,27 @@ def _dockerfile_image(
         outcome = budget.execute(
             quote, policy, build, operation_key=f"image-build:{owner_id}:{role}", cost_kind="sandbox"
         )
+    # A cancelled build keeps its started row and id: the stop wait can end before the build does.
     if isinstance(outcome, ImageBuildCancelledError):
         raise outcome
+    row_id = pending[-1] if pending else None
     if isinstance(outcome, ImageBuildError):
-        store.save_image_build(username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log)
+        store.save_image_build(
+            username, input_hash, builder=kind, image=None, size_bytes=None, log=outcome.log, row_id=row_id
+        )
         tail = outcome.log_tail.strip()
         raise BoxImageError(
             f"[{role}] dockerfile '{dockerfile}' did not build: {outcome}"
             + (f"\n\nBuild log tail:\n{tail}" if tail else "")
         )
     build_id = store.save_image_build(
-        username, input_hash, builder=kind, image=outcome.image, size_bytes=outcome.size_bytes, log=outcome.log
+        username,
+        input_hash,
+        builder=kind,
+        image=outcome.image,
+        size_bytes=outcome.size_bytes,
+        log=outcome.log,
+        row_id=row_id,
     )
     return {"image": outcome.image, "digest": outcome.digest, **record, "build_log": f"image-build:{build_id}"}
 

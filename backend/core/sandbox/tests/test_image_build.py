@@ -1494,3 +1494,204 @@ def test_zip_context_fails_on_a_file_that_vanished(tmp_path: Path, monkeypatch: 
 
     with pytest.raises(ImageBuildError, match="cannot read the build context"):
         image_build._zip_context(context, io.BytesIO(), 10**9)
+
+
+def test_codebuild_reports_the_build_id_before_the_wait(tmp_path: Path) -> None:
+    """The builder gives the build id to ``on_start`` before the first status read (SKY-896)."""
+    codebuild = FakeCodeBuild([_done()])
+    builder, _ = _builder(codebuild)
+    seen: list[tuple[str, int]] = []
+
+    builder.build(_request(_context(tmp_path)), on_start=lambda build_id: seen.append((build_id, codebuild.reads)))
+
+    assert seen == [("proj:1", 0)]
+
+
+def test_codebuild_stops_the_build_when_the_start_record_fails(tmp_path: Path) -> None:
+    """A build whose id cannot be stored must not run on, so the builder stops it (SKY-896)."""
+    codebuild = FakeCodeBuild([RUNNING])
+    builder, _ = _builder(codebuild)
+
+    def _fail(build_id: str) -> None:
+        """Fail like a lost database.
+
+        Args:
+            build_id: The build id.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database gone")
+
+    with pytest.raises(ImageBuildError, match="lost track of image build proj:1"):
+        builder.build(_request(_context(tmp_path)), on_start=_fail)
+
+    assert codebuild.stopped == ["proj:1"]
+    assert codebuild.reads == 0
+
+
+class _BatchCodeBuild:
+    """Report each known build as running or complete, and record reads and stops."""
+
+    def __init__(self, complete: dict[str, bool]) -> None:
+        """Hold the known builds.
+
+        Args:
+            complete: Whether each known build is complete, by build id.
+        """
+        self.complete = complete
+        self.batches: list[list[str]] = []
+        self.stopped: list[str] = []
+
+    def batch_get_builds(self, ids: list[str]) -> dict[str, Any]:
+        """Return the known builds, like CodeBuild.
+
+        Args:
+            ids: The build ids.
+
+        Returns:
+            The known builds and the ids that CodeBuild does not know.
+        """
+        self.batches.append(ids)
+        builds = [{"id": i, "buildComplete": self.complete[i]} for i in ids if i in self.complete]
+        return {"builds": builds, "buildsNotFound": [i for i in ids if i not in self.complete]}
+
+    def stop_build(self, id: str) -> dict[str, Any]:
+        """Record a stop.
+
+        Args:
+            id: The build id.
+
+        Returns:
+            An empty response.
+        """
+        self.stopped.append(id)
+        return {}
+
+
+def test_stop_unfinished_builds_stops_only_the_running_builds() -> None:
+    """Running builds are stopped and count as not complete; finished and unknown builds count as complete (SKY-896)."""
+    codebuild = _BatchCodeBuild({"p:run": False, "p:done": True})
+
+    assert image_build.stop_unfinished_builds(codebuild, ["p:run", "p:done", "p:gone"]) is False
+    assert codebuild.stopped == ["p:run"]
+
+    codebuild.complete["p:run"] = True
+    assert image_build.stop_unfinished_builds(codebuild, ["p:run", "p:done", "p:gone"]) is True
+
+
+def test_stop_unfinished_builds_reads_at_most_100_ids_at_a_time() -> None:
+    """BatchGetBuilds takes at most 100 ids, so more ids go in more reads (SKY-896)."""
+    ids = [f"p:{i}" for i in range(201)]
+    codebuild = _BatchCodeBuild(dict.fromkeys(ids, True))
+
+    assert image_build.stop_unfinished_builds(codebuild, ids) is True
+    assert [len(batch) for batch in codebuild.batches] == [100, 100, 1]
+
+
+def test_stop_unfinished_builds_counts_a_build_that_ends_before_the_stop_as_complete() -> None:
+    """A build can end between the read and the stop; its failed stop then counts it as complete (SKY-896)."""
+    codebuild = _BatchCodeBuild({"p:run": False})
+
+    def _end_then_refuse(id: str) -> None:
+        """End the build, then refuse the stop as CodeBuild does for an ended build.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: Always.
+        """
+        codebuild.complete[id] = True
+        raise ClientError({"Error": {"Code": "InvalidInputException", "Message": "done"}}, "StopBuild")
+
+    codebuild.stop_build = _end_then_refuse  # type: ignore[method-assign]
+
+    assert image_build.stop_unfinished_builds(codebuild, ["p:run"]) is True
+    assert codebuild.batches == [["p:run"], ["p:run"]]
+
+
+def test_stop_unfinished_builds_counts_a_build_that_is_already_stopping_as_not_complete() -> None:
+    """A second deletion try finds the build still stopping; its refused stop means "not complete", not an error (SKY-896)."""
+    codebuild = _BatchCodeBuild({"p:run": False})
+
+    def _refuse(id: str) -> None:
+        """Refuse the stop as CodeBuild may for a build that an earlier stop is ending.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise ClientError({"Error": {"Code": "InvalidInputException", "Message": "stopping"}}, "StopBuild")
+
+    codebuild.stop_build = _refuse  # type: ignore[method-assign]
+
+    assert image_build.stop_unfinished_builds(codebuild, ["p:run"]) is False
+    assert codebuild.batches == [["p:run"], ["p:run"]]
+
+
+def test_stop_unfinished_builds_reports_the_stop_error_when_the_read_after_it_fails() -> None:
+    """A failed read after a refused stop must not hide the stop's error code (SKY-896)."""
+    codebuild = _BatchCodeBuild({"p:run": False})
+
+    def _refuse(id: str) -> None:
+        """Refuse the stop, and make the next read fail.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: Always.
+        """
+
+        def _throttled(ids: list[str]) -> dict[str, Any]:
+            """Fail the read like a throttled CodeBuild.
+
+            Args:
+                ids: The build ids.
+
+            Raises:
+                ClientError: Always.
+            """
+            raise ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow"}}, "BatchGetBuilds")
+
+        codebuild.batch_get_builds = _throttled  # type: ignore[method-assign]
+        raise ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "StopBuild")
+
+    codebuild.stop_build = _refuse  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildError, match=r"cannot stop the image builds \(AccessDeniedException\)"):
+        image_build.stop_unfinished_builds(codebuild, ["p:run"])
+    assert codebuild.batches == [["p:run"]]
+
+
+def test_codebuild_client_fails_fast() -> None:
+    """The client that account deletion uses under its row locks has short timeouts (SKY-896)."""
+    client = image_build.codebuild_client("us-east-2")
+
+    assert client.meta.config.connect_timeout == 3
+    assert client.meta.config.read_timeout == 5
+    assert client.meta.config.retries["total_max_attempts"] == 2
+
+
+def test_stop_unfinished_builds_raises_on_a_codebuild_error() -> None:
+    """A CodeBuild error becomes ImageBuildError with only the error code (SKY-896)."""
+    codebuild = _BatchCodeBuild({"p:run": False})
+
+    def _refuse(id: str) -> None:
+        """Refuse the stop.
+
+        Args:
+            id: The build id.
+
+        Raises:
+            ClientError: Always.
+        """
+        raise ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "StopBuild")
+
+    codebuild.stop_build = _refuse  # type: ignore[method-assign]
+
+    with pytest.raises(ImageBuildError, match=r"cannot stop the image builds \(AccessDeniedException\)"):
+        image_build.stop_unfinished_builds(codebuild, ["p:run"])

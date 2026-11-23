@@ -5810,12 +5810,13 @@ class _FakeBuilder:
         self.fail = fail
         self.requests: list[Any] = []
 
-    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+    def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> BuildResult:
         """Return a built image, fail like a broken Dockerfile, or stop on a cancel.
 
         Args:
             request: The build request.
             cancelled: Tells whether the run was cancelled, or ``None``.
+            on_start: Not used: the fake starts no remote build.
 
         Returns:
             The fixed built image.
@@ -5862,17 +5863,41 @@ class _ImageStore:
                 return build
         return None
 
-    def save_image_build(self, username: str, input_hash: str, **fields: Any) -> str:
-        """Keep one build and return its id.
+    def start_image_build(self, username: str, input_hash: str, **fields: Any) -> str:
+        """Keep one started build with its CodeBuild id and no result.
 
         Args:
             username: The run's owner.
             input_hash: The build's input hash.
-            **fields: Builder, image, size and log.
+            **fields: Builder and CodeBuild id.
 
         Returns:
             The new build's id.
         """
+        build_id = f"build-{len(self.builds) + 1}"
+        self.builds.append(
+            {"id": build_id, "username": username, "input_hash": input_hash, "image": None, "log": "", **fields}
+        )
+        return build_id
+
+    def save_image_build(self, username: str, input_hash: str, *, row_id: str | None = None, **fields: Any) -> str:
+        """Keep one build, or complete a started one, and return its id.
+
+        Args:
+            username: The run's owner.
+            input_hash: The build's input hash.
+            row_id: The started build to complete, or ``None``.
+            **fields: Builder, image, size and log.
+
+        Returns:
+            The build's id.
+        """
+        for build in self.builds:
+            if build["id"] == row_id:
+                build.update(fields)
+                if fields.get("image") is not None:
+                    build["codebuild_id"] = None
+                return build["id"]
         build_id = f"build-{len(self.builds) + 1}"
         self.builds.append({"id": build_id, "username": username, "input_hash": input_hash, **fields})
         return build_id
@@ -6375,6 +6400,68 @@ def test_a_cancelled_build_is_charged_keeps_no_record_and_stops_the_run(monkeypa
     assert runtime.specs == []
 
 
+class _StartingBuilder(_FakeBuilder):
+    """Report a started CodeBuild build, then build as the fake does."""
+
+    def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> BuildResult:
+        """Give the build id to ``on_start``, then build as the fake does.
+
+        Args:
+            request: The build request.
+            cancelled: Tells whether the run was cancelled, or ``None``.
+            on_start: Takes the build id.
+
+        Returns:
+            What the fake builder returns.
+        """
+        on_start("images:1")
+        return super().build(request, cancelled=cancelled)
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["built", "failed"])
+def test_a_started_build_stores_its_codebuild_id_until_the_result(monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
+    """The started build's row holds its CodeBuild id until a built image clears it; a failure keeps it (SKY-896).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        fail: Whether the build fails.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    store = _ImageStore()
+    try:
+        with pytest.raises(repo_staging.BoxImageError) if fail else contextlib.nullcontext():
+            _prepare(
+                staged,
+                _ImageRuntime(),
+                builder=_StartingBuilder(fail=fail),
+                store=store,
+                registry=_FakeRegistry({"sha256:" + "b" * 64}),
+            )
+    finally:
+        staged.cleanup()
+    assert [(build["id"], build["image"], build["codebuild_id"]) for build in store.builds] == [
+        ("build-1", None, "images:1") if fail else ("build-1", _BUILT_IMAGE, None)
+    ]
+
+
+def test_a_cancelled_started_build_keeps_its_codebuild_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel can end the stop wait before the build ends, so the row keeps its CodeBuild id (SKY-896).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    store = _ImageStore()
+    try:
+        with pytest.raises(ImageBuildCancelledError):
+            _prepare(staged, _ImageRuntime(), builder=_StartingBuilder(), store=store, cancelled=lambda: True)
+    finally:
+        staged.cleanup()
+    assert [(build["image"], build["codebuild_id"]) for build in store.builds] == [(None, "images:1")]
+
+
 class _SlowBuilder(_FakeBuilder):
     """Build like the fake, but let more time pass than the build's time limit."""
 
@@ -6388,12 +6475,13 @@ class _SlowBuilder(_FakeBuilder):
         super().__init__(fail=fail)
         self._clock = clock
 
-    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+    def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> BuildResult:
         """Move the clock past the time limit, then build as the fake does.
 
         Args:
             request: The build request.
             cancelled: Tells whether the run was cancelled, or ``None``.
+            on_start: Not used: the fake starts no remote build.
 
         Returns:
             What the fake builder returns.
@@ -6436,12 +6524,13 @@ def test_a_build_that_runs_past_its_reservation_settles_at_the_reserved_limit(
 class _CancelledBeforeStart(_FakeBuilder):
     """Stop on a cancel before any paid build starts."""
 
-    def build(self, request: Any, *, cancelled: Any = None) -> BuildResult:
+    def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> BuildResult:
         """Raise the cancel that the builder raises before it starts a build.
 
         Args:
             request: The build request.
             cancelled: Tells whether the run was cancelled, or ``None``.
+            on_start: Not used: the fake starts no remote build.
 
         Raises:
             ImageBuildCancelledError: Always, with no started build.

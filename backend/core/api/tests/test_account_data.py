@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from botocore.exceptions import BotoCoreError
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -799,6 +800,144 @@ def test_a_cancelled_run_with_an_expired_worker_lease_allows_the_deletion(
 
     assert resp.status_code == 200
     assert registry.repositories == [image_owner(_EMAIL)]
+
+
+class _FakeCodeBuild:
+    """Answer CodeBuild's build reads and record each stop (SKY-896)."""
+
+    def __init__(self, *, complete: bool = False, fail: bool = False) -> None:
+        """Start with no reads and no stops.
+
+        Args:
+            complete: Whether each build reads as complete.
+            fail: Whether each read fails.
+        """
+        self.complete = complete
+        self.fail = fail
+        self.reads: list[list[str]] = []
+        self.stopped: list[str] = []
+
+    def batch_get_builds(self, *, ids: list[str]) -> dict[str, Any]:
+        """Record one read and answer each build's state.
+
+        Args:
+            ids: The build ids.
+
+        Returns:
+            The builds, as CodeBuild returns them.
+
+        Raises:
+            BotoCoreError: When the fake fails.
+        """
+        if self.fail:
+            raise BotoCoreError()
+        self.reads.append(ids)
+        return {"builds": [{"id": build_id, "buildComplete": self.complete} for build_id in ids]}
+
+    def stop_build(self, *, id: str) -> dict[str, Any]:
+        """Record one stop.
+
+        Args:
+            id: The build id.
+
+        Returns:
+            An empty CodeBuild answer.
+        """
+        self.stopped.append(id)
+        return {}
+
+
+def _seed_orphan_build(engine: Engine) -> None:
+    """Seed the trace of a hard-killed worker: a cancelled run with an expired lease and a started build.
+
+    Another account also has a started build, which the deletion must not read,
+    and the account has a build id older than CodeBuild's longest build.
+
+    Args:
+        engine: The test database.
+    """
+    with Session(engine) as session:
+        session.add(
+            JobModel(
+                optimization_id="job-orphan",
+                username=_EMAIL,
+                status="cancelled",
+                claimed_by="dead-pod",
+                lease_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        session.add(ImageBuildModel(username=_EMAIL, input_hash="h1", builder="codebuild", codebuild_id="images:1"))
+        session.add(ImageBuildModel(username=_OTHER, input_hash="h1", builder="codebuild", codebuild_id="images:2"))
+        session.add(
+            ImageBuildModel(
+                username=_EMAIL,
+                input_hash="h0",
+                builder="codebuild",
+                codebuild_id="images:old",
+                created_at=datetime.now(UTC) - account_data_service.BUILD_ID_MAX_AGE - timedelta(minutes=1),
+            )
+        )
+        session.commit()
+
+
+def test_a_hard_killed_worker_build_is_stopped_and_refuses_the_deletion_until_it_ends(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deletion stops the build a hard-killed worker left, answers 409 while it runs, and goes on once it ends (SKY-896).
+
+    A build id older than CodeBuild's longest build is not read.
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    _seed_orphan_build(harness.engine)
+    registry = _FakeImageRegistry()
+    codebuild = _FakeCodeBuild()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+    monkeypatch.setattr(account_data_service, "codebuild_client", lambda region: codebuild)
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "accounts.deletion_runs_active"
+    assert codebuild.reads == [["images:1"]]
+    assert codebuild.stopped == ["images:1"]
+    assert registry.repositories == []
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
+
+    codebuild.complete = True
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 200
+    assert codebuild.stopped == ["images:1"]
+    assert registry.repositories == [image_owner(_EMAIL)]
+    with Session(harness.engine) as session:
+        assert session.scalars(select(ImageBuildModel.codebuild_id)).all() == ["images:2"]
+
+
+def test_a_codebuild_failure_answers_503_and_keeps_the_account(
+    harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When CodeBuild cannot report or stop the builds, deletion answers 503 and keeps the account (SKY-896).
+
+    Args:
+        harness: The test client and its engine.
+        monkeypatch: Pytest monkeypatch.
+    """
+    _seed_orphan_build(harness.engine)
+    registry = _FakeImageRegistry()
+    monkeypatch.setattr(account_data_service, "image_registry", lambda **_: registry)
+    monkeypatch.setattr(account_data_service, "codebuild_client", lambda region: _FakeCodeBuild(fail=True))
+
+    resp = harness.client.post("/account/delete", json={"password": _PASSWORD})
+
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "accounts.deletion_storage_unavailable"
+    assert registry.repositories == []
+    with Session(harness.engine) as session:
+        assert session.get(UserModel, _EMAIL) is not None
 
 
 def test_another_account_run_in_progress_does_not_block_the_deletion(

@@ -28,11 +28,12 @@ account's images go next, with one delete of the account's Vercel registry
 repository (SKY-895). Known gap: each worker keeps its in-memory copy cache
 until it restarts. A cached copy names a source digest that only a rebuild of
 the same bytes can make again, and its box then fails to start, so the cache
-cannot leak an image. Known gap: an expired lease does not prove that the run's
-CodeBuild image build ended. A worker that was killed after a cancel cannot
-stop its build, which can then push after the repository delete. SKY-896
-(account deletion stops an orphaned CodeBuild image build after a hard-killed
-worker) tracks the fix. Known gap: the active-run check covers only the runs
+cannot leak an image. An expired lease does not prove that the run's CodeBuild
+image build ended, so the deletion also stops each build that still has a
+stored CodeBuild id, and refuses until CodeBuild reports each one complete
+(SKY-896). Known gap: a worker killed between the build start and the id's
+commit leaves a build with no id. So does a failed id commit whose best-effort
+StopBuild also fails. Known gap: the active-run check covers only the runs
 that exist when the deletion reads them. A run that the user submits during the
 deletion is not locked out, so its image build can push after the repository
 delete and make the repository again.
@@ -51,7 +52,7 @@ import json
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -61,6 +62,7 @@ from sqlalchemy.orm import Session
 from ..billing.budgets import BudgetService
 from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
+from ..sandbox.image_build import codebuild_client, stop_unfinished_builds
 from ..sandbox.image_registry import ImageRegistry, image_owner, image_registry
 from ..sandbox.vcr_copy import delete_copies
 from ..storage import tree_purge
@@ -116,6 +118,10 @@ from ..storage.models import (
 from .routers.constants import TERMINAL_STATUSES
 
 EXPORT_FORMAT = "skynet-account-export/v2"
+# CodeBuild ends every build within its hard limits: 36 hours of build time and
+# 8 hours in the queue. An older stored build id is complete, so the deletion
+# does not read it, also when CodeBuild no longer lets the API read it (SKY-896).
+BUILD_ID_MAX_AGE = timedelta(hours=48)
 
 
 @dataclass
@@ -545,7 +551,8 @@ class AccountRunsActiveError(Exception):
     repository delete. The registry then makes the repository again, and the
     pushed layers outlive the account with no row that names them. A cancelled
     run counts as in progress while its worker holds a live lease, because the
-    worker stops its image build only later.
+    worker stops its image build only later. A CodeBuild image build that is not
+    complete also counts, because its worker can be dead (SKY-896).
     """
 
 
@@ -580,7 +587,9 @@ def delete_account(
     Raises:
         AccountRunsActiveError: The deployment has a user image registry and
             one of the account's runs is not in a terminal status, or a worker
-            still holds a live lease on it; nothing is deleted.
+            still holds a live lease on it, or CodeBuild does not report one of
+            the account's image builds as complete; nothing is deleted.
+        ImageBuildError: A CodeBuild read or stop failed; nothing is deleted.
         ImageRegistryError: The user image registry or Vercel's registry
             refused to delete the account's repository, or the registry
             settings are set but not usable; nothing in the main database or
@@ -638,6 +647,22 @@ def delete_account(
         )
         if active is not None:
             raise AccountRunsActiveError
+    if registry is not None:
+        build_ids = list(
+            session.scalars(
+                select(ImageBuildModel.codebuild_id).where(
+                    ImageBuildModel.username == username,
+                    ImageBuildModel.codebuild_id.is_not(None),
+                    ImageBuildModel.created_at > datetime.now(UTC) - BUILD_ID_MAX_AGE,
+                )
+            )
+        )
+        # The stops are not rolled back with a refused deletion; a stopped build is what the user wants.
+        if build_ids:
+            # The ImageRegistry protocol has no Region; the ECR registry has one, the same as the builds'.
+            codebuild = codebuild_client(getattr(registry, "region", None))
+            if not stop_unfinished_builds(codebuild, build_ids):
+                raise AccountRunsActiveError
     if job_ids:
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
