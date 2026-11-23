@@ -1431,20 +1431,28 @@ for config in pam_configs:
     except (FileNotFoundError, IsADirectoryError):
         continue
     for row in rows:
-        # Linux-PAM reads a [...] argument as one word across spaces, and \] does not close it.
-        words, group = [], None
-        for token in row.split("#")[0].split():
-            if group is None and not token.startswith("["):
-                words.append(token)
-                continue
-            group = token if group is None else group + " " + token
-            if group.endswith("]") and not group.endswith("\\]"):
-                words.append(group)
-                group = None
-        if group is not None:
-            sys.exit("the PAM configuration " + config + " does not close " + group)
+        # This scan copies Linux-PAM's: only a space or a tab splits words, a word that starts with [ ends at the
+        # first ] that has no \ before it, also inside a word, and the text after that ] starts the next word.
+        words, line, start = [], row.split("#")[0], 0
+        while True:
+            while start < len(line) and line[start] in " \t":
+                start += 1
+            if start == len(line):
+                break
+            end = start + 1
+            if line[start] == "[":
+                while end < len(line) and not (line[end] == "]" and line[end - 1] != "\\"):
+                    end += 1
+                if end == len(line):
+                    sys.exit("the PAM configuration " + config + " does not close " + line[start:])
+                end += 1
+            else:
+                while end < len(line) and line[end] not in " \t":
+                    end += 1
+            words.append(line[start:end])
+            start = end
         for word in words:
-            bare = word.strip("[]")
+            bare = word[1:-1].replace("\\]", "]") if word.startswith("[") else word
             key, _, value = bare.partition("=")
             # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
             if any(runner in word for runner in PAM_RUNNERS):

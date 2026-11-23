@@ -8742,6 +8742,14 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         ("", False, "session required pam_env.so [envfile=/etc/environment x]\n", "", "[envfile=/etc/environment x]"),
         ("", False, "session required pam_env.so [envfile=/etc/environment\\]\n", "", "does not close [envfile"),
         ("", False, "session required pam_alias.so conffile=c\n", "", "gives pam_env conffile=c"),
+        (
+            "",
+            False,
+            "session required pam_env.so [readenv=1]envfile=/home/box/env\n",
+            "",
+            "gives pam_env envfile=/home/box/env",
+        ),
+        ("", False, "session required pam_env.so envfile=/etc/environment\x0bx\n", "", "envfile=/etc/environment\x0bx"),
     ],
     ids=[
         "line-continuation",
@@ -8761,6 +8769,8 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
         "bracket-space-stock-prefix",
         "bracket-escape",
         "module-alias",
+        "bracket-then-word",
+        "vertical-tab",
     ],
 )
 def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pam_does(

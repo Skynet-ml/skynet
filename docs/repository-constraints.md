@@ -835,9 +835,10 @@ own commands in the setup box and in each candidate box:
   `envfile=` or `conffile=`, and may not turn on `user_readenv`, which
   reads a file in the box user's home. The check reads these options on
   every line, also inside `[...]` brackets, because another module name
-  can load `pam_env`. A `[...]` argument counts as one word across
-  spaces, as Linux-PAM reads it. The check refuses one with no closing
-  bracket. No line in these PAM files may name any other path, such as a
+  can load `pam_env`. The check splits words as Linux-PAM does: only
+  at a space or a tab, and a `[...]` argument ends at its first `]` that
+  has no `\` before it, even across spaces. The check refuses a `[...]`
+  argument with no closing bracket. No line in these PAM files may name any other path, such as a
   module or an `@include` file outside the module folders. The only other
   path allowed is `/run/motd.dynamic`, which stock images name. The check
   refuses `pam_exec`, `pam_script` and `pam_python`, which run a program
