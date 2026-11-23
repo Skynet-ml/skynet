@@ -159,6 +159,77 @@ _FAILED_START_GRACE_SEC = 5.0
 # The remote shell reads the whole script from stdin and runs it, so the
 # command then sees an empty stdin.
 _READ_STDIN_SCRIPT = 'eval "$(cat)"'
+# Root writes one upload with this script (SKY-910). The box user can plant a
+# symbolic link in a folder that it can write, and mkdir -p and cat > follow
+# links, so root could write any file. The arguments are the start folder
+# ("/" or "."), the folder names and the file name, after the content size in
+# bytes. The script enters one folder at a time and checks with /bin/pwd -P
+# that each cd reached the named child of the folder before, so a link that
+# the box user swaps in after the -L check is refused too. Not the bash pwd
+# builtin: it resolves the saved path text again, and the box user can change
+# that text by renaming folders; /bin/pwd asks the kernel. A folder that a
+# parallel upload makes between the -d test and mkdir is fine, because the
+# cd and the check still follow. The current folder then stays bound to the
+# checked folder, whatever happens to the path. The content goes into a
+# root-only stage folder, and mv -T renames it onto the name, so a link that
+# appears at the name is replaced, not followed. So an overwritten file loses
+# its owner and mode, by design: a copy of them (chown/chmod --reference)
+# would follow a link swapped in at the name and could copy a setuid bit. No
+# current caller needs the old owner or mode. The box user can rename the
+# stage folder in its parent and put its own folder, with a planted link, at
+# the name before the cd. So after the cd the script also checks that root
+# owns the folder and only root can use it: the box user cannot make such a
+# folder. A setgid parent gives the stage folder its setgid bit, which grants
+# no access, so the mode check accepts it.
+# The exit trap removes the stage file from inside the stage folder after a
+# failure or a hang-up, then the folder by name with rmdir. If the box user
+# swapped a folder in at that name, rmdir removes only an empty folder, and
+# root's renamed empty stage folder stays.
+# Under set -e a failed trap command sets the exit status, so the trap ends
+# with || : and a failed cleanup cannot report a written file as a failure.
+_UPLOAD_SCRIPT = r"""set -eu
+where() { here=$(/bin/pwd -P && echo x); here=${here%?x}; }
+size=$1
+shift
+cd -P -- "$1"
+shift
+while [ "$#" -gt 1 ]; do
+  part=$1
+  shift
+  where
+  if [ "$part" = .. ]; then
+    want=${here%/*}
+    want=${want:-/}
+    next=..
+  else
+    if [ -L "$part" ]; then echo "upload refused: $part is a symbolic link" >&2; exit 3; fi
+    [ -d "$part" ] || mkdir -- "$part" || [ -d "$part" ]
+    want=${here%/}/$part
+    next=./$part
+  fi
+  cd -P -- "$next"
+  where
+  if [ "$here" != "$want" ]; then echo "upload refused: $part changed during the upload" >&2; exit 3; fi
+done
+name=$1
+if [ -L "$name" ]; then echo "upload refused: $name is a symbolic link" >&2; exit 3; fi
+where
+parent=$here
+stage=$(mktemp -d ./.skynet-upload.XXXXXX)
+stage=${stage#./}
+cd -P -- "./$stage" || { rmdir -- "$stage" 2>/dev/null || :; exit 3; }
+where
+case $(ls -ld .) in drwx------* | drwx--S---*) mode=ok ;; *) mode=bad ;; esac
+if [ "$here" != "${parent%/}/$stage" ] || [ ! -O . ] || [ "$mode" != ok ]; then
+  echo "upload refused: the stage folder changed during the upload" >&2
+  exit 3
+fi
+trap 'rm -f -- file || :; cd -P .. && rmdir -- "$stage" 2>/dev/null || :' EXIT
+trap 'exit 129' HUP INT TERM
+cat > file
+if [ "$(wc -c < file)" -ne "$size" ]; then echo "upload refused: the content was cut off" >&2; exit 3; fi
+mv -fT -- file "../$name"
+"""
 
 # The instances of this process, so that the job sweep can clear their state
 # and find the regions that they run in.
@@ -497,29 +568,34 @@ class EC2Environment(SandboxEnvironment):
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write UTF-8 text files on the instance and create their parent directories.
 
-        Each file write has the run phase time limit, as ``exec`` has.
+        Each file write has the run phase time limit, as ``exec`` has. Root
+        renames a new file onto each name (SKY-910), so an overwritten file,
+        like a new one, is owned by root with root's umask mode.
 
         Args:
             files: Maps each absolute sandbox path to its text content.
 
         Raises:
-            RuntimeError: The instance is not running, or a directory or a
+            RuntimeError: The instance is not running, a path has no file
+                name, a path part is a symbolic link, or a directory or a
                 file could not be written.
             SandboxInfraError: A file write ran past the time limit.
         """
         self._require_running()
-        parents = sorted({str(PurePosixPath(path).parent) for path in files} - {"", ".", "/"})
-        if parents:
-            made = await self.exec("mkdir -p " + " ".join(shlex.quote(parent) for parent in parents), sudo=True)
-            if not made.ok:
-                raise RuntimeError(f"The ec2 sandbox could not create the upload directories: {made.stderr}")
         limit = self._default_timeout
         for path, text in files.items():
-            script = wrap_script(f"cat > {shlex.quote(path)}", env={}, cwd=None, sudo=True)
+            parts = PurePosixPath(path).parts
+            # PurePosixPath drops a last "/" or "." part, so the raw text decides the file name.
+            if path.rsplit("/", 1)[-1] in ("", ".", ".."):
+                raise RuntimeError(f"The ec2 sandbox could not write {path}: the path has no file name.")
+            # A path that starts with exactly two slashes keeps "//" as its first part.
+            start, names = ("/", parts[1:]) if parts[0] in ("/", "//") else (".", parts)
+            data = text.encode("utf-8")
+            # A killed ssh ends stdin early, so the size check keeps a cut-off file off the name.
+            args = " ".join(shlex.quote(arg) for arg in (str(len(data)), start, *names))
+            script = wrap_script(f"set -- {args}; {_UPLOAD_SCRIPT}", env={}, cwd=None, sudo=True)
             try:
-                code, _, err = await _run_process(
-                    self._ssh_argv(script, stdin=True, limit=limit), text.encode("utf-8"), limit
-                )
+                code, _, err = await _run_process(self._ssh_argv(script, stdin=True, limit=limit), data, limit)
             except TimeoutError:
                 raise SandboxInfraError(f"The ec2 sandbox timed out writing {path}.") from None
             if code != 0:

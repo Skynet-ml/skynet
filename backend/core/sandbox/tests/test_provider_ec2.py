@@ -3,7 +3,8 @@
 A fake EC2 client replaces boto3's, and a fake ``ssh`` script replaces the
 real client. The fake ssh runs the remote command on this machine inside one
 directory per instance, with ``bash`` and ``sudo`` shims that drop the login
-and root switches, and a ``timeout`` shim that drops its limits. No test calls AWS or opens a network connection.
+and root switches, a ``timeout`` shim that drops its limits, and an ``mv`` shim
+for macOS. No test calls AWS or opens a network connection.
 """
 
 from __future__ import annotations
@@ -104,6 +105,10 @@ BASH_SHIM = '#!/bin/sh\nif [ "$1" = "-lc" ]; then shift; exec /bin/bash -c "$@";
 SUDO_SHIM = '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n'
 # macOS has no timeout command, and the local ssh kill already bounds each test command.
 TIMEOUT_SHIM = '#!/bin/sh\n[ "$1" = "-k" ] && shift 2\nshift\nexec "$@"\n'
+# macOS mv has no -T. Its -h also renames onto a link at the target instead of following it.
+MV_SHIM = (
+    '#!/bin/sh\nif [ "$1" = "-fT" ] && [ "$(uname)" = Darwin ]; then shift; set -- -fh "$@"; fi\nexec /bin/mv "$@"\n'
+)
 
 
 def _client_error(code: str, status: int | None, message: str = "") -> ClientError:
@@ -358,6 +363,7 @@ def fake_ec2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEC
         ("bash", BASH_SHIM),
         ("sudo", SUDO_SHIM),
         ("timeout", TIMEOUT_SHIM),
+        ("mv", MV_SHIM),
         ("ssh-keygen", f"#!{sys.executable}\n{FAKE_KEYGEN}"),
     ):
         path = bin_dir / name
@@ -691,6 +697,207 @@ async def test_uploads_run_as_root(fake_ec2: FakeEC2) -> None:
     assert "cat >" in calls[-1][-1]
 
 
+def _plant_outside(tmp_path: Path) -> Path:
+    """Make a folder outside the instance with one file in it.
+
+    Args:
+        tmp_path: The test's directory.
+
+    Returns:
+        The folder.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.txt").write_text("keep")
+    return outside
+
+
+async def test_an_upload_refuses_a_link_at_the_file_path(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Refuse a link that the box user plants at the name, so root keeps the link target (SKY-910)."""
+    outside = _plant_outside(tmp_path)
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        (home / "a.txt").symlink_to(outside / "victim.txt")
+        with pytest.raises(RuntimeError, match=r"a\.txt is a symbolic link"):
+            await env.upload_files({"a.txt": "attack"})
+    assert (outside / "victim.txt").read_text() == "keep"
+    assert sorted(path.name for path in outside.iterdir()) == ["victim.txt"]
+    assert not list(home.glob(".skynet-upload.*"))
+
+
+@pytest.mark.parametrize("path", ["dir/victim.txt", "dir/new/x.txt", "{home}/dir/victim.txt"])
+async def test_an_upload_refuses_a_link_at_a_parent_folder(fake_ec2: FakeEC2, tmp_path: Path, path: str) -> None:
+    """Refuse a parent link in a relative or an absolute path, so root writes and creates nothing outside (SKY-910)."""
+    outside = _plant_outside(tmp_path)
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        (home / "dir").symlink_to(outside)
+        with pytest.raises(RuntimeError, match="dir is a symbolic link"):
+            await env.upload_files({path.format(home=home): "attack"})
+    assert (outside / "victim.txt").read_text() == "keep"
+    assert sorted(child.name for child in outside.iterdir()) == ["victim.txt"]
+
+
+async def test_an_upload_replaces_a_link_planted_at_the_name_after_the_check(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Replace a link that appears at the name after the link check, so root does not write through it (SKY-910).
+
+    A ``mktemp`` shim plants the link before it makes the stage folder, as a
+    box user that wins the race would.
+    """
+    outside = _plant_outside(tmp_path)
+    plant = tmp_path / "bin" / "mktemp"
+    plant.write_text(f'#!/bin/sh\n/bin/ln -s {outside / "victim.txt"} a.txt && PATH=/usr/bin:/bin exec mktemp "$@"\n')
+    plant.chmod(plant.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        await env.upload_files({"a.txt": "data"})
+        target = fake_ec2.state / "root" / env._host / "a.txt"
+        assert not target.is_symlink()
+        assert target.read_text() == "data"
+    assert (outside / "victim.txt").read_text() == "keep"
+
+
+async def test_an_upload_accepts_a_setgid_stage_folder(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Accept a stage folder with the setgid bit of a setgid parent, because the bit grants no access (SKY-910)."""
+    setgid = tmp_path / "bin" / "mktemp"
+    setgid.write_text(
+        '#!/bin/sh\nstage=$(PATH=/usr/bin:/bin mktemp "$@") && /bin/chmod 2700 "$stage" && echo "$stage"\n'
+    )
+    setgid.chmod(setgid.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        await env.upload_files({"a.txt": "data"})
+        home = fake_ec2.state / "root" / env._host
+        assert (home / "a.txt").read_text() == "data"
+        assert not list(home.glob(".skynet-upload.*"))
+
+
+async def test_an_upload_refuses_a_folder_swapped_for_a_link_after_the_check(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Refuse a folder that becomes a link between the check and the cd (SKY-910).
+
+    A ``mkdir`` shim makes the folder and then swaps it for a link, as a box
+    user that wins the race would.
+    """
+    outside = _plant_outside(tmp_path)
+    swap = tmp_path / "bin" / "mkdir"
+    swap.write_text(f'#!/bin/sh\n/bin/mkdir "$@" && /bin/rmdir -- "$2" && /bin/ln -s {outside} "$2"\n')
+    swap.chmod(swap.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        with pytest.raises(RuntimeError, match="new changed during the upload"):
+            await env.upload_files({"new/x.txt": "attack"})
+    assert sorted(path.name for path in outside.iterdir()) == ["victim.txt"]
+
+
+@pytest.mark.parametrize(
+    "swap_in",
+    [
+        '/bin/mkdir -m 755 -- "$stage"',
+        pytest.param(
+            '/bin/mkdir -m 700 -- "$stage" && /bin/chown 65534 "$stage"',
+            marks=pytest.mark.skipif(os.geteuid() != 0, reason="only root can give the folder another owner"),
+        ),
+    ],
+    ids=["open-mode", "other-owner"],
+)
+async def test_an_upload_refuses_a_stage_folder_swapped_before_the_cd(
+    fake_ec2: FakeEC2, tmp_path: Path, swap_in: str
+) -> None:
+    """Refuse a folder that the box user puts at the stage name, so root does not write through its link (SKY-910).
+
+    A ``mktemp`` shim makes the stage folder, renames it, and puts another
+    folder with a planted link at its name, as a box user that wins the race
+    would. The other-owner case needs root, as in CI, so it checks the owner part.
+    """
+    outside = _plant_outside(tmp_path)
+    swap = tmp_path / "bin" / "mktemp"
+    swap.write_text(
+        "#!/bin/sh\n"
+        f'stage=$(PATH=/usr/bin:/bin mktemp "$@") && /bin/mv -- "$stage" "$stage.moved" && {swap_in}'
+        f' && /bin/ln -s {outside / "victim.txt"} "$stage/file" && echo "$stage"\n'
+    )
+    swap.chmod(swap.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        with pytest.raises(RuntimeError, match="stage folder changed during the upload"):
+            await env.upload_files({"a.txt": "attack"})
+        assert not (fake_ec2.state / "root" / env._host / "a.txt").exists()
+    assert (outside / "victim.txt").read_text() == "keep"
+
+
+async def test_an_upload_accepts_a_folder_that_a_parallel_upload_makes(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Accept a folder that another upload makes between the folder test and mkdir (SKY-910).
+
+    A ``mkdir`` shim makes the folder and then fails as mkdir does when the
+    folder exists, as a parallel upload that wins the race would.
+    """
+    race = tmp_path / "bin" / "mkdir"
+    race.write_text('#!/bin/sh\n/bin/mkdir "$@"; /bin/mkdir "$@"\n')
+    race.chmod(race.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        await env.upload_files({"new/x.txt": "data"})
+        assert (fake_ec2.state / "root" / env._host / "new" / "x.txt").read_text() == "data"
+
+
+async def test_an_upload_makes_missing_folders_and_replaces_a_file(fake_ec2: FakeEC2) -> None:
+    """Create nested folders, accept . and .. parts, and overwrite an existing file."""
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        await env.upload_files({"x/./y/z.txt": "one", f"{home}/x/y/../w.txt": "two", f"/{home}/x/v.txt": "four"})
+        await env.upload_files({"-/a.txt": "dash", "nl\n/b.txt": "newline"})
+        assert (home / "-" / "a.txt").read_text() == "dash"
+        assert (home / "nl\n" / "b.txt").read_text() == "newline"
+        await env.upload_files({"x/y/z.txt": "three"})
+        assert (home / "x" / "y" / "z.txt").read_text() == "three"
+        assert (home / "x" / "w.txt").read_text() == "two"
+        assert (home / "x" / "v.txt").read_text() == "four"
+        assert not list(home.rglob(".skynet-upload.*"))
+        with pytest.raises(RuntimeError, match="no file name"):
+            await env.upload_files({"x/..": "bad"})
+        for bad in ("//", "x/", "x/.", "."):
+            with pytest.raises(RuntimeError, match="no file name"):
+                await env.upload_files({bad: "bad"})
+        assert not (home / "x" / "x").exists()
+
+
+async def test_a_failed_upload_removes_its_stage_folder(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Remove the root stage folder when the rename fails, so no folder stays that the box user cannot remove."""
+    broken = tmp_path / "bin" / "mv"
+    broken.write_text("#!/bin/sh\nexit 1\n")
+    broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        with pytest.raises(RuntimeError, match=r"could not write a\.txt"):
+            await env.upload_files({"a.txt": "data"})
+        assert not list(home.glob(".skynet-upload.*"))
+        assert not (home / "a.txt").exists()
+
+
+async def test_an_upload_cut_off_by_a_killed_ssh_keeps_the_old_file(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse content that ends early, so a killed ssh never puts a cut-off file at the name (SKY-910)."""
+    real = ec2_provider._run_process
+
+    async def cut(argv: list[str], data: bytes | None, limit: float) -> tuple[int, bytes, bytes]:
+        """Send only half of each upload, as a killed ssh would.
+
+        Args:
+            argv: The command.
+            data: The standard input.
+            limit: The time limit.
+
+        Returns:
+            The real result for the shortened input.
+        """
+        return await real(argv, data[: len(data) // 2] if data else data, limit)
+
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        await env.upload_files({"a.txt": "old"})
+        monkeypatch.setattr(ec2_provider, "_run_process", cut)
+        with pytest.raises(RuntimeError, match="content was cut off"):
+            await env.upload_files({"a.txt": "new content"})
+        assert (home / "a.txt").read_text() == "old"
+        assert not list(home.glob(".skynet-upload.*"))
+
+
 async def test_download_raises_when_ssh_cannot_reach_the_instance(fake_ec2: FakeEC2) -> None:
     """Tell a lost connection apart from a missing file."""
     async with EC2Environment(_spec()) as env:
@@ -925,7 +1132,7 @@ async def test_transfers_have_the_run_time_limit_and_keepalive(
         Raises:
             TimeoutError: The command is a file transfer.
         """
-        if "cat > b.txt" in argv[-1] or "cat a.txt" in argv[-1]:
+        if ("skynet-upload" in argv[-1] and "b.txt" in argv[-1]) or "cat a.txt" in argv[-1]:
             limits.append(limit)
             raise TimeoutError
         return await real(argv, data, limit)
