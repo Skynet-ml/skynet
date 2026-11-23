@@ -21,6 +21,7 @@ from ...billing.budgets import (
     BudgetSnapshot,
     BudgetTotalConflictError,
 )
+from ...billing.service import cost_ceiling_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 
@@ -124,6 +125,28 @@ def require_one_lease(total_cents: int, *, from_balance: bool = False) -> None:
     if from_balance:
         raise DomainError("budget.insufficient", status=402)
     raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
+
+
+def require_funded_lease(total_cents: int, spendable_cents: int | None, token_source: str) -> None:
+    """Refuse a capped run whose limit or balance cannot buy the run's first budget lease.
+
+    Args:
+        total_cents: The run's approved spending limit.
+        spendable_cents: The account's spendable balance, or ``None`` when no
+            balance applies.
+        token_source: ``"managed"`` or ``"byok"``.
+
+    Raises:
+        DomainError: 402 ``budget.insufficient`` when the balance is the
+            reason, or 409 ``budget.below_minimum`` when the user's own limit is.
+    """
+    if spendable_cents is None:
+        require_one_lease(total_cents)
+        return
+    # Submit lowers a user's limit to what the balance backs, so a limit at that ceiling is the balance's.
+    require_one_lease(total_cents, from_balance=cost_ceiling_budget(spendable_cents, token_source) <= total_cents)
+    # A BYOK ceiling ignores the balance, but every run's first lease holds one full lease of it (SKY-923).
+    require_one_lease(spendable_cents, from_balance=True)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

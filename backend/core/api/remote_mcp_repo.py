@@ -40,7 +40,7 @@ from pydantic import Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from ..billing.budgets import BudgetConflictError, BudgetError, BudgetService
+from ..billing.budgets import CHUNK_CENTS, BudgetConflictError, BudgetError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.service import StripeBillingService
 from ..config import settings
@@ -906,9 +906,12 @@ def review_draft(
         validate_job(request)
     except ServiceError as error:
         issues.append(str(error))
+    # A capped run takes its budget in leases, so submit refuses a limit below one lease;
+    # a local run's budget is uncapped and has no such floor (SKY-923).
+    minimum = floor if settings.local_mode else max(floor, CHUNK_CENTS)
     price = {
-        "min_max_cost_cents": floor,
-        "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, floor),
+        "min_max_cost_cents": minimum,
+        "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, minimum),
         "unpriced_models": unpriced,
         "spendable_cents": StripeBillingService(engine=job_store.engine).spendable_cents(user.username),
     }

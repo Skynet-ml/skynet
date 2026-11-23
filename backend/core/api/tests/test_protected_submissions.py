@@ -28,6 +28,7 @@ from core.api.routers import execution_budgets, submissions, wizard_preflight
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.api.routers.optimizations_meta import create_optimizations_meta_router
 from core.api.routers.wizard_preflight import create_wizard_preflight_router
+from core.billing import budgets
 from core.billing.budgets import (
     AccountFundsError,
     BudgetConflictError,
@@ -55,7 +56,7 @@ from core.storage.models import (
 )
 from core.storage.preflights import PreflightStore, WizardPreflightModel
 from core.storage.remote import RemoteDBJobStore
-from core.worker import loop_host, repo_gate
+from core.worker import repo_gate
 
 ROUTE = "/blackbox/run"
 
@@ -701,9 +702,9 @@ def test_a_run_limit_below_one_lease_is_refused_before_paid_setup(
         harness: Real legacy submission routes and spending authority.
         monkeypatch: Restores the real lease size.
     """
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
 
-    response = harness.client.post(ROUTE, json=_payload(total=loop_host.CHUNK_CENTS - 1))
+    response = harness.client.post(ROUTE, json=_payload(total=budgets.CHUNK_CENTS - 1))
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"] == _BELOW_ONE_LEASE
@@ -724,9 +725,9 @@ def test_a_balance_below_one_lease_is_refused_as_a_balance_problem(
         monkeypatch: Restores the real lease size.
         limit: The user's own limit, or ``None`` for none.
     """
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     with Session(harness.store.engine) as session:
-        session.get(BillingCustomerModel, "alice").balance_cents = loop_host.CHUNK_CENTS - 1
+        session.get(BillingCustomerModel, "alice").balance_cents = budgets.CHUNK_CENTS - 1
         session.commit()
     payload = _payload() if limit is None else _payload(total=limit)
     if limit is None:
@@ -740,6 +741,78 @@ def test_a_balance_below_one_lease_is_refused_as_a_balance_problem(
     assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
 
 
+def test_a_byok_run_with_a_balance_below_one_lease_is_refused(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a BYOK run whose balance cannot fund its first lease, though its ceiling ignores the balance (SKY-923).
+
+    Args:
+        harness: Real legacy submission routes and spending authority.
+        monkeypatch: Restores the real lease size and stands in a verified BYOK key.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = budgets.CHUNK_CENTS - 1
+        session.commit()
+    payload = _payload(total=500)
+    payload["reflection_model_config"] = {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"}
+
+    response = harness.client.post(ROUTE, json=payload)
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert harness.calls == []
+    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
+
+
+@pytest.mark.parametrize(
+    ("limit", "balance", "status", "detail"),
+    [
+        (budgets.CHUNK_CENTS - 1, None, 409, _BELOW_ONE_LEASE),
+        (500, budgets.CHUNK_CENTS - 1, 402, ENGLISH_MESSAGES["budget.insufficient"]),
+    ],
+    ids=["limit", "balance"],
+)
+def test_the_wizard_check_refuses_a_budget_below_one_lease_before_paid_setup(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int, balance: int | None, status: int, detail: str
+) -> None:
+    """Refuse the wizard's setup check for a run that submit would refuse, before it pays for setup (SKY-923).
+
+    Args:
+        harness: Real wizard check routes and spending authority.
+        monkeypatch: Restores the real lease size.
+        limit: The budget's limit.
+        balance: The account balance, or ``None`` to keep the funded fixture balance.
+        status: The expected refusal status.
+        detail: The expected refusal text.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    if balance is not None:
+        with Session(harness.store.engine) as session:
+            session.get(BillingCustomerModel, "alice").balance_cents = balance
+            session.commit()
+    budget = harness.budgets.create(harness.username, limit, idempotency_key="small-check")
+
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision},
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+
+    assert response.status_code == status, response.text
+    assert response.json()["detail"] == detail
+    assert harness.calls == []
+    assert harness.count(WizardPreflightModel) == 0
+
+
 @pytest.mark.parametrize("uncapped", [False, True])
 def test_a_wizard_run_limit_below_one_lease_is_refused(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, uncapped: bool
@@ -751,9 +824,9 @@ def test_a_wizard_run_limit_below_one_lease_is_refused(
         monkeypatch: Restores the real lease size.
         uncapped: Whether the wizard budget is uncapped.
     """
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
     budget = harness.budgets.create(
-        harness.username, loop_host.CHUNK_CENTS - 1, idempotency_key="small-wizard", uncapped=uncapped
+        harness.username, budgets.CHUNK_CENTS - 1, idempotency_key="small-wizard", uncapped=uncapped
     )
 
     response = harness.client.post(

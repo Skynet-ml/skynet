@@ -34,6 +34,7 @@ from core.api.routers import execution_budgets, submissions
 from core.api.routers._helpers import automated_run_ids
 from core.api.routers.continuous import _HISTORY_LIMIT, create_continuous_router
 from core.api.tests.test_protected_submissions import _Gateway, _Harness, _SQLiteJobStore
+from core.billing import budgets
 from core.billing.budget_amounts import CENT_SCALE, budget_wallet_hold
 from core.billing.budgets import BudgetService
 from core.storage.models import (
@@ -43,7 +44,7 @@ from core.storage.models import (
     ExecutionBudgetModel,
     JobModel,
 )
-from core.worker import continuous, loop_host
+from core.worker import continuous
 
 BALANCE = 1000
 WEEKLY = {"frequency": "weekly", "weekdays": [0], "time": "09:00", "timezone": "UTC"}
@@ -578,21 +579,45 @@ def test_a_plan_with_a_run_budget_below_one_lease_is_refused(env: _Env, monkeypa
         monkeypatch: Restores the real lease size.
     """
     optimization_id = _incumbent(env)
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
 
     refused = env.client.post(
         f"/optimizations/{optimization_id}/continuous",
         json={
             "schedule": WEEKLY,
             "permitted": {"reflection_model": True},
-            "cycle_budget_cents": loop_host.CHUNK_CENTS - 1,
+            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
         },
     )
 
     assert refused.status_code == 409, refused.text
     assert refused.json()["code"] == "budget.below_minimum"
-    assert refused.json()["params"] == {"minimum_total_cents": loop_host.CHUNK_CENTS}
+    assert refused.json()["params"] == {"minimum_total_cents": budgets.CHUNK_CENTS}
     assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["plan"] is None
+
+
+def test_a_local_plan_with_a_run_budget_below_one_lease_is_accepted(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local check's run gets an uncapped budget, so its plan has no lease floor (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease size and turns local mode on.
+    """
+    optimization_id = _incumbent(env)
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", True)
+
+    enabled = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={
+            "schedule": WEEKLY,
+            "permitted": {"reflection_model": True},
+            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
+        },
+    )
+
+    assert enabled.status_code == 201, enabled.text
+    assert enabled.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS - 1
 
 
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:

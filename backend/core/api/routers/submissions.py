@@ -101,7 +101,7 @@ from ._helpers import (
     stable_seed,
     strip_api_key,
 )
-from .execution_budgets import budget_http_error, require_one_lease
+from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +159,7 @@ def _ensure_api_budget(
             total = payload.max_cost_cents
             if total is None:
                 total = ceiling
-            # Submit lowers a user's limit to what the balance backs, so a limit at that ceiling is the balance's.
-            require_one_lease(total, from_balance=spendable is not None and ceiling <= total)
+            require_funded_lease(total, spendable, payload.token_source)
             budget = service.create(user.username, total, idempotency_key=budget_creation_key)
     except BudgetError as error:
         raise budget_http_error(error) from error

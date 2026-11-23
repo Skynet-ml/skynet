@@ -812,6 +812,12 @@ def test_a_cap_below_one_lease_ends_the_run_on_its_budget(
 
     A staging run with an 80-cent cap and a 100-cent lease failed after its first 2 cents with an internal
     error. The engine must get :class:`BudgetReached`, so the run ends with the normal budget outcome.
+
+    Args:
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
     """
     budgets = BudgetService(engine=engine)
     budget = budgets.create("alice", 5, idempotency_key="workspace-budget")

@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...billing.budgets import BudgetConflictError
+from ...billing.budgets import CHUNK_CENTS, BudgetConflictError
 from ...config import settings
 from ...models.hardening import HardeningJobModel
 from ...service_gateway.agents.workspace_tools import ASCENT_TOML_EXAMPLE, METRIC_GUIDE
@@ -587,6 +587,30 @@ def test_submit_refuses_a_limit_below_the_floor(harness: Any) -> None:
         "detail": "max_cost_cents 100 is below this run's minimum of 192 cents.",
         "min_max_cost_cents": 192,
     }
+    assert calls["submits"] == []
+
+
+def test_review_and_submit_name_one_lease_when_the_floor_is_below_it(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Name one lease as the minimum of a capped run whose floor is smaller, as the submit refuses it (SKY-923).
+
+    Args:
+        harness: MCP client, database engine and recorded calls.
+        monkeypatch: Sets a floor below one lease and turns local mode off.
+    """
+    client, _engine, calls = harness
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    draft_id = _complete_draft(client)
+
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    text = _error_text(
+        _call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 50, "confirm": True})
+    )
+
+    assert review["min_max_cost_cents"] == CHUNK_CENTS
+    assert json.loads(text)["min_max_cost_cents"] == CHUNK_CENTS
     assert calls["submits"] == []
 
 

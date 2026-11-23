@@ -16,8 +16,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from ...billing import StripeBillingService
+from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
+from ...config import settings
 from ...i18n import request_locale, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
 from ...models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED
@@ -37,6 +40,7 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
+from .execution_budgets import budget_http_error, require_funded_lease
 from .submissions import (
     _admit_byok_models,
     _materialize_repo_cases,
@@ -164,6 +168,34 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
     return response.model_copy(update=update)
 
 
+def _require_budget_lease(
+    request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any, token_source: str
+) -> None:
+    """Refuse a capped budget that cannot buy the run's first lease, as submit would.
+
+    Args:
+        request: The check request, with its budget.
+        user: Budget owner.
+        job_store: Store whose engine holds the budget and the wallet.
+        token_source: The run's ``"managed"`` or ``"byok"`` source.
+
+    Raises:
+        DomainError: The budget's lookup error, or the refusal of
+            :func:`require_funded_lease`.
+    """
+    try:
+        budget = BudgetService(engine=job_store.engine).get(request.execution_budget_id, user.username)
+    except BudgetError as error:
+        raise budget_http_error(error) from error
+    if budget.uncapped:
+        return
+    # As at submit, local mode has no balance gate.
+    spendable = (
+        None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
+    )
+    require_funded_lease(budget.total_cents, spendable, token_source)
+
+
 def checked_preflight(
     request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any
 ) -> WizardPreflightResponse:
@@ -206,6 +238,7 @@ def checked_preflight(
         novelty = bool(typed.shinka and typed.shinka.novelty)
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
         payload = typed.model_dump(mode="json", by_alias=True)
+        token_source = typed.token_source
     else:
         # The evaluation check skips the full run request, but the sandbox
         # still reads every scorer field, so it gets the run's defaults and limits.
@@ -244,6 +277,9 @@ def checked_preflight(
         shinka = payload.get("shinka")
         novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
+        token_source = payload.get("token_source", "managed")
+    # Submit refuses this run, so it must not pay for a setup check first (SKY-923).
+    _require_budget_lease(request, user, job_store, token_source)
     return run_preflight(request.model_copy(update={"payload": payload}), user, job_store)
 
 

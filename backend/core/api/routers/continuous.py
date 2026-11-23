@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...billing.budgets import BudgetError, BudgetService
+from ...config import settings
 from ...models.common import OptimizationStatus
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
 from ...worker import continuous as engine_mod
@@ -438,7 +439,7 @@ def create_continuous_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 409 when the run did not succeed, is not a repository
                 run with inline cases, keeps no test cases apart, or already has a plan;
-                and when its run budget is below one lease.
+                and, outside local mode, when its run budget is below one lease.
         """
         job = _owned_job(job_store, optimization_id, current_user, payload=True)
         # A run still in flight takes a waiting plan, set up from the submit wizard.
@@ -450,7 +451,9 @@ def create_continuous_router(*, job_store) -> APIRouter:
         cycle_budget = body.cycle_budget_cents or _source_budget_cents(job_store, job, current_user.username)
         if cycle_budget is None:
             raise DomainError("continuous.not_eligible", status=409)
-        require_one_lease(cycle_budget)
+        if not settings.local_mode:
+            # A local check's run gets an uncapped budget, which has no lease floor (SKY-923).
+            require_one_lease(cycle_budget)
         now = datetime.now(UTC)
         plan = ContinuousPlanModel(
             username=current_user.username,

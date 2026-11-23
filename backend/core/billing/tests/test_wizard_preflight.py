@@ -23,6 +23,7 @@ from core.api import preflight_execution as wizard_preflight
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.model_billing import normalize_model_token_sources
+from core.api.routers import execution_budgets
 from core.api.routers import submissions as submission_router
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
@@ -124,6 +125,8 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(wizard_preflight, "_verify_anything", verify)
     monkeypatch.setattr(preflight_router, "enforce_submission_rate", lambda username: None)
     monkeypatch.setattr(wizard_preflight.settings, "openrouter_api_key", SecretStr("test-only"))
+    # These scenarios size budgets in cents to test setup holds, so the one-lease floor of a run limit stays out of the way.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     app = FastAPI()
 
     @app.exception_handler(HTTPException)
