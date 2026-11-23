@@ -1390,12 +1390,14 @@ PAM_ENV_EXTRA = (
     "/usr/lib/environment.d",
 )
 PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")
-PAM_PATHS = PAM_ENV_FILES + ("/run/motd.dynamic",)
+# Stock login and sshd stacks show this file with pam_motd.so motd=, which is the only use the check allows.
+PAM_MOTD = "/run/motd.dynamic"
 PAM_RUNNERS = ("pam_exec", "pam_script", "pam_python", "pam_xauth")
 # The only modules that a stack which sudo reaches may load: all that the sudo stacks of python:3.12-slim, Debian 12,
 # Ubuntu 24.04 and Tumbleweed use. None runs a program as root, and each file it reads is one that the probe walks.
 PAM_MODULES = (
-    # Accounts from /etc/passwd and /etc/shadow. It runs unix_chkpwd only when it does not run as root, and sudo is root.
+    # Accounts from /etc/passwd and /etc/shadow. It runs unix_chkpwd only when it does not run as root, and sudo is
+    # root.
     "pam_unix.so",
     # A fixed answer, or a syslog line.
     "pam_permit.so",
@@ -1415,7 +1417,12 @@ PAM_MODULES = (
 # Sudo reads its own configuration as root, and Tumbleweed's sudo reads the vendor copy when /etc has none.
 SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")
 # The stock sudoers plugin, by name in plugin_dir or by its full path on Debian, Ubuntu and Tumbleweed.
-SUDO_PLUGINS = ("sudoers.so", "/usr/libexec/sudo/sudoers.so", "/usr/lib/sudo/sudoers.so", "/usr/libexec/sudo/sudo/sudoers.so")
+SUDO_PLUGINS = (
+    "sudoers.so",
+    "/usr/libexec/sudo/sudoers.so",
+    "/usr/lib/sudo/sudoers.so",
+    "/usr/libexec/sudo/sudo/sudoers.so",
+)
 # The stock values of the Path settings that run or load a file as root.
 SUDO_PATHS = (
     ("plugin_dir", "/usr/libexec/sudo"),
@@ -1569,7 +1576,13 @@ while todo:
     for words in stack_words.get(config, ()):
         for at, word in enumerate(words):
             if word.lower() in ("@include", "include", "substack") and at + 1 < len(words):
-                todo += [os.path.join(stack, words[at + 1]) for stack in PAM_STACKS]
+                # Linux-PAM takes the brackets off a target, as off an argument, and opens a path as written.
+                target = bare(words[at + 1])
+                if "/" in target:
+                    sys.exit(
+                        "the PAM stack " + config + " includes " + words[at + 1] + ", which is not a PAM file name"
+                    )
+                todo += [os.path.join(stack, target) for stack in PAM_STACKS]
 for config, rows in stack_words.items():
     for words in rows:
         for word in words:
@@ -1588,8 +1601,12 @@ for config, rows in stack_words.items():
                 or (key == "user_readenv" and value != "0")
             ):
                 sys.exit("the PAM stack " + config + " gives pam_env " + word)
-            # Linux-PAM opens a module, include or argument path as written, so only stock paths may appear.
-            if "/" in plain and (plain if plain.startswith("/") else value) not in PAM_PATHS:
+            # pam_limits reads conf= as written, so a relative name resolves in the box user's working folder.
+            if config in reached and key == "conf":
+                sys.exit("the PAM stack " + config + " gives pam_limits " + word)
+            # Linux-PAM opens a module, include or argument path as written, so a path may only be a stock option
+            # value: a pam_env file, or the stock motd= file.
+            if "/" in plain and ("/" in key or not (value in PAM_ENV_FILES or (key == "motd" and value == PAM_MOTD))):
                 sys.exit("the PAM configuration " + config + " names " + word)
 for config in sorted(reached & stack_words.keys()):
     for words in stack_words[config]:
@@ -1599,7 +1616,9 @@ for config in sorted(reached & stack_words.keys()):
             continue
         # Linux-PAM loads the word as written from its module folder, with no ".so" added, and a link loads its target.
         if words[2] not in PAM_MODULES or not module_names(words[2]) <= set(PAM_MODULES):
-            sys.exit("the PAM stack " + config + ", which sudo reaches, loads " + words[2] + ", which is not a stock module")
+            sys.exit(
+                "the PAM stack " + config + ", which sudo reaches, loads " + words[2] + ", which is not a stock module"
+            )
         for folder in module_folders:
             if os.path.lexists(os.path.join(folder, words[2])):
                 print("file", os.path.join(folder, words[2]))

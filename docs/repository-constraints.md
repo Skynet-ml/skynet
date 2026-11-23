@@ -867,7 +867,13 @@ own commands in the setup box and in each candidate box:
   except a tab.
   No line in these PAM files may name any other path, such as a module or
   an `@include` file outside the module folders. The only other path
-  allowed is `/run/motd.dynamic`, which stock images name. The check
+  allowed is `/run/motd.dynamic`, and only as the `motd=` value, which
+  stock images name. An `include`, `substack` or `@include` target in a
+  stack that `sudo` reaches must be a plain file name, with no `/`.
+  Linux-PAM takes the brackets off a target, so the check follows
+  `include [name]` to the file `name` in the PAM folders. In those stacks
+  the check also refuses a `conf=` option, because `pam_limits` reads a
+  relative `conf=` file in the working folder of the box user. The check
   refuses `pam_exec`, `pam_script`, `pam_python` and `pam_xauth`, which
   run a program that an argument names, even by a relative name. It also refuses a
   module name that is a link to one of them in a module folder.
