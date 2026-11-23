@@ -951,6 +951,39 @@ def test_protected_submit_refuses_a_limit_whose_setup_spend_leaves_less_than_one
         assert response.json()["detail"] == _BELOW_ONE_LEASE
 
 
+def test_protected_submit_names_the_balance_when_it_caps_the_room_setup_spend_left(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answer 402 at submit, not 409, when the balance left after the setup check caps the limit's room (SKY-923).
+
+    A higher limit cannot help here, so the refusal must not ask for one.
+
+    Args:
+        harness: Real submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    _set_balance(harness, budgets.CHUNK_CENTS)
+    budget = harness.budgets.create(harness.username, budgets.CHUNK_CENTS, idempotency_key="balance-caps-room")
+    payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+    checked = _check(harness, payload, budget.id, budget.revision).json()
+    assert checked["status"] == "succeeded", checked
+
+    response = harness.client.post(
+        ROUTE,
+        json={
+            **payload,
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert harness.count(JobModel) == 0
+
+
 def test_the_room_refusal_names_the_limit_that_buys_one_lease_after_spending() -> None:
     """Name the smallest limit that leaves one lease after the settled spending, rounded up to a cent (SKY-923)."""
     with pytest.raises(DomainError) as refused:
