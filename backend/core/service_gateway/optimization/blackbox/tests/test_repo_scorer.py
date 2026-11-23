@@ -5936,3 +5936,86 @@ def test_a_command_metric_gets_the_model_key_by_file_and_not_in_its_box_command_
     assert len(metric_envs) == 1
     assert ENV_API_KEY not in metric_envs[0]
     assert "sk-metric-key" not in json.dumps(metric_envs[0])
+
+
+def _case_file(path: str) -> str | None:
+    """Name the kind of a per-case file that the scorer writes into a box, or ``None`` for any other file.
+
+    Args:
+        path: The written path, relative to the box.
+
+    Returns:
+        ``runner``, ``ascent``, ``key`` or ``input``, or ``None``.
+    """
+    if path in (repo_scorer.RUNNER_PATH, repo_scorer.METRIC_RUNNER_PATH):
+        return "runner"
+    if path.startswith((f"{repo_scorer.RUN_ASCENT_DIR}/", f"{repo_scorer.METRIC_ASCENT_DIR}/")):
+        return "ascent"
+    return {runner.MODEL_KEY_FILE: "key", runner.INPUT_FILE: "input"}.get(path.rsplit("/", 1)[-1])
+
+
+@pytest.mark.parametrize(
+    ("commands", "expected"),
+    [
+        (False, [{"runner", "input"}, {"runner", "input"}]),
+        (True, [{"runner", "ascent", "input"}, {"runner", "ascent", "key", "input"}]),
+    ],
+    ids=["python-entries", "command-entries-with-model-key"],
+)
+def test_each_box_gets_its_case_files_in_one_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: bool, expected: list[set[str]]
+) -> None:
+    """One case writes its runner, OpenAscent, model key and input files in one call for each box (SKY-913).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Pytest patcher.
+        commands: Command ``[run]`` and metric entries, with a model route, instead of Python ones.
+        expected: The kinds of files in each case write: the candidate box's, then the metric box's.
+    """
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    writes: list[list[str]] = []
+    write = LocalSubprocessSession.write_files
+
+    def recorded(self: LocalSubprocessSession, files: Mapping[str, str]) -> None:
+        """Record each write's paths, then write.
+
+        Args:
+            self: The session.
+            files: The files to write.
+        """
+        writes.append(list(files))
+        write(self, files)
+
+    monkeypatch.setattr(LocalSubprocessSession, "write_files", recorded)
+    metric = 'printf \'{"score": 1, "feedback": "ok"}\' > "$ASCENT_OUTPUT"\n'
+    archive = _archive(tmp_path, {"src/cand.py": "def run(value):\n    return value\n", "eval/metric.sh": metric})
+    with FakeGateway(reply="judged") as fake:
+        scorer = RepoScorer(
+            RepoWorkspace(
+                runtime=LocalSubprocessRuntime(),
+                spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+                archive=archive,
+                editable_paths=["src"],
+                readonly_paths=[],
+                setup_command=None,
+                secrets={},
+                hidden_paths=["eval"],
+            ),
+            "" if commands else "def score(repo_path, case=None, output=None):\n    return {'score': 1.0}\n",
+            timeout_seconds=60,
+            gateway=(
+                ScorerGateway(url=fake.url, model="judge-model", api_key="sk-metric-key", billing_model="judge")
+                if commands
+                else None
+            ),
+            run_entry=("sh", "-c", 'printf \'{"output": 1}\' > "$ASCENT_OUTPUT"') if commands else "src/cand.py:run",
+            metric_entry=("bash", "eval/metric.sh") if commands else "eval/metric.py:score",
+        )
+        try:
+            assert scorer.score("", {"input": 1})["score"] == pytest.approx(1.0)
+        finally:
+            scorer.close()
+    case_writes = [kinds for kinds in ({_case_file(path) for path in paths} - {None} for paths in writes) if kinds]
+
+    assert case_writes == expected
