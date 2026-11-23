@@ -6090,6 +6090,7 @@ _CONF = {
     "/etc/gshadow": "640 regular file",
     "/etc/sudoers.d": "755 directory",
     "/etc/pam.d": "755 directory",
+    "/usr/lib/pam.d": "none",
     "/etc/security": "755 directory",
 }
 _CONF_ENTRIES = {
@@ -7883,7 +7884,26 @@ _SUDO_PARTS = _sudo_lines()
                 }
             )
         ),
+        _listing(sudo=_sudo_lines(conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory")},
+                entries={"/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "1000 644 regular file")},
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/usr/lib/pam.d": [
+                        *_walk("/usr/lib/pam.d", "777 symbolic link"),
+                        "link /home/box/pamd",
+                        *_walk("/home/box/pamd", "1000 755 directory", modes={"/home/box": "1000 755 directory"}),
+                    ]
+                }
+            )
+        ),
         _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/lib/pam.d"]),
     ],
     ids=[
         "box-owned-sudo-before-usr-bin",
@@ -7939,7 +7959,11 @@ _SUDO_PARTS = _sudo_lines()
         "box-owned-folder-in-etc-security",
         "box-owned-file-in-a-security-folder",
         "folder-two-levels-into-etc-security",
+        "box-owned-usr-lib-pam-d",
+        "box-owned-file-in-usr-lib-pam-d",
+        "usr-lib-pam-d-link-to-a-box-folder",
         "no-pam-d-line",
+        "no-usr-lib-pam-d-line",
     ],
 )
 def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
@@ -8057,6 +8081,12 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
                 }
             )
         ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory")},
+                entries={"/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "644 regular file")},
+            )
+        ),
     ],
     ids=[
         "empty-sudoers-d",
@@ -8071,6 +8101,7 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "no-locale-file-and-a-mode-0-shadow",
         "empty-etc-environment",
         "files-in-a-security-folder",
+        "root-owned-usr-lib-pam-d",
     ],
 )
 def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:

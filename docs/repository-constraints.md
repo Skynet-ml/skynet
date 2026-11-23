@@ -813,8 +813,9 @@ own commands in the setup box and in each candidate box:
   when they exist: `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
   `/etc/shadow` and `/etc/gshadow`. Root must own `/etc/sudoers.d`,
-  `/etc/pam.d` and `/etc/security` when they exist, and every entry in
-  them. Group and others must not be able to write any of them. Linux-PAM
+  `/etc/pam.d`, `/usr/lib/pam.d` and `/etc/security` when they exist, and
+  every entry in them. Debian's Linux-PAM reads a PAM file from
+  `/usr/lib/pam.d` when `/etc/pam.d` does not have it. Group and others must not be able to write any of them. Linux-PAM
   does not check who owns its files, so the image check does. Ubuntu's
   `sudo` PAM stack reads `/etc/default/locale` into root's environment. A
   box user who can change the account files can join the `sudo` group or
@@ -828,8 +829,8 @@ own commands in the setup box and in each candidate box:
   - The first `sudo` on the image `PATH` must have an x bit. A `PATH`
     lookup skips a file with no x bit.
   - Each `sudo` must resolve to an ELF file, not a script.
-  - Others must be able to list `/etc/sudoers.d`, `/etc/pam.d` and
-    `/etc/security`.
+  - Others must be able to list `/etc/sudoers.d`, `/etc/pam.d`,
+    `/usr/lib/pam.d` and `/etc/security`.
   - Each entry in those folders must be a regular file, or a link to one.
     `/etc/security` may also hold one level of such folders, for example
     `limits.d`.
@@ -1203,7 +1204,7 @@ Residual risk:
   `/etc/sudo.conf`, `/etc/sudoers`, `/etc/environment`,
   `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
   `/etc/shadow`, `/etc/gshadow`, and each entry in `/etc/sudoers.d`,
-  `/etc/pam.d` and `/etc/security`. It does not walk a
+  `/etc/pam.d`, `/usr/lib/pam.d` and `/etc/security`. It does not walk a
   file that sudoers includes from another folder, or a `sudo.conf`
   `sudoers_file` setting. Sudo itself refuses such a file when root does
   not own it, or when others can write it. It does not read the PAM
