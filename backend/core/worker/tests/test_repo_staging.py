@@ -8601,10 +8601,19 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
     assert "do-not-print" not in done.stdout
 
 
+_UBUNTU_SUDO_STACK = "session required pam_env.so readenv=1 envfile=LOCALE user_readenv=0\n"
+
+
 def _run_path_script_with_pam_files(
-    tmp_path: Path, environment: str, default_locale: str, conf: str, *, drop_in: bool = False
+    tmp_path: Path,
+    environment: str,
+    default_locale: str,
+    conf: str,
+    *,
+    drop_in: bool = False,
+    sudo_stack: str = _UBUNTU_SUDO_STACK,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the interpreter script with temporary pam_env files in place of the real ones.
+    """Run the interpreter script with temporary pam_env and PAM stack files in place of the real ones.
 
     Args:
         tmp_path: Pytest temporary folder.
@@ -8612,6 +8621,7 @@ def _run_path_script_with_pam_files(
         default_locale: The text of the stand-in ``/etc/default/locale``.
         conf: The text of the stand-in ``/etc/security/pam_env.conf``.
         drop_in: Whether a stand-in ``/etc/security/pam_env.conf.d`` folder exists.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``; ``LOCALE`` names the stand-in locale file.
 
     Returns:
         The finished script.
@@ -8619,7 +8629,13 @@ def _run_path_script_with_pam_files(
     folder = tmp_path / "pam_env.conf.d"
     if drop_in:
         folder.mkdir()
+    stacks = tmp_path / "pam.d"
+    stacks.mkdir()
+    (stacks / "sudo").write_text(sudo_stack.replace("LOCALE", str(tmp_path / "locale")))
     script = repo_staging._PATH_SCRIPT.replace('"/etc/security/pam_env.conf.d"', repr(str(folder)))
+    stand_in_stacks = f"({str(stacks)!r},)"
+    script = script.replace('("/etc/pam.d", "/usr/lib/pam.d")', stand_in_stacks)
+    assert stand_in_stacks in script
     files = {"/etc/environment": environment, "/etc/default/locale": default_locale}
     files["/etc/security/pam_env.conf"] = conf
     for real, text in files.items():
@@ -8683,28 +8699,32 @@ def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("environment", "drop_in", "reason"),
+    ("environment", "drop_in", "sudo_stack", "reason"),
     [
-        ("LD_\\\nPRELOAD=/tmp/x.so\n", False, "continues a line"),
-        ("LD_PRELOAD#=/tmp/x.so\n", False, "not letters, digits and underscores"),
-        ("", True, "which the check does not read"),
+        ("LD_\\\nPRELOAD=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "continues a line"),
+        ("LD_PRELOAD#=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "not letters, digits and underscores"),
+        ("", True, _UBUNTU_SUDO_STACK, "which the check does not read"),
+        ("", False, "session required pam_env.so envfile=/home/box/env\n", "gives pam_env envfile=/home/box/env"),
+        ("", False, "session required pam_env.so \\\n conffile=/tmp/c\n", "gives pam_env conffile=/tmp/c"),
+        ("", False, "session required pam_env.so readenv=1 user_readenv=1\n", "gives pam_env user_readenv=1"),
     ],
-    ids=["line-continuation", "odd-name", "drop-in-folder"],
+    ids=["line-continuation", "odd-name", "drop-in-folder", "other-envfile", "continued-conffile", "user-readenv"],
 )
 def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pam_does(
-    tmp_path: Path, environment: str, drop_in: bool, reason: str
+    tmp_path: Path, environment: str, drop_in: bool, sudo_stack: str, reason: str
 ) -> None:
-    """A continued line, an odd name or a drop-in folder fails the script, so pam_env reads nothing unchecked (SKY-912).
+    """A continued line, an odd name, a drop-in folder or another pam_env source fails the script (SKY-912).
 
     Args:
         tmp_path: Pytest temporary folder.
         environment: The text of the stand-in ``/etc/environment``.
         drop_in: Whether a stand-in ``pam_env.conf.d`` folder exists.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``.
         reason: Text that the script's error must contain.
     """
     if sys.platform != "linux":
         pytest.skip("the script reads /proc, as in the box images")
-    done = _run_path_script_with_pam_files(tmp_path, environment, "", "", drop_in=drop_in)
+    done = _run_path_script_with_pam_files(tmp_path, environment, "", "", drop_in=drop_in, sudo_stack=sudo_stack)
 
     assert done.returncode != 0
     assert reason in done.stderr

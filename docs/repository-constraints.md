@@ -828,8 +828,11 @@ own commands in the setup box and in each candidate box:
   variables. The check also refuses a line in these files that ends in a
   backslash, and a variable name that is not letters, digits and
   underscores. It refuses an image that has a `pam_env` drop-in folder or
-  a vendor copy, such as `/etc/security/pam_env.conf.d` or
-  `/usr/etc/environment`, because it does not read them. A
+  a vendor copy, such as `/etc/security/pam_env.conf.d`,
+  `/etc/environment.d` or `/usr/etc/environment`, because it does not
+  read them. In `/etc/pam.d` and `/usr/lib/pam.d`, a `pam_env` line may
+  name only those three files with `envfile=` or `conffile=`, and may not
+  turn on `user_readenv`, which reads a file in the box user's home. A
   box user who can change the account files can join the `sudo` group or
   set a root password. Others need not read `/etc/shadow` or
   `/etc/gshadow`, which are often mode 0640 or 0000. An image with no

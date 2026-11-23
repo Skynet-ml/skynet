@@ -1365,7 +1365,11 @@ PAM_ENV_EXTRA = (
     "/usr/lib/security/pam_env.conf",
     "/usr/lib/security/pam_env.conf.d",
     "/usr/lib/environment",
+    "/etc/environment.d",
+    "/usr/etc/environment.d",
+    "/usr/lib/environment.d",
 )
+PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d")
 if sys.prefix != sys.base_prefix:
     sys.exit("the interpreter runs in a virtual environment")
 for name in names:
@@ -1406,6 +1410,30 @@ for file in PAM_ENV_FILES:
             if not (value.isascii() and value.isprintable()):
                 sys.exit("a PAM locale value is not printable ASCII")
             print("locale", name + "=" + value)
+for stack in PAM_STACKS:
+    try:
+        services = sorted(os.listdir(stack))
+    except FileNotFoundError:
+        continue
+    for service in services:
+        try:
+            with open(os.path.join(stack, service), encoding="latin-1") as text:
+                rows = text.read().replace("\\\n", " ").split("\n")
+        except IsADirectoryError:
+            continue
+        for row in rows:
+            words = row.split("#")[0].split()
+            if not any("pam_env" in word for word in words):
+                continue
+            for word in words:
+                key, _, value = word.partition("=")
+                # Another envfile or conffile is a file the check does not read, and user_readenv reads the box user's own file.
+                if (
+                    (key == "envfile" and value not in PAM_ENV_FILES)
+                    or (key == "conffile" and value != PAM_ENV_CONF)
+                    or (key == "user_readenv" and value != "0")
+                ):
+                    sys.exit("the PAM stack " + os.path.join(stack, service) + " gives pam_env " + word)
 for entry in sys.path:
     print("path", entry)
 for tree in ("/usr/lib/locale", "/usr/share/locale"):
