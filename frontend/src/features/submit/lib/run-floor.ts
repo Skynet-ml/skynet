@@ -220,8 +220,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       const isImportError =
         exception?.name === "VariableName"
           ? code.slice(exception.from, exception.to) === "ImportError"
-          : (exception?.name === "TupleExpression" ||
-              exception?.name === "ParenthesizedExpression") &&
+          : (exception?.name === "TupleExpression" || exception?.name === "ParenthesizedExpression") &&
             exception
               .getChildren("VariableName")
               .some((n) => code.slice(n.from, n.to) === "ImportError");
@@ -469,11 +468,8 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         while (ancestor && ancestor.name !== "ImportStatement") ancestor = ancestor.parent;
         if (
           !ancestor &&
-          !(
-            parent?.name === "ArgList" &&
-            current.nextSibling?.name === "AssignOp" &&
-            code.slice(current.nextSibling.from, current.nextSibling.to) === "="
-          ) &&
+          !(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
+            code.slice(current.nextSibling.from, current.nextSibling.to) === "=") &&
           parent?.name !== "ScopeStatement" &&
           !(
             parent?.name === "MemberExpression" &&
@@ -498,11 +494,8 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         isHelper(current) &&
         !allowedFallbacks.has(current.from) &&
         current.parent?.name !== "ScopeStatement" &&
-        !(
-          current.parent?.name === "ArgList" &&
-          current.nextSibling?.name === "AssignOp" &&
-          code.slice(current.nextSibling.from, current.nextSibling.to) === "="
-        )
+        !(current.parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
+          code.slice(current.nextSibling.from, current.nextSibling.to) === "=")
       ) {
         let parent = current.parent;
         let callable = current;
