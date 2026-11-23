@@ -835,13 +835,15 @@ own commands in the setup box and in each candidate box:
   `envfile=` or `conffile=`, and may not turn on `user_readenv`, which
   reads a file in the box user's home. The check reads these options on
   every line, also inside `[...]` brackets, because another module name
-  can load `pam_env`. No line in these PAM files may name any other path,
-  such as a module or an `@include` file outside the module folders. The
-  only other path allowed is `/run/motd.dynamic`, which stock images name.
-  The check refuses `pam_exec`, `pam_script` and `pam_python`, which run a
-  program that an argument names, even by a relative name. A
-  box user who can change the account files can join the `sudo` group or
-  set a root password. Others need not read `/etc/shadow` or
+  can load `pam_env`. A `[...]` argument counts as one word across
+  spaces, as Linux-PAM reads it. The check refuses one with no closing
+  bracket. No line in these PAM files may name any other path, such as a
+  module or an `@include` file outside the module folders. The only other
+  path allowed is `/run/motd.dynamic`, which stock images name. The check
+  refuses `pam_exec`, `pam_script` and `pam_python`, which run a program
+  that an argument names, even by a relative name. A box user who can
+  change the account files can join the `sudo` group or set a root
+  password. Others need not read `/etc/shadow` or
   `/etc/gshadow`, which are often mode 0640 or 0000. An image with no
   `/etc/pam.d` passes; Linux-PAM then reads `/etc/pam.conf`, which the
   check reads too.

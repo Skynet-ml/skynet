@@ -1431,8 +1431,19 @@ for config in pam_configs:
     except (FileNotFoundError, IsADirectoryError):
         continue
     for row in rows:
-        for word in row.split("#")[0].split():
-            # Linux-PAM drops the brackets around an argument with spaces, so the check compares the text inside.
+        # Linux-PAM reads a [...] argument as one word across spaces, and \] does not close it.
+        words, group = [], None
+        for token in row.split("#")[0].split():
+            if group is None and not token.startswith("["):
+                words.append(token)
+                continue
+            group = token if group is None else group + " " + token
+            if group.endswith("]") and not group.endswith("\\]"):
+                words.append(group)
+                group = None
+        if group is not None:
+            sys.exit("the PAM configuration " + config + " does not close " + group)
+        for word in words:
             bare = word.strip("[]")
             key, _, value = bare.partition("=")
             # These modules run a program that an argument names, and a relative name resolves in sudo's folder.
