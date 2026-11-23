@@ -38,11 +38,13 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..converters import job_owner
 from ..errors import DomainError
 from ._helpers import get_job_no_payload
-from .execution_budgets import require_one_lease
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
 _HISTORY_LIMIT = 50
+# Each check's setup spends from the cycle budget, so a budget near one lease (CHUNK_CENTS) pays for setups whose
+# runs submit then refuses. Five dollars leaves room for setup and the first lease (SKY-923).
+_MIN_CYCLE_BUDGET_CENTS = 500
 _UPCOMING_CHECKS = 3
 _IN_FLIGHT = frozenset(
     {OptimizationStatus.pending.value, OptimizationStatus.validating.value, OptimizationStatus.running.value}
@@ -439,7 +441,7 @@ def create_continuous_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 409 when the run did not succeed, is not a repository
                 run with inline cases, keeps no test cases apart, or already has a plan;
-                and, outside local mode, when its run budget is below one lease.
+                and, outside local mode, when its run budget is below 500 cents.
         """
         job = _owned_job(job_store, optimization_id, current_user, payload=True)
         # A run still in flight takes a waiting plan, set up from the submit wizard.
@@ -451,9 +453,9 @@ def create_continuous_router(*, job_store) -> APIRouter:
         cycle_budget = body.cycle_budget_cents or _source_budget_cents(job_store, job, current_user.username)
         if cycle_budget is None:
             raise DomainError("continuous.not_eligible", status=409)
-        if not settings.local_mode:
-            # A local check's run gets an uncapped budget, which has no lease floor (SKY-923).
-            require_one_lease(cycle_budget)
+        # A local check's run gets an uncapped budget, which has no lease floor (SKY-923).
+        if not settings.local_mode and cycle_budget < _MIN_CYCLE_BUDGET_CENTS:
+            raise DomainError("budget.below_minimum", status=409, minimum_total_cents=_MIN_CYCLE_BUDGET_CENTS)
         now = datetime.now(UTC)
         plan = ContinuousPlanModel(
             username=current_user.username,

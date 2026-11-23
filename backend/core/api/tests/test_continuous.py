@@ -30,9 +30,10 @@ from core.api import preflight_execution
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.errors import DomainError
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
+from core.api.routers import continuous as continuous_routes
 from core.api.routers import execution_budgets, submissions
 from core.api.routers._helpers import automated_run_ids
-from core.api.routers.continuous import _HISTORY_LIMIT, create_continuous_router
+from core.api.routers.continuous import _HISTORY_LIMIT, _MIN_CYCLE_BUDGET_CENTS, create_continuous_router
 from core.api.tests.test_protected_submissions import _Gateway, _Harness, _SQLiteJobStore
 from core.billing import budgets
 from core.billing.budget_amounts import CENT_SCALE, budget_wallet_hold
@@ -343,6 +344,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
     # These fixtures size budgets in cents to test holds, so the one-lease floor of a run limit stays out of the way.
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
+    # The same holds for the plan floor of a cycle budget (SKY-923).
+    monkeypatch.setattr(continuous_routes, "_MIN_CYCLE_BUDGET_CENTS", 1)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
     monkeypatch.setattr(submissions.settings, "submissions_paused", False)
     monkeypatch.setattr(submissions.settings, "max_concurrent_jobs_per_user", 0)
@@ -571,40 +574,48 @@ def test_a_run_without_a_repository_cannot_enable_a_plan(env: _Env) -> None:
     assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
 
 
-def test_a_plan_with_a_run_budget_below_one_lease_is_refused(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plan's run budget must buy the run's first lease, or every check would fail its run (SKY-914).
+@pytest.mark.parametrize(
+    ("cycle_budget", "status"), [(_MIN_CYCLE_BUDGET_CENTS - 1, 409), (_MIN_CYCLE_BUDGET_CENTS, 201)]
+)
+def test_a_plan_with_a_run_budget_below_five_dollars_is_refused(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, cycle_budget: int, status: int
+) -> None:
+    """A plan's run budget must pay for setup and the first lease, or each check pays a setup for nothing (SKY-923).
 
     Args:
         env: Test environment.
-        monkeypatch: Restores the real lease size.
+        monkeypatch: Restores the real plan floor.
+        cycle_budget: The plan's run budget.
+        status: The expected status.
     """
     optimization_id = _incumbent(env)
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(continuous_routes, "_MIN_CYCLE_BUDGET_CENTS", _MIN_CYCLE_BUDGET_CENTS)
 
-    refused = env.client.post(
+    response = env.client.post(
         f"/optimizations/{optimization_id}/continuous",
-        json={
-            "schedule": WEEKLY,
-            "permitted": {"reflection_model": True},
-            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
-        },
+        json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": cycle_budget},
     )
 
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["code"] == "budget.below_minimum"
-    assert refused.json()["params"] == {"minimum_total_cents": budgets.CHUNK_CENTS}
-    assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["plan"] is None
+    assert response.status_code == status, response.text
+    if status == 409:
+        assert response.json()["code"] == "budget.below_minimum"
+        assert response.json()["params"] == {"minimum_total_cents": 500}
+        assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["plan"] is None
+    else:
+        assert response.json()["cycle_budget_cents"] == 500
 
 
-def test_a_local_plan_with_a_run_budget_below_one_lease_is_accepted(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A local check's run gets an uncapped budget, so its plan has no lease floor (SKY-923).
+def test_a_local_plan_with_a_run_budget_below_five_dollars_is_accepted(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local check's run gets an uncapped budget, so its plan has no floor (SKY-923).
 
     Args:
         env: Test environment.
-        monkeypatch: Restores the real lease size and turns local mode on.
+        monkeypatch: Restores the real plan floor and turns local mode on.
     """
     optimization_id = _incumbent(env)
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(continuous_routes, "_MIN_CYCLE_BUDGET_CENTS", _MIN_CYCLE_BUDGET_CENTS)
     monkeypatch.setattr(submissions.settings, "local_mode", True)
 
     enabled = env.client.post(
@@ -612,12 +623,12 @@ def test_a_local_plan_with_a_run_budget_below_one_lease_is_accepted(env: _Env, m
         json={
             "schedule": WEEKLY,
             "permitted": {"reflection_model": True},
-            "cycle_budget_cents": budgets.CHUNK_CENTS - 1,
+            "cycle_budget_cents": _MIN_CYCLE_BUDGET_CENTS - 1,
         },
     )
 
     assert enabled.status_code == 201, enabled.text
-    assert enabled.json()["cycle_budget_cents"] == budgets.CHUNK_CENTS - 1
+    assert enabled.json()["cycle_budget_cents"] == _MIN_CYCLE_BUDGET_CENTS - 1
 
 
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:

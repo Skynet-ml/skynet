@@ -120,7 +120,7 @@ _MIN_SUGGESTED_LIMIT_CENTS = 500
 # The setup check spends from the same limit, and submit refuses a capped limit that leaves less
 # than one lease, so a client that picks the bare minimum would pay for the check twice (SKY-923).
 _LIMIT_DESCRIPTION = (
-    "Spending limit of this run, in cents. The setup check spends from it, and submit needs "
+    "Spending limit of this run, in cents. The setup check spends from it. Outside local mode, submit needs "
     f"{CHUNK_CENTS} cents of it left after that check. Use suggested_max_cost_cents from repo_draft_review."
 )
 _PENDING_RETRY_SECONDS = 5

@@ -154,9 +154,11 @@ def require_funded_lease(
         require_one_lease(total_cents, spent_units=spent_units)
         return
     # Submit lowers a user's limit to what the balance backs, so a limit at that ceiling is the balance's.
+    # Setup spend leaves only the limit's room, so the balance sets the limit only when it is below that room (SKY-923).
+    balance_units = cost_ceiling_budget(spendable_cents, token_source) * CENT_SCALE
     require_one_lease(
         total_cents,
-        from_balance=cost_ceiling_budget(spendable_cents, token_source) <= total_cents,
+        from_balance=balance_units <= total_cents * CENT_SCALE - spent_units,
         spent_units=spent_units,
     )
     # A BYOK ceiling ignores the balance, but every run's first lease holds one full lease of it (SKY-923).
