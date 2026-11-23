@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
@@ -33,20 +34,24 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+from vercel.sandbox import SandboxApiError
 
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
+from core.billing.budgets import BudgetError
 from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy, image_build_usd
+from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError, image_build_usd
 from core.billing.protected_credentials import has_exposed_execution_credentials
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
-from core.exceptions import ServiceError
+from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.i18n_keys import I18nKey
 from core.models.blackbox import (
     BLACKBOX_ENGINE_AUTORESEARCH,
@@ -59,6 +64,7 @@ from core.models.blackbox import (
 )
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox import image_build, image_registry
+from core.sandbox.errors import SandboxInfraError, SandboxRejectedError, SandboxTransientError
 from core.sandbox.image_build import (
     BuildResult,
     CodeBuildImageBuilder,
@@ -6073,37 +6079,81 @@ def _listing(
 
 
 _TRUSTED_PROBE = _listing()
+_TOOLS_FOUND = f"{repo_staging._BOX_TOOLS_DONE}\n"
+_ROOT_KEPT = "0\nkept\n"
+_ALL_RUN_TOOLS = ", ".join(dict.fromkeys((*repo_staging._BOX_TOOLS["run"], *repo_staging._ROOT_TOOLS)))
+_WORKDIR_OK = f"/home/box\n{repo_staging._WORKDIR_DONE}\n"
 
 
 class _CheckSession:
-    """Answer ``ascent check --image`` with a fixed report, and the interpreter probe with a fixed listing."""
+    """Answer ``ascent check --image`` and each image probe with fixed output."""
 
-    def __init__(self, ok: bool, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n") -> None:
+    def __init__(
+        self,
+        ok: bool,
+        probe: str = _TRUSTED_PROBE,
+        uid_probe: str = "account ok 1000\n",
+        tools: str = _TOOLS_FOUND,
+        root: str | BaseException | None = _ROOT_KEPT,
+        workdir: str = _WORKDIR_OK,
+    ) -> None:
         """Keep the check outcome.
 
         Args:
             ok: Whether the image passes.
             probe: What the trusted interpreter probe prints.
             uid_probe: What the metric role's box uid probe prints.
+            tools: What each role's box tools probe prints.
+            root: What the run role's root probe prints, ``None`` when sudo is missing, or the error it raises.
+            workdir: What the working folder probe prints.
         """
         self.ok = ok
         self.probe = probe
         self.uid_probe = uid_probe
+        self.tools = tools
+        self.root = root
+        self.workdir = workdir
         self.commands: list[str] = []
+        self.sudo_commands: list[str] = []
+        self.root_env: dict[str, str] | None = None
 
-    def run(self, command: str, **_: Any) -> CommandResult:
-        """Print the check's JSON report, or the probe's listing.
+    def run(self, command: str, *, sudo: bool = False, env: dict[str, str] | None = None, **_: Any) -> CommandResult:
+        """Print the check's JSON report, or the matching probe's output.
 
         Args:
             command: The check or probe command.
+            sudo: Whether the command runs as root.
+            env: The command's variables.
             **_: Unused run options.
 
         Returns:
-            The report, with exit code 1 when the image fails.
+            The report or probe output, with exit code 1 when the image fails.
+
+        Raises:
+            SandboxApiError: Vercel's no-sudo answer, when the root probe runs and ``root`` is ``None``.
+            BaseException: The error in ``root``, when the root probe runs.
         """
         self.commands.append(command)
+        if sudo:
+            self.sudo_commands.append(command)
         if command.endswith(shlex.quote(repo_staging._BOX_UID_PROBE)):
             return CommandResult(exit_code=0, stdout=self.uid_probe)
+        if command in repo_staging._BOX_TOOLS_PROBE.values():
+            return CommandResult(exit_code=0, stdout=self.tools)
+        if command == repo_staging._ROOT_PROBE:
+            self.root_env = env
+            if self.root is None:
+                raise SandboxApiError(
+                    httpx.Response(400), "sudo: not found", data={"error": {"code": "executable_not_found"}}
+                )
+            if isinstance(self.root, BaseException):
+                raise self.root
+            kept = (env or {}).get(repo_staging._ROOT_VARIABLE) == "kept"
+            stdout = self.root if kept else self.root.replace("kept", "")
+            return CommandResult(exit_code=0 if self.root else 1, stdout=stdout)
+        if command == repo_staging._WORKDIR_PROBE:
+            done = self.workdir.endswith(f"{repo_staging._WORKDIR_DONE}\n")
+            return CommandResult(exit_code=0 if done else 1, stdout=self.workdir)
         if not command.startswith("ascent check"):
             return CommandResult(exit_code=0 if self.probe else 1, stdout=self.probe)
         checks = [{"name": "python", "ok": self.ok, "message": "ok" if self.ok else "no python3 on PATH"}]
@@ -6121,7 +6171,14 @@ class _ImageRuntime:
     max_lifetime_seconds = 120.0
 
     def __init__(
-        self, *, check_ok: bool = True, probe: str = _TRUSTED_PROBE, uid_probe: str = "account ok 1000\n"
+        self,
+        *,
+        check_ok: bool = True,
+        probe: str = _TRUSTED_PROBE,
+        uid_probe: str = "account ok 1000\n",
+        tools: str = _TOOLS_FOUND,
+        root: str | BaseException | None = _ROOT_KEPT,
+        workdir: str = _WORKDIR_OK,
     ) -> None:
         """Start with no boxes.
 
@@ -6129,10 +6186,17 @@ class _ImageRuntime:
             check_ok: Whether each image passes its check.
             probe: What the trusted interpreter probe prints in each check box.
             uid_probe: What the metric role's box uid probe prints.
+            tools: What each role's box tools probe prints in each check box.
+            root: What the run role's root probe prints in each check box, ``None`` when sudo is missing,
+                or the error it raises.
+            workdir: What the working folder probe prints in each check box.
         """
         self.check_ok = check_ok
         self.probe = probe
         self.uid_probe = uid_probe
+        self.tools = tools
+        self.root = root
+        self.workdir = workdir
         self.specs: list[SandboxSpec] = []
         self.checks: list[_CheckSession] = []
         self._local = LocalSubprocessRuntime()
@@ -6148,7 +6212,9 @@ class _ImageRuntime:
         """
         self.specs.append(spec)
         if spec.operation_key.startswith("image-check:"):
-            self.checks.append(_CheckSession(self.check_ok, self.probe, self.uid_probe))
+            self.checks.append(
+                _CheckSession(self.check_ok, self.probe, self.uid_probe, self.tools, self.root, self.workdir)
+            )
             return self.checks[-1]
         return self._local.open(spec)
 
@@ -6227,12 +6293,19 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
         [
             "ascent check --image --role candidate",
             repo_staging._TRUSTED_PYTHON_PROBE,
+            repo_staging._BOX_TOOLS_PROBE["run"],
+            repo_staging._ROOT_PROBE,
+            repo_staging._WORKDIR_PROBE,
         ],
         [
             "ascent check --image --role metric",
+            repo_staging._BOX_TOOLS_PROBE["metric"],
+            repo_staging._WORKDIR_PROBE,
             f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}",
         ],
     ]
+    assert [check.sudo_commands for check in runtime.checks] == [[repo_staging._ROOT_PROBE], []]
+    assert runtime.checks[0].root_env == {repo_staging._ROOT_VARIABLE: "kept"}
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
     assert all(spec.network_disabled for spec in checks)
     assert [spec.private for spec in checks] == [False, True]
@@ -6721,6 +6794,186 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
     runtime = _ImageRuntime(probe=_TRUSTED_PROBE.replace("run box\naccount ok 1000\n", "run box\naccount none 1000\n"))
     try:
         with pytest.raises(repo_staging.BoxImageError, match=r"has no /etc/passwd line for the box user \(uid 1000\)"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("tools", "missing"),
+    [
+        (f"git\nsed\n{repo_staging._BOX_TOOLS_DONE}\n", "git, sed"),
+        (f"tr\n{repo_staging._BOX_TOOLS_DONE}\n", "tr"),
+        ("git\n", _ALL_RUN_TOOLS),
+        ("", _ALL_RUN_TOOLS),
+    ],
+)
+def test_a_run_image_without_the_box_tools_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tools: str, missing: str
+) -> None:
+    """A run image whose box user finds no git stops the run at the image check, not at the unpack (SKY-903).
+
+    A probe that did not reach its last line names every tool.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tools: What the box tools probe prints.
+        missing: The tools that the error names.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(tools=tools)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=rf"has no {re.escape(missing)}\. "):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert repo_staging._BOX_TOOLS_PROBE["run"] in runtime.checks[0].commands
+
+
+def test_a_metric_image_without_its_box_tools_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A metric image whose box user finds no xargs stops the run at the image check, not at the metric setup.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    original = runtime.open
+
+    def open_box(spec: SandboxSpec) -> Any:
+        """Let only the metric check box miss xargs.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        session = original(spec)
+        if spec.operation_key.endswith(":metric"):
+            session.tools = f"xargs\n{repo_staging._BOX_TOOLS_DONE}\n"
+        return session
+
+    runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"^The \[metric\] image .* has no xargs\. "):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert repo_staging._BOX_TOOLS_PROBE["metric"] in runtime.checks[1].commands
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        "",
+        "1000\nkept\n",
+        "0\n\n",
+        None,
+    ],
+)
+def test_a_run_image_that_cannot_run_a_root_command_is_refused(
+    monkeypatch: pytest.MonkeyPatch, root: str | BaseException | None
+) -> None:
+    """A run image with no working sudo stops the run at the image check, not at the first case (SKY-903).
+
+    sudo that drops the run's variables, or a provider that refuses the root command, also counts.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        root: What the root probe prints or raises, or ``None`` when Vercel finds no sudo.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match="did not run a command as root"):
+            _prepare(staged, _ImageRuntime(root=root))
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        UsagePendingError("usage pending"),
+        SandboxInfraError("box stopped"),
+        BudgetReached("budget"),
+        BudgetError("the budget refused"),
+        UnpricedOperationError("no price"),
+        SandboxTransientError("try again"),
+        SandboxRejectedError("the provider refused"),
+        NotImplementedError("no root commands"),
+        InfrastructureInterruptionError("provider stream ended"),
+        httpx.ConnectError("no route"),
+        SandboxApiError(httpx.Response(503), "unavailable", data={}),
+        SandboxApiError(httpx.Response(401), "unauthorized", data={}),
+        SandboxApiError(httpx.Response(403), "forbidden", data={}),
+        SandboxApiError(httpx.Response(404), "no box", data={}),
+        SandboxApiError(httpx.Response(429), "slow down", data={}),
+        SandboxApiError(httpx.Response(400), "bad body", data={"error": {"code": "bad_request"}}),
+        RuntimeError("the portal closed"),
+    ],
+    ids=lambda error: f"{type(error).__name__}-{getattr(error, 'status_code', '')}",
+)
+def test_a_budget_or_box_error_in_the_root_probe_is_not_an_image_error(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    """A budget signal, a stopped box or a provider fault in the root probe stops the run with that error (SKY-903).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        error: What the root probe raises.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        with pytest.raises(type(error)):
+            _prepare(staged, _ImageRuntime(root=error))
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+@pytest.mark.parametrize(
+    ("workdir", "folder"),
+    [("/\nmkdir: cannot create directory: Permission denied\n", "/"), ("", "the working folder")],
+)
+def test_an_image_whose_working_folder_the_box_user_cannot_write_is_refused(
+    monkeypatch: pytest.MonkeyPatch, role: str, workdir: str, folder: str
+) -> None:
+    """An image that starts in a root-owned folder stops the run at the image check (SKY-903).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        role: The role whose image starts in the folder.
+        workdir: What the working folder probe prints.
+        folder: The folder that the error names.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime(workdir=workdir)
+    if role == "metric":
+        original = runtime.open
+
+        def open_box(spec: SandboxSpec) -> Any:
+            """Let only the metric check box start in the folder.
+
+            Args:
+                spec: The box spec.
+
+            Returns:
+                The session.
+            """
+            session = original(spec)
+            if spec.operation_key.endswith(":run"):
+                session.workdir = _WORKDIR_OK
+            return session
+
+        runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        with pytest.raises(
+            repo_staging.BoxImageError, match=rf"^The \[{role}\] image .* starts in {re.escape(folder)},"
+        ):
             _prepare(staged, runtime)
     finally:
         staged.cleanup()
