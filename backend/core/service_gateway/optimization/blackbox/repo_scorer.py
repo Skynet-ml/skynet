@@ -579,7 +579,9 @@ class RepoScorer:
             raise RepoScoreError("The metric files could not be installed, so the version has no score.") from None
         session, root = metric.session, metric.root
         self._root = root
-        session.write_files({METRIC_RUNNER_PATH: RUNNER_SOURCE})
+        # Each write_files call costs several provider requests on Vercel, so
+        # the call's files go up in one write, after the relay opens (SKY-913).
+        files = {METRIC_RUNNER_PATH: RUNNER_SOURCE}
         folder = f"{METRIC_CALLS_DIR}/{call.rsplit('/', 1)[1]}"
         document: dict[str, Any] = {
             "candidate": metric.repo_path,
@@ -588,7 +590,7 @@ class RepoScorer:
             runner.METRIC_SITE_PARAM: metric.site_path,
         }
         if isinstance(self._metric_entry, tuple):
-            session.write_files(_ascent_files(METRIC_ASCENT_DIR))
+            files.update(_ascent_files(METRIC_ASCENT_DIR))
             document[runner.METRIC_ENTRY_PARAM] = list(self._metric_entry)
             document[runner.METRIC_TIMEOUT_PARAM] = self._timeout_seconds * _COMMAND_TIME_SHARE
             document[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{METRIC_ASCENT_DIR}"
@@ -597,7 +599,7 @@ class RepoScorer:
             # read their /proc/<pid>/environ. So the key goes in a file that the
             # runner deletes before the metric command starts (SKY-767).
             if env.get(ENV_API_KEY):
-                session.write_files({f"{folder}/{runner.MODEL_KEY_FILE}": env[ENV_API_KEY]})
+                files[f"{folder}/{runner.MODEL_KEY_FILE}"] = env[ENV_API_KEY]
             env = {name: value for name, value in env.items() if name != ENV_API_KEY}
         else:
             document["code"] = self._code
@@ -610,7 +612,8 @@ class RepoScorer:
         with self._stage_relay(patch, f"{folder}/stages", box=session) as relay:
             if relay is not None:
                 document["stages"] = relay.config(root)
-            session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
+            files[f"{folder}/{runner.INPUT_FILE}"] = json.dumps(document)
+            session.write_files(files)
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
                 # ``exec`` replaces this shell with the runner. A Python metric
@@ -714,14 +717,16 @@ class RepoScorer:
             "timeout": self._run_timeout,
             "stages": None,
         }
-        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+        # One write for the call's files, as in the metric box (SKY-913).
+        files = {RUNNER_PATH: RUNNER_SOURCE}
         if isinstance(self._run_entry, tuple):
-            session.write_files(_ascent_files(RUN_ASCENT_DIR))
+            files.update(_ascent_files(RUN_ASCENT_DIR))
             payload[runner.ASCENT_PACKAGE_PARAM] = f"{root}/{RUN_ASCENT_DIR}"
         with self._service_relay(_RUN_ROLE, f"{supervisor}/stages", candidate=candidate) as relay:
             if relay is not None:
                 payload["stages"] = relay.config(root)
-            session.write_files({f"{supervisor}/{runner.INPUT_FILE}": json.dumps(payload)})
+            files[f"{supervisor}/{runner.INPUT_FILE}"] = json.dumps(payload)
+            session.write_files(files)
             unstamped = candidate.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
