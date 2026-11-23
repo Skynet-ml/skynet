@@ -1132,7 +1132,9 @@ def submit_draft(
         return {
             "status": "in_progress",
             "retry_after_seconds": _PENDING_RETRY_SECONDS,
-            "detail": "Other usage on this account must settle first. Call repo_draft_submit again with the same arguments.",
+            "detail": (
+                "Other usage on this account must settle first. Call repo_draft_submit again with the same arguments."
+            ),
         }
     return {**result.model_dump(mode="json"), "next_tool": "get_run"}
 
@@ -1708,7 +1710,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """
         if not confirm:
             raise ToolError(
-                "Show the user max_cost_cents and the balance from repo_draft_review. Send confirm=true after they agree."
+                "Show the user max_cost_cents and the balance from repo_draft_review. "
+                "Send confirm=true after they agree."
             )
         user = _user(SCOPE_WRITE)
         locale = _request_locale()
@@ -1756,7 +1759,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """
         if not confirm:
             raise ToolError(
-                "Show the user max_cost_cents and the balance from repo_draft_review. Send confirm=true after they agree."
+                "Show the user max_cost_cents and the balance from repo_draft_review. "
+                "Send confirm=true after they agree."
             )
         user = _user(SCOPE_WRITE)
         with Session(job_store.engine) as session:
@@ -1814,7 +1818,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """
         if not confirm:
             raise ToolError(
-                "Show the user max_cost_cents and the balance from repo_draft_review. Send confirm=true after they agree."
+                "Show the user max_cost_cents and the balance from repo_draft_review. "
+                "Send confirm=true after they agree."
             )
         if (candidate_commit is None) == (candidate_patch is None):
             raise ToolError("Send exactly one of candidate_commit and candidate_patch.")
@@ -1864,7 +1869,10 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                     "retry_after_seconds": _PENDING_RETRY_SECONDS,
                     "detail": f"{error} Call repo_judge_score again with the same arguments."
                     if isinstance(error, JudgePendingError)
-                    else "Other usage on this account must settle first. Call repo_judge_score again with the same arguments.",
+                    else (
+                        "Other usage on this account must settle first. "
+                        "Call repo_judge_score again with the same arguments."
+                    ),
                 }
 
         # The work keeps going after the answer and stores its outcome as the call's evidence, so a

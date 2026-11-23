@@ -1978,7 +1978,9 @@ def test_deep_tuple_keys_fail_only_their_call_or_their_reply_and_the_cost_is_bil
     ]
     assert reply.cost_cents == Decimal(1)
 
-    model.reply_calls = [{"id": "call_0", "name": _deep_tuple_keys(3000), "arguments": {}}]  # type: ignore[typeddict-item]
+    model.reply_calls = [
+        {"id": "call_0", "name": _deep_tuple_keys(3000), "arguments": {}},  # type: ignore[typeddict-item]
+    ]
     with pytest.raises(ModelCallFailedError, match="ModelReplyTooDeepError") as live:
         first.call_model("improve other", _TOOLS)
     assert live.value.cost_cents == Decimal(1)

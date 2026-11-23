@@ -723,7 +723,8 @@ class ProviderDispatcher:
                         else "an answer with an unusable cost"
                     )
                     logger.warning(
-                        "No confirmed cost for a %s call (%s): the provider sent %s, and the generation lookup gave %s.",
+                        "No confirmed cost for a %s call (%s): the provider sent %s, "
+                        "and the generation lookup gave %s.",
                         self.model,
                         identity,
                         receipt,

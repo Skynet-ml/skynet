@@ -225,11 +225,13 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
     if payload.seed is None:
         payload.seed = setup_seed(payload.execution_budget_id)
     try:
-        budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
+        service = BudgetService(engine=job_store.engine)
+        budget = service.get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
         if not budget.uncapped:
-            require_one_lease(budget.total_cents)
+            # The setup check spends from this limit, so the first lease needs the room it left (SKY-923).
+            require_one_lease(budget.total_cents, spent_units=service.spent_units(budget.id, payload.username))
         if not settings.local_mode:
             # The first lease draws on the balance whatever the limit, and the balance can fall
             # after the setup check (SKY-923).

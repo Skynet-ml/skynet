@@ -1065,7 +1065,10 @@ def test_wallet_exhaustion_pauses_without_buying_credit(env: _Env) -> None:
     ],
 )
 def test_review_compares_with_the_incumbents_saved_test_score(env: _Env, result: dict, status: str, code: str) -> None:
-    """Only a run that beats the incumbent's saved test score by the margin, on the same test cases, waits for review."""
+    """Only a run that beats the incumbent's saved test score by the margin waits for review.
+
+    Both scores must come from the same test cases.
+    """
     source_id, plan, cycle = _started(env)
     _finish(env, cycle.optimization_id, result=result)
 
@@ -2100,7 +2103,10 @@ def test_a_repository_fingerprint_changes_with_the_commit_or_the_scorer(env: _En
     ],
 )
 def test_a_minimize_review_wins_only_with_a_lower_score(env: _Env, best: float, status: str, code: str) -> None:
-    """For ``[metric] direction = "minimize"`` the candidate must score lower than the incumbent by the margin (SKY-750)."""
+    """For ``[metric] direction = "minimize"`` the candidate must beat the incumbent by the margin (SKY-750).
+
+    Here beating means a lower score.
+    """
     _source_id, _plan, cycle = _started(env)
     _finish(env, cycle.optimization_id, result={**_result(0.9, best), "direction": "minimize"})
 

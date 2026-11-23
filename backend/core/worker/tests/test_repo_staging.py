@@ -1965,7 +1965,9 @@ def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeyp
         monkeypatch: Pytest monkeypatch.
     """
     files = {
-        "ascent.toml": 'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
+        "ascent.toml": (
+            'version = 1\n[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n'
+        ),
         "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
         "tools/run.mcp.json": '{"mcpServers": {"docs": {"url": "https://docs.example.com/mcp"}}}',
         "a.py": "def f(x):\n    return x\n",
@@ -3331,7 +3333,9 @@ def _names(archive: Path) -> set[str]:
 
 
 _METRIC_TREE = {
-    "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "ascent.toml": (
+        'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n'
+    ),
     "src/app.py": "x = 1\n",
     "eval/scorer.py": "def score(): ...\n",
     "eval/data.csv": "1\n",
@@ -3692,7 +3696,10 @@ def test_binding_without_stages_keeps_the_scorer_as_it_was(tmp_path: Path) -> No
 
 
 _CASE_ID, _METHOD_ID, _OLD_ID = "a" * 32, "b" * 32, "c" * 32
-_CASE_DIFF = "diff --git a/inputs/q.json b/inputs/q.json\nnew file mode 100644\n--- /dev/null\n+++ b/inputs/q.json\n@@ -0,0 +1 @@\n+{}\n"
+_CASE_DIFF = (
+    "diff --git a/inputs/q.json b/inputs/q.json\nnew file mode 100644\n"
+    "--- /dev/null\n+++ b/inputs/q.json\n@@ -0,0 +1 @@\n+{}\n"
+)
 _METHOD_DIFF = (
     "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n"
 )
@@ -4083,8 +4090,8 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) 
         _tree(
             tmp_path,
             {
-                "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
-                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                "ascent.toml": 'version = 1\n[paths]\neditable = ["src"]\n\n'
+                '[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
             },
@@ -4119,7 +4126,8 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
     ("toml", "inside"),
     [
         (
-            'version = 1\n[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n'
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             "eval/labels.json",
         ),
         (
@@ -4161,7 +4169,8 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
             r"'eval' is editable, but only the scorer reads it",
         ),
         (
-            'version = 1\n[proposer]\nillegal = "eval/rules.md"\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            'version = 1\n[proposer]\nillegal = "eval/rules.md"\n\n'
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
         ),
         (
@@ -7703,7 +7712,9 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
 def test_a_run_image_with_root_variables_in_its_env_is_refused(
     monkeypatch: pytest.MonkeyPatch, variables: list[str], names: str
 ) -> None:
-    """An image ENV that root's loader or shell reads, such as ``LD_LIBRARY_PATH`` or ``BASH_ENV``, stops the run (SKY-737).
+    """An image ENV that root's loader or shell reads stops the run (SKY-737).
+
+    Examples are ``LD_LIBRARY_PATH`` and ``BASH_ENV``.
 
     The probe prints only the names, so ``/x:`` (an empty element, which
     glibc reads as the work folder) and ``/x`` refuse alike.
@@ -7719,7 +7730,8 @@ def test_a_run_image_with_root_variables_in_its_env_is_refused(
     try:
         with pytest.raises(
             repo_staging.BoxImageError,
-            match=rf"sets {re.escape(names)} in its environment.*BASH_FUNC_\* variable, and BASHOPTS, BASH_COMPAT, BASH_ENV",
+            match=rf"sets {re.escape(names)} in its environment"
+            r".*BASH_FUNC_\* variable, and BASHOPTS, BASH_COMPAT, BASH_ENV",
         ):
             _prepare(staged, runtime)
     finally:

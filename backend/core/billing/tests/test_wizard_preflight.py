@@ -133,7 +133,8 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(wizard_preflight, "_verify_anything", verify)
     monkeypatch.setattr(preflight_router, "enforce_submission_rate", lambda username: None)
     monkeypatch.setattr(wizard_preflight.settings, "openrouter_api_key", SecretStr("test-only"))
-    # These scenarios size budgets in cents to test setup holds, so the one-lease floor of a run limit stays out of the way.
+    # These scenarios size budgets in cents to test setup holds,
+    # so the one-lease floor of a run limit stays out of the way.
     monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 1)
     app = FastAPI()
 

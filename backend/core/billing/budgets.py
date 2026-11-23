@@ -654,6 +654,20 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             return self._snapshot(session, budget, wallet)
 
+    def spent_units(self, budget_id: str, username: str) -> int:
+        """Read the settled spending that admission counts against the budget's limit.
+
+        Args:
+            budget_id: Envelope to read.
+            username: Authenticated owner.
+
+        Returns:
+            Settled scope units, the amount :class:`BudgetInsufficientError` counts.
+        """
+        with self._transaction() as session:
+            _, budget = self._locked(session, budget_id, username)
+            return int(budget.settled_units)
+
     def get_operation(self, operation_id: str, username: str) -> OperationSnapshot:
         """Recover an existing attempt without dispatching or reserving it again.
 

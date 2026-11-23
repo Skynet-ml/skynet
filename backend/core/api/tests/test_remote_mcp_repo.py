@@ -1071,7 +1071,10 @@ def test_scorer_the_runner_cannot_call_is_an_issue(code: str, issue: str) -> Non
 
 def test_optional_extra_arguments_are_fine() -> None:
     """Accept extra arguments with defaults and a nested generator."""
-    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return {'score': 1.0, 'feedback': 'ok'}\n"
+    code = (
+        "def score(p, case=None, extra=1, *, mode='a'):\n"
+        "  def gen():\n    yield 1\n  return {'score': 1.0, 'feedback': 'ok'}\n"
+    )
     assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])
 
 
