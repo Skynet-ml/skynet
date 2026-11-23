@@ -6077,11 +6077,31 @@ _SUDO_PATH = [
 ]
 
 
+# The sudo and PAM files that a Debian image with sudo has, in probe order, and the entries of its folders.
+_CONF = {
+    "/etc/sudo.conf": "644 regular file",
+    "/etc/sudoers": "440 regular file",
+    "/etc/environment": "644 regular file",
+    "/etc/pam.conf": "none",
+    "/etc/sudoers.d": "755 directory",
+    "/etc/pam.d": "755 directory",
+    "/etc/security": "755 directory",
+}
+_CONF_ENTRIES = {
+    "/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "440 regular file"),
+    "/etc/pam.d": _entry("entry", "/etc/pam.d/sudo", "644 regular file"),
+    "/etc/security": [
+        *_entry("entry", "/etc/security/limits.conf", "644 regular file"),
+        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+    ],
+}
+
+
 def _sudo_lines(
     root: dict[str, list[str] | None] | None = None,
     path: list[str] = _SUDO_PATH,
-    sudoers: dict[str, list[str]] | None = None,
-    entries: list[str] | None = None,
+    conf: dict[str, list[str]] | None = None,
+    entries: dict[str, list[str]] | None = None,
     done: bool = True,
 ) -> list[str]:
     """Write the sudo part of the probe's output, as a Debian image with sudo prints it.
@@ -6090,9 +6110,8 @@ def _sudo_lines(
         root: The walks of ``folder/sudo`` for root's PATH folders that differ from one root-owned
             4755 ``/usr/bin/sudo``, by entry; ``None`` makes an entry a ``nosudo`` line.
         path: The ``pathdir`` and ``sudo`` lines of the image PATH.
-        sudoers: The walks of ``/etc/sudoers`` and ``/etc/sudoers.d`` that differ from a root-owned
-            0440 file and a root-owned 755 folder, by path.
-        entries: The ``sudoer`` lines and walks; the default is one root-owned 0440 ``box`` file.
+        conf: The walks of the sudo and PAM files and folders that differ from ``_CONF``, by path.
+        entries: The ``entry`` lines and walks of a folder that differ from ``_CONF_ENTRIES``, by folder.
         done: Whether the part ends with its last line.
 
     Returns:
@@ -6104,12 +6123,10 @@ def _sudo_lines(
         walk = found.get(f"{folder}/sudo")
         lines += [f"nosudo {folder}/sudo"] if walk is None else [f"sudo {folder}/sudo", *walk]
     lines += path
-    files = {
-        "/etc/sudoers": _walk("/etc/sudoers", "440 regular file"),
-        "/etc/sudoers.d": _walk("/etc/sudoers.d", "755 directory"),
-    } | (sudoers or {})
-    lines += [line for name, walk in files.items() for line in (f"sudoers {name}", *walk)]
-    lines += _entry("sudoer", "/etc/sudoers.d/box", "440 regular file") if entries is None else entries
+    walks = {name: _walk(name, last) for name, last in _CONF.items()} | (conf or {})
+    listed = _CONF_ENTRIES | (entries or {})
+    for name, walk in walks.items():
+        lines += [f"conf {name}", *walk, *listed.get(name, [])]
     return [*lines, repo_staging._SUDO_DONE] if done else lines
 
 
@@ -7785,31 +7802,73 @@ _SUDO_PARTS = _sudo_lines()
                 ]
             )
         ),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "1000 440 regular file")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "660 regular file")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers": _walk("/etc/sudoers", "755 directory")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "775 directory")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1777 directory")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1000 755 directory")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "750 directory")})),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "440 regular file")})),
-        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "1000 440 regular file"))),
-        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "660 regular file"))),
-        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/box", "755 directory"))),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "1000 440 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "660 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "775 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1777 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1000 755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "750 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "440 regular file")})),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "1000 440 regular file")})
+        ),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "660 regular file")})
+        ),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "755 directory")})),
         _listing(
             sudo=_sudo_lines(
-                entries=[
-                    *_entry("sudoer", "/etc/sudoers.d/box", "777 symbolic link"),
-                    "link gone",
-                    "none /etc/sudoers.d/gone",
-                ]
+                entries={
+                    "/etc/sudoers.d": [
+                        *_entry("entry", "/etc/sudoers.d/box", "777 symbolic link"),
+                        "link gone",
+                        "none /etc/sudoers.d/gone",
+                    ]
+                }
             )
         ),
-        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/sudoers.d/a/b", "440 regular file"))),
-        _listing(sudo=_sudo_lines(entries=_entry("sudoer", "/etc/other", "440 regular file"))),
-        _listing(sudo=_sudo_lines(entries=["sudoer /etc/sudoers.d/box"])),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/a/b", "440 regular file")})
+        ),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/other", "440 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": ["entry /etc/sudoers.d/box"]})),
         _listing(sudo=_sudo_lines(done=False)),
-        _listing(sudo=[line for line in _SUDO_PARTS if line != "sudoers /etc/sudoers"]),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/sudoers"]),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "664 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.conf": _walk("/etc/pam.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "775 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "1000 755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "750 directory")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/sudo", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/.sudo", "666 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/sudo.d", "755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/security": _walk("/etc/security", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/security": _entry("entry", "/etc/security/limits.d", "1000 755 directory")})
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/box.conf", "1000 644 regular file"),
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/more", "755 directory"),
+                    ]
+                }
+            )
+        ),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
     ],
     ids=[
         "box-owned-sudo-before-usr-bin",
@@ -7846,10 +7905,24 @@ _SUDO_PARTS = _sudo_lines()
         "sudoer-without-its-walk",
         "no-sudo-done-line",
         "no-sudoers-line",
+        "box-owned-sudo-conf",
+        "group-writable-etc-environment",
+        "box-owned-pam-conf",
+        "group-writable-pam-d",
+        "box-owned-pam-d",
+        "pam-d-that-others-cannot-list",
+        "box-owned-file-in-pam-d",
+        "other-writable-hidden-file-in-pam-d",
+        "folder-in-pam-d",
+        "box-owned-etc-security",
+        "box-owned-folder-in-etc-security",
+        "box-owned-file-in-a-security-folder",
+        "folder-two-levels-into-etc-security",
+        "no-pam-d-line",
     ],
 )
 def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
-    """A sudo or sudoers file that the box user could change, or a short sudo listing, refuses (SKY-912).
+    """A sudo, sudoers or PAM file that the box user could change, or a short sudo listing, refuses (SKY-912).
 
     Args:
         probe: What the trusted interpreter probe prints.
@@ -7877,8 +7950,10 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
 @pytest.mark.parametrize(
     "probe",
     [
-        _listing(sudo=_sudo_lines(entries=[])),
-        _listing(sudo=_sudo_lines(sudoers={"/etc/sudoers.d": _walk("/etc/sudoers.d", "none")}, entries=[])),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": []})),
+        _listing(
+            sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "none")}, entries={"/etc/sudoers.d": []})
+        ),
         _listing(
             sudo=_sudo_lines(
                 root={"/usr/bin/sudo": None},
@@ -7886,11 +7961,11 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
                     *_entry("pathdir", "/usr/local/bin", "755 directory"),
                     *_entry("pathdir", "/usr/bin", "755 directory"),
                 ],
-                sudoers={
+                conf={
                     "/etc/sudoers": _walk("/etc/sudoers", "none"),
                     "/etc/sudoers.d": _walk("/etc/sudoers.d", "none"),
                 },
-                entries=[],
+                entries={"/etc/sudoers.d": []},
             )
         ),
         _listing(
@@ -7919,11 +7994,37 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/tools/bin", "none"), *_SUDO_PATH])),
         _listing(
             sudo=_sudo_lines(
-                entries=[
-                    *_entry("sudoer", "/etc/sudoers.d/.hidden", "440 regular file"),
-                    *_entry("sudoer", "/etc/sudoers.d/README", "440 regular file"),
-                    *_entry("sudoer", "/etc/sudoers.d/box", "440 regular file"),
-                ]
+                entries={
+                    "/etc/sudoers.d": [
+                        *_entry("entry", "/etc/sudoers.d/.hidden", "440 regular file"),
+                        *_entry("entry", "/etc/sudoers.d/README", "440 regular file"),
+                        *_entry("entry", "/etc/sudoers.d/box", "440 regular file"),
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/etc/pam.conf": _walk("/etc/pam.conf", "644 regular file"),
+                    "/etc/pam.d": _walk("/etc/pam.d", "none"),
+                    "/etc/security": _walk("/etc/security", "none"),
+                },
+                entries={"/etc/pam.d": [], "/etc/security": []},
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "none")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "644 regular empty file")})),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/box.conf", "644 regular file"),
+                        *_entry("entry", "/etc/security/namespace.init", "755 regular file"),
+                        *_entry("entry", "/etc/security/opasswd", "600 regular file"),
+                    ]
+                }
             )
         ),
     ],
@@ -7935,10 +8036,14 @@ def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.Mon
         "guard-link-first-on-the-path",
         "missing-path-folder-before-sudo",
         "three-sudoers-d-files",
+        "no-pam-d-and-no-etc-security",
+        "no-sudo-conf",
+        "empty-etc-environment",
+        "files-in-a-security-folder",
     ],
 )
 def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:
-    """Root-owned sudo and sudoers files pass, and a missing sudo leaves the refusal to the root probe (SKY-912).
+    """Root-owned sudo, sudoers and PAM files pass, and a missing sudo leaves the refusal to the root probe (SKY-912).
 
     Args:
         probe: What the trusted interpreter probe prints.
@@ -8054,6 +8159,28 @@ def test_the_path_script_skips_a_dangling_optional_program(tmp_path: Path) -> No
     )
 
     assert done.returncode == 0, done.stderr
+
+
+def test_the_path_script_refuses_a_sudo_that_is_not_an_elf_file(tmp_path: Path) -> None:
+    """The ELF scan stops at a sudo script, whose interpreter the walk would never see (SKY-912).
+
+    Args:
+        tmp_path: The folder that holds the sudo script.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    sudo = tmp_path / "sudo"
+    sudo.write_text("#!/bin/sh\n")
+    sudo.chmod(0o755)
+    script = repo_staging._PATH_SCRIPT.replace("'/usr/local/sbin/sudo'", repr(str(sudo)))
+    assert script != repo_staging._PATH_SCRIPT
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert done.returncode != 0
+    assert "a sudo is not an ELF file" in done.stderr
 
 
 def test_the_probe_root_path_is_the_vercel_root_path() -> None:
@@ -8269,6 +8396,56 @@ def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: P
     assert "/opt/foo" not in done.stdout
     assert "evil-rc" not in done.stdout
     assert repo_staging._root_variables(done) == ["BASH_ENV", "CDPATH", "LD_LIBRARY_PATH"]
+
+
+def _sudo_part(stdout: str) -> list[str]:
+    """Take the sudo part of a real probe's output, last line first.
+
+    Args:
+        stdout: What the probe printed.
+
+    Returns:
+        The lines from the first ``_ROOT_PATH`` sudo line to ``_SUDO_DONE``, reversed.
+    """
+    lines = stdout.splitlines()
+    first = repo_staging._ROOT_PATH.split(":")[0]
+    start = next(at for at, line in enumerate(lines) if line in (f"sudo {first}/sudo", f"nosudo {first}/sudo"))
+    return lines[start : lines.index(repo_staging._SUDO_DONE) + 1][::-1]
+
+
+def test_the_real_probe_passes_the_host_sudo_and_pam_files(tmp_path: Path) -> None:
+    """The real shell walks the host's sudo, sudoers and PAM files, and the judge accepts the root-owned host (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    python = _fake_python(tmp_path.resolve())
+
+    done = _run_probe(python, PATH="/usr/local/bin:/usr/bin:/bin")
+
+    assert done.returncode == 0, done.stderr
+    part = _sudo_part(done.stdout)
+    assert f"conf {repo_staging._DEEP_FOLDER}" in part
+    assert repo_staging._trusted_sudo(part)
+
+
+def test_the_real_probe_refuses_a_sudo_that_the_box_user_could_change(tmp_path: Path) -> None:
+    """The real shell walks a sudo in a temporary folder first on PATH, and the judge refuses it (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    python = _fake_python(root)
+    (root / "sudo").write_text("#!/bin/sh\n")
+    (root / "sudo").chmod(0o755)
+
+    done = _run_probe(python, PATH=f"{root}:/usr/bin:/bin")
+
+    assert done.returncode == 0, done.stderr
+    part = _sudo_part(done.stdout)
+    assert f"sudo {root}/sudo" in part
+    assert not repo_staging._trusted_sudo(part)
 
 
 @pytest.mark.parametrize("locale", ["C.UTF-8", "en_US.ISO-8859-1", None])

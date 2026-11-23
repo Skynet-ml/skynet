@@ -1316,12 +1316,16 @@ _ROOT_TOOLS = ("tail", "head", "base64", "tr")
 # would run every later root step, and get the run's variables. So the probe
 # walks each ``sudo`` in a folder of ``_ROOT_PATH``, and each folder of the box
 # PATH up to and with its first ``sudo``, which must be root's. Sudo reads
-# ``/etc/sudoers`` and every entry in ``/etc/sudoers.d`` as root, so they must
-# be root's too, and others must be able to list the folder so that no entry
-# goes unchecked. Sudo itself checks the owner of any other file that sudoers
-# includes, but not the folders on its way.
-_SUDOERS = "/etc/sudoers"
-_SUDOERS_DIR = "/etc/sudoers.d"
+# these files and every entry in these folders as root, and its PAM steps read
+# the PAM stack. Linux-PAM does not check who owns its files, so they must be
+# root's too. Others must be able to list each folder so that no entry goes
+# unchecked. Sudo itself checks the owner of any other file that sudoers
+# includes, but not the folders on its way. Linux-PAM reads /etc/pam.conf only
+# when /etc/pam.d is missing. /etc/security may hold one level of folders,
+# such as limits.d.
+_SUDO_FILES = ("/etc/sudo.conf", "/etc/sudoers", "/etc/environment", "/etc/pam.conf")
+_SUDO_FOLDERS = ("/etc/sudoers.d", "/etc/pam.d", "/etc/security")
+_DEEP_FOLDER = "/etc/security"
 _SUDO_DONE = "sudo checked"
 _ROOT_SCRIPTS = (_HASH_PROTECTED, _HASH_PREPARED, _WRITE_ANSWER, _SUPERVISOR_BOOT, RUNNER_SOURCE)
 _PATH_SCRIPT = (
@@ -1409,10 +1413,14 @@ for folder in os.environ.get("PATH", "").split(":"):
     if folder.startswith("/") and os.path.lexists(os.path.join(folder, "sudo")):
         programs.append(os.path.join(folder, "sudo"))
         break
+sudos = {os.path.realpath(name) for name in programs if name.endswith("/sudo") and os.path.exists(name)}
 for name in sorted(seen | {os.path.realpath(name) for name in programs if os.path.exists(name)}):
     with open(name, "rb") as elf:
         data = elf.read()
     if data[:4] != b"\x7fELF":
+        # A script sudo names its own interpreter, which the scan would never walk.
+        if name in sudos:
+            sys.exit("a sudo is not an ELF file")
         continue
     if data[4:6] != b"\x02\x01":
         sys.exit("a mapped file is not a 64-bit little-endian ELF file")
@@ -1540,16 +1548,18 @@ _TRUSTED_PYTHON_PROBE = (
     '  if [ -e "$b" ] && [ ! -x "$b" ]; then exit 1; fi\n'
     '  if [ -e "$b/sudo" ] || [ -h "$b/sudo" ]; then printf \'sudo %s\\n\' "$b/sudo"; w "$b/sudo"; break; fi\n'
     "done\n"
-    f'for b in {_SUDOERS} {_SUDOERS_DIR}; do printf \'sudoers %s\\n\' "$b"; w "$b"; done\n'
-    f"if [ -d {_SUDOERS_DIR} ]; then\n"
-    f"  [ -r {_SUDOERS_DIR} ] && [ -x {_SUDOERS_DIR} ] || exit 1\n"
-    f"  for e in {_SUDOERS_DIR}/* {_SUDOERS_DIR}/.[!.]* {_SUDOERS_DIR}/..?*; do\n"
+    "k() {\n"
+    '  [ -r "$1" ] && [ -x "$1" ] || exit 1\n'
+    '  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do\n'
     '    if [ -e "$e" ] || [ -h "$e" ]; then\n'
     "      case $e in *[![:print:]]*) exit 1;; esac\n"
-    '      printf \'sudoer %s\\n\' "$e"; w "$e"\n'
+    '      printf \'entry %s\\n\' "$e"; w "$e"\n'
+    f'      if [ "$1" = {_DEEP_FOLDER} ] && [ -d "$e" ]; then k "$e"; fi\n'
     "    fi\n"
     "  done\n"
-    "fi\n"
+    "}\n"
+    f'for b in {" ".join(_SUDO_FILES)}; do printf \'conf %s\\n\' "$b"; w "$b"; done\n'
+    f'for b in {" ".join(_SUDO_FOLDERS)}; do printf \'conf %s\\n\' "$b"; w "$b"; if [ -d "$b" ]; then k "$b"; fi; done\n'
     f"printf '%s\\n' '{_SUDO_DONE}'\n"
     "for m in clean box; do\n"
     "  printf 'run %s\\n' $m\n"
@@ -1740,8 +1750,12 @@ UNTRUSTED_PYTHON = (
     " root and not writable by group or others. Others must be able to read each of those files,"
     " /etc/ld.so.cache and every library in the loader folders. /tmp must be a root-owned folder with mode 1777."
     " The same rule covers sudo: every sudo in a folder of root's PATH, the first sudo on the image PATH and"
-    " each folder of the image PATH before it, /etc/sudoers, /etc/sudoers.d and every entry in it. Others must"
-    " be able to read each sudo and to list /etc/sudoers.d, for example with chmod 755 /etc/sudoers.d."
+    " each folder of the image PATH before it, /etc/sudo.conf, /etc/sudoers, /etc/environment and /etc/pam.conf"
+    " when present, and /etc/sudoers.d, /etc/pam.d and /etc/security when present, with every entry in them."
+    " Others must be able to read each sudo and search each folder of the image PATH before it. The first sudo"
+    " on the image PATH must have an x bit, and each sudo must resolve to an ELF file. Others must be able to"
+    " list each of those three folders, for example with chmod 755 /etc/sudoers.d. Each entry in them must be"
+    " a regular file, except one level of folders in /etc/security."
     " Links count only below /, outside the import path, and in the locale trees when they resolve to such a"
     " file. The image must have no /etc/ld.so.preload, and no pybuilddir.txt, Modules/Setup.local or stray"
     " lib/pythonX.Y/os.py next to the Python. Each of those four tools must be in at least one"
@@ -2679,7 +2693,7 @@ def _trusted_python(probe: Any) -> bool:
 
 
 def _trusted_sudo(lines: list[str]) -> bool:
-    """Tell whether every sudo that Vercel may run, and the sudoers files it reads, are out of the box user's reach.
+    """Tell whether every sudo that Vercel may run, and the sudo and PAM files it reads, are out of the box user's reach.
 
     Args:
         lines: The probe's remaining lines, last line first; the check pops
@@ -2691,10 +2705,10 @@ def _trusted_sudo(lines: list[str]) -> bool:
         file that :func:`_readable_file` accepts. Each image PATH folder up to
         the first one with a sudo is missing, or a folder that group and
         others cannot write and others can search, and that sudo is such a
-        file with an x bit. ``/etc/sudoers`` is missing or a regular file that group and
-        others cannot write. ``/etc/sudoers.d`` is missing or such a folder
-        that others can also list, and each entry in it is such a regular
-        file. The listing ends with ``_SUDO_DONE``.
+        file with an x bit. Each of ``_SUDO_FILES`` is missing or a regular
+        file that group and others cannot write. Each of ``_SUDO_FOLDERS`` is
+        missing or a folder that :func:`_trusted_folder` accepts. The listing
+        ends with ``_SUDO_DONE``.
     """
     for folder in _ROOT_PATH.split(":"):
         line = lines.pop() if lines else ""
@@ -2721,24 +2735,55 @@ def _trusted_sudo(lines: list[str]) -> bool:
             if entry in (None, _MISSING) or not _readable_file(entry) or not entry[0] & 0o111:
                 return False
             break
-    for path, kind in ((_SUDOERS, "regular file"), (_SUDOERS_DIR, "directory")):
-        if not lines or lines.pop() != f"sudoers {path}":
+    for path in (*_SUDO_FILES, *_SUDO_FOLDERS):
+        if not lines or lines.pop() != f"conf {path}":
             return False
         entry = _walk(lines, path)
-        if entry is None or (entry != _MISSING and (entry[1] != kind or entry[0] & 0o022)):
+        if entry is None:
             return False
-        # Sudo reads every entry as root, so the box user must see them all.
-        if entry != _MISSING and kind == "directory" and entry[0] & 0o005 != 0o005:
+        if entry == _MISSING:
+            continue
+        if path in _SUDO_FILES and (entry[1] != "regular file" or entry[0] & 0o022):
             return False
-    while lines and lines[-1].startswith("sudoer "):
-        path = lines.pop().removeprefix("sudoer ")
-        name = path.removeprefix(f"{_SUDOERS_DIR}/")
-        if name in (path, "", ".", "..") or "/" in name or not _PRINTABLE_PATH.fullmatch(path):
-            return False
-        entry = _walk(lines, path)
-        if entry in (None, _MISSING) or entry[1] != "regular file" or entry[0] & 0o022:
+        if path in _SUDO_FOLDERS and not _trusted_folder(lines, path, entry, path == _DEEP_FOLDER):
             return False
     return bool(lines) and lines.pop() == _SUDO_DONE
+
+
+def _trusted_folder(lines: list[str], folder: str, entry: tuple[int, str], deep: bool) -> bool:
+    """Tell whether a sudo or PAM folder and each entry that the probe listed in it are out of the box user's reach.
+
+    Args:
+        lines: The probe's remaining lines, last line first; the check pops
+            the folder's ``entry`` lines and their walks.
+        folder: The folder's path.
+        entry: The folder's walked mode and type.
+        deep: Whether the folder may hold folders, whose entries the probe
+            lists next.
+
+    Returns:
+        True when the folder is a folder that group and others cannot write
+        and others can list. Each entry is directly in it, has a printable
+        name, and is a regular file that group and others cannot write. When
+        ``deep`` is set, an entry may also be such a folder, with such files.
+    """
+    # Sudo and PAM read every entry as root, so the box user must see them all.
+    if entry[1] != "directory" or entry[0] & 0o022 or entry[0] & 0o005 != 0o005:
+        return False
+    while lines and lines[-1].startswith(f"entry {folder}/"):
+        path = lines.pop().removeprefix("entry ")
+        name = path.removeprefix(f"{folder}/")
+        if name in ("", ".", "..") or "/" in name or not _PRINTABLE_PATH.fullmatch(path):
+            return False
+        entry = _walk(lines, path)
+        if entry in (None, _MISSING):
+            return False
+        if deep and entry[1] == "directory":
+            if not _trusted_folder(lines, path, entry, False):
+                return False
+        elif entry[1] != "regular file" or entry[0] & 0o022:
+            return False
+    return True
 
 
 def _readable_file(entry: tuple[int, str]) -> bool:
@@ -2873,6 +2918,9 @@ def _stat_entry(line: str, name: str) -> tuple[int, str] | None:
     if not line.endswith(" " + name):
         return None
     parts = line[: -len(name) - 1].split(" ", 2)
+    # GNU stat names a zero-byte file so, as Debian's own /etc/environment is (SKY-912).
+    if len(parts) == 3 and parts[2] == "regular empty file":
+        parts[2] = "regular file"
     if len(parts) != 3 or parts[0] != "0" or not re.fullmatch(r"[0-7]{3,4}", parts[1]) or parts[2] not in _FILE_TYPES:
         return None
     return int(parts[1], 8), parts[2]

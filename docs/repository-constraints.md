@@ -806,13 +806,30 @@ own commands in the setup box and in each candidate box:
 - `/usr/local/bin/python3` must be a trusted Python. The error of the
   image check lists the file and folder rules.
 - The box user must not be able to change the `sudo` that runs root's
-  commands (SKY-912). Root must own each `sudo` in a folder of
-  `secure_path`, and the first `sudo` on the image `PATH`. Root must also
-  own each folder of the image `PATH` before that `sudo`, `/etc/sudoers`,
-  `/etc/sudoers.d` and every entry in it. Group and others must not be able
-  to write any of them. Others must be able to read each `sudo` and to list
-  `/etc/sudoers.d`. The Debian `sudo` package meets these rules. Red Hat
-  images do not: their `sudo` is mode 4111 and `/etc/sudoers.d` is 0750.
+  commands, or the files that `sudo` reads as root (SKY-912). Root must
+  own each `sudo` in a folder of `secure_path`, and the first `sudo` on the
+  image `PATH`. Root must also own each folder of the image `PATH` before
+  that `sudo`. Root must own `/etc/sudo.conf`, `/etc/sudoers`,
+  `/etc/environment` and `/etc/pam.conf` when they exist. Root must own
+  `/etc/sudoers.d`, `/etc/pam.d` and `/etc/security` when they exist, and
+  every entry in them. Group and others must not be able to write any of
+  them. Linux-PAM does not check who owns its files, so the image check
+  does. An image with no `/etc/pam.d` passes; Linux-PAM then reads
+  `/etc/pam.conf`.
+- The check also needs these rules:
+  - Others must be able to read each `sudo`, and to search each folder of
+    the image `PATH` before the first `sudo`.
+  - The first `sudo` on the image `PATH` must have an x bit. A `PATH`
+    lookup skips a file with no x bit.
+  - Each `sudo` must resolve to an ELF file, not a script.
+  - Others must be able to list `/etc/sudoers.d`, `/etc/pam.d` and
+    `/etc/security`.
+  - Each entry in those folders must be a regular file, or a link to one.
+    `/etc/security` may also hold one level of such folders, for example
+    `limits.d`.
+
+  The Debian `sudo` package meets these rules. Red Hat images do not:
+  their `sudo` is mode 4111 and `/etc/sudoers.d` is 0750.
 
 The image check refuses an image that breaks one of these rules, before
 the first version. A minimal `[run]` image:
@@ -1175,10 +1192,15 @@ Residual risk:
   or looks `sudo` up on its own `PATH`, probably the image `PATH`. The
   check did not prove which. So the image check walks both: every `sudo`
   in a folder of root's `PATH`, and the image `PATH` up to its first
-  `sudo`. It also walks `/etc/sudoers` and each entry in `/etc/sudoers.d`.
-  It does not walk a file that sudoers includes from another folder, or a
-  `sudo.conf` `sudoers_file` setting. Sudo itself refuses such a file when
-  root does not own it, or when others can write it.
+  `sudo`. It also walks the `sudo` and PAM files: `/etc/sudo.conf`,
+  `/etc/sudoers`, `/etc/environment`, `/etc/pam.conf`, and each entry in
+  `/etc/sudoers.d`, `/etc/pam.d` and `/etc/security`. It does not walk a
+  file that sudoers includes from another folder, or a `sudo.conf`
+  `sudoers_file` setting. Sudo itself refuses such a file when root does
+  not own it, or when others can write it. It does not read the PAM
+  configuration, so a PAM module or file that it names outside those
+  folders is not walked. The PAM modules below the loader folders get only
+  the loader-folder check, which needs others to be able to read them.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).
