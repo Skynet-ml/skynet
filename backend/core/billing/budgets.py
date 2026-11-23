@@ -50,6 +50,8 @@ USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
+# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
+CHUNK_CENTS = 100
 # The cost kind of a worker agent's lease slice (core/worker/actors.py). No provider reconciler reads it back, so
 # only the worker or a fence settles it (SKY-829).
 AGENT_LEASE_COST_KIND = "agent_lease"

@@ -62,7 +62,7 @@ GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
 # OpenRouter's /generation accepts only this id shape (API reference,
 # getGeneration). A Responses answer names itself ``resp_...``, so a lookup by
 # that id can never find a bill, and asking again only delays the hold (SKY-664).
-_GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
+GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
 
 # Responses usage may omit ``is_byok``, and then a cost with an upstream share
 # is ambiguous. This opt-in adds ``openrouter_metadata``, whose ``is_byok`` the
@@ -690,7 +690,7 @@ class ProviderDispatcher:
             if self.policy.kind != "byok_model" and self.upstream == OPENROUTER and amount is None and identity:
                 reconciled, reason, retry = (
                     self._lookup_generation(identity)
-                    if _GENERATION_ID.fullmatch(identity)
+                    if GENERATION_ID.fullmatch(identity)
                     else (None, "nothing, because /generation does not accept this id", False)
                 )
                 for delay in GENERATION_LOOKUP_DELAYS:

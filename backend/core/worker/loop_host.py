@@ -36,12 +36,12 @@ import httpx
 import litellm
 from sqlalchemy.engine import Engine
 
-from ..billing.budgets import BudgetService
+from ..billing.budgets import CHUNK_CENTS, BudgetService
 from ..billing.byok_upstreams import resolve_upstream
 from ..billing.data_policy import DEFAULT_DATA_POLICY, DataPolicy, apply_data_policy
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
 from ..billing.model_dispatch import (
-    _GENERATION_ID,
+    GENERATION_ID,
     GENERATION_LOOKUP_DELAYS,
     data_policy_refusal,
     lookup_generation,
@@ -88,8 +88,6 @@ from .subprocess_runner import run_service_in_subprocess, safe_queue_put
 logger = logging.getLogger(__name__)
 
 LOOP_HOST_KEY = "_loop_host"
-# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
-CHUNK_CENTS = 100
 # The bound of one model call must fit in one lease. A reply that costs more stops the loop.
 MODEL_MAX_CENTS = 100
 # The longest that one command or metric box lives.
@@ -249,7 +247,7 @@ class LeaseModelClient:
             logger.warning(
                 "A managed model reply (generation %s) gave no complete cost, and the lookup gave %s; "
                 "the call is charged 0 cents.",
-                body.get("id") if _GENERATION_ID.fullmatch(str(body.get("id"))) else "unknown",
+                body.get("id") if GENERATION_ID.fullmatch(str(body.get("id"))) else "unknown",
                 reason,
             )
             cents = Decimal(0)
@@ -269,7 +267,7 @@ class LeaseModelClient:
         Returns:
             The provider's USD charge, or ``None``; and a short reason with no secret or prompt text.
         """
-        if not isinstance(identity, str) or not _GENERATION_ID.fullmatch(identity):
+        if not isinstance(identity, str) or not GENERATION_ID.fullmatch(identity):
             return None, "nothing, because the reply has no generation id"
         found, reason, retry = lookup_generation(self._client, self._key, identity, self._model)
         # OpenRouter can answer 404 for a short time while it indexes the bill (SKY-657).

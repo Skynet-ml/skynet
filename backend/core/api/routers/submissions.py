@@ -155,10 +155,12 @@ def _ensure_api_budget(
             budget = service.create(user.username, total, idempotency_key=budget_creation_key, uncapped=True)
         elif budget is None:
             spendable = _enforce_balance(job_store, user.username, payload.token_source)
+            ceiling = cost_ceiling_budget(spendable or 0, payload.token_source)
             total = payload.max_cost_cents
             if total is None:
-                total = cost_ceiling_budget(spendable or 0, payload.token_source)
-            require_one_lease(total)
+                total = ceiling
+            # Submit lowers a user's limit to what the balance backs, so a limit at that ceiling is the balance's.
+            require_one_lease(total, from_balance=spendable is not None and ceiling <= total)
             budget = service.create(user.username, total, idempotency_key=budget_creation_key)
     except BudgetError as error:
         raise budget_http_error(error) from error

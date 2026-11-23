@@ -11,6 +11,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import (
+    CHUNK_CENTS,
     BudgetConflictError,
     BudgetError,
     BudgetInFlightError,
@@ -20,7 +21,6 @@ from ...billing.budgets import (
     BudgetSnapshot,
     BudgetTotalConflictError,
 )
-from ...worker.loop_host import CHUNK_CENTS
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 
@@ -102,7 +102,7 @@ def budget_http_error(error: BudgetError) -> HTTPException:
     return DomainError(code, status=status)
 
 
-def require_one_lease(total_cents: int) -> None:
+def require_one_lease(total_cents: int, *, from_balance: bool = False) -> None:
     """Refuse a run limit that cannot buy the run's first budget lease.
 
     A run takes its budget in leases of :data:`CHUNK_CENTS`, so a smaller
@@ -110,12 +110,20 @@ def require_one_lease(total_cents: int) -> None:
 
     Args:
         total_cents: The run's approved spending limit.
+        from_balance: Whether the account balance, not the user's own
+            limit, sets this limit.
 
     Raises:
-        DomainError: 409 ``budget.below_minimum`` when the limit is below one lease.
+        DomainError: 402 ``budget.insufficient`` when a balance-set limit is
+            below one lease, or 409 ``budget.below_minimum`` when the user's
+            own limit is.
     """
-    if total_cents < CHUNK_CENTS:
-        raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
+    if total_cents >= CHUNK_CENTS:
+        return
+    # A higher limit cannot help when the balance sets it, so the refusal names the balance.
+    if from_balance:
+        raise DomainError("budget.insufficient", status=402)
+    raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

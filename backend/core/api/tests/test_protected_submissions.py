@@ -711,6 +711,35 @@ def test_a_run_limit_below_one_lease_is_refused_before_paid_setup(
     assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
 
 
+@pytest.mark.parametrize("limit", [None, 500], ids=["no-limit", "higher-limit"])
+def test_a_balance_below_one_lease_is_refused_as_a_balance_problem(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, limit: int | None
+) -> None:
+    """Refuse a run whose balance, not the user's own limit, is below one lease (SKY-923).
+
+    The limit message would tell the user to raise a limit that the balance caps.
+
+    Args:
+        harness: Real legacy submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+        limit: The user's own limit, or ``None`` for none.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", loop_host.CHUNK_CENTS)
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = loop_host.CHUNK_CENTS - 1
+        session.commit()
+    payload = _payload() if limit is None else _payload(total=limit)
+    if limit is None:
+        payload.pop("max_cost_cents")
+
+    response = harness.client.post(ROUTE, json=payload)
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert harness.calls == []
+    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 0
+
+
 @pytest.mark.parametrize("uncapped", [False, True])
 def test_a_wizard_run_limit_below_one_lease_is_refused(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, uncapped: bool
