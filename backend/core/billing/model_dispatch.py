@@ -648,7 +648,18 @@ class ProviderDispatcher:
         def settle(
             status: int, content_type: str, content: bytes, interrupted: bool, retry_after: str | None
         ) -> PaidResult[ModelHTTPResult]:
-            """Turn a provider answer into its measured charge and the relay's response."""
+            """Turn a provider answer into its measured charge and the relay's response.
+
+            Args:
+                status: The provider's HTTP status.
+                content_type: The provider's response content type.
+                content: The response body as received.
+                interrupted: Whether the body stream broke before its end.
+                retry_after: The provider's ``Retry-After`` header, if any.
+
+            Returns:
+                The measured charge and the response to relay.
+            """
             failure = None
             if path == "/responses":
                 identity, usage, complete = responses_receipt(content, content_type)

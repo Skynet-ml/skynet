@@ -230,6 +230,11 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
             raise DomainError("budget.conflict", status=409)
         if not budget.uncapped:
             require_one_lease(budget.total_cents)
+        if not settings.local_mode:
+            # The first lease draws on the balance whatever the limit, and the balance can fall
+            # after the setup check (SKY-923).
+            spendable = StripeBillingService(engine=job_store.engine).spendable_cents(payload.username)
+            require_one_lease(spendable, from_balance=True)
         canonical = _persistable_payload(payload, job_store)
         PreflightStore(job_store.engine).require_current(
             username=payload.username,

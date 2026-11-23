@@ -254,7 +254,12 @@ class _CapturedError(Exception):
 def test_evaluation_check_reads_the_staged_dataset(
     client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The evaluation setup check dry-runs the scorer on the staged rows, not on no case."""
+    """The evaluation setup check dry-runs the scorer on the staged rows, not on no case.
+
+    Args:
+        client_and_store: Funded client and its fake job store.
+        monkeypatch: Captures the setup check's payload.
+    """
     client, store = client_and_store
     seen: dict[str, Any] = {}
 

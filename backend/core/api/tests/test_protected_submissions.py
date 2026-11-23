@@ -882,6 +882,186 @@ def test_a_wizard_run_limit_below_one_lease_is_refused(
     assert harness.count(JobModel) == 0
 
 
+def _set_balance(harness: _Harness, cents: int) -> None:
+    """Set the fixture account's balance.
+
+    Args:
+        harness: Real wallet fixture.
+        cents: The new balance.
+    """
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = cents
+        session.commit()
+
+
+# Local mode runs no managed models, so its checks use a subscription CLI.
+_SUBSCRIPTION = {"name": "anthropic/claude-sonnet-4.6", "token_source": "subscription", "cli_provider": "claude"}
+
+
+def _uncapped_check(harness: _Harness, reflection: dict[str, Any] | None = None) -> tuple[Any, dict[str, Any]]:
+    """Run the wizard's setup check for an uncapped ("no limit") budget.
+
+    Args:
+        harness: Real wizard check routes and spending authority.
+        reflection: The reflection model, or ``None`` for the managed default.
+
+    Returns:
+        The HTTP response and the submission body that the check covers.
+    """
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="no-limit", uncapped=True)
+    payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+    if reflection is not None:
+        payload["reflection_model_config"] = reflection
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    return response, payload
+
+
+def _stub_byok_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in a verified OpenAI BYOK key.
+
+    Args:
+        monkeypatch: Replaces the key vault.
+    """
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+
+
+@pytest.mark.parametrize("token_source", ["managed", "byok"])
+def test_the_wizard_check_refuses_an_uncapped_budget_whose_balance_is_below_one_lease(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, token_source: str
+) -> None:
+    """Refuse a "no limit" setup check that the balance cannot fund a first lease for (SKY-923).
+
+    An uncapped budget has no limit floor, but its first lease still draws on the balance.
+
+    Args:
+        harness: Real wizard check routes and spending authority.
+        monkeypatch: Restores the real lease size, stands in a BYOK key and watches the setup check.
+        token_source: The run's model source.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    _stub_byok_key(monkeypatch)
+    checks: list[Any] = []
+    monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args, **kwargs: checks.append(args))
+    _set_balance(harness, 30)
+
+    byok = {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"}
+    response, _payload_body = _uncapped_check(harness, byok if token_source == "byok" else None)
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert checks == []
+    assert harness.calls == []
+    assert harness.count(WizardPreflightModel) == 0
+
+
+@pytest.mark.parametrize("local_mode", [False, True], ids=["hosted", "local"])
+def test_the_wizard_check_passes_an_uncapped_budget_the_balance_or_local_mode_covers(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, local_mode: bool
+) -> None:
+    """Run a "no limit" setup check when the balance funds one lease, or in local mode at any balance (SKY-923).
+
+    Args:
+        harness: Real wizard check routes and spending authority.
+        monkeypatch: Restores the real lease size and sets local mode.
+        local_mode: Whether the server runs in local mode, which has no balance gate.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", local_mode)
+    _set_balance(harness, 30 if local_mode else budgets.CHUNK_CENTS)
+
+    response, _payload_body = _uncapped_check(harness, _SUBSCRIPTION if local_mode else None)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "succeeded", response.json()
+    assert len(harness.calls) == harness.count(WizardPreflightModel) == 1
+
+
+@pytest.mark.parametrize("uncapped", [False, True], ids=["capped", "uncapped"])
+@pytest.mark.parametrize(("balance", "status"), [(30, 402), (1_000, 201)], ids=["short", "funded"])
+def test_protected_submit_refuses_a_balance_below_one_lease(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, uncapped: bool, balance: int, status: int
+) -> None:
+    """Refuse a checked run whose balance fell below one lease before submit, with or without a limit (SKY-923).
+
+    Args:
+        harness: Real submission routes and spending authority.
+        monkeypatch: Restores the real lease size.
+        uncapped: Whether the budget has no limit.
+        balance: The balance at submit.
+        status: The expected submit status.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    _set_balance(harness, 1_000)
+    budget = harness.budgets.create(harness.username, 500, idempotency_key="balance-falls", uncapped=uncapped)
+    payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+    checked = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    ).json()
+    assert checked["status"] == "succeeded", checked
+    _set_balance(harness, balance)
+
+    response = harness.client.post(
+        ROUTE,
+        json={
+            **payload,
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert response.status_code == status, response.text
+    assert harness.count(JobModel) == (status == 201)
+    if status == 402:
+        assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+
+
+def test_local_mode_submits_an_uncapped_run_at_any_balance(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept a local "no limit" run whose balance is below one lease, since local mode has no balance gate.
+
+    Args:
+        harness: Real submission routes and spending authority.
+        monkeypatch: Restores the real lease size and turns local mode on.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    monkeypatch.setattr(submissions.settings, "local_mode", True)
+    _set_balance(harness, 30)
+    response, payload = _uncapped_check(harness, _SUBSCRIPTION)
+    checked = response.json()
+    assert checked["status"] == "succeeded", checked
+
+    submitted = harness.client.post(
+        ROUTE,
+        json={
+            **payload,
+            "execution_budget_revision": checked["budget"]["revision"],
+            "preflight_id": checked["id"],
+            "preflight_fingerprint": checked["fingerprint"],
+        },
+    )
+
+    assert submitted.status_code == 201, submitted.text
+    assert harness.count(JobModel) == 1
+
+
 def test_attachment_rolls_back_job_when_budget_already_attached(harness: _Harness) -> None:
     """Reject a second root and roll its inserted job back in the attachment transaction.
 

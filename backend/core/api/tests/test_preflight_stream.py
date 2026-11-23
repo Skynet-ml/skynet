@@ -15,7 +15,11 @@ from core.api.routers import wizard_preflight
 
 
 def test_stream_preserves_phase_order_and_returns_one_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forward actual milestones and keep arbitrary guest output out of the public stream."""
+    """Forward actual milestones and keep arbitrary guest output out of the public stream.
+
+    Args:
+        monkeypatch: Stands in the paid setup check and the lease check.
+    """
     calls = []
 
     def run(request: Any, user: Any, store: Any) -> Any:
@@ -102,7 +106,12 @@ def test_stream_reports_admission_failure_without_success(monkeypatch: pytest.Mo
 
 
 def test_stream_logs_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Log the cause of a failure the stream shows only as a generic line."""
+    """Log the cause of a failure the stream shows only as a generic line.
+
+    Args:
+        monkeypatch: Stands in a failing setup check and the lease check.
+        caplog: Captures the logged cause.
+    """
 
     def crash(request: Any, user: Any, store: Any) -> Any:
         """Fail the check with an error the stream does not frame."""

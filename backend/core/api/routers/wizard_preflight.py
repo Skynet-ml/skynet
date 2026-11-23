@@ -40,7 +40,7 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
-from .execution_budgets import budget_http_error, require_funded_lease
+from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
 from .submissions import (
     _admit_byok_models,
     _materialize_repo_cases,
@@ -171,7 +171,9 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
 def _require_budget_lease(
     request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any, token_source: str
 ) -> None:
-    """Refuse a capped budget that cannot buy the run's first lease, as submit would.
+    """Refuse a budget that cannot buy the run's first lease, as submit would.
+
+    An uncapped budget has no limit floor, but its first lease still draws on the balance.
 
     Args:
         request: The check request, with its budget.
@@ -187,13 +189,14 @@ def _require_budget_lease(
         budget = BudgetService(engine=job_store.engine).get(request.execution_budget_id, user.username)
     except BudgetError as error:
         raise budget_http_error(error) from error
-    if budget.uncapped:
-        return
     # As at submit, local mode has no balance gate.
     spendable = (
         None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
     )
-    require_funded_lease(budget.total_cents, spendable, token_source)
+    if not budget.uncapped:
+        require_funded_lease(budget.total_cents, spendable, token_source)
+    elif spendable is not None:
+        require_one_lease(spendable, from_balance=True)
 
 
 def checked_preflight(

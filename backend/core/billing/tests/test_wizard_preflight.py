@@ -80,7 +80,15 @@ def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, object, list]]:
-    """Serve real evidence and ledger tables around one synthetic paid setup adapter."""
+    """Serve real evidence and ledger tables around one synthetic paid setup adapter.
+
+    Args:
+        tmp_path: Holds the SQLite database.
+        monkeypatch: Stands in the paid setup adapter and the app settings.
+
+    Yields:
+        The test client, the database engine, and the setup calls it records.
+    """
     engine = create_engine(f"sqlite:///{tmp_path / 'setup.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as session:
