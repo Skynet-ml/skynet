@@ -39,10 +39,12 @@ from vercel.sandbox import SandboxApiError
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
+from core.billing import model_mailbox
 from core.billing.budgets import BudgetError
 from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
+from core.billing.model_mailbox import mailbox_empty_command, root_empty_command
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError, image_build_usd
 from core.billing.protected_credentials import has_exposed_execution_credentials
@@ -6106,7 +6108,9 @@ def _listing(
 _TRUSTED_PROBE = _listing()
 _TOOLS_FOUND = f"{repo_staging._BOX_TOOLS_DONE}\n"
 _ROOT_KEPT = "0\nkept\n"
-_ALL_RUN_TOOLS = ", ".join(dict.fromkeys((*repo_staging._BOX_TOOLS["run"], *repo_staging._ROOT_TOOLS)))
+_ALL_RUN_TOOLS = ", ".join(
+    dict.fromkeys((*repo_staging._BOX_TOOLS["run"], *repo_staging._ROOT_TOOLS, *repo_staging._UPLOAD_PROGRAMS))
+)
 _WORKDIR_OK = f"/home/box\n{repo_staging._WORKDIR_DONE}\n"
 
 
@@ -6129,7 +6133,7 @@ class _CheckSession:
             probe: What the trusted interpreter probe prints.
             uid_probe: What the metric role's box uid probe prints.
             tools: What each role's box tools probe prints.
-            root: What the run role's root probe prints, ``None`` when sudo is missing, or the error it raises.
+            root: What each role's root probe prints, ``None`` when sudo is missing, or the error it raises.
             workdir: What the working folder probe prints.
         """
         self.ok = ok
@@ -6212,7 +6216,7 @@ class _ImageRuntime:
             probe: What the trusted interpreter probe prints in each check box.
             uid_probe: What the metric role's box uid probe prints.
             tools: What each role's box tools probe prints in each check box.
-            root: What the run role's root probe prints in each check box, ``None`` when sudo is missing,
+            root: What each role's root probe prints in each check box, ``None`` when sudo is missing,
                 or the error it raises.
             workdir: What the working folder probe prints in each check box.
         """
@@ -6325,12 +6329,14 @@ def test_a_dockerfile_builds_checks_and_scores_in_its_image(monkeypatch: pytest.
         [
             "ascent check --image --role metric",
             repo_staging._BOX_TOOLS_PROBE["metric"],
+            repo_staging._ROOT_PROBE,
             repo_staging._WORKDIR_PROBE,
             f"{shlex.quote(sys.executable)} -I -S -c {shlex.quote(repo_staging._BOX_UID_PROBE)}",
         ],
     ]
-    assert [check.sudo_commands for check in runtime.checks] == [[repo_staging._ROOT_PROBE], []]
+    assert [check.sudo_commands for check in runtime.checks] == [[repo_staging._ROOT_PROBE]] * 2
     assert runtime.checks[0].root_env == {repo_staging._ROOT_VARIABLE: "kept"}
+    assert runtime.checks[1].root_env is None
     checks = [spec for spec in runtime.specs if spec.operation_key.startswith("image-check:")]
     assert all(spec.network_disabled for spec in checks)
     assert [spec.private for spec in checks] == [False, True]
@@ -6893,6 +6899,8 @@ def test_a_run_image_with_no_passwd_line_for_the_box_user_is_refused(monkeypatch
     [
         (f"git\nsed\n{repo_staging._BOX_TOOLS_DONE}\n", "git, sed"),
         (f"tr\n{repo_staging._BOX_TOOLS_DONE}\n", "tr"),
+        # SKY-907: cat only in /usr/bin passes the PATH lookup, but every upload runs /bin/cat.
+        (f"/bin/cat\n{repo_staging._BOX_TOOLS_DONE}\n", "/bin/cat"),
         ("git\n", _ALL_RUN_TOOLS),
         ("", _ALL_RUN_TOOLS),
     ],
@@ -6980,6 +6988,292 @@ def test_a_run_image_that_cannot_run_a_root_command_is_refused(
             _prepare(staged, _ImageRuntime(root=root))
     finally:
         staged.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("root", "refused"), [("0\n\n", False), ("0\nextra\n", True), ("1000\n", True), ("", True), (None, True)]
+)
+def test_a_metric_image_that_cannot_run_a_root_command_is_refused(
+    monkeypatch: pytest.MonkeyPatch, root: str | None, refused: bool
+) -> None:
+    """A metric image with no working sudo stops the run at the image check, not at its first upload (SKY-907).
+
+    Every Vercel upload makes and removes its stage folder as root (SKY-902).
+    Those steps pass no variables, so a sudo that drops them still passes.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        root: What the metric box's root probe prints, or ``None`` when Vercel finds no sudo.
+        refused: Whether the check refuses the image.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    original = runtime.open
+
+    def open_box(spec: SandboxSpec) -> Any:
+        """Give only the metric check box the root probe output.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        session = original(spec)
+        if spec.operation_key.endswith(":metric"):
+            session.root = root
+        return session
+
+    runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        if refused:
+            with pytest.raises(
+                repo_staging.BoxImageError, match=r"^The \[metric\] image .* did not run a command as root"
+            ):
+                _prepare(staged, runtime)
+        else:
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert repo_staging._ROOT_PROBE in runtime.checks[1].sudo_commands
+
+
+@pytest.mark.parametrize(("code", "hinted"), [(127, True), (1, False)])
+def test_a_check_that_finds_no_program_names_the_upload_paths(
+    monkeypatch: pytest.MonkeyPatch, code: int, hinted: bool
+) -> None:
+    """A check that exits 127, as Vercel does with no /usr/bin/timeout, names the six upload paths (SKY-907).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        code: The exit code of ``ascent check``.
+        hinted: Whether the error names the upload paths.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    original = runtime.open
+
+    def open_box(spec: SandboxSpec) -> Any:
+        """Make the check command itself fail with ``code``.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        session = original(spec)
+        run = session.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Fail ``ascent check`` and run every other command as before.
+
+            Args:
+                command: The command.
+                **options: The run options.
+
+            Returns:
+                The result.
+            """
+            if command.startswith("ascent check"):
+                return CommandResult(exit_code=code, stdout="", stderr="no such file\n")
+            return run(command, **options)
+
+        session.run = failing
+        return session
+
+    runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=rf"exit code {code}") as raised:
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert ("/usr/bin/setpriv, /usr/bin/timeout, /bin/bash" in str(raised.value)) is hinted
+
+
+@pytest.mark.parametrize(
+    ("tools", "named"),
+    [
+        (CommandResult(exit_code=0, stdout=f"/usr/bin/timeout\n{repo_staging._BOX_TOOLS_DONE}\n"), "/usr/bin/timeout"),
+        (CommandResult(exit_code=127, stdout="", stderr="setpriv: failed to execute /bin/bash\n"), "/bin/bash"),
+        (None, None),
+    ],
+)
+def test_a_check_that_exits_127_names_the_missing_upload_program(
+    monkeypatch: pytest.MonkeyPatch, tools: CommandResult | None, named: str | None
+) -> None:
+    """A check that exits 127 names the upload program that the tools probe found missing (SKY-907).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+        tools: The tools probe result, or ``None`` to run the real probe.
+        named: The program the error names, or ``None`` for the generic hint.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    original = runtime.open
+    probe_options: list[dict[str, Any]] = []
+
+    def open_box(spec: SandboxSpec) -> Any:
+        """Fail ``ascent check`` with 127 and answer the tools probe with ``tools``.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        session = original(spec)
+        run = session.run
+
+        def failing(command: str, **options: Any) -> CommandResult:
+            """Fail ``ascent check``, fake the tools probe, and run every other command as before.
+
+            Args:
+                command: The command.
+                **options: The run options.
+
+            Returns:
+                The result.
+            """
+            if command.startswith("ascent check"):
+                return CommandResult(exit_code=127, stdout="", stderr="no such file\n")
+            if command in repo_staging._BOX_TOOLS_PROBE.values():
+                probe_options.append(options)
+                if tools is not None:
+                    return tools
+            return run(command, **options)
+
+        session.run = failing
+        return session
+
+    runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"exit code 127") as raised:
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    message = str(raised.value)
+    assert probe_options == [{}]
+    if named is None:
+        assert "The box found no program to run." in message
+    else:
+        assert f"The image has no {named}." in message
+        assert "found no program" not in message
+        assert "Also check that the image has `ascent`" in message
+    assert "/usr/bin/setpriv, /usr/bin/timeout, /bin/bash, /bin/cat, /bin/rm, /bin/mkdir" in message
+
+
+def test_a_check_that_vercel_refuses_names_the_upload_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that Vercel refuses, as it does with no /usr/bin/setpriv, names the six upload paths (SKY-907).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    _, staged = _stage_with(_BOX_TREE, monkeypatch)
+    runtime = _ImageRuntime()
+    original = runtime.open
+
+    def open_box(spec: SandboxSpec) -> Any:
+        """Make Vercel refuse the check command itself.
+
+        Args:
+            spec: The box spec.
+
+        Returns:
+            The session.
+        """
+        session = original(spec)
+        run = session.run
+
+        def refused(command: str, **options: Any) -> CommandResult:
+            """Refuse ``ascent check`` and run every other command as before.
+
+            Args:
+                command: The command.
+                **options: The run options.
+
+            Returns:
+                The result.
+
+            Raises:
+                SandboxApiError: Vercel's answer when the image has no setpriv.
+            """
+            if command.startswith("ascent check"):
+                raise SandboxApiError(
+                    httpx.Response(400), "setpriv: not found", data={"error": {"code": "executable_not_found"}}
+                )
+            return run(command, **options)
+
+        session.run = refused
+        return session
+
+    runtime.open = open_box  # type: ignore[method-assign]
+    try:
+        with pytest.raises(
+            repo_staging.BoxImageError, match=r"has no /usr/bin/setpriv, so the box could not start"
+        ) as raised:
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert "/usr/bin/setpriv, /usr/bin/timeout, /bin/bash" in str(raised.value)
+
+
+def test_a_missing_upload_program_is_named_before_the_trusted_python_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run image with no /bin/cat gets the error that names it, not the untrusted Python error (SKY-907).
+
+    The trusted Python probe also walks every root program, so a missing one fails that probe too.
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(
+        probe=_TRUSTED_PROBE.replace("file /bin/mkdir\n", ""), tools=f"/bin/mkdir\n{repo_staging._BOX_TOOLS_DONE}\n"
+    )
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"has no /bin/mkdir\. "):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize("role", ["run", "metric"])
+def test_the_box_tools_probe_names_the_upload_programs_that_this_host_cannot_run(role: str) -> None:
+    """The real probe names each upload path that is not an executable regular file here (SKY-907).
+
+    Args:
+        role: The role whose probe runs.
+    """
+    result = subprocess.run(
+        ["/bin/sh", "-c", repo_staging._BOX_TOOLS_PROBE[role]], capture_output=True, text=True, check=False
+    )
+    lines = result.stdout.splitlines()
+    assert result.returncode == 0
+    assert lines[-1] == repo_staging._BOX_TOOLS_DONE
+    expected = [
+        path for path in repo_staging._UPLOAD_PROGRAMS if not (Path(path).is_file() and os.access(path, os.X_OK))
+    ]
+    assert [line for line in lines if line in repo_staging._UPLOAD_PROGRAMS] == expected
+
+
+def test_the_box_tools_probe_names_a_missing_and_a_non_executable_upload_program(tmp_path: Path) -> None:
+    """The probe names an upload path that does not exist and one that it cannot run (SKY-907).
+
+    Args:
+        tmp_path: Scratch folder for the file with no execute bit.
+    """
+    plain = tmp_path / "rm"
+    plain.write_text("")
+    probe = repo_staging._BOX_TOOLS_PROBE["metric"].replace(" /bin/cat ", " /nonexistent/cat ")
+    probe = probe.replace(" /bin/rm ", f" {plain} ")
+    result = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True, check=False)
+    lines = result.stdout.splitlines()
+
+    assert "/nonexistent/cat" in lines
+    assert str(plain) in lines
+    assert lines[-1] == repo_staging._BOX_TOOLS_DONE
 
 
 @pytest.mark.parametrize(
@@ -7099,6 +7393,8 @@ def test_an_image_whose_working_folder_the_box_user_cannot_write_is_refused(
         _listing(programs={"/bin/bash": _walk("/bin/bash", modes={"/bin": "777 directory"})}),
         _listing(programs={"/bin/sh": _walk("/bin/sh", "755 directory")}),
         _TRUSTED_PROBE.replace("file /bin/mkdir\n", ""),
+        _TRUSTED_PROBE.replace("0 755 regular file /bin/rm", "1000 755 regular file /bin/rm"),
+        _TRUSTED_PROBE.replace("0 755 regular file /usr/bin/setpriv", "0 757 regular file /usr/bin/setpriv"),
         _listing(programs={"/tmp": _walk("/tmp", "777 directory")}),
         _listing(programs={"/tmp": _walk("/tmp", "1000 1777 directory")}),
         _listing(programs={"/tmp": _walk("/tmp", "777 symbolic link")}),
@@ -7108,6 +7404,7 @@ def test_an_image_whose_working_folder_the_box_user_cannot_write_is_refused(
         _listing(programs={"/etc/passwd": _walk("/etc/passwd", modes={"/etc": "1000 755 directory"})}),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "664 regular file")}),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "755 directory")}),
+        _listing(programs={"/usr/bin/find": _walk("/usr/bin/find", "1000 755 regular file")}),
         _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "777 directory")}),
         _listing(folders={"/usr/sbin": _walk("/usr/sbin", "1000 755 directory")}),
         _listing(folders={"/sbin": _walk("/sbin", modes={"/": "775 directory"})}),
@@ -7195,6 +7492,8 @@ def test_an_image_whose_working_folder_the_box_user_cannot_write_is_refused(
         "bash-under-a-writable-folder",
         "sh-is-a-folder",
         "no-mkdir-walk",
+        "box-owned-rm",
+        "world-writable-setpriv",
         "tmp-not-sticky",
         "user-owned-tmp",
         "tmp-is-a-link",
@@ -7204,6 +7503,7 @@ def test_an_image_whose_working_folder_the_box_user_cannot_write_is_refused(
         "passwd-in-a-user-owned-etc",
         "group-writable-nsswitch",
         "nsswitch-is-a-folder",
+        "box-owned-find",
         "writable-usr-local-sbin",
         "user-owned-usr-sbin",
         "sbin-under-a-writable-root",
@@ -7312,6 +7612,7 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         ),
         _listing(box=["env PATH", "env MALLOC_ARENA_MAX", *_ENTRIES]),
         _listing(programs={"/etc/nsswitch.conf": _walk("/etc/nsswitch.conf", "none")}),
+        _listing(programs={"/usr/bin/find": _walk("/usr/bin/find", "none")}),
         _listing(programs={"/etc/passwd": _walk("/etc/passwd", "644 regular file")}),
         _listing(folders={"/usr/local/sbin": _walk("/usr/local/sbin", "none")}),
         _listing(
@@ -7344,6 +7645,7 @@ def test_a_run_image_without_a_trusted_python_is_refused(monkeypatch: pytest.Mon
         "linked-top-folder",
         "plain-environment",
         "no-nsswitch",
+        "no-find",
         "read-only-passwd",
         "no-usr-local-sbin",
         "merged-usr-bin-link",
@@ -7421,6 +7723,57 @@ def test_a_run_image_with_root_variables_in_its_env_is_refused(
             _prepare(staged, runtime)
     finally:
         staged.cleanup()
+
+
+def test_the_upload_programs_cover_the_vercel_upload_paths() -> None:
+    """The box tools probe checks every program that a Vercel upload runs by path (SKY-907).
+
+    ``/bin/rmdir`` is left out, because the copy ignores its failure.
+    """
+    paths = set(re.findall(r"/(?:usr/)?bin/[a-z]+", vercel.UPLOAD_SCRIPT)) | {vercel.UNPRIVILEGED[0]}
+    assert paths - {"/bin/rmdir"} <= set(repo_staging._UPLOAD_PROGRAMS)
+
+
+def test_the_root_programs_cover_the_root_cleanup_and_wrapper_paths() -> None:
+    """The image check walks every program that a Vercel root cleanup or root wrapper runs by path (SKY-907)."""
+    wrapper = vercel._wrapper("/usr/bin/timeout --signal=KILL 1s /bin/bash -c true", "token", sudo=True)[0]
+    text = root_empty_command("x") + mailbox_empty_command("x") + wrapper
+    paths = set(re.findall(r"/(?:usr/)?s?bin/[\w.+-]*[\w+-]", text))
+    paths |= {vercel._bash(["true"], sudo=True)[0], vercel.UNPRIVILEGED[0]}
+    assert {"/usr/bin/timeout", "/bin/bash", "/bin/mkdir"} <= paths
+    assert paths <= {*repo_staging._ROOT_PROGRAMS, repo_staging._ROOT_FIND}
+
+
+def test_every_absolute_program_in_the_vercel_provider_is_checked() -> None:
+    """Each program path in the Vercel provider and the mailbox is in a checked list (SKY-907).
+
+    A new path fails here until it joins the root or upload programs. ``/bin/rmdir``
+    is left out, because the copy ignores its failure. The trusted Python has its own check.
+    """
+    text = Path(vercel.__file__).read_text() + Path(model_mailbox.__file__).read_text()
+    paths = set(re.findall(r"/(?:usr/)?(?:local/)?s?bin/[\w.+-]*[\w+-]", text))
+    known = {*repo_staging._ROOT_PROGRAMS, *repo_staging._UPLOAD_PROGRAMS, repo_staging._ROOT_FIND}
+    assert paths - {"/bin/rmdir", model_mailbox.ROOT_PYTHON} <= known
+
+
+def test_the_path_script_skips_a_dangling_optional_program(tmp_path: Path) -> None:
+    """The ELF scan skips a dangling ``/usr/bin/find``, which the walk takes as missing (SKY-907).
+
+    Args:
+        tmp_path: The folder that holds the dangling link.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    link = tmp_path / "find"
+    link.symlink_to(tmp_path / "gone")
+    script = repo_staging._PATH_SCRIPT.replace("'/usr/bin/find'", repr(str(link)))
+    assert script != repo_staging._PATH_SCRIPT
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert done.returncode == 0, done.stderr
 
 
 def test_the_probe_root_path_is_the_vercel_root_path() -> None:

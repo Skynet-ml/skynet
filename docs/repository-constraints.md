@@ -742,8 +742,12 @@ A minimal metric image:
 ```dockerfile
 # eval/box/Dockerfile
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir openascent==0.4.5 numpy==2.1.0
-RUN useradd --uid 1000 --create-home box
+RUN useradd --uid 1000 --create-home box \
+  && printf 'box ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/box \
+  && chmod 0440 /etc/sudoers.d/box
 USER 1000
 WORKDIR /home/box
 ```
@@ -771,8 +775,15 @@ must also find `tar`, `gzip`, `split`, `base64`, `cat`, `ls`, `rm`,
 `mkdir`, `find`, `xargs` and `touch` on its `PATH`. Skynet runs them to
 install and save the metric files. Both images also need `tail`, `head`, `base64` and `tr` in
 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, because a
-hosted run reads a command's output with them. `python:3.12-slim` has all
-of them.
+hosted run reads a command's output with them. Both images must also hold
+`/usr/bin/setpriv`, `/usr/bin/timeout`, `/bin/bash`, `/bin/cat`, `/bin/rm`
+and `/bin/mkdir` at these exact paths. A hosted run starts every box command
+and every file upload with them. `python:3.12-slim` has all of these tools.
+A `[metric]` image must also install `sudo` and give the box user a
+`NOPASSWD` rule for all commands, because the first and last steps of each
+file upload run as root. `python:3.12-slim` has no `sudo`. The image check
+refuses an image without the six paths on every runtime. A local Docker
+run does not use `sudo`, so only a hosted run proves the `sudo` rule.
 
 A `[run]` image needs other tools and more rules, because Skynet runs its
 own commands in the setup box and in each candidate box:
@@ -783,8 +794,9 @@ own commands in the setup box and in each candidate box:
   Skynet runs them to unpack, save and score each version, and to copy,
   start and stop its Compose services. `python:3.12-slim` has all
   of them except `git`.
-- Root must be able to run a command with the run's variables. On a hosted
-  run, Skynet starts its root commands through the image's `sudo`. Install
+- Root must be able to run a command with the run's variables, and to run
+  the first and last steps of each file upload. On a hosted run, Skynet
+  starts its root commands through the image's `sudo`. Install
   `sudo`, give the box user a `NOPASSWD` rule for all commands, turn off
   `env_reset`, turn on `always_set_home` so that root does not use the box
   user's home, and set `secure_path` to
