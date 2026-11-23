@@ -40,7 +40,7 @@ from ..billing.budgets import BudgetService
 from ..billing.byok_upstreams import resolve_upstream
 from ..billing.data_policy import DEFAULT_DATA_POLICY, DataPolicy, apply_data_policy
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
-from ..billing.model_dispatch import data_policy_refusal, usage_charge
+from ..billing.model_dispatch import data_policy_refusal, response_usage, usage_charge
 from ..billing.openrouter_quotes import fetch_endpoint_prices, price_text_request, resolve_model_slug
 from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from ..config import settings
@@ -93,7 +93,8 @@ _PACK_SECONDS = 300
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_TIMEOUT_SECONDS = 600.0
 # A rate limit (429) or a busy service (503) refuses the call before the model runs, and often clears in seconds, so
-# a model call tries again on these answers. A 502 or 504 can come after the model ran and the provider billed it,
+# a model call tries again on these answers, unless the body names a generation or reports usage: the model dispatch
+# counts such an answer as billed (see model_dispatch's ``refused``). A 502 or 504 can come after the model ran and the provider billed it,
 # and the lease pays one reply only once, so these answers are final, as all other error answers are.
 _MODEL_RETRY_STATUSES = frozenset({429, 503})
 # These errors come before the request reaches the provider, so the provider cannot bill the try. A read, write or
@@ -102,9 +103,10 @@ _MODEL_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeo
 _MODEL_RETRIES = 3
 _MODEL_BACKOFF_SECONDS = 2.0
 _MODEL_RETRY_AFTER_CAP_SECONDS = 60.0
-# No new try starts after this time from the first one. With one try's timeout, a call then stays far below the
-# watchdog's job_stall_timeout_seconds (1800 s).
-_MODEL_RETRY_WINDOW_SECONDS = 300.0
+# The worker forwards no log of this module, so nothing resets the stall watchdog during a model step. A new try
+# starts only when it can end, at its full timeout, within this fraction of job_stall_timeout_seconds. The rest of the
+# window is for the price read before the first try.
+_MODEL_RETRY_STALL_FRACTION = 0.5
 _PROVIDER_MESSAGE_CHARS = 200
 # Tests replace these, so a retry test does not wait.
 _sleep = time.sleep
@@ -202,7 +204,8 @@ class LeaseModelClient:
             self._client.close()
 
     def __call__(self, prompt: Prompt, tools: list[ToolDefinition] | None) -> ModelReply:
-        """Call the model, and try a managed or custom endpoint call again after a rate limit or gateway error.
+        """Call the model, and try a managed or custom endpoint call again after a rate limit (429), a busy service
+        (503) or a connection error.
 
         Args:
             prompt: The prompt text, or the chat messages.
@@ -315,7 +318,8 @@ class LeaseModelClient:
         """Post one model call, and try it again after an answer that a short wait can clear.
 
         Only an answer that refuses the call before the model runs, or an error before the request reaches the
-        provider, leads to a new try, so a new try never follows a call that the provider billed. The loop saves
+        provider, leads to a new try, so a new try never follows a call that the provider billed. A new try starts
+        only when it can end, at its full timeout, within a fraction of the stall watchdog's window. The loop saves
         the call's step only after this returns, so a resume does not replay a failure that a new try clears.
 
         Args:
@@ -338,10 +342,10 @@ class LeaseModelClient:
             except httpx.HTTPError as error:
                 raise self._failed(error) from error
             else:
-                if answer.status_code not in _MODEL_RETRY_STATUSES:
+                if answer.status_code not in _MODEL_RETRY_STATUSES or _maybe_billed(answer):
                     return answer
             wait = _retry_wait(answer, attempt)
-            if attempt == _MODEL_RETRIES or _clock() - started + wait > _MODEL_RETRY_WINDOW_SECONDS:
+            if attempt == _MODEL_RETRIES or _clock() - started + wait + MODEL_TIMEOUT_SECONDS > _retry_deadline():
                 break
             reason = f"HTTP {answer.status_code}" if answer is not None else type(failure).__name__
             logger.warning("The model call failed with %s; try %d again in %.1f s.", reason, attempt + 2, wait)
@@ -372,6 +376,29 @@ class LeaseModelClient:
         return ServiceError(text)
 
 
+def _maybe_billed(answer: httpx.Response) -> bool:
+    """Tell whether an error answer can follow a billed call, by the model dispatch's rule.
+
+    Args:
+        answer: The provider's answer.
+
+    Returns:
+        ``True`` when the body names a generation or reports usage.
+    """
+    identity, usage = response_usage(answer.content, answer.headers.get("content-type", ""))
+    return identity is not None or usage is not None
+
+
+def _retry_deadline() -> float:
+    """Return the time from a call's first try by which its last try must end.
+
+    Returns:
+        A fraction of ``job_stall_timeout_seconds``, or no limit when the stall watchdog is off.
+    """
+    stall = settings.job_stall_timeout_seconds
+    return stall * _MODEL_RETRY_STALL_FRACTION if stall > 0 else float("inf")
+
+
 def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
     """Return the wait before the next try of a model call.
 
@@ -392,9 +419,10 @@ def _retry_wait(answer: httpx.Response | None, attempt: int) -> float:
 
 
 def provider_message(body: bytes, secret: str) -> str:
-    """Return the provider's ``error.message`` from an error answer, short, on one line and with no credential.
+    """Return the provider's error message from an error answer, short, on one line and with no credential.
 
-    Only this field is read: other body text can echo the request, which holds the prompt.
+    Only ``error.message``, or ``error`` when it is a string, is read: other body text can echo the request, which
+    holds the prompt.
 
     Args:
         body: The provider's error answer body.
@@ -407,7 +435,7 @@ def provider_message(body: bytes, secret: str) -> str:
         error = json.loads(body).get("error")
     except (ValueError, AttributeError):
         return ""
-    message = error.get("message") if isinstance(error, dict) else None
+    message = error.get("message") if isinstance(error, dict) else error
     if not isinstance(message, str):
         return ""
     if secret:

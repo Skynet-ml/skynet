@@ -997,10 +997,18 @@ def test_a_billed_reply_that_cannot_be_read_gives_its_cost() -> None:
     assert raised.value.cost_cents > 0
 
 
-def test_a_provider_error_fails_the_call_with_no_provider_text() -> None:
-    """The provider's error text can hold request data, so the error names only its type and status."""
-    with pytest.raises(ServiceError, match=r"^The model call failed: HTTPStatusError \(HTTP 500\)$"):
+def test_a_body_with_no_json_error_message_adds_no_provider_text() -> None:
+    """Only a JSON ``error.message`` gives provider text, so a plain body leaves the error with its type and status."""
+    with pytest.raises(ServiceError, match=r"^The model call failed: HTTPStatusError \(HTTP 500\)$") as raised:
         _managed_client(lambda request: httpx.Response(500, text=f"key {_FAKE_KEY}"))("hello", None)
+    assert _FAKE_KEY not in str(raised.value)
+
+
+def test_a_string_error_body_gives_the_provider_text_with_no_key() -> None:
+    """Some providers send ``{"error": "<text>"}``, so that string is the provider's message, with no key."""
+    body = json.dumps({"error": f"Too  many\nrequests for {_FAKE_KEY}"}).encode()
+
+    assert loop_host.provider_message(body, _FAKE_KEY) == "Too many requests for [key]"
 
 
 def _waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -1232,14 +1240,65 @@ def test_a_failed_call_logs_the_provider_reason(
     assert _FAKE_KEY not in caplog.text
 
 
-def test_no_new_try_starts_after_the_retry_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Slow tries stop the retries early, so the call stays far below the stall timeout.
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow"), httpx.PoolTimeout("full")],
+    ids=["connect", "connect-timeout", "pool-timeout"],
+)
+def test_a_call_with_no_answer_on_every_try_fails(error: httpx.HTTPError, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the last try with no answer the call fails with the error's type, and makes no extra request.
+
+    Args:
+        error: The transport error before the request reached the provider.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(*[error for _ in range(loop_host._MODEL_RETRIES + 1)])
+
+    with pytest.raises(ServiceError, match=rf"^The model call failed: {type(error).__name__}$"):
+        _managed_client(provider)("hello", None)
+
+    assert len(requests) == loop_host._MODEL_RETRIES + 1
+    assert waits == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"id": "gen-123", "error": {"message": "overloaded"}},
+        {"error": {"message": "overloaded"}, "usage": {"prompt_tokens": 10, "cost": 0.001}},
+    ],
+    ids=["generation-id", "usage"],
+)
+def test_a_retryable_status_whose_body_shows_a_bill_is_not_tried_again(
+    body: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 429 or 503 that names a generation or reports usage can follow a billed call, so it gets no new try.
+
+    Args:
+        body: The provider's answer body.
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    provider, requests = _answers(httpx.Response(503, json=body), _reply(cast(httpx.Request, None)))
+
+    with pytest.raises(ServiceError, match=r"\(HTTP 503\): overloaded$"):
+        _managed_client(provider)("hello", None)
+
+    assert (len(requests), waits) == (1, [])
+
+
+def test_no_new_try_starts_that_could_end_after_the_stall_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new try starts only when it can end, at its full timeout, within a fraction of the stall timeout.
 
     Args:
         monkeypatch: The test's patcher.
     """
     waits = _waits(monkeypatch)
-    ticks = iter([0.0, 10.0, loop_host._MODEL_RETRY_WINDOW_SECONDS])
+    monkeypatch.setattr(loop_host.settings, "job_stall_timeout_seconds", 1800.0)
+    deadline = 1800.0 * loop_host._MODEL_RETRY_STALL_FRACTION
+    # At the second check, a try after the 4 s wait could end 1 s after the deadline.
+    ticks = iter([0.0, 10.0, deadline - loop_host.MODEL_TIMEOUT_SECONDS - 3.0])
     monkeypatch.setattr(loop_host, "_clock", lambda: next(ticks))
     provider, requests = _answers(*[_rate_limited() for _ in range(loop_host._MODEL_RETRIES + 1)])
 
@@ -1247,6 +1306,21 @@ def test_no_new_try_starts_after_the_retry_window(monkeypatch: pytest.MonkeyPatc
         _managed_client(provider)("hello", None)
 
     assert (len(requests), waits) == (2, [2.0])
+
+
+def test_a_call_with_the_stall_watchdog_off_has_no_retry_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the watchdog off, only the try count stops the retries, even after a long time.
+
+    Args:
+        monkeypatch: The test's patcher.
+    """
+    waits = _waits(monkeypatch)
+    monkeypatch.setattr(loop_host.settings, "job_stall_timeout_seconds", 0.0)
+    monkeypatch.setattr(loop_host, "_clock", iter([0.0, 5000.0, 10000.0, 15000.0]).__next__)
+    provider, requests = _answers(_rate_limited(), _rate_limited(), _rate_limited(), _reply(cast(httpx.Request, None)))
+
+    assert _managed_client(provider)("hello", None).text == "hi"
+    assert (len(requests), waits) == (4, [2.0, 4.0, 8.0])
 
 
 @pytest.mark.parametrize(
@@ -1403,7 +1477,7 @@ def test_a_custom_byok_call_goes_to_the_checked_address(monkeypatch: pytest.Monk
     }
 
 
-def test_a_custom_byok_call_tries_again_after_a_gateway_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_custom_byok_call_tries_again_after_a_busy_service_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The user's own endpoint gets the same retries as OpenRouter (SKY-924).
 
     Args:
