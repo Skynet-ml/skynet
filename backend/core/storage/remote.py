@@ -2418,6 +2418,31 @@ class RemoteDBJobStore:
         finally:
             session.close()
 
+    def start_image_build(self, username: str, input_hash: str, *, builder: str, codebuild_id: str) -> str:
+        """Store a build of a user's Dockerfile that CodeBuild started, with no result yet (SKY-896).
+
+        Account deletion stops the build by its id when the worker dies before it records the result.
+
+        Args:
+            username: The run's owner.
+            input_hash: The ``sha256:`` hash of the build inputs.
+            builder: The builder kind, for example ``codebuild``.
+            codebuild_id: The CodeBuild build id.
+
+        Returns:
+            The row id, which :meth:`save_image_build` takes to record the result.
+        """
+        session = self._get_session()
+        try:
+            row = ImageBuildModel(
+                username=username, input_hash=input_hash, builder=builder, log="", codebuild_id=codebuild_id
+            )
+            session.add(row)
+            session.commit()
+            return str(row.id)
+        finally:
+            session.close()
+
     def save_image_build(
         self,
         username: str,
@@ -2427,6 +2452,7 @@ class RemoteDBJobStore:
         image: str | None,
         size_bytes: int | None,
         log: str,
+        row_id: str | None = None,
     ) -> str:
         """Store one build of a user's Dockerfile and its full log.
 
@@ -2437,21 +2463,24 @@ class RemoteDBJobStore:
             image: The pinned image, or None for a failed build.
             size_bytes: The image size, or None for a failed build.
             log: The full build log.
+            row_id: The row of :meth:`start_image_build` to complete, or None for a new row.
+                A built image clears the row's CodeBuild id; a failed build keeps it.
 
         Returns:
             The row id, which the run record names as the build log reference.
         """
         session = self._get_session()
         try:
-            row = ImageBuildModel(
-                username=username,
-                input_hash=input_hash,
-                builder=builder,
-                image=image,
-                size_bytes=size_bytes,
-                log=log,
-            )
-            session.add(row)
+            row = session.get(ImageBuildModel, row_id) if row_id is not None else None
+            if row is None:
+                row = ImageBuildModel(username=username, input_hash=input_hash, builder=builder)
+                session.add(row)
+            row.image = image
+            row.size_bytes = size_bytes
+            row.log = log
+            # A failure can come from a wait that ended before CodeBuild did, so keep the id to stop it.
+            if image is not None:
+                row.codebuild_id = None
             session.commit()
             return str(row.id)
         finally:

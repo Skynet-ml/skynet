@@ -512,10 +512,14 @@ class ImageBuildModel(Base):
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     input_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     builder: Mapped[str] = mapped_column(String(32), nullable=False)
-    # Null for a failed build, which keeps only its log.
+    # Null until the build succeeds: a started, failed or cancelled build keeps only its log.
     image: Mapped[str | None] = mapped_column(String(512), nullable=True)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     log: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # The CodeBuild build id while the build may still run, so account deletion can stop a build whose
+    # worker was hard-killed (SKY-896). Only a built image clears it: a failed wait (a timeout or a lost
+    # status read) can end before CodeBuild does.
+    codebuild_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

@@ -576,6 +576,57 @@ def test_find_image_build_ignores_only_failed_builds(store: SQLiteJobStore) -> N
     assert store.find_image_build("alice", "sha256:in") is None
 
 
+def test_a_started_build_keeps_its_codebuild_id_until_the_result_is_saved(store: SQLiteJobStore) -> None:
+    """A started build is not reusable and holds its CodeBuild id; the result completes the same row (SKY-896).
+
+    Args:
+        store: Disposable job store.
+    """
+    row_id = store.start_image_build("alice", "sha256:in", builder="codebuild", codebuild_id="images:1")
+
+    assert store.find_image_build("alice", "sha256:in") is None
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, row_id)
+        assert row is not None
+        assert (row.image, row.log, row.codebuild_id) == (None, "", "images:1")
+    finally:
+        session.close()
+
+    saved_id = store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image="img", size_bytes=7, log="ok", row_id=row_id
+    )
+
+    assert saved_id == row_id
+    session = store._get_session()
+    try:
+        rows = session.query(ImageBuildModel).all()
+        assert [(r.id, r.image, r.size_bytes, r.log, r.codebuild_id) for r in rows] == [(row_id, "img", 7, "ok", None)]
+    finally:
+        session.close()
+
+
+def test_a_failed_build_keeps_its_codebuild_id(store: SQLiteJobStore) -> None:
+    """A failure can come from a wait that ended before CodeBuild did, so its row keeps the id (SKY-896).
+
+    Args:
+        store: Disposable job store.
+    """
+    row_id = store.start_image_build("alice", "sha256:in", builder="codebuild", codebuild_id="images:1")
+
+    store.save_image_build(
+        "alice", "sha256:in", builder="codebuild", image=None, size_bytes=None, log="timed out", row_id=row_id
+    )
+
+    session = store._get_session()
+    try:
+        row = session.get(ImageBuildModel, row_id)
+        assert row is not None
+        assert (row.image, row.log, row.codebuild_id) == (None, "timed out", "images:1")
+    finally:
+        session.close()
+
+
 def test_get_jobs_status_by_ids_returns_map(store: SQLiteJobStore) -> None:
     """Get jobs status by ids returns map.
 

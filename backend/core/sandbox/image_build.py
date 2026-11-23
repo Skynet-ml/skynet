@@ -31,7 +31,7 @@ import time
 import uuid
 import zipfile
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, NoReturn, Protocol
@@ -46,8 +46,10 @@ except ImportError:
     boto3 = None
 
 try:
+    from botocore.config import Config as BotoConfig
     from botocore.exceptions import BotoCoreError, ClientError
 except ImportError:
+    BotoConfig = None
     BotoCoreError = None
     ClientError = None
 
@@ -69,6 +71,7 @@ _MIN_TIMEOUT_MINUTES = 5
 MAX_TIMEOUT_MINUTES = 480
 _QUEUE_TIMEOUT_MINUTES = 60
 _QUEUED_PHASES = frozenset({"SUBMITTED", "QUEUED"})
+_BATCH_GET_BUILDS_LIMIT = 100
 # StopBuild only starts the stop, so a cancel waits this long for the build to end.
 _STOP_WAIT_SECONDS = 300.0
 # CloudWatch can deliver the last log events a few seconds after the build ends.
@@ -207,12 +210,19 @@ class BuildResult:
 class ImageBuilder(Protocol):
     """Build a Dockerfile with its build context into an image."""
 
-    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
+    def build(
+        self,
+        request: BuildRequest,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        on_start: Callable[[str], None] | None = None,
+    ) -> BuildResult:
         """Build the image that the request describes.
 
         Args:
             request: The Dockerfile, the build context and the build args.
             cancelled: Tells whether the run was cancelled, so the builder stops the build.
+            on_start: Takes the provider's build id when a remote build starts, so it can be stopped later.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -765,7 +775,13 @@ class CodeBuildImageBuilder:
         self._sleep = sleep
         self._clock = clock
 
-    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
+    def build(
+        self,
+        request: BuildRequest,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        on_start: Callable[[str], None] | None = None,
+    ) -> BuildResult:
         """Build the image on CodeBuild and push it to the owner's repository.
 
         Args:
@@ -773,6 +789,8 @@ class CodeBuildImageBuilder:
             cancelled: Tells whether the run was cancelled. The builder calls
                 it before the upload, before the build starts and on each
                 status poll. A true answer stops the build before it pushes.
+            on_start: Takes the CodeBuild build id right after the start. When
+                it fails, the builder stops the build.
 
         Returns:
             The pinned image, its digest and size, the input hash and the log.
@@ -835,6 +853,8 @@ class CodeBuildImageBuilder:
         # A build the worker cannot follow must not run on and push, so every
         # failure here stops it. _wait stops the build before its own errors.
         try:
+            if on_start is not None:
+                on_start(build_id)
             build = self._wait(build_id, cancelled)
             log = self._read_log(build, settle=True)
         except ImageBuildError:
@@ -1091,6 +1111,72 @@ def codebuild_builder(registry: EcrRegistry | None, config: Any = settings) -> C
     )
 
 
+def codebuild_client(region: str | None) -> Any:
+    """Return a CodeBuild client with this process's AWS credentials (SKY-896).
+
+    Args:
+        region: The AWS Region of the builds, or ``None`` for the default Region.
+
+    Returns:
+        A boto3 CodeBuild client.
+
+    Raises:
+        ImageBuildError: boto3 is missing.
+    """
+    if boto3 is None:
+        raise ImageBuildError("the CodeBuild image builder needs boto3")
+    # Account deletion calls CodeBuild while it holds the account's row locks, so a slow
+    # answer must fail fast instead of holding them for botocore's default 60 s per try. A
+    # deletion makes one read plus up to two calls for each running build.
+    config = BotoConfig(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1}) if BotoConfig else None
+    return boto3.client("codebuild", region_name=region, config=config)
+
+
+def stop_unfinished_builds(codebuild: Any, build_ids: Sequence[str]) -> bool:
+    """Stop each build that is not complete, and tell whether every build is complete (SKY-896).
+
+    StopBuild only starts the stop, so a build that this call stops is not
+    complete yet. A build that CodeBuild does not know is complete. A build
+    can end between the read and the stop, so a failed stop reads the build
+    again. A build that still runs after a refused stop
+    (``InvalidInputException``) is already stopping, from an earlier try, so
+    it is not complete. Any other failed stop of a running build raises.
+
+    Args:
+        codebuild: A boto3 CodeBuild client.
+        build_ids: The CodeBuild build ids.
+
+    Returns:
+        Whether CodeBuild reports every build as complete.
+
+    Raises:
+        ImageBuildError: A CodeBuild read or stop failed.
+    """
+    complete = True
+    try:
+        for start in range(0, len(build_ids), _BATCH_GET_BUILDS_LIMIT):
+            batch = list(build_ids[start : start + _BATCH_GET_BUILDS_LIMIT])
+            for build in codebuild.batch_get_builds(ids=batch).get("builds") or []:
+                if build.get("buildComplete"):
+                    continue
+                try:
+                    codebuild.stop_build(id=build["id"])
+                except _AWS_ERRORS as error:
+                    try:
+                        again = codebuild.batch_get_builds(ids=[build["id"]]).get("builds") or []
+                    except _AWS_ERRORS:
+                        # Report the stop's error: it is the cause, the failed read only hides it.
+                        raise error from None
+                    if not again or again[0].get("buildComplete"):
+                        continue
+                    if _aws_error(error) != "InvalidInputException":
+                        raise
+                complete = False
+    except _AWS_ERRORS as exc:
+        raise ImageBuildError(f"cannot stop the image builds ({_aws_error(exc)})") from exc
+    return complete
+
+
 def _raise_if_cancelled_before_start(cancelled: Callable[[], bool] | None) -> None:
     """Stop a build whose run was cancelled before CodeBuild started it (SKY-891).
 
@@ -1202,13 +1288,20 @@ class LocalDockerImageBuilder:
         self._limits = limits or BuildLimits.from_settings()
         self._platform = platform
 
-    def build(self, request: BuildRequest, *, cancelled: Callable[[], bool] | None = None) -> BuildResult:
+    def build(
+        self,
+        request: BuildRequest,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        on_start: Callable[[str], None] | None = None,
+    ) -> BuildResult:
         """Build the image with ``docker build``.
 
         Args:
             request: The Dockerfile, the build context and the build args.
             cancelled: Not used: a local build pushes to no registry, so a
                 cancel does not need to stop it.
+            on_start: Not used: a local build ends with the worker.
 
         Returns:
             The local image id, its size, the input hash and the log.

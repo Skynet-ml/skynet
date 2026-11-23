@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...sandbox.image_build import ImageBuildError
 from ...sandbox.image_registry import ImageRegistryError
 from ...service_gateway.agents.attachment_sandbox import stop_chat_runner
 from ...storage.models import AgentConversationModel, UserModel
@@ -129,7 +130,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 deployment has a user image registry and one of the account's
                 runs is not finished, or a worker still holds a live lease on
                 it, because its build could push after the repository delete
-                (SKY-891). Nothing is deleted.
+                (SKY-891). Also while CodeBuild does not report one of the
+                account's image builds as complete; the deletion stops each
+                such build first (SKY-896). Nothing is deleted.
             DomainError: 503 (``accounts.deletion_storage_unavailable``) when
                 the account has tree packs to delete and ``SKYNET_TREE_BUCKET``
                 is not set or the bucket client cannot be built (for example,
@@ -141,8 +144,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 registry refuses to delete the account's repository, or its
                 settings are set but not usable (SKY-891). Also when Vercel
                 refuses to delete the account's image copies, or does not
-                answer (SKY-895). The main database rows stay, so the account
-                is not deleted.
+                answer (SKY-895). Also when a CodeBuild read or stop of the
+                account's image builds fails (SKY-896). The main database rows
+                stay, so the account is not deleted.
         """
         with Session(job_store.engine) as session:
             # delete_account locks this row after it deletes passkeys. Locking
@@ -162,6 +166,9 @@ def create_account_data_router(*, job_store) -> APIRouter:
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
             except ImageRegistryError as exc:
                 logger.exception("Account deletion stopped: the user images of the account were not deleted")
+                raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
+            except ImageBuildError as exc:
+                logger.exception("Account deletion stopped: the image builds of the account were not stopped")
                 raise DomainError("accounts.deletion_storage_unavailable", status=503) from exc
             session.commit()
         # A deleted account's chats must not keep a paid sandbox or a Mac workspace with its files.

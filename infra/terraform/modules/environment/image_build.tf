@@ -426,6 +426,15 @@ data "aws_iam_policy_document" "image_build_backend" {
     actions   = ["ecr:DeleteRepository"]
     resources = [local.user_images_arn]
   }
+
+  # A hard-killed worker cannot stop its build, so the deletion stops each
+  # build of the account that is not complete before the repository delete
+  # (SKY-896).
+  statement {
+    sid       = "StopOrphanImageBuilds"
+    actions   = ["codebuild:BatchGetBuilds", "codebuild:StopBuild"]
+    resources = [aws_codebuild_project.image_build.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "image_build_backend" {

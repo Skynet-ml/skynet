@@ -1269,12 +1269,13 @@ def test_a_cancel_during_the_image_build_stops_the_build_and_keeps_the_run_cance
     class _CancelledMidBuild(_LocalBuilder):
         """Take the user's cancel while the build runs."""
 
-        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+        def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> Any:
             """Cancel the run, then build as the fake does.
 
             Args:
                 request: The build request.
                 cancelled: The engine's cancel check.
+                on_start: Not used: the fake starts no remote build.
 
             Returns:
                 What the fake builder returns.
@@ -1323,12 +1324,13 @@ def test_a_cancel_stored_by_another_pod_stops_the_image_build(
     class _CancelledByPeer(_LocalBuilder):
         """Take a cancel that another pod stored while the build runs."""
 
-        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+        def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> Any:
             """Store the cancel, then build as the fake does.
 
             Args:
                 request: The build request.
                 cancelled: The engine's cancel check.
+                on_start: Not used: the fake starts no remote build.
 
             Returns:
                 What the fake builder returns.
@@ -1367,12 +1369,13 @@ def test_a_worker_shutdown_during_the_image_build_releases_the_run_for_a_restart
     class _StoppedByShutdown(_LocalBuilder):
         """Take a worker shutdown while the build runs."""
 
-        def build(self, request: Any, *, cancelled: Any = None) -> Any:
+        def build(self, request: Any, *, cancelled: Any = None, on_start: Any = None) -> Any:
             """Stop the worker, then build as the fake does.
 
             Args:
                 request: The build request.
                 cancelled: The engine's cancel check.
+                on_start: Not used: the fake starts no remote build.
 
             Returns:
                 What the fake builder returns.
