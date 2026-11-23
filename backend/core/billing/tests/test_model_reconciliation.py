@@ -17,7 +17,7 @@ from core.billing.budgets import BudgetConflictError
 from core.billing.model_dispatch import GenerationNotFoundError, OpenRouterDispatcher, generation_charge
 from core.billing.model_reconciliation import OpenRouterUsageReconciler, UnsettleableUsageError
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy, json_fingerprint
+from core.billing.operation_pricing import ChargePolicy, json_fingerprint, operation_quote
 from core.billing.runtime import BudgetRuntime, PaidResult, UsagePendingError
 from core.billing.tests.test_protected_dispatch import CATALOG, REQUEST, _runtime
 from core.billing.tests.test_protected_dispatch import database as _database_fixture
@@ -563,12 +563,36 @@ def test_execute_logs_why_a_held_model_call_has_no_request_id(
     with Session(database) as session:
         operation_id = session.scalar(select(ExecutionOperationModel.id))
     [record] = [record for record in caplog.records if "no provider request id" in record.getMessage()]
+    assert record.levelno == logging.WARNING
     message = record.getMessage()
     assert operation_id in message
     assert reason in message
     assert "role=task" in message
     assert "hello" not in message
     assert "secret" not in message
+
+
+def test_execute_logs_a_missing_request_id_at_debug_off_openrouter(database, caplog: pytest.LogCaptureFixture) -> None:
+    """Keep the missing request id of a route that never names its generations at debug (SKY-923).
+
+    Args:
+        database: Ledger database.
+        caplog: Captures the log lines.
+    """
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model", byok_fee_fraction=Decimal("0.05"))
+    quote = operation_quote(REQUEST, Decimal(0), policy, {"provider": "anthropic", "model": "claude"})
+    caplog.set_level(logging.DEBUG, logger="core.billing.runtime")
+    with pytest.raises(UsagePendingError):
+        runtime.execute(
+            quote,
+            policy,
+            lambda: PaidResult(None, None, {"provider": "anthropic", "status": 200, "interrupted": False}),
+            operation_key="byok-no-id",
+            cost_kind="model",
+        )
+    [record] = [record for record in caplog.records if "no provider request id" in record.getMessage()]
+    assert record.levelno == logging.DEBUG
 
 
 def test_execute_does_not_log_a_held_model_call_with_a_request_id(database, caplog: pytest.LogCaptureFixture) -> None:

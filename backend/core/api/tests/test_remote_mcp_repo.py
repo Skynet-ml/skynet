@@ -1256,6 +1256,29 @@ def test_judge_opens_one_session_and_scores_in_it(judge: Any) -> None:
     )
 
 
+def test_judge_session_minimum_skips_the_lease_floor(judge: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a judge session's minimum at one call and the final score when the floor is below one lease (SKY-923).
+
+    A judge session charges each scored call directly and takes no lease,
+    so the run's one-lease floor does not apply to it.
+
+    Args:
+        judge: MCP client, database engine and the recorded opens and calls.
+        monkeypatch: Sets a floor below one lease and turns local mode off.
+    """
+    client, _engine, record = judge
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(remote_mcp_repo, "repo_floor_cents", lambda spec, http_client: (30, []))
+    draft_id = _complete_draft(client)
+
+    refused = json.loads(_error_text(_judge(client, draft_id, max_cost_cents=59)))
+    scored = _payload(_judge(client, draft_id, max_cost_cents=60))
+
+    assert refused["min_max_cost_cents"] == 60
+    assert scored["status"] == "scored"
+    assert record["opens"][0]["floor_cents"] == 30
+
+
 def test_judge_refuses_a_short_commit_sha(judge: Any) -> None:
     """Refuse an abbreviated commit SHA, which git cannot fetch, before any session or call."""
     client, _engine, record = judge

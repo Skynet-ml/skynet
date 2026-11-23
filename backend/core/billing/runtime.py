@@ -539,7 +539,10 @@ class BudgetRuntime:
                     if cost_kind == "model" and (result is None or not result.provider_request_id):
                         # Without a request id no lookup can confirm the bill, so the sweep releases the hold at
                         # no charge after one minute (SKY-914). The reason shows which path loses the bill.
-                        logger.warning(
+                        # Only OpenRouter names each generation; another route never does, so its missing id
+                        # is normal and stays at debug (SKY-923).
+                        logger.log(
+                            logging.WARNING if quote.price_snapshot.get("provider") == "openrouter" else logging.DEBUG,
                             "Model operation %s is held with no provider request id: %s "
                             "(role=%s, state=%s, interrupted=%s, status=%s).",
                             operation.id,

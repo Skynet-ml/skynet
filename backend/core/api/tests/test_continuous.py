@@ -1831,6 +1831,35 @@ def test_failing_checks_in_a_row_pause_the_plan_until_resumed(env: _Env) -> None
     assert resumed["next_check_at"] is not None
 
 
+def test_an_old_plan_with_a_run_budget_below_one_lease_stops_after_a_streak(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan enabled before the lease floor fails each check for free, then pauses as failing (SKY-923).
+
+    Args:
+        env: Test environment.
+        monkeypatch: Restores the real lease size after the plan is enabled, as for a plan made before the floor.
+    """
+    source_id = _incumbent(env)
+    _enable(env, source_id, schedule=DAILY)
+    assert CYCLE_BUDGET < budgets.CHUNK_CENTS
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    env.better()
+    jobs, run_budgets = env.count(JobModel), env.count(ExecutionBudgetModel)
+    for _ in range(continuous.FAILURE_STREAK):
+        env.sweep(_due(env))
+
+    current = env.plan()
+    cycles = env.cycles()
+    assert (current.status, current.pause_reason, current.next_check_at) == ("paused", "failing", None)
+    assert [(c.status, c.detail_code) for c in cycles] == [
+        ("failed", "continuous.run_rejected")
+    ] * continuous.FAILURE_STREAK
+    assert all("below the minimum" in c.detail_params["reason"] for c in cycles)
+    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, run_budgets)
+    assert env.sweep(datetime.now(UTC) + timedelta(days=30)) == []
+
+
 def test_a_waiting_check_is_reported_as_busy(env: _Env) -> None:
     """A check behind another check still running says it is busy, not waiting for a review."""
     source_id = _incumbent(env)

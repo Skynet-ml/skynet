@@ -813,6 +813,48 @@ def test_the_wizard_check_refuses_a_budget_below_one_lease_before_paid_setup(
     assert harness.count(WizardPreflightModel) == 0
 
 
+def test_the_wizard_check_refuses_a_byok_run_whose_balance_is_below_one_lease(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the wizard's setup check for a BYOK run whose balance cannot fund its first lease (SKY-923).
+
+    A BYOK run's ceiling ignores the balance, but its first lease still holds one full lease of it.
+
+    Args:
+        harness: Real wizard check routes and spending authority.
+        monkeypatch: Restores the real lease size, stands in a verified BYOK key and watches the setup check.
+    """
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", budgets.CHUNK_CENTS)
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    checks: list[Any] = []
+    monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args, **kwargs: checks.append(args))
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = budgets.CHUNK_CENTS - 1
+        session.commit()
+    budget = harness.budgets.create(harness.username, 500, idempotency_key="small-byok-check")
+    payload = {**_payload(), "execution_budget_id": budget.id, "execution_budget_revision": budget.revision}
+    payload["reflection_model_config"] = {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"}
+
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert checks == []
+    assert harness.calls == []
+    assert harness.count(WizardPreflightModel) == 0
+
+
 @pytest.mark.parametrize("uncapped", [False, True])
 def test_a_wizard_run_limit_below_one_lease_is_refused(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, uncapped: bool

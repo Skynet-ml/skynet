@@ -852,7 +852,12 @@ def contract_issues(text: str) -> tuple[list[str], list[str]]:
 
 
 def review_draft(
-    spec: dict[str, Any], user: AuthenticatedUser, *, job_store: Any, http_client: Callable[[], httpx.Client]
+    spec: dict[str, Any],
+    user: AuthenticatedUser,
+    *,
+    job_store: Any,
+    http_client: Callable[[], httpx.Client],
+    judge_session: bool = False,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
     """Check a whole draft again, and price it when it is complete.
 
@@ -861,6 +866,7 @@ def review_draft(
         user: Account that owns it.
         job_store: Store that holds staged data, connectors and the wallet.
         http_client: Factory for the model catalog client.
+        judge_session: True to price a judge session instead of a run.
 
     Returns:
         The issues, the notes, and the price fields (empty while steps are missing).
@@ -907,8 +913,9 @@ def review_draft(
     except ServiceError as error:
         issues.append(str(error))
     # A capped run takes its budget in leases, so submit refuses a limit below one lease;
-    # a local run's budget is uncapped and has no such floor (SKY-923).
-    minimum = floor if settings.local_mode else max(floor, CHUNK_CENTS)
+    # a local run's budget is uncapped, and a judge session charges each scored call
+    # directly and takes no lease, so neither has that floor (SKY-923).
+    minimum = floor if settings.local_mode or judge_session else max(floor, CHUNK_CENTS)
     price = {
         "min_max_cost_cents": minimum,
         "suggested_max_cost_cents": max(_MIN_SUGGESTED_LIMIT_CENTS, minimum),
@@ -955,7 +962,9 @@ def _ready_request(
             or the key already made a higher limit.
         DomainError: 404 when the account has no such hardening job.
     """
-    issues, _notes, price = review_draft(spec, user, job_store=job_store, http_client=http_client)
+    issues, _notes, price = review_draft(
+        spec, user, job_store=job_store, http_client=http_client, judge_session=session_minimum is not None
+    )
     if issues:
         raise ToolError(json.dumps({"code": "draft.not_ready", "issues": issues, "next_tool": "repo_draft_review"}))
     floor = price["min_max_cost_cents"]
