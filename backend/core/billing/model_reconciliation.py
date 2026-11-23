@@ -17,8 +17,10 @@ from .runtime import BudgetRuntime, UsagePendingError
 from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
 
 # A model call runs at most 10 minutes and OpenRouter confirms its bill soon
-# after. A bill still missing at 15 minutes is absorbed: the hold is released at
-# no charge, so the user never pays for it or waits on it (Gilad, SKY-784).
+# after. A bill still missing 15 minutes after dispatched_at is absorbed: the
+# hold is released at no further charge, so the user never pays for it or
+# waits on it (Gilad, SKY-784). This window covers every pending reason except
+# UnsettleableUsageError.
 UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
 # A returned call with no provider request id can never be looked up. A call
 # whose original credential this worker cannot resolve is also not looked up:
@@ -37,7 +39,9 @@ logger = logging.getLogger(__name__)
 class UnsettleableUsageError(UsagePendingError):
     """Report a pending model bill that this worker cannot confirm with the provider.
 
-    The hold is released at no further charge; Skynet accepts the revenue gap (SKY-914).
+    This error releases nothing. ``sweep`` releases the hold at no further charge
+    1 minute after dispatch, but only a returned (pending) hold with no
+    quarantine evidence. Skynet accepts the revenue gap (SKY-914).
     """
 
 
@@ -96,7 +100,8 @@ class OpenRouterUsageReconciler:
             stored refusal that names no generation.
 
         Raises:
-            UnsettleableUsageError: When the provider identity or original credential is unavailable.
+            UnsettleableUsageError: When the provider request id is missing and no stored
+                refusal exists, or this worker cannot resolve the original credential.
             UsagePendingError: When the operation is not an admitted OpenRouter generation, or
                 final billing evidence or the original policy is unavailable.
         """
@@ -168,8 +173,11 @@ class OpenRouterUsageReconciler:
     def sweep(self, *, limit: int = 100, after_id: str | None = None) -> ReconciliationPage:
         """Reconcile one bounded page and release, at no further charge, holds whose bill stays unknown.
 
-        A hold that cannot be looked up is released 1 minute after dispatch; a
-        hold that can still be looked up is released after 15 minutes.
+        Only a returned (pending) hold with no quarantine evidence is released. A
+        dispatched (in-flight) hold is never released. The release comes 1 minute
+        after dispatched_at for UnsettleableUsageError: no provider request id and
+        no stored refusal, or this worker cannot resolve the original credential.
+        It comes 15 minutes after dispatched_at for every other pending reason.
 
         Args:
             limit: Maximum number of operations visited.
