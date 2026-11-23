@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,6 +20,17 @@ from .vercel_reconciliation import ReconciliationPage, ReconciliationResult
 # after. A bill still missing at 15 minutes is absorbed: the hold is released at
 # no charge, so the user never pays for it or waits on it (Gilad, SKY-784).
 UNCONFIRMED_RELEASE_AFTER = timedelta(minutes=15)
+# A returned call with no provider request id, or whose original credential is
+# gone, can never be looked up, so waiting 15 minutes only blocks the account's
+# setup check (SKY-914). The minute absorbs clock skew between workers; with the
+# 30-second sweep the hold is released within about 90 seconds.
+UNSETTLEABLE_RELEASE_AFTER = timedelta(minutes=1)
+
+logger = logging.getLogger(__name__)
+
+
+class UnsettleableUsageError(UsagePendingError):
+    """Report a pending model bill that no later provider lookup can ever confirm."""
 
 
 def _stored_refusal(documents: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -76,7 +88,8 @@ class OpenRouterUsageReconciler:
             stored refusal that names no generation.
 
         Raises:
-            UsagePendingError: When identity, credentials, or final billing evidence is unavailable.
+            UnsettleableUsageError: When the provider identity or original credential is unavailable.
+            UsagePendingError: When final billing evidence or the original policy is unavailable.
         """
         record = self.service.get_reconciliation(operation_id, username)
         operation, prices = record.operation, record.price_snapshot
@@ -91,10 +104,11 @@ class OpenRouterUsageReconciler:
                 return self.service.reject(
                     operation_id, username, evidence_key=f"openrouter-refusal:{operation_id}", evidence=refusal
                 )
+            raise UnsettleableUsageError("The provider request id is unavailable; no bill can be looked up.")
         digest = prices.get("credential_fingerprint")
         key = self.resolve_key(username, str(digest)) if digest else None
-        if not identity or not key or json_fingerprint(key) != digest:
-            raise UsagePendingError("Original provider identity or credential is unavailable; coverage is retained.")
+        if not key or json_fingerprint(key) != digest:
+            raise UnsettleableUsageError("The original provider credential is unavailable; no bill can be looked up.")
         values = prices.get("policy") or {}
         if values.get("version") != "skynet-operation-pricing-v1":
             raise UsagePendingError("The original conversion policy is unavailable.")
@@ -157,19 +171,26 @@ class OpenRouterUsageReconciler:
             after_id=after_id,
         )
         results = []
-        dispatched_before = datetime.now(UTC) - UNCONFIRMED_RELEASE_AFTER
+        now = datetime.now(UTC)
         for operation_id, username in attempts:
             try:
                 operation = self.reconcile(operation_id, username)
                 results.append(ReconciliationResult(operation_id, operation.state))
             except UsagePendingError as error:
+                wait = (
+                    UNSETTLEABLE_RELEASE_AFTER
+                    if isinstance(error, UnsettleableUsageError)
+                    else UNCONFIRMED_RELEASE_AFTER
+                )
                 try:
                     operation = self.service.release_unconfirmed(
-                        operation_id, username, dispatched_before=dispatched_before, reason=str(error)
+                        operation_id, username, dispatched_before=now - wait, reason=str(error)
                     )
                 except BudgetError as release_error:
                     results.append(ReconciliationResult(operation_id, "pending", str(release_error)))
                     continue
+                if operation.state == "released":
+                    logger.info("Released model hold %s at no charge: %s", operation_id, error)
                 results.append(
                     ReconciliationResult(
                         operation_id, operation.state, None if operation.state == "released" else str(error)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.billing.budget_amounts import wallet_reserved_cents
+from core.billing.budgets import BudgetConflictError
 from core.billing.model_dispatch import OpenRouterDispatcher, generation_charge
 from core.billing.model_reconciliation import OpenRouterUsageReconciler
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
@@ -283,6 +285,114 @@ def test_sweep_releases_a_hold_whose_bill_stays_unconfirmed_for_15_minutes(datab
         ).one()
         assert (evidence.final, evidence.billed_cents) == (True, 0)
     assert reconciler.sweep(limit=4).results == ()
+
+
+def _park_model_call(runtime, request_id: str | None) -> str:
+    """Leave one returned managed model call pending without a usable bill.
+
+    Args:
+        runtime: Setup runtime that admits the call.
+        request_id: Provider request id the call returned, or None when it gave none.
+
+    Returns:
+        The pending operation's id.
+    """
+    policy = ChargePolicy("managed_model")
+    quote = price_text_request(REQUEST, CATALOG, policy).quote
+    quote = replace(
+        quote, price_snapshot={**quote.price_snapshot, "credential_fingerprint": json_fingerprint("private")}
+    )
+    with pytest.raises(UsagePendingError):
+        runtime.execute(
+            quote,
+            policy,
+            lambda: PaidResult(
+                None, None, {"provider": "openrouter", "model": "fixture/text"}, provider_request_id=request_id
+            ),
+            operation_key=f"parked-{request_id}",
+            cost_kind="model",
+            role="task",
+        )
+    with Session(runtime.service.engine) as session:
+        return session.scalar(select(ExecutionOperationModel.id).where(ExecutionOperationModel.state == "pending"))
+
+
+def _age_operations(database, minutes: int) -> None:
+    """Move every operation's dispatch time back by the given minutes.
+
+    Args:
+        database: Ledger database.
+        minutes: How long ago every operation now started.
+    """
+    with Session(database) as session:
+        for operation in session.scalars(select(ExecutionOperationModel)):
+            operation.dispatched_at = datetime.now(UTC) - timedelta(minutes=minutes)
+        session.commit()
+
+
+@pytest.mark.parametrize(
+    ("request_id", "resolved_key", "reason"),
+    [(None, "private", "request id"), ("gen-orphan", None, "credential")],
+)
+def test_sweep_releases_a_hold_that_can_never_settle_after_one_minute(
+    database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, request_id, resolved_key, reason
+) -> None:
+    """Release at no charge, and log, a hold with no request id or no credential (SKY-914)."""
+    monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: pytest.fail("No lookup is possible."))
+    runtime = _runtime(database)
+    operation_id = _park_model_call(runtime, request_id)
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: resolved_key)
+    page = reconciler.sweep(limit=4)
+    assert [(result.state, reason in result.reason) for result in page.results] == [("pending", True)]
+    _age_operations(database, 2)
+    caplog.set_level(logging.INFO, logger="core.billing.model_reconciliation")
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["released"]
+    assert any(operation_id in record.getMessage() and reason in record.getMessage() for record in caplog.records)
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.pending_operations, snapshot.reserved_cents, snapshot.setup_spent_cents) == (0, 0, 0)
+    with Session(database) as session:
+        assert wallet_reserved_cents(session, "alice") == 0
+        evidence = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.issue == "unconfirmed")
+        ).one()
+        assert (evidence.final, evidence.billed_cents) == (True, 0)
+    assert reconciler.sweep(limit=4).results == ()
+    again = runtime.service.release_unconfirmed(
+        operation_id, "alice", dispatched_before=datetime.now(UTC), reason="again"
+    )
+    assert again.state == "released"
+    with Session(database) as session:
+        assert len(session.scalars(select(ExecutionUsageEvidenceModel.id)).all()) == 2
+
+
+def test_sweep_keeps_a_hold_it_can_still_look_up_for_15_minutes(database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the SKY-784 window for a request id the original credential can still look up."""
+    monkeypatch.setattr(OpenRouterDispatcher, "reconcile", lambda self, identity: None)
+    runtime = _runtime(database)
+    _park_model_call(runtime, "gen-late")
+    reconciler = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private")
+    _age_operations(database, 2)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["pending"]
+    _age_operations(database, 16)
+    assert [result.state for result in reconciler.sweep(limit=4).results] == ["released"]
+
+
+def test_late_receipt_after_release_bills_nothing(database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a bill that arrives after the hold was released, so the user pays nothing."""
+    runtime = _runtime(database)
+    operation_id = _park_model_call(runtime, "gen-after")
+    _age_operations(database, 2)
+    released = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: None).sweep(limit=4)
+    assert [result.state for result in released.results] == ["released"]
+    monkeypatch.setattr(
+        OpenRouterDispatcher,
+        "reconcile",
+        lambda self, identity: (Decimal("0.004"), {"id": identity, "total_cost": "0.004"}),
+    )
+    with pytest.raises(BudgetConflictError):
+        OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private").reconcile(operation_id, "alice")
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert (snapshot.pending_operations, snapshot.reserved_cents, snapshot.setup_spent_cents) == (0, 0, 0)
 
 
 @pytest.mark.parametrize(
