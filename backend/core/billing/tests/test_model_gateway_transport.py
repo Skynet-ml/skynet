@@ -3144,3 +3144,55 @@ def test_the_box_service_variable_matches_the_runner() -> None:
     """The box proxy names each service variable as the runner does, so a role's code reads one name everywhere."""
     for name in ("echo", "geo-coder", "maps.v2"):
         assert guest_model_proxy.service_env_name(name) == runner.service_env_name(name)
+
+
+class _RecordingSession:
+    """Record each mailbox command and file write, in order."""
+
+    def __init__(self, mkdir_code: int = 0) -> None:
+        """Hold the record and the exit code of the root mkdir.
+
+        Args:
+            mkdir_code: The exit code the root mkdir returns.
+        """
+        self.mkdir_code = mkdir_code
+        self.calls: list[tuple[str, Any]] = []
+
+    def write_files(self, files: dict[str, str]) -> None:
+        """Record the written paths."""
+        self.calls.append(("write", sorted(files)))
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Record the command and whether it runs as root."""
+        self.calls.append(("run", (command, kwargs.get("sudo", False))))
+        return CommandResult(exit_code=self.mkdir_code if command.startswith("/bin/mkdir") else 0)
+
+
+def test_a_root_mailbox_has_root_make_its_folders_before_any_file_write() -> None:
+    """A root proxy's folders belong to root, so the box user cannot swap its answers (SKY-901).
+
+    A Vercel file write makes a missing folder as the box user.
+    """
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    (kind, (mkdir, root)), (write_kind, written), *_ = session.calls
+    folder = written[0].rsplit("/", 1)[0]
+    assert (kind, root, write_kind) == ("run", True, "write")
+    assert mkdir == f"/bin/mkdir -m 0755 {folder} {folder}/responses"
+    assert written == [f"{folder}/config.json", f"{folder}/proxy.py"]
+
+
+def test_a_root_mailbox_stops_when_root_cannot_make_its_folders() -> None:
+    """A failed root mkdir writes no file and starts no proxy (SKY-901)."""
+    session = _RecordingSession(mkdir_code=1)
+    with pytest.raises(RuntimeError, match="mailbox folders"):
+        ModelMailbox(MagicMock()).run(session, "true", sudo=True)
+    assert [kind for kind, _ in session.calls] == ["run"]
+
+
+def test_a_user_mailbox_runs_no_root_command() -> None:
+    """A non-root mailbox leaves its folders to the file write, so the guest owns them (SKY-901)."""
+    session = _RecordingSession()
+    ModelMailbox(MagicMock()).run(session, "true")
+    assert [kind for kind, _ in session.calls] == ["write", "run"]
+    assert session.calls[1][1][1] is False

@@ -93,15 +93,17 @@ class ModelMailbox:
         config = json.dumps(
             {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
         )
-        session.write_files(
-            {
-                source_path: source,
-                config_path: config,
-                # A root proxy would make this folder, and the parent could not write
-                # its answers into a root-owned folder. So the parent makes it first.
-                **({f"{response_directory}/.keep": ""} if sudo else {}),
-            }
-        )
+        if sudo:
+            # A file write makes missing folders as the box user, who could then
+            # swap a root proxy's answers. Root makes both folders first; the
+            # parent's file writes still reach a root-owned folder (SKY-901).
+            # No ``-p``: mkdir fails on anything already at the name.
+            made = session.run(
+                f"/bin/mkdir -m 0755 {shlex.quote(directory)} {shlex.quote(response_directory)}", sudo=True
+            )
+            if made.exit_code != 0:
+                raise RuntimeError("The sandbox could not make the model mailbox folders.")
+        session.write_files({source_path: source, config_path: config})
         pending = {"stdout": "", "stderr": ""}
         visible: dict[str, list[str]] = {"stdout": [], "stderr": []}
         seen: set[str] = set()

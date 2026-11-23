@@ -1668,9 +1668,9 @@ class VercelEnvironment(SandboxEnvironment):
         cwd = self._cwd(session)
         with self._stop_guard():
             for path, text in files.items():
-                parent = path.rsplit("/", 1)[0] if "/" in path else ""
-                if parent:
-                    await session.fs.mkdir(parent, cwd=cwd, recursive=True)
+                # No ``fs.mkdir``: it gives the folder to uid 1000, an image user
+                # with another uid cannot write there, and no capability now hides
+                # that (SKY-901). The write makes missing folders as the box user.
                 await session.fs.write_text(path, text, cwd=cwd)
 
     async def download_file(self, path: str) -> str | None:
