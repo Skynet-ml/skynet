@@ -3,8 +3,8 @@
 A fake EC2 client replaces boto3's, and a fake ``ssh`` script replaces the
 real client. The fake ssh runs the remote command on this machine inside one
 directory per instance, with ``bash`` and ``sudo`` shims that drop the login
-and root switches, a ``timeout`` shim that drops its limits, and an ``mv`` shim
-for macOS. No test calls AWS or opens a network connection.
+and root switches, a ``timeout`` shim that drops its limits, and ``mv`` and
+``dd`` shims for macOS. No test calls AWS or opens a network connection.
 """
 
 from __future__ import annotations
@@ -108,6 +108,33 @@ TIMEOUT_SHIM = '#!/bin/sh\n[ "$1" = "-k" ] && shift 2\nshift\nexec "$@"\n'
 # macOS mv has no -T. Its -h also renames onto a link at the target instead of following it.
 MV_SHIM = (
     '#!/bin/sh\nif [ "$1" = "-fT" ] && [ "$(uname)" = Darwin ]; then shift; set -- -fh "$@"; fi\nexec /bin/mv "$@"\n'
+)
+
+# macOS dd has no iflag=nofollow or iflag=nonblock, so on macOS the shim opens the file as GNU dd
+# does: with O_NOFOLLOW and O_NONBLOCK only when iflag names them. Without a flag the shim follows a
+# link or blocks on a named pipe, so a test that relies on the flag fails, as it would with GNU dd.
+DD_SHIM = textwrap.dedent(
+    """
+    import os, sys
+
+    if os.uname().sysname != "Darwin":
+        os.execv("/bin/dd", ["dd", *sys.argv[1:]])
+    ops = dict(arg.split("=", 1) for arg in sys.argv[1:])
+    assert set(ops) <= {"if", "iflag", "bs", "status"}, f"the dd shim does not know the operands {ops}"
+    iflags = set(filter(None, ops.get("iflag", "").split(",")))
+    assert iflags <= {"nofollow", "nonblock"}, f"the dd shim does not know the input flags {iflags}"
+    flags = os.O_RDONLY
+    flags |= os.O_NOFOLLOW if "nofollow" in iflags else 0
+    flags |= os.O_NONBLOCK if "nonblock" in iflags else 0
+    # os.read raises EAGAIN as GNU dd fails on it; a buffered read would return None and look like the end.
+    try:
+        fd = os.open(ops["if"], flags)
+        while chunk := os.read(fd, 65536):
+            sys.stdout.buffer.write(chunk)
+    except OSError as error:
+        sys.stderr.write(f"dd: {ops['if']!r}: {error.strerror}\\n")
+        sys.exit(1)
+    """
 )
 
 
@@ -364,6 +391,7 @@ def fake_ec2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEC
         ("sudo", SUDO_SHIM),
         ("timeout", TIMEOUT_SHIM),
         ("mv", MV_SHIM),
+        ("dd", f"#!{sys.executable}\n{DD_SHIM}"),
         ("ssh-keygen", f"#!{sys.executable}\n{FAKE_KEYGEN}"),
     ):
         path = bin_dir / name
@@ -907,6 +935,108 @@ async def test_download_raises_when_ssh_cannot_reach_the_instance(fake_ec2: Fake
         (fake_ec2.state / "ssh_down").unlink()
 
 
+async def test_a_download_refuses_a_link_at_the_file_path(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Refuse a link that the box user plants at the name, so root does not read the link target (SKY-911)."""
+    outside = _plant_outside(tmp_path)
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        (home / "a.txt").symlink_to(outside / "victim.txt")
+        (home / "gone.txt").symlink_to(outside / "missing.txt")
+        with pytest.raises(RuntimeError, match=r"a\.txt is a symbolic link") as caught:
+            await env.download_file("a.txt")
+        assert "keep" not in str(caught.value)
+        with pytest.raises(RuntimeError, match=r"gone\.txt is a symbolic link"):
+            await env.download_file("gone.txt")
+
+
+@pytest.mark.parametrize("path", ["dir/victim.txt", "{home}/dir/victim.txt", "/{home}/dir/../dir/victim.txt"])
+async def test_a_download_refuses_a_link_at_a_parent_folder(fake_ec2: FakeEC2, tmp_path: Path, path: str) -> None:
+    """Refuse a parent link in a relative or an absolute path, so root does not read through it (SKY-911)."""
+    outside = _plant_outside(tmp_path)
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        (home / "dir").symlink_to(outside)
+        with pytest.raises(RuntimeError, match="dir is a symbolic link"):
+            await env.download_file(path.format(home=home))
+
+
+async def test_a_download_refuses_a_link_swapped_in_at_the_name_after_the_check(
+    fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a link that appears at the name after the link check, so root does not read it (SKY-911).
+
+    The test puts the swap into the script just before the read, as a box
+    user that wins the race would do it.
+    """
+    outside = _plant_outside(tmp_path)
+    check = '[ -f "$1" ] || exit 4\n'
+    swap = f'/bin/rm -f -- "$1" && /bin/ln -s {outside / "victim.txt"} "$1"\n'
+    assert check in ec2_provider._DOWNLOAD_SCRIPT
+    monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(check, check + swap))
+    async with EC2Environment(_spec()) as env:
+        (fake_ec2.state / "root" / env._host / "a.txt").write_text("mine")
+        with pytest.raises(RuntimeError, match=r"a\.txt changed during the download") as caught:
+            await env.download_file("a.txt")
+        assert "keep" not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["folder", "pipe"])
+async def test_a_download_refuses_a_folder_or_a_pipe_swapped_in_at_the_name_after_the_check(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Refuse, not fail as infra, when the box user swaps a folder or a named pipe in at the name (SKY-911).
+
+    A named pipe with a writer and no data must not hold the read until the
+    time limit. The test puts the swap into the script just before the read.
+    """
+    check = '[ -f "$1" ] || exit 4\n'
+    make = "/bin/mkdir" if kind == "folder" else "/usr/bin/mkfifo"
+    swap = f'/bin/rm -f -- "$1" && {make} -- "$1"\n'
+    if kind == "pipe":
+        # A writer holds the pipe for ten seconds and never writes. A read without O_NONBLOCK waits,
+        # then reads an empty end and does not raise, so the test fails in about ten seconds.
+        swap += 'exec 9<>"$1"; /bin/sleep 10 </dev/null >/dev/null 2>&1 & exec 9>&-\n'
+    assert check in ec2_provider._DOWNLOAD_SCRIPT
+    monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(check, check + swap))
+    async with EC2Environment(_spec()) as env:
+        (fake_ec2.state / "root" / env._host / "a.txt").write_text("mine")
+        with pytest.raises(RuntimeError, match=r"a\.txt changed during the download"):
+            await env.download_file("a.txt")
+
+
+async def test_a_download_refuses_a_folder_swapped_for_a_link_after_the_check(
+    fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a folder that becomes a link between the check and the cd (SKY-911).
+
+    The test puts the swap into the script just before the cd, as a box user
+    that wins the race would do it.
+    """
+    outside = _plant_outside(tmp_path)
+    cd = '  cd -P -- "$next" || changed "$part"\n'
+    swap = f'  /bin/mv -- "$part" "$part.moved" && /bin/ln -s {outside} "$part"\n'
+    assert cd in ec2_provider._DOWNLOAD_SCRIPT
+    monkeypatch.setattr(ec2_provider, "_DOWNLOAD_SCRIPT", ec2_provider._DOWNLOAD_SCRIPT.replace(cd, swap + cd))
+    async with EC2Environment(_spec()) as env:
+        (fake_ec2.state / "root" / env._host / "dir").mkdir()
+        with pytest.raises(RuntimeError, match="dir changed during the download"):
+            await env.download_file("dir/victim.txt")
+
+
+async def test_a_download_reads_odd_paths_and_returns_none_for_no_file(fake_ec2: FakeEC2) -> None:
+    """Read names with spaces, newlines, dashes and . or .. parts, and return None when no regular file is there."""
+    async with EC2Environment(_spec()) as env:
+        home = fake_ec2.state / "root" / env._host
+        (home / "x" / "-" / "a b").mkdir(parents=True)
+        (home / "x" / "-" / "a b" / "nl\n.txt").write_text("odd")
+        (home / "x" / "f.txt").write_text("plain")
+        assert await env.download_file("x/-/a b/nl\n.txt") == "odd"
+        assert await env.download_file(f"{home}/x/./-/../f.txt") == "plain"
+        assert await env.download_file(f"/{home}/x/f.txt") == "plain"
+        for missing in ("x/no/f.txt", "x/f.txt/y", "x/-", "x/f.txt/", "x/.", "x/..", "/", ""):
+            assert await env.download_file(missing) is None, missing
+
+
 async def test_exec_before_start_raises() -> None:
     """Refuse a command before the instance runs."""
     with pytest.raises(RuntimeError, match="not running"):
@@ -1132,7 +1262,7 @@ async def test_transfers_have_the_run_time_limit_and_keepalive(
         Raises:
             TimeoutError: The command is a file transfer.
         """
-        if ("skynet-upload" in argv[-1] and "b.txt" in argv[-1]) or "cat a.txt" in argv[-1]:
+        if ("skynet-upload" in argv[-1] and "b.txt" in argv[-1]) or "dd if=" in argv[-1]:
             limits.append(limit)
             raise TimeoutError
         return await real(argv, data, limit)
