@@ -130,11 +130,12 @@ _REFUSAL_ERRORS: frozenset[type[BaseException]] = frozenset(
 # it runs until its timeout while its hold stays pending.
 _RECHECK_DELAY_SEC = 30.0
 
-# modal 1.6.3 refuses other env names (sandbox/_common.py, _SECRET_KEYNAME_REGEX).
-# The check runs here, before any hold, because the V2 create does not check
-# the keys of a Secret.from_dict and a server refusal of the sent create would
-# leave the hold pending. It runs on every box on purpose: Modal refuses such
-# a name on any create path, so an early, clear spec error beats a late one.
+# modal 1.6.3 checks env names with ^[a-zA-Z_][a-zA-Z0-9_]*$ and .match
+# (sandbox/_common.py, _SECRET_KEYNAME_REGEX). This check uses fullmatch, so it
+# is a little stricter: it also refuses a trailing newline that Modal's $ lets
+# through. The V2 create does not check the keys of a Secret.from_dict, and a
+# server refusal of the sent create would leave the hold pending. The check
+# runs on every box on purpose, so a bad name fails early with no hold.
 _ENV_KEY = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
