@@ -608,7 +608,9 @@ class E2BEnvironment(SandboxEnvironment):
             expires_at: When the current E2B timeout ends, on the clock.
             deadline: When the spec lifetime ends, on the clock.
         """
-        while expires_at < deadline:
+        # A timeout that ends less than a second before the deadline needs no
+        # renewal; another one would spin with no sleep in the last slice.
+        while deadline - expires_at >= 1:
             await self._clock.sleep(max(0.0, expires_at - RENEW_LEAD - self._clock.monotonic()))
             box = self._box
             if box is None:
@@ -652,7 +654,10 @@ class E2BEnvironment(SandboxEnvironment):
         usage = self._usage
         if usage is None or usage.started_at is None:
             return True
-        lifetime_ms = math.ceil((self._clock.monotonic() - usage.started_at + seconds + RENEW_CALL_TIMEOUT) * 1000)
+        # One second of slack keeps the whole timeout funded after the
+        # extend and the read pacing use a little time; ``_funded_seconds``
+        # would otherwise cut it by a second and leave a short last slice.
+        lifetime_ms = math.ceil((self._clock.monotonic() - usage.started_at + seconds + RENEW_CALL_TIMEOUT + 1) * 1000)
         if lifetime_ms <= usage.lifetime_ms:
             return True
         deadline = time.monotonic() + max(0.0, expires_at - RENEW_LEAD / 2 - self._clock.monotonic())

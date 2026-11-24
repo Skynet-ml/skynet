@@ -1178,7 +1178,7 @@ async def test_renew_loop_funds_each_extension_before_it_asks_e2b() -> None:
         # Each renewal funds the time already used, the new timeout and the call time limit.
         assert box.timeouts == [e2b.LIFETIME_SLICE, 600]
         assert box.request_timeouts == [e2b.RENEW_CALL_TIMEOUT, e2b.RENEW_CALL_TIMEOUT]
-        assert extends == [6_930_000, 7_230_000]
+        assert extends == [6_931_000, 7_231_000]
     finally:
         await env.stop()
 
@@ -1530,5 +1530,41 @@ async def test_slow_confirm_does_not_push_the_last_extension_past_the_quote() ->
         extends = [event[1] for event in usage.events if event[0] == "extend"]
         assert extends
         assert max(extends) <= e2b.E2B_MAX_LIFETIME * 1000
+    finally:
+        await env.stop()
+
+
+async def test_slow_extend_and_read_fund_one_extension_per_slice() -> None:
+    """Fund each slice once when the extend and the read pacing take a little time."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=2 * 3600)
+    clock = env._clock
+
+    async def pace_read() -> None:
+        """Take a small step of fake time, as a read-bucket wait."""
+        clock.now += 0.05
+
+    env._pace_read = pace_read
+    await env.start()
+    (usage,) = made.made
+    extend = usage.extend
+
+    def slow_extend(lifetime_ms: int, *, deadline: float) -> None:
+        """Take a small step of fake time, as a ledger call.
+
+        Args:
+            lifetime_ms: The new total lifetime.
+            deadline: The wait deadline.
+        """
+        clock.now += 0.05
+        extend(lifetime_ms, deadline=deadline)
+
+    usage.extend = slow_extend
+    try:
+        box = _the_box()
+        await asyncio.wait_for(env._renewer, 1)
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        assert box.timeouts == [e2b.LIFETIME_SLICE, 600]
+        assert len(extends) == 2
     finally:
         await env.stop()
