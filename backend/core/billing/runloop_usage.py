@@ -216,9 +216,10 @@ class RunloopUsageReservation:
         """
         self.runtime = runtime
         self.request = dict(request)
+        # The quote checks the lifetime and size, so read them only after it.
+        self.quote = quote_runloop_devbox(request)
         self.vcpus, self.memory_gb, self.disk_gb = _size(request)
         self.lifetime_ms = request["lifetime_ms"]
-        self.quote = quote_runloop_devbox(request)
         self.box = box_tag(operation_key)
         if reserved is None:
             self.operation = runtime.reserve(

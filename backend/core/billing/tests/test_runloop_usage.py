@@ -133,6 +133,19 @@ def test_unbounded_devboxes_are_not_quoted(change: dict[str, Any]) -> None:
         quote_runloop_devbox({**CREATE, **change})
 
 
+def test_a_reservation_without_a_lifetime_is_not_priced(database: Engine) -> None:
+    """Refuse a create request with no keep-alive lifetime before any reserve.
+
+    Args:
+        database: The funded ledger.
+    """
+    runtime = _runtime(database)
+    request = {key: value for key, value in CREATE.items() if key != "lifetime_ms"}
+    with pytest.raises(UnpricedOperationError, match="keep-alive"):
+        RunloopUsageReservation(runtime, request, operation_key="box-one")
+    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
+
+
 def test_reported_usage_settles_at_its_counters(database: Engine) -> None:
     """Charge the vCPU, memory and disk seconds that Runloop reports, and unpin the hold."""
     runtime = _runtime(database)
