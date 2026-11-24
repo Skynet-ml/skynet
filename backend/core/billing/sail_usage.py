@@ -495,7 +495,9 @@ class SailUsageReservation:
     def pending(self) -> None:
         """Keep the coverage pending for manual reconciliation."""
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
-        if current.state in {"dispatched", "pending"}:
+        # The ledger refuses new evidence under the same key, and a retried
+        # teardown can come here again, so an already pending hold stays as is.
+        if current.state == "dispatched":
             self.runtime.service.mark_pending(
                 self.operation.id,
                 self.runtime.username,

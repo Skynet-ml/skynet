@@ -756,3 +756,34 @@ def test_a_refused_create_releases_the_hold(database: Engine) -> None:
     with Session(database) as session:
         evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
     assert evidence["sailbox_name"] == "skynet-box-1"
+
+
+def test_a_pending_hold_still_settles(database: Engine) -> None:
+    """Settle a hold that a cancelled teardown already marked pending.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    reservation = _reservation(database, FakeSpend(SPEND))
+    _created(reservation)
+    reservation.pending()
+    reservation.pending()
+    assert _state(database) == "pending"
+    reservation.settle_spend(SPEND)
+    assert _state(database) == "settled"
+
+
+def test_a_failed_settle_of_a_pending_hold_raises_its_own_error(database: Engine) -> None:
+    """Raise the settle error, not an evidence conflict, when a pending hold fails to settle.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    reservation = _reservation(database, FakeSpend(SPEND))
+    reservation.begin_create("skynet-box-1")
+    reservation.release()
+    assert _state(database) == "pending"
+    reservation.sailbox_id = "sb-1"
+    with pytest.raises(UsagePendingError, match="spend"):
+        reservation.settle_spend({})
+    assert _state(database) == "pending"

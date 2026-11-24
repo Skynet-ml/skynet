@@ -741,7 +741,13 @@ class SailEnvironment(SandboxEnvironment):
                 # Nothing is terminated or settled yet, so a later stop() can
                 # run a fresh teardown instead of the cancelled one.
                 self._stop_task = None
-                if self._usage is not None and self._create_task is not None:
+                if self._usage is not None and self._create_task is None:
+                    # No create was sent, so no box can exist for this hold.
+                    usage, self._usage = self._usage, None
+                    release = asyncio.ensure_future(asyncio.to_thread(usage.release, refused=False))
+                    _LATE_TASKS.add(release)
+                    release.add_done_callback(_on_late_release)
+                elif self._usage is not None:
                     # A box can exist once the create is sent; keep its hold
                     # pending until a later stop() settles it.
                     await self._pend_after_cancel(self._usage)
@@ -767,20 +773,21 @@ class SailEnvironment(SandboxEnvironment):
                 self._usage = billing.result()
         sailbox, self._sailbox = self._sailbox, None
         if sailbox is not None:
+            try:
+                self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
+            except BaseException:
+                # The box can still run, so its hold stays pending. A later
+                # stop(), or the job sweep, gets the handle and the usage, to
+                # terminate and settle.
+                self._sailbox = sailbox
+                await self._pend_after_cancel(self._usage)
+                raise
             job_id = self._job_id
             boxes = _JOB_BOXES.get(job_id) if job_id is not None else None
             if job_id is not None and boxes is not None:
                 boxes.discard(self)
                 if not boxes:
                     del _JOB_BOXES[job_id]
-            try:
-                self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
-            except BaseException:
-                # The box can still run, so its hold stays pending. A later
-                # stop() gets the handle and the usage, to terminate and settle.
-                self._sailbox = sailbox
-                await self._pend_after_cancel(self._usage)
-                raise
         try:
             await self._settle(sailbox, end)
         finally:

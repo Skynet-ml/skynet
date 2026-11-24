@@ -110,6 +110,8 @@ class FakeCloud:
     terminate_fails: set[str] = field(default_factory=set)
     terminate_started: asyncio.Event = field(default_factory=asyncio.Event)
     terminate_gate: asyncio.Event | None = None
+    app_started: asyncio.Event = field(default_factory=asyncio.Event)
+    app_gate: asyncio.Event | None = None
     no_auth: bool = False
     limits: tuple[int, int, int] = (1, 16 * 1024, 32)
     ids: Any = field(default_factory=lambda: itertools.count(1))
@@ -239,6 +241,9 @@ async def _find_app(name: str, *, mint_if_missing: bool) -> SimpleNamespace:
         The app.
     """
     CLOUD.apps.append((name, mint_if_missing))
+    CLOUD.app_started.set()
+    if CLOUD.app_gate is not None:
+        await CLOUD.app_gate.wait()
     return SimpleNamespace(name=name)
 
 
@@ -2068,14 +2073,14 @@ async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(
 ) -> None:
     """Mark the hold pending once, and pass the cancel on, when the teardown is cancelled in its terminate.
 
-    A later stop terminates the box and settles the pending hold. When that
+    A later job sweep terminates the box and settles the pending hold. When that
     terminate fails too, the hold stays pending with no second pending call.
 
     Args:
         fake_sdk: The fake Sail cloud.
         retry_terminates: True when the terminate of the later stop works.
     """
-    env, made = _protected()
+    env, made = _protected(tags={JOB_TAG: "job-1"})
     await env.start()
     fake_sdk.terminate_gate = asyncio.Event()
     stopping = asyncio.ensure_future(env.stop())
@@ -2088,7 +2093,9 @@ async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(
     assert "settle" not in made[0].names()
     fake_sdk.terminate_gate.set()
     if retry_terminates:
-        await env.stop()
+        # The job sweep still finds the box after the cancel.
+        assert await SailEnvironment.stop_job_sandboxes("job-1") == 1
+        assert sail._JOB_BOXES == {}
         assert [box.terminated for box in fake_sdk.boxes] == [True]
         assert made[0].names()[-1] == "settle"
     else:
@@ -2097,6 +2104,39 @@ async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(
             await env.stop()
         assert "settle" not in made[0].names()
     assert made[0].names().count("pending") == 1
+
+
+async def test_a_cancel_in_the_start_wait_before_the_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when the teardown is cancelled in its start wait before any create was sent.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.app_gate = asyncio.Event()
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.app_started.wait()
+    create = env._starting
+    assert create is not None
+    stopping = asyncio.ensure_future(env.stop())
+    # The first loop turn runs stop(), which makes the teardown task; the
+    # second lets the teardown cancel the create and reach its start wait.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert env._stop_task is not None
+    assert not create.done()
+    env._stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    with contextlib.suppress(BaseException):
+        await starting
+    for _ in range(100):
+        if made[0].calls:
+            break
+        await asyncio.sleep(0.01)
+    await env.stop()
+    assert made[0].calls == [("release", False)]
+    assert fake_sdk.create_calls == 0
 
 
 async def test_a_cancel_during_the_release_call_keeps_the_hold_pending_once(fake_sdk: FakeCloud) -> None:
