@@ -12,7 +12,7 @@
 
 import * as React from "react";
 
-/** Set the view of a figure toggle (ARC-AGI-3 or LLM-as-a-Verifier) to the choice of this button. */
+/** Set the view of the ARC-AGI-3 figure toggle to the choice of this button. */
 function pick(button: HTMLButtonElement) {
   const group = button.parentElement;
   const view = button.closest<HTMLElement>(".arcv");

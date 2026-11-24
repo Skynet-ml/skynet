@@ -491,13 +491,8 @@
   }
 }
 .bf .arcv[data-m="score"] .v-cost,
-.bf .arcv[data-m="cost"] .v-score,
-.bf .arcv[data-m="pick"] .v-judge,
-.bf .arcv[data-m="judge"] .v-pick {
+.bf .arcv[data-m="cost"] .v-score {
   display: none;
-}
-.bf #fig-verifier .ctl {
-  justify-content: center;
 }
 .bf .legend {
   display: flex;
@@ -895,7 +890,7 @@
   .bf.motion .a-fade {
     transition: opacity 0.3s ease-out var(--d, 0ms);
   }
-  .bf .arcv :is(.v-score, .v-cost, .v-pick, .v-judge) {
+  .bf .arcv :is(.v-score, .v-cost) {
     animation: vin 0.3s ease-out;
   }
   @keyframes vin {

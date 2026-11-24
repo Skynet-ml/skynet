@@ -50,7 +50,7 @@ On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace us
 
 Extra attempts pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results [19]. They replaced a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria. Frontier coding and medical agents reached new highs, and the same zero-shot model beat specialized trained reward models [19].
 
-{{figure: verifier | LLM-as-a-Verifier [19]. Picking attempts: on coding and medical benchmarks, each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle. Scoring method: on RoboRewardBench preference accuracy, only the scoring method changes on the same zero-shot model, and it beats trained robotics reward models.}}
+{{figure: verifier | LLM-as-a-Verifier on coding and medical benchmarks [19]. Each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle.}}
 
 ## Problems come in three kinds
 
