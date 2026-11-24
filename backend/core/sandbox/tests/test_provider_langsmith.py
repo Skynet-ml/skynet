@@ -11,8 +11,9 @@ import json
 import shlex
 import threading
 import time
+import types
 from collections.abc import AsyncIterator, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from core.billing.langsmith_usage import LangSmithUsageReservation
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.sandbox import SandboxSpec, factory
 from core.sandbox.capabilities import SandboxSpecError
+from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
     SandboxFatalError,
     SandboxInfraError,
@@ -308,6 +310,7 @@ class FakeServer:
         self.delete_steps: list[str] = []
         self.found_at: list[float] = []
         self.missing_at: list[float] = []
+        self.missing = asyncio.Event()
 
 
 class FakeClient:
@@ -363,6 +366,7 @@ class FakeClient:
             raise self.server.get_error
         if name not in self.server.boxes:
             self.server.missing_at.append(time.monotonic())
+            self.server.missing.set()
             raise FakeNotFoundError(name)
         self.server.found_at.append(time.monotonic())
         return self.server.boxes[name]
@@ -961,6 +965,53 @@ def _fast_proof(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(langsmith, "_CREATE_LANDING_GRACE_SECONDS", 0)
 
 
+@pytest.fixture(autouse=True)
+def _settle_tasks(monkeypatch: pytest.MonkeyPatch) -> Iterator[set[asyncio.Future[None]]]:
+    """Give each test its own set of background proof waits, and cancel any that a test leaves.
+
+    Yields:
+        The set of background proof waits.
+    """
+    tasks: set[asyncio.Future[None]] = set()
+    monkeypatch.setattr(langsmith, "_SETTLE_TASKS", tasks)
+    yield tasks
+    for task in list(tasks):
+        task.cancel()
+
+
+async def _settled() -> None:
+    """Wait until every background proof wait of this test ends."""
+    await asyncio.wait_for(asyncio.gather(*list(langsmith._SETTLE_TASKS), return_exceptions=True), 5)
+
+
+class FakeClock:
+    """Shift the provider's monotonic clock, so a test can pass a long create window at once."""
+
+    def __init__(self) -> None:
+        """Start at the real clock."""
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        """Return the real monotonic time plus the shift.
+
+        Returns:
+            The shifted time.
+        """
+        return time.monotonic() + self.offset
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    """Replace the provider's clock with a clock that a test can move forward.
+
+    Returns:
+        The fake clock.
+    """
+    fake = FakeClock()
+    monkeypatch.setattr(langsmith, "time", types.SimpleNamespace(monotonic=fake.monotonic))
+    return fake
+
+
 class FakeUsage:
     """Stand in for ``LangSmithUsageReservation``: record each billing call in order."""
 
@@ -1025,6 +1076,10 @@ class FakeUsage:
         self.events.append(("settle", self.deleted))
         if not self.deleted:
             raise UsagePendingError("not deleted")
+
+    def pending(self) -> None:
+        """Record that the hold stays pending."""
+        self.events.append(("pending",))
 
 
 @pytest.fixture
@@ -1160,6 +1215,7 @@ async def test_protected_box_reserves_before_create_and_settles_after_delete(
     assert reservation_request["lifetime_ms"] == 60_000
     assert reservation_request["idle_ttl_seconds"] == server.creates[0]["idle_ttl_seconds"]
     await env.stop()
+    assert not langsmith._SETTLE_TASKS
     await env.stop()
     assert usage.events[2:] == [("settle", True)]
     assert server.deletes == [env.name]
@@ -1259,13 +1315,15 @@ async def test_refused_create_with_no_box_releases_the_hold(server: FakeServer, 
 
 
 async def test_failed_create_settles_after_the_create_window(server: FakeServer, usage: type[FakeUsage]) -> None:
-    """Delete the partial box of a create without an answer, and settle only after its create window."""
+    """Delete the partial box of a create without an answer, and settle in the background only after its create window."""
     server.create_then_fail = True
     env = _protected(usage)
     loop = asyncio.get_running_loop()
     started = loop.time()
     with pytest.raises(SandboxTransientError):
         await env.start()
+    assert usage.events == [("reserve", "op-1")]
+    await _settled()
     assert loop.time() - started >= _STARTUP_SECONDS
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
     assert server.boxes == {}
@@ -1278,6 +1336,7 @@ async def test_box_that_lands_late_is_deleted_before_the_settle(server: FakeServ
     env = _protected(usage)
     with pytest.raises(SandboxTransientError):
         await env.start()
+    await _settled()
     assert server.boxes == {}
     assert server.deletes.count(env.name) >= 2
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
@@ -1290,6 +1349,7 @@ async def test_gateway_error_on_create_waits_for_a_late_box(server: FakeServer, 
     env = _protected(usage)
     with pytest.raises(SandboxTransientError):
         await env.start()
+    await _settled()
     assert server.boxes == {}
     assert server.deletes.count(env.name) >= 2
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
@@ -1373,6 +1433,8 @@ async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(
 ) -> None:
     """Keep the hold pending when no lookup proves the box gone, and attach that to the start error."""
     monkeypatch.setattr(langsmith, "_DELETE_TIMEOUT_SECONDS", 0.1)
+    # The create window has already ended, so the proof wait stays on the fast path.
+    monkeypatch.setattr(langsmith, "_CREATE_LANDING_GRACE_SECONDS", -1)
     server.create_error = FakeConnectionError("lost")
     server.get_error = FakeConnectionError("lookup lost")
     env = _protected(usage)
@@ -1392,6 +1454,7 @@ async def test_cancelled_create_settles_after_the_create_window(server: FakeServ
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    await _settled()
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
 
 
@@ -1495,3 +1558,149 @@ async def test_real_reservation_releases_a_refused_create(server: FakeServer, le
         await env.start()
     assert _operation(ledger, made).state == "released"
     assert ledger.service.get(ledger.budget_id, "alice").reserved_cents == 0
+
+
+# The default start limit, so the create window of a create without an answer ends far in the future.
+_LONG_STARTUP_SECONDS = 900
+# A clock shift past the create window but inside the poll window that follows it.
+_PAST_THE_WINDOW = _LONG_STARTUP_SECONDS + 30
+# A clock shift past the poll window too, so no proof can come.
+_PAST_THE_POLL = _LONG_STARTUP_SECONDS + 1000
+
+
+async def _handed_off(server: FakeServer, env: LangSmithEnvironment) -> asyncio.Future[None]:
+    """Start a protected box whose create gets no answer, stop it, and return its background proof wait.
+
+    Args:
+        server: The fake server state.
+        env: The protected provider with a long start limit.
+
+    Returns:
+        The one background proof wait, after it saw an early 404.
+    """
+    server.create_error = FakeConnectionError("lost")
+    with pytest.raises(SandboxTransientError):
+        await asyncio.wait_for(env.start(), 5)
+    (task,) = langsmith._SETTLE_TASKS
+    # An early 404 proves nothing, so the wait goes on.
+    await asyncio.wait_for(server.missing.wait(), 5)
+    assert not task.done()
+    return task
+
+
+async def test_stop_after_an_unanswered_create_returns_and_settles_in_the_background(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock
+) -> None:
+    """Return from stop at once after a create with no answer, then settle once on the later 404 proof."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    server.create_error = FakeConnectionError("lost")
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await asyncio.wait_for(task, 5)
+    (late,) = langsmith._SETTLE_TASKS
+    await asyncio.wait_for(server.missing.wait(), 5)
+    assert usage.events == [("reserve", "op-1")]
+    closed = server.closed
+    clock.offset = _PAST_THE_WINDOW
+    await _settled()
+    assert late.done()
+    assert not langsmith._SETTLE_TASKS
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert usage.ends == [None]
+    assert server.closed == closed + 1
+
+
+async def test_background_wait_without_proof_keeps_the_hold_pending(
+    server: FakeServer, ledger: BudgetRuntime, clock: FakeClock
+) -> None:
+    """Mark the real hold pending once, and close the client, when the background wait gets no proof."""
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(
+        _recording(made),
+        budget=ledger,
+        idle_ttl_seconds=60,
+        delete_after_stop_seconds=60,
+        startup_timeout_seconds=_LONG_STARTUP_SECONDS,
+    )
+    task = await _handed_off(server, env)
+    server.get_error = FakeConnectionError("lookup lost")
+    clock.offset = _PAST_THE_POLL
+    await _settled()
+    assert isinstance(task.exception(), UsagePendingError)
+    assert _operation(ledger, made).state == "pending"
+    assert server.closed == 1
+    await env.stop()
+    assert _operation(ledger, made).state == "pending"
+
+
+async def test_cancel_of_the_background_wait_marks_the_hold_pending_once(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Mark the hold pending once, close the client and re-raise the cancel when the event loop cancels the wait."""
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = await _handed_off(server, env)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("pending",)]
+    assert server.closed == 1
+    assert not langsmith._SETTLE_TASKS
+
+
+async def test_later_stops_and_the_job_sweep_leave_a_handed_off_hold_alone(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock
+) -> None:
+    """Leave the hold to the background wait: a second stop, the job sweep and a new start do not touch it."""
+    spec = replace(_PROTECTED_SPEC, tags={JOB_TAG: "job-1"})
+    env = _protected(usage, spec, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    await _handed_off(server, env)
+    await asyncio.wait_for(env.stop(), 5)
+    assert await asyncio.wait_for(LangSmithEnvironment.stop_job_sandboxes("job-1"), 5) == 0
+    assert usage.events == [("reserve", "op-1")]
+    assert len(langsmith._SETTLE_TASKS) == 1
+    # A new start reserves its own hold instead of reusing the handed-off one.
+    server.create_error = None
+    await asyncio.wait_for(env.start(), 5)
+    assert await asyncio.wait_for(LangSmithEnvironment.stop_job_sandboxes("job-1"), 5) == 1
+    assert [event[0] for event in usage.events] == ["reserve", "reserve", "confirm", "settle"]
+    clock.offset = _PAST_THE_WINDOW
+    await _settled()
+    assert [event[0] for event in usage.events] == ["reserve", "reserve", "confirm", "settle", "settle"]
+    assert usage.events[-1] == ("settle", True)
+    assert server.closed == 2
+
+
+async def test_cancelled_start_after_an_unanswered_create_returns_at_once(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock
+) -> None:
+    """Return a cancelled start after its delete, and leave the proof wait and the settle to the background."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert server.deletes == [env.name]
+    assert usage.events == [("reserve", "op-1")]
+    assert len(langsmith._SETTLE_TASKS) == 1
+    clock.offset = _PAST_THE_WINDOW
+    await _settled()
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.closed == 1
+
+
+async def test_answered_create_settles_on_the_fast_path_with_a_long_start_limit(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Settle an answered create inside stop, with no background wait, also when the start limit is long."""
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    await env.start()
+    await asyncio.wait_for(env.stop(), 5)
+    assert not langsmith._SETTLE_TASKS
+    assert usage.events[-1] == ("settle", True)
+    assert server.closed == 1
