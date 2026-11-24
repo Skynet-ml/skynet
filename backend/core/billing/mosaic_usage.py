@@ -303,6 +303,16 @@ class MosaicUsageReservation:
             raise UsagePendingError("The cloud sandbox did not confirm the admitted CPU and memory.")
         self._shape_unconfirmed = False
 
+    def accept_sent_shape(self) -> None:
+        """Charge the sent shape of a box that the provider destroyed while its confirm still ran.
+
+        The box came from the create that sent the funded shape. The
+        provider's destroy made the confirm's shape read fail, so that failure
+        says nothing about the shape. Call it only for such a failure, never
+        for a shape mismatch or a box found by its tag.
+        """
+        self._shape_unconfirmed = False
+
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Fund the box up to ``lifetime_ms`` before it may run that long.
 
@@ -377,12 +387,12 @@ class MosaicUsageReservation:
         self.runtime.unpin(self.operation.id)
 
     def _usage(self) -> tuple[Decimal, str, Any]:
-        """Return the box's cost, its source and the raw evidence.
+        """Return the box's cost, its source and its evidence.
 
         Returns:
             The USD cost, its source (``"usage_history"``,
             ``"measured_wall_time"`` or ``"funded_ceiling"``), and the history
-            records, the wall time or the funded lifetime.
+            record count and unit-seconds, the wall time or the funded lifetime.
 
         Raises:
             UsagePendingError: No box id is known.
@@ -403,7 +413,13 @@ class MosaicUsageReservation:
                 history = None
         usd = history_usd(history, units=self.units) if isinstance(history, Mapping) else None
         if usd is not None:
-            return usd, "usage_history", history.get("records")
+            records = history["records"]
+            # A summary, not the up to 500 raw records, keeps the audit row small.
+            summary = {
+                "records": len(records),
+                "unit_seconds": str(sum(_amount(record["unit_seconds"]) for record in records)),
+            }
+            return usd, "usage_history", summary
         return mosaic_measured_usd(self.units, wall_ms), "measured_wall_time", wall_ms
 
     def settle(self) -> None:

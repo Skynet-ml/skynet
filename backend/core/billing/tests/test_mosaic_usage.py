@@ -242,6 +242,55 @@ def test_settle_charges_the_metered_usage_history(database: Engine, monkeypatch:
     assert operation.actual_cents == Decimal("2.5")
 
 
+def test_the_history_evidence_is_a_summary(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep only the record count and the unit-seconds total as evidence, not the raw records.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _clock(monkeypatch, 0.0, 3000.0)
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    _run_box(reservation, FakeHandle(history=_page(_record(), _record(id="seg-2"))))
+    _usd, source, evidence = reservation._usage()
+    assert source == "usage_history"
+    assert evidence == {"records": 2, "unit_seconds": str(2 * Decimal(str(_record()["unit_seconds"])))}
+
+
+def test_a_box_destroyed_during_its_confirm_is_charged_its_measured_time(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge the measured time at the sent shape when the provider's destroy made the shape read fail.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    _clock(monkeypatch, 0.0, 1800.0 - mosaic_usage._WALL_MARGIN_MS / 1000)
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box")
+    handle = FakeHandle(history=RuntimeError("billing:read scope missing"))
+
+    def destroyed_info() -> SimpleNamespace:
+        """Fail like a read of a destroyed box.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("sandbox not found")
+
+    handle.info = destroyed_info
+    reservation.dispatched()
+    with pytest.raises(RuntimeError):
+        USAGE.confirm(reservation, handle)
+    reservation.stopped()
+    reservation.accept_sent_shape()
+    USAGE.settle(reservation)
+    operation = _operation(runtime, reservation)
+    assert operation.state == "settled"
+    assert operation.actual_cents == Decimal("2.5")
+
+
 def test_settle_falls_back_to_measured_time_when_the_history_fails(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

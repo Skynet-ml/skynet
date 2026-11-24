@@ -1034,6 +1034,10 @@ class FakeUsage:
         if self.confirm_error is not None:
             raise self.confirm_error
 
+    def accept_sent_shape(self) -> None:
+        """Record that the sent shape is charged."""
+        self.calls.append("sent_shape")
+
     def bind(self, sandbox_id: str, handle: Any = None) -> None:
         """Record the box id of a lost create.
 
@@ -1286,6 +1290,101 @@ async def test_a_stop_during_a_hanging_confirm_destroys_the_box_first(
         await start
     await _wait_for_the_background_cleanup()
     assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+@pytest.mark.parametrize(
+    ("error", "sent_shape"),
+    [(FakeNotFoundError("gone", status=404), True), (UsagePendingError("shape mismatch"), False)],
+)
+async def test_a_stop_during_a_failing_confirm_charges_the_sent_shape_only_for_a_read_error(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], error: Exception, sent_shape: bool
+) -> None:
+    """Charge the sent shape when our destroy broke the confirm's read, never for a shape mismatch.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        error: The confirm's error after the destroy.
+        sent_shape: Whether the sent shape is charged.
+    """
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation whose confirm is slow, then fails.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        usage = FakeUsage(*args, **kwargs)
+        usage.confirm_delay = 0.2
+        usage.confirm_error = error
+        return usage
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    expected = ["dispatched", f"confirm:{box.id}", "stopped", *(["sent_shape"] if sent_shape else []), "settle"]
+    assert usages[0].calls == expected
+
+
+async def test_the_destroy_and_the_settle_share_one_stop_deadline(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return from the stop within one stop limit when both the destroy and the settle are slow.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.2)
+    original = FakeSyncSandbox.destroy
+
+    def slow_destroy(self: FakeSyncSandbox) -> None:
+        """Destroy the box after most of the stop limit.
+
+        Args:
+            self: The fake box.
+        """
+        time.sleep(0.15)
+        original(self)
+
+    monkeypatch.setattr(FakeSyncSandbox, "destroy", slow_destroy)
+    env = _protected()
+    await env.start()
+    usages[0].settle_delay = 0.5
+    stopping = time.monotonic()
+    await env.stop()
+    assert time.monotonic() - stopping < 0.3
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    await _wait_for_the_background_cleanup()
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_an_expiry_cancelled_by_the_teardown_ends_cancelled(fake_sdk: FakeCloud, usages: list[FakeUsage]) -> None:
+    """Let the expiry task end cancelled when the teardown it started cancels it, not swallow the cancel.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+    """
+    env = _protected(lifetime_seconds=0.05)
+    await env.start()
+    expiry = env._expiry
+    assert expiry is not None
+    await asyncio.wait({expiry}, timeout=2.0)
+    assert expiry.cancelled()
+    await env.stop()
+    assert usages[0].calls[-2:] == ["stopped", "settle"]
 
 
 async def test_a_slow_settle_goes_on_after_the_stop_limit(
