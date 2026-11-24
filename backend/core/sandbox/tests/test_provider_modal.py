@@ -260,6 +260,10 @@ class FakeModal:
         self.builds = 0
         self.build_error: Exception | None = None
         self.list_error: Exception | None = None
+        self.list_calls = 0
+        self.list_gate: asyncio.Event | None = None
+        self.list_entered = asyncio.Event()
+        self.list_hook: Callable[[], None] | None = None
         self.no_object_id = False
         self.App = SimpleNamespace(lookup=_aio(self._lookup))
         self.Image = SimpleNamespace(from_registry=lambda tag: SimpleNamespace(tag=tag, build=_aio(self._build)))
@@ -329,6 +333,12 @@ class FakeModal:
         Raises:
             Exception: ``list_error`` is set.
         """
+        self.list_calls += 1
+        self.list_entered.set()
+        if self.list_hook is not None:
+            self.list_hook()
+        if self.list_gate is not None:
+            await self.list_gate.wait()
         if self.list_error is not None:
             raise self.list_error
         for box in list(self.boxes):
@@ -338,11 +348,20 @@ class FakeModal:
 
 @pytest.fixture(autouse=True)
 def fake_modal(monkeypatch: pytest.MonkeyPatch) -> FakeModal:
-    """Replace the Modal SDK in the provider module with a fresh fake."""
+    """Replace the Modal SDK in the provider module with a fresh fake.
+
+    The fake ``InvalidError`` counts as a server answer, and the second
+    lookup after a client-side create error runs at once.
+
+    Args:
+        monkeypatch: Pytest fixture that restores the module after the test.
+    """
     sdk = FakeModal()
     for name in ("App", "Image", "Secret", "Sandbox"):
         monkeypatch.setattr(modal_provider, name, getattr(sdk, name))
     monkeypatch.setattr(modal_provider, "_EXEC_TIMEOUT_ERRORS", (FakeExecTimeoutError,))
+    monkeypatch.setattr(modal_provider, "_SERVER_ANSWER_ERRORS", frozenset({FakeInvalidError}))
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0)
     return sdk
 
 
@@ -1193,6 +1212,7 @@ async def test_protected_box_releases_only_after_a_lookup_finds_no_box(fake_moda
     (usage,) = budget.reservations
     assert usage.calls == ["sent", "fail"]
     assert usage.absent is True
+    assert fake_modal.list_calls == 1
 
 
 @pytest.mark.parametrize("error", [FakeInvalidError("bad"), FakeSubclassedInvalidError("conflict"), RuntimeError("x")])
@@ -1438,8 +1458,70 @@ async def test_confirm_failure_settles_the_real_reservation(fake_modal: FakeModa
             await env.start()
         assert _box(fake_modal).terminated
         with Session(engine) as session:
-            row = session.scalar(select(ExecutionOperationModel))
+            row = session.scalars(select(ExecutionOperationModel)).one()
         assert row.state == "settled"
         assert runtime._pinned == {}
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("connection lost"), FakeSubclassedInvalidError("conflict")])
+async def test_client_side_create_error_looks_up_the_box_twice(fake_modal: FakeModal, error: Exception) -> None:
+    """Release the hold after a client-side create error only when two lookups found no box.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: A create error that does not prove that Modal answered.
+    """
+    fake_modal.create_error = error
+    env, budget = _protected()
+    with pytest.raises(type(error)):
+        await env.start()
+    (usage,) = budget.reservations
+    assert fake_modal.list_calls == 2
+    assert usage.calls == ["sent", "fail"]
+    assert usage.absent is True
+
+
+async def test_box_that_appears_after_a_client_side_error_is_settled(fake_modal: FakeModal) -> None:
+    """Terminate and settle a box that Modal made after the first lookup found none."""
+    fake_modal.create_error = RuntimeError("client timeout")
+    env, budget = _protected()
+
+    def make_box_late() -> None:
+        """Make the box of the failed create once the first lookup ran."""
+        if fake_modal.list_calls == 2:
+            (usage,) = budget.reservations
+            app = SimpleNamespace(app_id=f"ap-{env._app_name}")
+            fake_modal.boxes.append(FakeSandbox(fake_modal, ("sleep",), {"app": app, "tags": {BOX_KEY: usage.box}}))
+
+    fake_modal.list_hook = make_box_late
+    with pytest.raises(RuntimeError, match="client timeout"):
+        await env.start()
+    (usage,) = budget.reservations
+    assert fake_modal.list_calls == 2
+    assert _box(fake_modal).terminated
+    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+
+
+async def test_cancel_during_the_box_lookup_still_fails_the_usage(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish the cleanup of a failed create in the background when cancels arrive during the lookup."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_error = FakeInvalidError("bad")
+    fake_modal.list_gate = asyncio.Event()
+    env, budget = _protected()
+    task = asyncio.create_task(env.start())
+    await fake_modal.list_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises((FakeInvalidError, asyncio.CancelledError)):
+        await asyncio.wait_for(task, 2)
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent"]
+    fake_modal.list_gate.set()
+    await _until(lambda: usage.calls == ["sent", "fail"])
+    assert usage.absent is True
+    await _until(lambda: not modal_provider._LATE_TERMINATES)

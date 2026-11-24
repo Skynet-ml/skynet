@@ -88,7 +88,7 @@ def _operation(database: Engine) -> ExecutionOperationModel:
         The operation row.
     """
     with Session(database) as session:
-        return session.scalar(select(ExecutionOperationModel))
+        return session.scalars(select(ExecutionOperationModel)).one()
 
 
 def _run(reservation: ModalUsageReservation, *, measured_sec: float | None) -> None:
@@ -315,5 +315,6 @@ def test_extend_is_refused(database: Engine) -> None:
 def test_modal_usage_adapter_is_found() -> None:
     """Find ``USAGE`` through the metering registry, so hosted Skynet can offer Modal."""
     adapter = usage_adapter("modal")
+    assert adapter is not None
     assert adapter is modal_usage.USAGE
     assert adapter.name == "modal"
