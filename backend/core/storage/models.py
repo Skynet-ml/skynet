@@ -853,6 +853,9 @@ class ExecutionBudgetModel(Base):
     creation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     uncapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # A continuous-plan check keeps the policy from before SKY-925: its total
+    # caps and counts setup spend. Every other budget bills setup to the balance.
+    setup_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="open")

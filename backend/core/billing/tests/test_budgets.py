@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.orm import Session
 
+from core.api.routers import execution_budgets
 from core.billing.budget_amounts import cent_units
 from core.billing.budgets import (
     AccountFundsError,
@@ -525,6 +526,64 @@ def test_setup_admission_is_bounded_by_the_wallet_not_the_limit(engine: Engine) 
     assert _reserve(service, budget.id, "above-limit", max_cents=30).state == "reserved"
     with pytest.raises(AccountFundsError, match="cannot fund"):
         _reserve(service, budget.id, "above-balance", max_cents=51)
+
+
+def test_a_continuous_plan_budget_counts_setup_against_its_limit(engine: Engine) -> None:
+    """A continuous-plan budget keeps the policy from before SKY-925: its limit bounds and counts setup."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 100, idempotency_key="plan-cycle", setup_in_total=True)
+    with pytest.raises(BudgetInsufficientError) as refused:
+        _reserve(service, budget.id, "above-limit", max_cents=101)
+    assert not isinstance(refused.value, AccountFundsError)
+    setup = _reserve(service, budget.id, "setup-check", max_cents=60)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=60, evidence={"usage": "setup"})
+
+    attached = service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+
+    assert attached.setup_in_total
+    assert attached.available_cents == 40
+    assert attached.limit_spent_cents == 60
+    assert execution_budgets.budget_response(attached).run_spent_cents == 60
+    with pytest.raises(BudgetTotalConflictError) as lowered:
+        service.update_total(budget.id, "alice", 59, expected_revision=attached.revision)
+    assert lowered.value.minimum_total_cents == 60
+    with pytest.raises(BudgetInsufficientError):
+        _reserve(service, budget.id, "run-lease", phase="run", max_cents=41)
+
+
+def test_a_wizard_budget_leaves_setup_out_of_its_limit(engine: Engine) -> None:
+    """Only a continuous-plan budget counts setup; every other budget bills setup to the wallet alone."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 100, idempotency_key="wizard")
+    setup = _reserve(service, budget.id, "setup-check", max_cents=60)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=60, evidence={"usage": "setup"})
+
+    attached = service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+
+    assert not attached.setup_in_total
+    assert attached.available_cents == 100
+    assert execution_budgets.budget_response(attached).run_spent_cents == 0
+
+
+def test_a_continuous_plan_check_keeps_one_lease_of_its_limit(engine: Engine) -> None:
+    """A plan cycle's check leaves the run's first lease of the limit and of the balance (SKY-923)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 40, idempotency_key="plan-lease", setup_in_total=True)
+    runtime = BudgetRuntime(
+        service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0, keep_cents=10
+    )
+
+    with pytest.raises(BudgetInsufficientError, match=r"needs up to \$0\.41"):
+        runtime.reserve(_quote(31), operation_key="over", cost_kind="model")
+    assert runtime.reserve(_quote(30), operation_key="fits", cost_kind="model").state == "reserved"
 
 
 def test_wallet_holds_span_budgets_and_protect_against_legacy_debits(engine: Engine) -> None:

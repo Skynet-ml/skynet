@@ -2021,8 +2021,9 @@ class BackgroundWorker:
             return
         if snapshot.uncapped:
             return
-        # Setup bills only the wallet, so only run spend counts against the limit (SKY-925).
-        run_watcher.observe_spend(float(snapshot.run_spent_cents), snapshot.total_cents)
+        # Setup bills only the wallet, so only run spend counts against the limit, except for a
+        # continuous-plan budget (SKY-925).
+        run_watcher.observe_spend(float(snapshot.limit_spent_cents), snapshot.total_cents)
 
     def _build_cancelled(self, cancel_event: threading.Event | None, optimization_id: str) -> bool:
         """Tell an image build whether its run must stop (SKY-891).

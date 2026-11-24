@@ -1569,6 +1569,16 @@ def test_the_sidebar_flags_every_run_of_a_plan(env: _Env) -> None:
     }
 
 
+def test_a_plan_cycle_budget_counts_its_setup_in_the_total(env: _Env) -> None:
+    """A plan cycle keeps the policy from before SKY-925, while the source run's budget does not."""
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
 def test_a_plan_without_amounts_reuses_the_run_budget_and_has_no_monthly_limit(env: _Env) -> None:
     """With no amounts, each run gets the source run's budget and only the wallet gates it."""
     source_id = _incumbent(env)

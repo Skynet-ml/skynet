@@ -15,15 +15,17 @@ SPENT = "The next operation needs up to $1.35, but only $0.53 of the $0.53 limit
 
 
 @pytest.mark.parametrize(
-    ("error", "key", "field"),
+    ("error", "setup_in_total", "key", "field"),
     [
-        (BudgetInsufficientError(SPENT), "budget", "balance"),
-        (AccountFundsError("The account cannot fund the next operation."), "budget", "balance"),
-        (RuntimeError(SPENT), "setup", None),
+        (BudgetInsufficientError(SPENT), False, "budget", "balance"),
+        (AccountFundsError("The account cannot fund the next operation."), False, "budget", "balance"),
+        (RuntimeError(SPENT), False, "setup", None),
+        (BudgetInsufficientError(SPENT), True, "budget", None),
+        (AccountFundsError("The account cannot fund the next operation."), True, "budget", "balance"),
     ],
 )
 def test_preflight_reports_a_reservation_over_the_limit_as_a_budget_check(
-    monkeypatch: pytest.MonkeyPatch, error: Exception, key: str, field: str | None
+    monkeypatch: pytest.MonkeyPatch, error: Exception, setup_in_total: bool, key: str, field: str | None
 ) -> None:
     """A runtime stopped by the budget fails the ``budget`` check; any other failure stays ``setup``.
 
@@ -31,7 +33,8 @@ def test_preflight_reports_a_reservation_over_the_limit_as_a_budget_check(
     drives the real ``_verify_anything`` through that event rather than
     raising past it. Setup bills the balance only (SKY-925), so every budget
     stop names the balance, even a plain one the guest relays. The wizard then
-    does not offer to raise a limit that was never the problem.
+    does not offer to raise a limit that was never the problem. A
+    continuous-plan limit still bounds setup, so its plain stop names the limit.
     """
 
     class _Gateway:
@@ -69,7 +72,7 @@ def test_preflight_reports_a_reservation_over_the_limit_as_a_budget_check(
         request,
         SimpleNamespace(username="alice"),
         object(),
-        SimpleNamespace(id="budget", generation=1),
+        SimpleNamespace(id="budget", generation=1, setup_in_total=setup_in_total),
         {"id": "setup"},
         attempt=1,
         engine=object(),

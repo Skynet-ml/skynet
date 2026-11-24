@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import AliasChoices, BaseModel, Field
 
-from ...billing.budget_amounts import MAX_CENTS
+from ...billing.budget_amounts import CENT_SCALE, MAX_CENTS, ceil_cents
 from ...billing.budgets import (
     CHUNK_CENTS,
     BudgetConflictError,
@@ -70,7 +70,9 @@ def budget_response(snapshot: BudgetSnapshot) -> ExecutionBudgetResponse:
     Returns:
         Response whose fractional amounts are decimal strings in JSON.
     """
-    return ExecutionBudgetResponse.model_validate(asdict(snapshot))
+    # The budget card reads run_spent_cents as the spend against the limit, so a
+    # continuous-plan budget, whose limit also counts setup, reports both (SKY-925).
+    return ExecutionBudgetResponse.model_validate({**asdict(snapshot), "run_spent_cents": snapshot.limit_spent_cents})
 
 
 def budget_http_error(error: BudgetError) -> HTTPException:
@@ -102,51 +104,61 @@ def budget_http_error(error: BudgetError) -> HTTPException:
     return DomainError(code, status=status)
 
 
-def require_one_lease(total_cents: int, *, from_balance: bool = False) -> None:
-    """Refuse a run limit that cannot buy the run's first budget lease.
+def require_one_lease(total_cents: int, *, from_balance: bool = False, spent_units: int = 0) -> None:
+    """Refuse a run limit whose unspent room cannot buy the run's first budget lease.
 
     A run takes its budget in leases of :data:`CHUNK_CENTS`, so a smaller
     limit ends the run before its first paid step (SKY-914). Setup checks
     bill only the wallet, so they leave the whole limit to the run (SKY-925).
+    A continuous-plan check still spends from the limit, so its lease counts
+    only the room the check left (SKY-923).
 
     Args:
         total_cents: The run's approved spending limit.
         from_balance: Whether the account balance, not the user's own
             limit, sets this limit.
+        spent_units: Settled spending already charged to this limit, in
+            budget units.
 
     Raises:
         DomainError: 402 ``budget.insufficient`` when a balance-set limit is
             below one lease, or 409 ``budget.below_minimum`` when the user's
             own limit is.
     """
-    if total_cents >= CHUNK_CENTS:
+    if total_cents * CENT_SCALE - spent_units >= CHUNK_CENTS * CENT_SCALE:
         return
     # A higher limit cannot help when the balance sets it, so the refusal names the balance.
     if from_balance:
         raise DomainError("budget.insufficient", status=402)
-    raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
+    raise DomainError(
+        "budget.below_minimum", status=409, minimum_total_cents=ceil_cents(spent_units + CHUNK_CENTS * CENT_SCALE)
+    )
 
 
-def require_funded_lease(total_cents: int, spendable_cents: int | None, *, from_balance: bool = False) -> None:
+def require_funded_lease(
+    total_cents: int, spendable_cents: int | None, *, spent_units: int = 0, from_balance: bool = False
+) -> None:
     """Refuse a capped run whose balance or limit cannot buy the run's first budget lease.
 
     Args:
         total_cents: The run's approved spending limit.
         spendable_cents: The account's spendable balance, or ``None`` when no
             balance applies.
+        spent_units: Settled spending already charged to this limit, in
+            budget units.
         from_balance: Whether the account balance, not the user's own
             limit, sets this limit.
 
     Raises:
         DomainError: 402 ``budget.insufficient`` when the balance, or a limit
             the balance sets, is below one lease; or 409
-            ``budget.below_minimum`` when the user's own limit is.
+            ``budget.below_minimum`` when the user's own limit's room is.
     """
     # Every run's first lease holds one full lease of the balance, also for BYOK. A higher limit cannot help a
     # balance below that, so the balance is checked first (SKY-923).
     if spendable_cents is not None:
         require_one_lease(spendable_cents, from_balance=True)
-    require_one_lease(total_cents, from_balance=from_balance)
+    require_one_lease(total_cents, from_balance=from_balance, spent_units=spent_units)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

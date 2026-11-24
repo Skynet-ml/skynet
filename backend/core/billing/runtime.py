@@ -101,6 +101,8 @@ class BudgetRuntime:
         phase: str,
         stop: BudgetStopLatch | None = None,
         wait_timeout: float = 600,
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> None:
         """Bind the spending context without passing database credentials to guest code.
 
@@ -112,6 +114,10 @@ class BudgetRuntime:
             phase: Setup or run attribution.
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
+            keep_cents: Cents of a capped limit, and of the account's funds,
+                that the coverage must leave free. Only a continuous-plan
+                check keeps them, for the run's first lease (SKY-923).
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
         """
         self.service = service
         self.username = username
@@ -120,6 +126,8 @@ class BudgetRuntime:
         self.phase = phase
         self.stop = stop or BudgetStopLatch()
         self.wait_timeout = wait_timeout
+        self.keep_cents = keep_cents
+        self.keep_funds = keep_funds
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
@@ -244,9 +252,10 @@ class BudgetRuntime:
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
         """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
-        Setup work is bounded by the account's funds alone (SKY-925). A setup
+        Setup work is bounded by the account's funds alone (SKY-925), except
+        for a continuous-plan budget, whose limit also bounds setup. A setup
         check runs its samples one at a time inside boxes it opened itself, so
-        its pinned coverage never frees funds while it waits. A run's lanes share
+        its pinned coverage never frees funds or limit while it waits. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
         only when no pinned work box can end: each one has a model call that
@@ -262,13 +271,14 @@ class BudgetRuntime:
 
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
-            In the setup phase it is an ``AccountFundsError``. In the run phase
+            In the setup phase it is an ``AccountFundsError`` for the funds, or
+            a ``BudgetInsufficientError`` for a continuous-plan limit. In the run phase
             it is the stop latch's ``BudgetReached``, after the budget stopped
             admitting work, like any other run refusal.
         """
         if self._fits_after_unpinned_work(error):
             return None
-        if self.phase == "setup":
+        if self.phase == "setup" and error.funds:
             return AccountFundsError("The account cannot fund the next operation.")
         with self._changed:
             pinned = sum(self._pinned.values())
@@ -277,13 +287,17 @@ class BudgetRuntime:
             every_box_waits = all(
                 box is not None and (self._waiting[box] > 0 or self._parked[box] > 0) for box in self._boxes.values()
             )
-        if not every_box_waits:
+        if self.phase != "setup" and not every_box_waits:
             return None
+        # Only a continuous-plan budget's limit refuses setup work (SKY-925).
+        owner = "check's" if self.phase == "setup" else "run's"
         message = (
-            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this run's "
+            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this {owner} "
             f"sandboxes hold {usd_text(ceil_cents(pinned))} of the "
             f"{usd_text(max(error.room_units, 0) // CENT_SCALE)} that remain."
         )
+        if self.phase == "setup":
+            return BudgetInsufficientError(message)
         self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
         return self.stop.trip(message)
 
@@ -353,6 +367,8 @@ class BudgetRuntime:
                     max_wallet_cents=quote.maximum.wallet,
                     attempt=attempt,
                     role=role,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetUnreconciledError as error:
                 raise UsagePendingError(
@@ -418,6 +434,8 @@ class BudgetRuntime:
                     max_cents=quote.maximum.total,
                     max_wallet_cents=quote.maximum.wallet,
                     evidence=evidence,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetInFlightError as error:
                 refusal = self._wait_cannot_help(error)

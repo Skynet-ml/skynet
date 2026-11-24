@@ -463,7 +463,7 @@ def test_preflight_reports_pending_when_the_async_settle_stays_pending(monkeypat
         request,  # type: ignore[arg-type]
         SimpleNamespace(username="user"),
         None,  # type: ignore[arg-type]
-        SimpleNamespace(id="budget-1", generation=3),
+        SimpleNamespace(id="budget-1", generation=3, setup_in_total=False),
         {"id": "preflight-1"},
         attempt=1,
         engine=None,
