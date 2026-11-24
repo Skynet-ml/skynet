@@ -11,12 +11,15 @@ import asyncio
 import itertools
 import shlex
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core.billing.prime_usage import quote_prime_sandbox
+from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -27,6 +30,7 @@ from core.sandbox.errors import (
     SandboxTransientError,
     StartTimeoutError,
 )
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import prime
 from core.sandbox.providers.prime import BOX_TAG, PrimeEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -67,6 +71,12 @@ class FakeUploadTimeoutError(RuntimeError):
     """Stand in for ``UploadTimeoutError``."""
 
 
+# The SDK model field defaults, before its validator runs: the fake runs no validator.
+_SDK_DEFAULTS = {"cpu_cores": 1.0, "memory_gb": 1.0, "disk_size_gb": None, "timeout_minutes": 60, "gpu_count": 0}
+_CREATED_AT = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+_FAKE_ENDED = frozenset({"ERROR", "TERMINATED", "TIMEOUT"})
+
+
 class FakeCreateRequest(dict):
     """Stand in for ``CreateSandboxRequest``: keep the fields as a dict."""
 
@@ -78,6 +88,21 @@ class FakeCreateRequest(dict):
         """
         super().__init__(fields)
 
+    def __getattr__(self, name: str) -> Any:
+        """Read a field like the SDK model, with the SDK default when it is not set.
+
+        Args:
+            name: The field name.
+
+        Returns:
+            The field value.
+        """
+        if name in self:
+            return self[name]
+        if name in _SDK_DEFAULTS:
+            return _SDK_DEFAULTS[name]
+        raise AttributeError(name)
+
 
 @dataclass
 class BoxState:
@@ -87,6 +112,7 @@ class BoxState:
     labels: list[str]
     request: dict[str, Any]
     status: str = "PENDING"
+    terminated_at: datetime | None = None
     files: dict[str, str] = field(default_factory=dict)
     dirs: set[str] = field(default_factory=lambda: {"/", "/tmp"})
 
@@ -114,6 +140,8 @@ class FakeCloud:
     # The get_network calls before Prime reports the policy as applied; None never applies it.
     apply_after: int | None = 0
     ids: Any = field(default_factory=lambda: itertools.count(1))
+    # The seconds between the create and the end that the delete records; None records no end.
+    run_seconds: float | None = 90.0
 
     def run(self, box: BoxState, command: str, env: dict[str, str] | None) -> tuple[int, str, str]:
         """Run one raw command in a tiny shell model.
@@ -179,7 +207,39 @@ class FakeClient:
         CLOUD.boxes[box.id] = box
         if CLOUD.create_hangs:
             await asyncio.Event().wait()
-        return SimpleNamespace(id=box.id)
+        return self._view(box)
+
+    @staticmethod
+    def _view(box: BoxState) -> SimpleNamespace:
+        """Return the SDK ``Sandbox`` view of a fake sandbox.
+
+        Args:
+            box: The sandbox.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        sizes = {name: box.request.get(name, default) for name, default in _SDK_DEFAULTS.items()}
+        return SimpleNamespace(
+            id=box.id,
+            status=box.status,
+            created_at=_CREATED_AT,
+            started_at=None,
+            terminated_at=box.terminated_at,
+            **sizes,
+        )
+
+    async def get(self, sandbox_id: str) -> SimpleNamespace:
+        """Read one sandbox.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        CLOUD.calls.append(f"get:{sandbox_id}")
+        return self._view(CLOUD.boxes[sandbox_id])
 
     async def wait_for_creation(self, sandbox_id: str, *, max_attempts: int) -> None:
         """Wait until the sandbox runs, forever when the cloud says it hangs.
@@ -295,25 +355,29 @@ class FakeClient:
         return SimpleNamespace(applied=CLOUD.apply_after <= 0)
 
     async def list(
-        self, *, labels: list[str], exclude_terminated: bool, per_page: int, cursor: str | None
+        self, *, labels: list[str], exclude_terminated: bool | None, per_page: int, cursor: str | None
     ) -> SimpleNamespace:
         """Return one page of sandboxes with these labels.
 
         Args:
             labels: The label filter.
-            exclude_terminated: Leave terminated sandboxes out.
+            exclude_terminated: The SDK ``is_active`` filter, or ``None`` for every box.
             per_page: The page size the provider asked for.
             cursor: The page cursor.
 
         Returns:
             An object like ``SandboxListResponse``.
         """
-        CLOUD.list_calls.append({"labels": labels, "per_page": per_page, "cursor": cursor})
+        CLOUD.list_calls.append(
+            {"labels": labels, "per_page": per_page, "cursor": cursor, "exclude_terminated": exclude_terminated}
+        )
+        # Like the SDK: None sends no is_active and lists every box; True
+        # lists only active boxes; False lists only ended boxes.
         boxes = [
             box
             for box in CLOUD.boxes.values()
             if (CLOUD.list_ignores_labels or set(labels) <= set(box.labels))
-            and not (exclude_terminated and box.status == "TERMINATED")
+            and (exclude_terminated is None or (box.status not in _FAKE_ENDED) == exclude_terminated)
         ]
         start = int(cursor or 0)
         page = boxes[start : start + CLOUD.page_size]
@@ -333,7 +397,10 @@ class FakeClient:
             sandbox_id: The sandbox id.
         """
         CLOUD.calls.append(f"delete:{sandbox_id}")
-        CLOUD.boxes[sandbox_id].status = "TERMINATED"
+        box = CLOUD.boxes[sandbox_id]
+        box.status = "TERMINATED"
+        if CLOUD.run_seconds is not None:
+            box.terminated_at = _CREATED_AT + timedelta(seconds=CLOUD.run_seconds)
 
     async def aclose(self) -> None:
         """Close the client."""
@@ -369,6 +436,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     monkeypatch.setenv(prime.API_KEY_ENV, "fake-key-for-tests")
     monkeypatch.setattr(prime, "STOP_TIMEOUT", 1.0)
     monkeypatch.setattr(prime, "POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(prime, "SEARCH_AGAIN_DELAY", 0.0)
     return CLOUD
 
 
@@ -529,14 +597,17 @@ def test_create_fields_defaults() -> None:
     assert fields["timeout_minutes"] == 1
     assert "secrets" not in fields
     assert "memory_gb" not in fields
-    assert "disk_size_gb" not in fields
+    assert fields["disk_size_gb"] == prime.DEFAULT_DISK_GB == 5.0
     assert len(_fields(_spec(name="x" * 300))["name"]) == prime._NAME_LIMIT
 
 
-def test_ignore_mode_sends_no_size() -> None:
-    """Send no size when the spec ignores resources."""
-    fields = _fields(_spec(resources=ResourceRequest(cpus=64, memory_mb=1024, mode=ResourceMode.IGNORE)))
-    assert not {"cpu_cores", "memory_gb", "disk_size_gb"} & fields.keys()
+def test_ignore_mode_sends_only_the_default_disk() -> None:
+    """Send no CPU or memory size when the spec ignores resources, and the SDK's default disk."""
+    fields = _fields(
+        _spec(resources=ResourceRequest(cpus=64, memory_mb=1024, disk_mb=99_999, mode=ResourceMode.IGNORE))
+    )
+    assert not {"cpu_cores", "memory_gb"} & fields.keys()
+    assert fields["disk_size_gb"] == prime.DEFAULT_DISK_GB
 
 
 def test_create_fields_map_the_network_mode() -> None:
@@ -852,3 +923,598 @@ async def test_an_upload_timeout_is_transient(fake_sdk: FakeCloud) -> None:
         with pytest.raises(SandboxTransientError) as caught:
             await env.upload_files({"/tmp/a.txt": "x"})
     assert caught.value.__cause__ is error
+
+
+@dataclass
+class FakeUsage:
+    """Record the reservation calls that a protected sandbox makes."""
+
+    budget: Any
+    request: dict[str, Any]
+    operation_key: str
+    created_before: list[str]
+    calls: list[tuple[str, Any]] = field(default_factory=list)
+    sandbox_id: str | None = None
+    settle_error: Exception | None = None
+    seconds: list[int | None] = field(default_factory=list)
+
+    def confirm_created(self, record: dict[str, Any]) -> None:
+        """Bind the created sandbox.
+
+        Args:
+            record: The sandbox record.
+        """
+        self.sandbox_id = record["id"]
+        self.calls.append(("confirm", record))
+
+    def settle(self, record: dict[str, Any] | None = None, *, seconds: int | None = None) -> None:
+        """Record the settle, or fail it.
+
+        Args:
+            record: The final sandbox record.
+            seconds: The lifetime to charge when the record has no end.
+
+        Raises:
+            Exception: The ``settle_error`` the test set.
+        """
+        self.calls.append(("settle", record))
+        self.seconds.append(seconds)
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def pending(self, record: dict[str, Any] | None = None) -> None:
+        """Record that the hold stays pending.
+
+        Args:
+            record: The last sandbox record.
+        """
+        self.calls.append(("pending", record))
+
+    def release(self, reason: str) -> None:
+        """Record the release of a hold with no sandbox.
+
+        Args:
+            reason: Why no sandbox exists.
+        """
+        self.calls.append(("release", reason))
+
+
+class UsageRecorder:
+    """Make fake reservations and keep each one."""
+
+    def __init__(self, settle_error: Exception | None = None) -> None:
+        """Start with no reservation.
+
+        Args:
+            settle_error: The error each settle raises, or ``None``.
+        """
+        self.made: list[FakeUsage] = []
+        self.settle_error = settle_error
+
+    def __call__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make one reservation and record the cloud calls made before it.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced create fields.
+            operation_key: The sandbox identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = FakeUsage(budget, request, operation_key, list(CLOUD.calls), settle_error=self.settle_error)
+        self.made.append(usage)
+        return usage
+
+
+def _protected(recorder: UsageRecorder, **kwargs: Any) -> PrimeEnvironment:
+    """Return a protected sandbox that reserves through the recorder.
+
+    Args:
+        recorder: The fake usage factory.
+        **kwargs: Extra provider options.
+
+    Returns:
+        The sandbox.
+    """
+    return PrimeEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=recorder, **kwargs)
+
+
+def test_prime_is_billable_and_has_a_usage_adapter() -> None:
+    """Declare Prime billable, so the broker passes a budget, and find its usage adapter."""
+    assert prime.PRIME_CAPABILITIES.billable is True
+    assert usage_adapter("prime") is not None
+
+
+def test_a_protected_sandbox_needs_an_operation_key() -> None:
+    """Refuse a budget without the stable identity the ledger needs."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        PrimeEnvironment(_spec(), budget=object(), usage_factory=UsageRecorder())
+
+
+async def test_a_protected_sandbox_reserves_before_the_create_and_settles_after_the_delete(
+    fake_sdk: FakeCloud,
+) -> None:
+    """Reserve the funded size, confirm the created sandbox and settle its ended record."""
+    recorder = UsageRecorder()
+    env = _protected(recorder)
+    assert env.capabilities.protected is True
+    async with env:
+        pass
+    (usage,) = recorder.made
+    assert "create" not in usage.created_before
+    assert usage.operation_key == "op-1"
+    assert usage.request == {**_SDK_DEFAULTS, "cpu_cores": 1.0, "disk_size_gb": 5.0, "timeout_minutes": 5}
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    record = usage.calls[1][1]
+    assert record["id"] == "sbx-1"
+    assert record["created_at"] == _CREATED_AT.isoformat()
+    assert record["terminated_at"] == (_CREATED_AT + timedelta(seconds=90)).isoformat()
+    assert fake_sdk.calls.index("delete:sbx-1") < fake_sdk.calls.index("get:sbx-1")
+    assert fake_sdk.calls[-1] == "aclose"
+
+
+async def test_a_start_timeout_settles_the_created_sandbox(fake_sdk: FakeCloud) -> None:
+    """Settle the sandbox that never reached running, and keep the start error."""
+    fake_sdk.wait_hangs = True
+    recorder = UsageRecorder()
+    with pytest.raises(StartTimeoutError):
+        await _protected(recorder, timeouts=_timeouts(start=0.05)).start()
+    assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle"]
+
+
+async def test_a_cancelled_create_settles_the_lost_sandbox(fake_sdk: FakeCloud) -> None:
+    """Find a sandbox whose create never returned, bind it and settle it."""
+    fake_sdk.create_hangs = True
+    recorder = UsageRecorder()
+    start = asyncio.ensure_future(_protected(recorder).start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[1][1]["status"] == "TERMINATED"
+
+
+async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Prime refused the create and no sandbox carries the label."""
+    fake_sdk.create_error = FakeAPIError("HTTP 422: bad field")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxRejectedError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("release", "SandboxRejectedError")]
+
+
+async def test_a_transient_create_error_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold when a 5xx answer and an empty search leave it unknown whether Prime made a sandbox."""
+    fake_sdk.create_error = FakeAPIError("HTTP 503: unavailable")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxTransientError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_failed_settle_is_raised_once_by_stop(fake_sdk: FakeCloud) -> None:
+    """Raise the settle failure from the first stop only, and keep the hold pending."""
+    recorder = UsageRecorder(settle_error=UsagePendingError("not final"))
+    env = _protected(recorder)
+    await env.start()
+    with pytest.raises(UsagePendingError, match="not final"):
+        await env.stop()
+    await env.stop()
+    assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle", "pending"]
+
+
+@pytest.mark.parametrize(
+    "resources",
+    [ResourceRequest(cpus=1), ResourceRequest(cpus=4, memory_mb=8192, mode=ResourceMode.IGNORE)],
+    ids=["no-disk", "ignore"],
+)
+async def test_a_protected_sandbox_with_no_disk_size_sends_and_quotes_the_default_disk(
+    fake_sdk: FakeCloud, resources: ResourceRequest
+) -> None:
+    """Send the SDK's default disk in the create, and price that same disk in the quote.
+
+    Args:
+        resources: A request with no disk size, or one that ignores sizes.
+    """
+    recorder = UsageRecorder()
+    env = PrimeEnvironment(_spec(operation_key="op-1", resources=resources), budget=object(), usage_factory=recorder)
+    async with env:
+        pass
+    (usage,) = recorder.made
+    assert usage.request["disk_size_gb"] == prime.DEFAULT_DISK_GB
+    assert fake_sdk.boxes["sbx-1"].request["disk_size_gb"] == prime.DEFAULT_DISK_GB
+    assert quote_prime_sandbox(usage.request).maximum.total > 0
+
+
+async def test_a_stop_after_a_refused_create_but_before_start_handles_it_releases(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release the hold when a stop runs between a 4xx refusal and the start's own teardown."""
+    recorder = UsageRecorder()
+    env = _protected(recorder)
+    stops: list[asyncio.Future[None]] = []
+
+    async def refuse(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Start a stop, then refuse the create, so the stop's teardown starts before start() sees the error.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 422.
+        """
+        stops.append(asyncio.ensure_future(env.stop()))
+        raise FakeAPIError("HTTP 422: bad field")
+
+    monkeypatch.setattr(FakeClient, "create", refuse)
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    await stops[0]
+    assert recorder.made[0].calls == [("release", "SandboxRejectedError")]
+
+
+async def test_a_sandbox_with_no_end_time_settles_until_the_delete_answer(fake_sdk: FakeCloud) -> None:
+    """Charge the local time to the accepted delete when the box shows TERMINATED with no end time."""
+    fake_sdk.run_seconds = None
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["terminated_at"] is None
+    assert usage.calls[-1][1]["status"] == "TERMINATED"
+    (seconds,) = usage.seconds
+    assert 0 <= seconds <= 5
+    assert fake_sdk.calls.count("get:sbx-1") > 1
+
+
+async def test_a_sandbox_whose_reads_fail_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge the whole funded lifetime after an accepted delete when every read gets a 5xx: no record shows an end."""
+
+    async def unavailable(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Fail the read with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 503.
+        """
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(FakeClient, "get", unavailable)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [5 * 60]
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "TERMINATING"])
+async def test_a_sandbox_still_live_after_an_accepted_delete_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Charge the whole funded lifetime when Prime accepts the delete but the box still shows a live status.
+
+    Args:
+        status: The status the box keeps after the delete.
+    """
+
+    async def accept(self: FakeClient, sandbox_id: str) -> None:
+        """Accept the delete and leave the box in the live status.
+
+        Args:
+            sandbox_id: The sandbox id.
+        """
+        CLOUD.calls.append(f"delete:{sandbox_id}")
+        CLOUD.boxes[sandbox_id].status = status
+
+    monkeypatch.setattr(FakeClient, "delete", accept)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["status"] == status
+    assert usage.seconds == [5 * 60]
+
+
+async def test_a_sandbox_with_no_end_and_no_delete_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle the whole funded timeout when no delete succeeded and Prime shows no end, since Prime ends the box then."""
+
+    async def unavailable(self: FakeClient, sandbox_id: str) -> None:
+        """Fail the delete with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 503.
+        """
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(FakeClient, "delete", unavailable)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [5 * 60]
+
+
+async def test_a_failed_delete_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Try the delete again after a 5xx answer, then settle the ended record."""
+    original = FakeClient.delete
+    tries = 0
+
+    async def flaky(self: FakeClient, sandbox_id: str) -> None:
+        """Fail the first delete with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: On the first try.
+        """
+        nonlocal tries
+        tries += 1
+        if tries == 1:
+            raise FakeAPIError("HTTP 503: unavailable")
+        await original(self, sandbox_id)
+
+    monkeypatch.setattr(FakeClient, "delete", flaky)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert tries == 2
+    assert usage.calls[-1][1]["terminated_at"] is not None
+    assert usage.seconds == [None]
+
+
+async def test_a_sandbox_that_prime_no_longer_knows_settles_on_local_time(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle on the local time since the create when the read after the delete gets a 404."""
+
+    async def gone(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Answer that the sandbox does not exist.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 404.
+        """
+        raise FakeAPIError("HTTP 404: not found")
+
+    monkeypatch.setattr(FakeClient, "get", gone)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1] == {}
+    (seconds,) = usage.seconds
+    assert isinstance(seconds, int)
+    assert 0 <= seconds <= 5
+
+
+@pytest.mark.parametrize("error", [FakeUnauthorizedError("no key"), FakePaymentRequiredError("no funds")])
+async def test_a_create_refused_with_401_or_402_stays_pending_when_the_search_fails(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Keep the hold when the label search timed out: an SDK retry can get 401 or 402 after a first try made a box.
+
+    Args:
+        error: The SDK refusal.
+    """
+    monkeypatch.setattr(prime, "STOP_TIMEOUT", 0.05)
+    fake_sdk.create_error = error
+    fake_sdk.list_hangs = True
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_create_refused_with_402_and_no_box_releases(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Prime refused the create with 402 and the label search found nothing."""
+    fake_sdk.create_error = FakePaymentRequiredError("no funds")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("release", "SandboxFatalError")]
+
+
+def _create_then_refuse(monkeypatch: pytest.MonkeyPatch, *, ended: bool) -> list[BoxState]:
+    """Make each create build a box and then answer 402, like an SDK retry after a first try.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        ended: End the box before the answer.
+
+    Returns:
+        The boxes made, in order.
+    """
+    original = FakeClient.create
+    made: list[BoxState] = []
+
+    async def create(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Make the box, then refuse the create.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakePaymentRequiredError: Always, after the box exists.
+        """
+        view = await original(self, request)
+        box = CLOUD.boxes[view.id]
+        if ended:
+            box.status = "TERMINATED"
+            box.terminated_at = _CREATED_AT + timedelta(seconds=30)
+        made.append(box)
+        raise FakePaymentRequiredError("no funds")
+
+    monkeypatch.setattr(FakeClient, "create", create)
+    return made
+
+
+async def test_a_refused_create_whose_box_already_ended_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find an ended box under the label, settle its record and never delete or release it."""
+    _create_then_refuse(monkeypatch, ended=True)
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert not any(call.startswith("delete:") for call in fake_sdk.calls)
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["terminated_at"] == (_CREATED_AT + timedelta(seconds=30)).isoformat()
+    assert usage.seconds == [None]
+
+
+async def test_a_refused_create_whose_box_still_runs_settles(fake_sdk: FakeCloud) -> None:
+    """Find a running box under the label after a refused create, delete it and settle it, never release it."""
+    original = FakeClient.create
+
+    async def create(self: FakeClient, request: FakeCreateRequest) -> SimpleNamespace:
+        """Make a running box, then answer 400 like an SDK retry after a 5xx.
+
+        Args:
+            request: The create request.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 400, after the box exists.
+        """
+        view = await original(self, request)
+        CLOUD.boxes[view.id].status = "RUNNING"
+        raise FakeAPIError("HTTP 400: duplicate")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FakeClient, "create", create)
+        recorder = UsageRecorder()
+        with pytest.raises(SandboxRejectedError):
+            await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert fake_sdk.list_calls[0]["exclude_terminated"] is None
+    assert "delete:sbx-1" in fake_sdk.calls
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [None]
+
+
+async def test_a_refused_create_whose_box_is_listed_late_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search again after a refused create, and delete and settle the box that the second search finds."""
+    made = _create_then_refuse(monkeypatch, ended=False)
+    original = FakeClient.list
+    hidden: dict[str, BoxState] = {}
+
+    async def late(self: FakeClient, **kwargs: Any) -> SimpleNamespace:
+        """Hide the new box from the first search only.
+
+        Args:
+            **kwargs: The list options.
+
+        Returns:
+            An object like ``SandboxListResponse``.
+        """
+        if not fake_sdk.list_calls:
+            hidden.update({box.id: fake_sdk.boxes.pop(box.id) for box in made})
+        else:
+            fake_sdk.boxes.update(hidden)
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(FakeClient, "list", late)
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    (usage,) = recorder.made
+    assert len(fake_sdk.list_calls) == 2
+    assert "delete:sbx-1" in fake_sdk.calls
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.seconds == [None]
+
+
+async def test_a_create_conflict_stays_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold after a 409, since a retried create may have made a box that Prime does not list yet."""
+    fake_sdk.create_error = FakeAPIError("HTTP 409: conflict")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxRejectedError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_lost_sandbox_whose_delete_fails_still_settles(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the id of a found lost sandbox after a failed delete, and settle its whole funded timeout."""
+
+    async def failing(self: FakeClient, sandbox_id: str) -> None:
+        """Fail every delete.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with a 5xx answer.
+        """
+        CLOUD.calls.append(f"delete:{sandbox_id}")
+        raise FakeAPIError("HTTP 503: unavailable")
+
+    monkeypatch.setattr(prime, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(FakeClient, "delete", failing)
+    fake_sdk.create_hangs = True
+    recorder = UsageRecorder()
+    start = asyncio.ensure_future(_protected(recorder).start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (usage,) = recorder.made
+    assert fake_sdk.calls.count("delete:sbx-1") > 1
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.sandbox_id == "sbx-1"
+    assert usage.seconds == [5 * 60]
+
+
+async def test_the_read_waits_for_an_ended_status(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read again while Prime shows an end time but not yet an ended status."""
+    original = FakeClient.get
+    reads = 0
+
+    async def ending(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Show an end time with a status that has not ended on the first read.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        nonlocal reads
+        reads += 1
+        view = await original(self, sandbox_id)
+        if reads == 1:
+            view.status = "STOPPING"
+        return view
+
+    monkeypatch.setattr(FakeClient, "get", ending)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert reads == 2
+    assert usage.calls[-1][1]["status"] == "TERMINATED"
+    assert usage.seconds == [None]
