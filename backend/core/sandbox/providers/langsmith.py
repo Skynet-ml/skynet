@@ -355,11 +355,13 @@ class LangSmithEnvironment(SandboxEnvironment):
         A protected box waits for a 404 proof. After an answered create this
         takes about one poll. After a create without an answer (a timeout,
         a cancel, a 5xx), the proof counts only after the create window, so
-        ``stop`` and a cancelled ``start`` can block for the first delete (up
-        to 60 s), the start limit plus 60 s grace, the 60 s poll window, one
-        last pass of up to about 122 s (get, delete, poll pause), and the
-        client close (up to 60 s). With the default 900 s start limit that is
-        about 1,200 to 1,260 s, or about 20 to 21 minutes. This is deliberate:
+        ``stop`` and a cancelled ``start`` can block for the start limit plus
+        60 s grace, the 60 s poll window, one last pass of up to about 122 s
+        (get, delete, poll pause), and the client close (up to 60 s). The
+        first delete (up to 60 s) counts inside the create window, because the
+        poll starts at the later of the proof time and the delete's end. With
+        the default 900 s start limit that is up to about 1,200 s (20 minutes),
+        plus the ledger calls. This is deliberate:
         an earlier settle could miss a box that the create still makes.
 
         Raises:

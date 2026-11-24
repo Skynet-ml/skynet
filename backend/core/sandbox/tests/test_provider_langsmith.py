@@ -1165,6 +1165,31 @@ async def test_protected_box_reserves_before_create_and_settles_after_delete(
     assert server.deletes == [env.name]
 
 
+async def test_failed_confirm_deletes_the_box_before_the_settle(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the created box, then settle, and raise the confirm error when the ledger refuses the confirm."""
+
+    def refuse(self: FakeUsage, box: Any) -> None:
+        """Fail like a refused ledger call.
+
+        Args:
+            self: The fake reservation.
+            box: The created SDK box.
+
+        Raises:
+            BudgetError: Always.
+        """
+        self.events.append(("confirm", box))
+        raise BudgetError("ledger refused")
+
+    usage.confirm_created = refuse  # type: ignore[method-assign]
+    env = _protected(usage)
+    with pytest.raises(BudgetError, match="ledger refused"):
+        await env.start()
+    assert len(server.deletes) == 1
+    assert usage.events[-1] == ("settle", True)
+    assert [event[0] for event in usage.events] == ["reserve", "confirm", "settle"]
+
+
 async def test_budget_refusal_creates_no_box(server: FakeServer, usage: type[FakeUsage]) -> None:
     """Raise the budget refusal before any create call."""
     usage.error = BudgetError("no headroom")
