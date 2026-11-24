@@ -45,7 +45,7 @@ L'assistant ne vous laisse pas continuer si le plafond est inférieur à ce mont
 
 ## Réservations
 
-Avant tout travail payant, Skynet réserve une partie du plafond de l'exécution. Skynet libère la réservation quand le travail est réglé et ne facture que le coût réel.
+Avant tout travail payant, Skynet réserve une partie du plafond de l'exécution. Skynet libère la réservation quand le travail est réglé et ne facture que le coût réel. Les vérifications de configuration réservent plutôt sur votre solde, sauf si la configuration compte dans le plafond.
 
 Quand un budget a déjà de l'activité, la carte **Plafond de dépenses** de l'assistant affiche son registre :
 
@@ -106,7 +106,7 @@ Le code de votre dépôt et votre évaluateur s'exécutent dans une sandbox. Sky
 2. Quand la sandbox se termine, Skynet facture l'utilisation finale indiquée par le fournisseur de la sandbox.
 3. La majoration d'utilisation s'applique au calcul en sandbox.
 
-Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé.
+Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé. L'utilisation de la sandbox pendant les vérifications de configuration est payée par votre solde, sauf si la configuration compte dans le plafond.
 
 ## Service (serving)
 

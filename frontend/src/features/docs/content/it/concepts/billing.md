@@ -45,7 +45,7 @@ La procedura guidata non ti fa proseguire quando il limite è inferiore a questo
 
 ## Riserve
 
-Prima di svolgere un lavoro a pagamento, Skynet riserva una parte del limite dell'esecuzione. Skynet rilascia la riserva quando il lavoro viene regolato e addebita solo il costo reale.
+Prima di svolgere un lavoro a pagamento, Skynet riserva una parte del limite dell'esecuzione. Skynet rilascia la riserva quando il lavoro viene regolato e addebita solo il costo reale. I controlli di configurazione riservano invece dal tuo saldo, a meno che la configurazione conti nel limite.
 
 Quando un budget ha già delle attività, la scheda **Limite di spesa** nella procedura guidata ne mostra il registro:
 
@@ -106,7 +106,7 @@ Il codice del tuo repository e il tuo scorer girano in una sandbox. Skynet misur
 2. Quando la sandbox termina, Skynet addebita l'uso finale riportato dal provider della sandbox.
 3. Il ricarico sull'utilizzo si applica al calcolo della sandbox.
 
-Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave.
+Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave. L'uso della sandbox nei controlli di configurazione è pagato dal tuo saldo, a meno che la configurazione conti nel limite.
 
 ## Serving
 

@@ -45,7 +45,7 @@ Der Assistent lässt Sie nicht weitermachen, wenn das Limit unter diesem Betrag 
 
 ## Reservierungen
 
-Bevor Skynet kostenpflichtige Arbeit ausführt, reserviert es einen Teil des Limits des Durchlaufs. Skynet gibt die Reservierung frei, wenn die Arbeit abgerechnet ist, und berechnet nur die tatsächlichen Kosten.
+Bevor Skynet kostenpflichtige Arbeit ausführt, reserviert es einen Teil des Limits des Durchlaufs. Skynet gibt die Reservierung frei, wenn die Arbeit abgerechnet ist, und berechnet nur die tatsächlichen Kosten. Einrichtungsprüfungen reservieren stattdessen von Ihrem Guthaben, außer die Einrichtung zählt zum Limit.
 
 Wenn ein Budget bereits Aktivität hat, zeigt die Karte **Ausgabenlimit** im Assistenten dessen Kontoauszug:
 
@@ -106,7 +106,7 @@ Ihr Repository-Code und Ihr Scorer laufen in einer Sandbox. Skynet misst die San
 2. Wenn die Sandbox fertig ist, berechnet Skynet die endgültige Nutzung, die der Sandbox-Anbieter meldet.
 3. Der Nutzungsaufschlag gilt für Sandbox-Rechenzeit.
 
-Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden.
+Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden. Sandbox-Nutzung in Einrichtungsprüfungen wird von Ihrem Guthaben bezahlt, außer die Einrichtung zählt zum Limit.
 
 ## Bereitstellung (Serving)
 

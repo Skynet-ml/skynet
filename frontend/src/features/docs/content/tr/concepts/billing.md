@@ -45,7 +45,7 @@ Limit bu tutarın altındayken sihirbaz devam etmenize izin vermez. Bakiyeniz bu
 
 ## Rezervasyonlar
 
-Skynet ücretli bir iş yapmadan önce çalıştırmanın limitinin bir bölümünü ayırır. İş kesinleştiğinde rezervasyonu serbest bırakır ve yalnızca gerçek maliyeti tahsil eder.
+Skynet ücretli bir iş yapmadan önce çalıştırmanın limitinin bir bölümünü ayırır. İş kesinleştiğinde rezervasyonu serbest bırakır ve yalnızca gerçek maliyeti tahsil eder. Kurulum kontrolleri, kurulum limite dahil edilmedikçe bunun yerine bakiyenizden rezerve eder.
 
 Bir bütçede zaten hareket varsa sihirbazdaki **Harcama limiti** kartı hesap dökümünü gösterir:
 
@@ -106,7 +106,7 @@ Depo kodunuz ve puanlayıcınız bir sandbox içinde çalışır. Skynet sandbox
 2. Sandbox bittiğinde Skynet, sandbox sağlayıcısının bildirdiği nihai kullanımı tahsil eder.
 3. Kullanım marjı sandbox işlem gücüne uygulanır.
 
-Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir.
+Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir. Kurulum kontrollerindeki sandbox kullanımı, kurulum limite dahil edilmedikçe bakiyenizden ödenir.
 
 ## Sunum
 

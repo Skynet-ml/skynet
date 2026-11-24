@@ -45,7 +45,7 @@ O assistente não deixa você continuar quando o limite está abaixo desse valor
 
 ## Reservas
 
-Antes de o Skynet fazer trabalho pago, ele reserva parte do limite da execução. O Skynet libera a reserva quando o trabalho é liquidado e cobra apenas o custo real.
+Antes de o Skynet fazer trabalho pago, ele reserva parte do limite da execução. O Skynet libera a reserva quando o trabalho é liquidado e cobra apenas o custo real. As verificações de configuração reservam do seu saldo, a menos que a configuração conte no limite.
 
 Quando um orçamento já tem atividade, o cartão **Limite de gastos** no assistente mostra o seu extrato:
 
@@ -106,7 +106,7 @@ O código do seu repositório e o seu avaliador rodam em uma sandbox. O Skynet m
 2. Quando a sandbox termina, o Skynet cobra o uso final que o provedor da sandbox informa.
 3. O acréscimo sobre o uso se aplica à computação da sandbox.
 
-A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave.
+A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave. O uso da sandbox nas verificações de configuração é pago pelo seu saldo, a menos que a configuração conte no limite.
 
 ## Serviço
 

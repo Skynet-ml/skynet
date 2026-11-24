@@ -48,7 +48,9 @@ class ExecutionBudgetResponse(BaseModel):
     state: str
     job_id: str | None
     setup_spent_cents: Decimal
-    run_spent_cents: Decimal
+    run_spent_cents: Decimal = Field(
+        description="Spend that counts against the limit. It includes setup spend when setup_in_total is true."
+    )
     reserved_cents: Decimal
     available_cents: Decimal
     billed_cents: int

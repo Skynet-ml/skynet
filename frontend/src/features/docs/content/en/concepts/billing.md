@@ -45,7 +45,7 @@ The wizard does not let you continue when the limit is below this amount. It als
 
 ## Reservations
 
-Before Skynet does paid work, it reserves part of the run's limit. Skynet releases the reservation when the work settles and charges only the real cost.
+Before Skynet does paid work, it reserves part of the run's limit. Skynet releases the reservation when the work settles and charges only the real cost. Setup checks reserve from your balance instead, unless setup counts in the limit.
 
 When a budget already has activity, the **Spending limit** card in the wizard shows its ledger:
 
@@ -106,7 +106,7 @@ Your repository code and your scorer run in a sandbox. Skynet meters sandbox com
 2. When the sandbox finishes, Skynet charges the final usage that the sandbox provider reports.
 3. The usage markup applies to sandbox compute.
 
-Sandbox compute is part of the run's spending limit, also when the model calls use your own key.
+Sandbox compute is part of the run's spending limit, also when the model calls use your own key. Sandbox use in setup checks is paid from your balance, unless setup counts in the limit.
 
 ## Serving
 
