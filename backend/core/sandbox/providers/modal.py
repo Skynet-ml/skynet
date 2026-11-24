@@ -47,24 +47,20 @@ try:
     from modal.exception import (
         AlreadyExistsError,
         AuthError,
-        ConflictError,
         ExecTimeoutError,
         InvalidError,
         NotFoundError,
         PermissionDeniedError,
-        ResourceExhaustedError,
         SandboxFilesystemNotFoundError,
         UnimplementedError,
     )
 except ImportError:
     AlreadyExistsError = None
     AuthError = None
-    ConflictError = None
     ExecTimeoutError = None
     InvalidError = None
     NotFoundError = None
     PermissionDeniedError = None
-    ResourceExhaustedError = None
     SandboxFilesystemNotFoundError = None
     UnimplementedError = None
 
@@ -112,21 +108,21 @@ _EXEC_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = tuple(
     error for error in (ExecTimeoutError,) if error is not None
 )
 
-# Exact Modal errors that a definite gRPC status maps to (modal 1.6.3
-# _grpc_client._STATUS_TO_EXCEPTION), or that the client raises before any
-# call: Modal answered, so no create is still in flight. ServiceError,
-# InternalError, timeouts and transport errors are ambiguous, and a subclass
-# may come from elsewhere, so they never count.
+# Exact Modal errors after which one empty lookup releases the hold. In modal
+# 1.6.3 the default V2 create raises them only from client checks or from a
+# definite status of its single SandboxCreateV2 call, which then returns no
+# sandbox. The V1 create raises ResourceExhaustedError and ConflictError from
+# its task-id poll after SandboxCreate already made the box, so those two get
+# the second lookup. ServiceError, InternalError, timeouts, transport errors
+# and subclasses prove nothing, so they never count.
 _SERVER_ANSWER_ERRORS: frozenset[type[BaseException]] = frozenset(
     error
     for error in (
         AlreadyExistsError,
         AuthError,
-        ConflictError,
         InvalidError,
         NotFoundError,
         PermissionDeniedError,
-        ResourceExhaustedError,
         UnimplementedError,
     )
     if error is not None

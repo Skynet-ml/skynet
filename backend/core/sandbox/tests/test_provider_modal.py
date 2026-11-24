@@ -1526,3 +1526,35 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
     await _until(lambda: usage.calls == ["sent", "fail"])
     assert usage.absent is True
     await _until(lambda: not modal_provider._LATE_TERMINATES)
+
+
+class FakeResourceExhaustedError(Exception):
+    """Stand in for modal.exception.ResourceExhaustedError, which the V1 create raises after its box exists."""
+
+
+async def test_resource_exhausted_create_settles_a_box_found_on_the_second_lookup(fake_modal: FakeModal) -> None:
+    """Settle, not release, a box that the second lookup finds after an "insufficient capacity" create error."""
+    fake_modal.create_error = FakeResourceExhaustedError("Insufficient capacity to create sandbox.")
+    env, budget = _protected()
+
+    def list_box_late() -> None:
+        """Make the box visible only to the second lookup."""
+        if fake_modal.list_calls == 2:
+            (usage,) = budget.reservations
+            app = SimpleNamespace(app_id=f"ap-{env._app_name}")
+            fake_modal.boxes.append(FakeSandbox(fake_modal, ("sleep",), {"app": app, "tags": {BOX_KEY: usage.box}}))
+
+    fake_modal.list_hook = list_box_late
+    with pytest.raises(FakeResourceExhaustedError):
+        await env.start()
+    (usage,) = budget.reservations
+    assert fake_modal.list_calls == 2
+    assert _box(fake_modal).terminated
+    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+    assert "fail" not in usage.calls
+
+
+def test_server_answer_errors_leave_out_errors_raised_after_a_v1_box_exists() -> None:
+    """Keep the V1 post-create errors out of the one-lookup release set."""
+    names = {error.__name__ for error in modal_provider._SERVER_ANSWER_ERRORS}
+    assert not names & {"ResourceExhaustedError", "ConflictError"}
