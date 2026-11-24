@@ -207,6 +207,37 @@ gke = [
     # core.sandbox.providers.gke; the factory loads it lazily.
     "kubernetes>=32.0.0",
 ]
+novita = [
+    # Novita sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.novita; the default legacy backend never needs it.
+    "novita-sandbox>=2.0.6",
+]
+blaxel = [
+    # Blaxel sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.blaxel; the default legacy backend never needs it.
+    "blaxel>=0.4.24",
+]
+hyperbrowser = [
+    # Hyperbrowser sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.hyperbrowser; the default legacy backend never needs it.
+    "hyperbrowser>=1.5.0",
+]
+runta = [
+    # Runta sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.runta; the default legacy backend never needs it.
+    "runta-sdk>=0.2.6,<0.3",
+]
+boxd = [
+    # boxd sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.boxd; the default legacy backend never needs it.
+    "boxd>=0.3.0",
+]
+superserve = [
+    # Superserve sandbox provider (SKY-928). Imported lazily by
+    # core.sandbox.providers.superserve; the default legacy backend never needs it.
+    # 0.11.6 adds the idle timeout; 0.12 to 0.14 only add API, so the bound is wider than Harbor's <0.12.
+    "superserve>=0.11.6,<0.15",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither

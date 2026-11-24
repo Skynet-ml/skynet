@@ -60,6 +60,14 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "gke": ProviderEntry("core.sandbox.providers.gke", "GKEEnvironment", "gke", False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
+    "novita": ProviderEntry("core.sandbox.providers.novita", "NovitaEnvironment", "novita", False),
+    "blaxel": ProviderEntry("core.sandbox.providers.blaxel", "BlaxelEnvironment", "blaxel", False),
+    "hyperbrowser": ProviderEntry(
+        "core.sandbox.providers.hyperbrowser", "HyperbrowserEnvironment", "hyperbrowser", False
+    ),
+    "runta": ProviderEntry("core.sandbox.providers.runta", "RuntaEnvironment", "runta", False),
+    "boxd": ProviderEntry("core.sandbox.providers.boxd", "BoxdEnvironment", "boxd", False),
+    "superserve": ProviderEntry("core.sandbox.providers.superserve", "SuperserveEnvironment", "superserve", False),
 }
 
 
