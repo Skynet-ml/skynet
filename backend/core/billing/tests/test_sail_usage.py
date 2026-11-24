@@ -252,32 +252,42 @@ def _status_error(status: int, retry_after: str | None = None) -> httpx.HTTPStat
 
 
 def test_reserve_then_settle_charges_sails_reported_cost(database: Engine) -> None:
-    """Settle at Sail's cost once the box's line stays the same for a minute, and free the rest of the hold."""
+    """Settle at Sail's cost plus the creation fee once the line stays the same for a minute.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     spend = FakeSpend(None, SPEND)
     reservation = _reservation(database, spend)
     _created(reservation)
     reservation.settle()
     runtime = reservation.runtime
     assert _state(database) == "settled"
-    assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("1.20")
+    # 1.2 cents of usage and the published 1-cent creation fee.
+    assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("2.20")
     assert reservation.operation.id not in runtime._pinned
-    assert [read[0] for read in spend.reads] == ["sb-1"] * 4
+    assert {read[0] for read in spend.reads} == {"sb-1"}
     assert spend.reads[0][1] < reservation.create_sent_at
-    # The line first shows at the second read; two equal reads 30 s apart
-    # are not enough, so the settle waits until it held for 60 s.
-    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 3 * sail_usage.SPEND_POLL_SECONDS
+    # The line first shows at the second read; equal reads 15 and 30 s
+    # apart are not enough, so the settle waits until it held for 60 s.
+    assert len(spend.reads) == 6
+    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 5 * sail_usage.SPEND_POLL_SECONDS
 
 
 def test_a_changed_line_restarts_the_agreement_wait(database: Engine) -> None:
-    """Wait a new minute when a late usage batch changes the box's line."""
+    """Wait a new minute when a late usage batch changes the box's line.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     late = {**SPEND, "cost_usd_nanos": 13_000_000}
     spend = FakeSpend(SPEND, SPEND, late)
     reservation = _reservation(database, spend)
     _created(reservation)
     reservation.settle()
     settled = reservation.runtime.service.get_operation(reservation.operation.id, "alice")
-    assert settled.actual_cents == Decimal("1.30")
-    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 4 * sail_usage.SPEND_POLL_SECONDS
+    assert settled.actual_cents == Decimal("2.30")
+    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 6 * sail_usage.SPEND_POLL_SECONDS
 
 
 def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
@@ -287,6 +297,20 @@ def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
     usage = (600 * Decimal("0.015") + 1200 * Decimal("0.008") + 2400 * Decimal("0.0007")) / 3600
     assert sail_actual_usd(line, snapshot) == usage + Decimal("0.01")
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
+
+
+def test_settle_adds_sails_creation_rate_to_its_cost() -> None:
+    """Add Sail's creation rate for the size to its cost, because the docs do not say the cost holds it."""
+    snapshot = quote_sail_sandbox(CREATE).price_snapshot
+    line = {
+        **SPEND,
+        "pricing_configured": True,
+        "creation_fees_waived": False,
+        "rates": {"s_creation_usd_nanos": 20_000_000, "l_creation_usd_nanos": 50_000_000},
+    }
+    assert sail_actual_usd(line, snapshot) == Decimal("0.012") + Decimal("0.02")
+    assert sail_actual_usd({**line, "rates": None}, snapshot) == Decimal("0.012") + Decimal("0.01")
+    assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == Decimal("0.012")
 
 
 def test_settle_ignores_zero_creation_rates_when_sail_has_no_prices() -> None:
@@ -319,14 +343,18 @@ def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCa
     settled = runtime.service.get_operation(reservation.operation.id, "alice")
     assert settled.actual_cents == settled.max_cents == Decimal("17.54")
     with Session(database) as session:
-        evidence = session.scalar(select(ExecutionUsageEvidenceModel)).evidence
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
     assert evidence["clamped"] is True
-    assert Decimal(evidence["unclamped_cents"]) == Decimal(500)
+    assert Decimal(evidence["unclamped_cents"]) == Decimal(501)
     assert "clamped" in caplog.text
 
 
 def test_a_spend_api_failure_keeps_polling_until_the_deadline(database: Engine) -> None:
-    """Read again after a transport error, and keep the hold pending when the reads never work."""
+    """Read again after a transport error, and keep the hold pending when the reads never work.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     spend = FakeSpend(httpx.ConnectError("down"))
     reservation = _reservation(database, spend)
     _created(reservation)
@@ -337,19 +365,29 @@ def test_a_spend_api_failure_keeps_polling_until_the_deadline(database: Engine) 
     assert reservation.operation.id in reservation.runtime._pinned
 
 
-def test_a_rate_limited_or_unavailable_read_is_tried_again(database: Engine) -> None:
-    """Honor Retry-After on a 429, poll again after a 503 or a transport error, then settle."""
-    spend = FakeSpend(_status_error(429, "5"), _status_error(503), httpx.ReadTimeout("slow"), SPEND)
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_a_rate_limited_or_unavailable_read_is_tried_again(database: Engine, status: int) -> None:
+    """Honor Retry-After on a 429, poll again after a 5xx answer, then settle.
+
+    Args:
+        database: Engine of the funded ledger.
+        status: The server error that Sail answers once.
+    """
+    spend = FakeSpend(_status_error(429, "5"), _status_error(status), SPEND)
     reservation = _reservation(database, spend)
     _created(reservation)
     reservation.settle()
     assert _state(database) == "settled"
     poll = sail_usage.SPEND_POLL_SECONDS
-    assert spend.waits[:4] == [sail_usage.SPEND_DELAY_SECONDS, 5.0, poll, poll]
+    assert spend.waits[:3] == [sail_usage.SPEND_DELAY_SECONDS, 5.0, poll]
 
 
 def test_a_refused_spend_read_keeps_the_hold_pending(database: Engine) -> None:
-    """Stop at once and keep the hold when Sail refuses the read for good, as with a wrong key."""
+    """Stop at once and keep the hold when Sail refuses the read for good, as with a wrong key.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     spend = FakeSpend(_status_error(403))
     reservation = _reservation(database, spend)
     _created(reservation)
@@ -360,7 +398,11 @@ def test_a_refused_spend_read_keeps_the_hold_pending(database: Engine) -> None:
 
 
 def test_a_spend_that_never_arrives_stays_pending(database: Engine) -> None:
-    """Give up at the deadline when Sail never lists the box, and keep the hold."""
+    """Give up at the deadline when Sail never lists the box, and keep the hold.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     spend = FakeSpend(None)
     reservation = _reservation(database, spend)
     _created(reservation)
@@ -370,8 +412,32 @@ def test_a_spend_that_never_arrives_stays_pending(database: Engine) -> None:
     assert spend.now <= sail_usage.SPEND_DEADLINE_SECONDS
 
 
+def test_a_line_that_never_settles_stays_pending_with_its_last_read(database: Engine) -> None:
+    """Keep the hold at the deadline when the line keeps changing, with the last line as evidence.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    lines = [{**SPEND, "cost_usd_nanos": 12_000_000 + step} for step in range(20)]
+    spend = FakeSpend(*lines)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    with pytest.raises(UsagePendingError, match="final spend"):
+        reservation.settle()
+    assert _state(database) == "pending"
+    assert spend.now <= sail_usage.SPEND_DEADLINE_SECONDS
+    with Session(database) as session:
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
+    assert reservation.spend is not None
+    assert evidence["spend"]["cost_usd_nanos"] == reservation.spend["cost_usd_nanos"] > 12_000_000
+
+
 def test_a_box_over_its_funding_fails_the_confirm(database: Engine) -> None:
-    """Refuse a created box whose memory is larger than the funded limit."""
+    """Refuse a created box whose memory is larger than the funded limit.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation = _reservation(database, FakeSpend(SPEND))
     with pytest.raises(UsagePendingError, match="inside its funding"):
         _created(reservation, memory_mib=32 * 1024)
@@ -379,7 +445,11 @@ def test_a_box_over_its_funding_fails_the_confirm(database: Engine) -> None:
 
 
 def test_a_failed_start_before_the_create_releases_the_hold(database: Engine) -> None:
-    """Return the hold when the create call was never sent, so no box can exist."""
+    """Return the hold when the create call was never sent, so no box can exist.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation = _reservation(database, FakeSpend(SPEND))
     reservation.release()
     assert _state(database) == "released"
@@ -387,7 +457,11 @@ def test_a_failed_start_before_the_create_releases_the_hold(database: Engine) ->
 
 
 def test_a_cancelled_create_keeps_the_hold_pending(database: Engine) -> None:
-    """Keep the hold when the create call went out but no box handle came back."""
+    """Keep the hold when the create call went out but no box handle came back.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation = _reservation(database, FakeSpend(SPEND))
     reservation.begin_create()
     reservation.release()
@@ -397,7 +471,11 @@ def test_a_cancelled_create_keeps_the_hold_pending(database: Engine) -> None:
 
 
 def test_a_refused_create_releases_the_hold(database: Engine) -> None:
-    """Return the hold when Sail clearly refused the create, so no box can exist."""
+    """Return the hold when Sail clearly refused the create, so no box can exist.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
     reservation = _reservation(database, FakeSpend(SPEND))
     reservation.begin_create()
     reservation.release(refused=True)

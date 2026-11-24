@@ -11,7 +11,9 @@ import asyncio
 import contextlib
 import itertools
 import logging
+import math
 import shlex
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -21,6 +23,7 @@ from typing import Any
 import pytest
 
 from core.billing.runtime import UsagePendingError
+from core.billing.sail_usage import SailUsageReservation
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -104,7 +107,7 @@ class FakeCloud:
     read_error: type[BaseException] = FileNotFoundError
     terminate_fails: set[str] = field(default_factory=set)
     no_auth: bool = False
-    limits: tuple[int, int, int] = (8, 64 * 1024, 256)
+    limits: tuple[int, int, int] = (1, 16 * 1024, 32)
     ids: Any = field(default_factory=lambda: itertools.count(1))
 
     def run(self, box: BoxState, argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
@@ -300,7 +303,12 @@ class FakeSailbox:
             The size fit.
         """
         CLOUD.size_calls.append({"cpus": cpus, "memory_gib": memory_gib, "disk_gib": disk_gib})
-        return SimpleNamespace(size=f"cpu-{cpus}", memory_limit_gib=memory_gib or 2, disk_limit_gib=disk_gib or 10)
+        size = "s" if cpus <= 1 else "m" if cpus <= 4 else "l"
+        return SimpleNamespace(
+            size=size,
+            memory_limit_gib=math.ceil(memory_gib) if memory_gib else None,
+            disk_limit_gib=math.ceil(disk_gib) if disk_gib else None,
+        )
 
     @staticmethod
     async def _create(**params: Any) -> FakeSailbox:
@@ -314,13 +322,13 @@ class FakeSailbox:
         """
         CLOUD.create_calls += 1
         CLOUD.create_started.set()
+        if CLOUD.create_delay:
+            await asyncio.sleep(CLOUD.create_delay)
         if CLOUD.create_error is not None:
             if CLOUD.create_makes_box:
                 # Sail made the box, but the answer that names it was lost.
                 CLOUD.boxes.append(BoxState(id=f"sb-{next(CLOUD.ids)}", params=params))
             raise CLOUD.create_error
-        if CLOUD.create_delay:
-            await asyncio.sleep(CLOUD.create_delay)
         box = BoxState(id=f"sb-{next(CLOUD.ids)}", params=params, egress=params["egress_policy"])
         CLOUD.boxes.append(box)
         return FakeSailbox(box)
@@ -443,11 +451,6 @@ async def _list(*, name: str) -> list[FakeSailbox]:
     return [FakeSailbox(box) for box in CLOUD.boxes if box.params.get("name") == name]
 
 
-FakeSailbox.create = _aio(FakeSailbox._create)
-FakeSailbox.get = _aio(_get)
-FakeSailbox.list = _aio(_list)
-
-
 @pytest.fixture(autouse=True)
 def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     """Swap the Sail SDK for the fake and reset the fake cloud.
@@ -469,6 +472,9 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     }
     for name, value in fakes.items():
         monkeypatch.setattr(sail, name, value)
+    # The SDK's class-level calls, which the fake class does not declare.
+    for name, value in {"create": _aio(FakeSailbox._create), "get": _aio(_get), "list": _aio(_list)}.items():
+        monkeypatch.setattr(FakeSailbox, name, value, raising=False)
     monkeypatch.setattr(sail, "STOP_TIMEOUT", 1.0)
     monkeypatch.setattr(sail, "_JOB_BOXES", {})
     monkeypatch.setattr(sail, "_LATE_TASKS", set())
@@ -507,7 +513,11 @@ def _timeouts(*, start: float = 30, run: float = 30) -> PhaseTimeouts:
 
 
 def test_sail_is_not_allowed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse the Sail provider in production before its import (D1)."""
+    """Refuse the Sail provider in production before its import (D1).
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     assert factory.PROVIDERS["sail"].production_allowed is False
     monkeypatch.setattr(factory.settings, "app_environment", "production")
     with pytest.raises(factory.ProductionNotAllowedError, match="sail"):
@@ -515,20 +525,32 @@ def test_sail_is_not_allowed_in_production(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_factory_loads_sail_outside_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Load the Sail class from the registry outside production."""
+    """Load the Sail class from the registry outside production.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(factory.settings, "app_environment", "staging")
     assert factory.load_provider("sail") is SailEnvironment
 
 
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Name the extra when the SDK is not installed."""
+    """Name the extra when the SDK is not installed.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(sail, "Sailbox", None)
     with pytest.raises(SandboxFatalError, match="`sail` extra"):
         SailEnvironment.preflight()
 
 
 async def test_start_needs_credentials(fake_sdk: FakeCloud) -> None:
-    """Refuse to start, with no create call, when Sail finds no credentials."""
+    """Refuse to start, with no create call, when Sail finds no credentials.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.no_auth = True
     with pytest.raises(SandboxFatalError, match="credentials"):
         await SailEnvironment(_spec()).start()
@@ -536,7 +558,11 @@ async def test_start_needs_credentials(fake_sdk: FakeCloud) -> None:
 
 
 async def test_create_sends_the_name_image_lifetime_and_open_egress(fake_sdk: FakeCloud) -> None:
-    """Create one box in the Skynet app with the spec name, a lifetime and open egress."""
+    """Create one box in the Skynet app with the spec name, a lifetime and open egress.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec(name="box-a", lifetime_seconds=300.5), timeouts=_timeouts(start=12.2)):
         pass
     assert fake_sdk.apps == [(sail.APP_NAME, True)]
@@ -550,7 +576,11 @@ async def test_create_sends_the_name_image_lifetime_and_open_egress(fake_sdk: Fa
 
 
 async def test_create_uses_the_spec_image_and_no_build_limit_without_timeouts(fake_sdk: FakeCloud) -> None:
-    """Boot the spec image, and send no build limit when no start limit exists."""
+    """Boot the spec image, and send no build limit when no start limit exists.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec(image="ghcr.io/acme/tool:1")):
         pass
     params = fake_sdk.boxes[0].params
@@ -559,17 +589,25 @@ async def test_create_uses_the_spec_image_and_no_build_limit_without_timeouts(fa
 
 
 async def test_sizes_map_to_size_for(fake_sdk: FakeCloud) -> None:
-    """Send the spec vCPUs, memory and disk in GiB to the size fit."""
+    """Send the spec vCPUs, memory and disk in GiB to the size fit.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     resources = ResourceRequest(cpus=2, memory_mb=4096, disk_mb=20480)
     async with SailEnvironment(_spec(resources=resources)):
         pass
     assert fake_sdk.size_calls == [{"cpus": 2, "memory_gib": 4.0, "disk_gib": 20.0}]
     params = fake_sdk.boxes[0].params
-    assert (params["size"], params["memory_limit_gib"], params["disk_limit_gib"]) == ("cpu-2", 4.0, 20.0)
+    assert (params["size"], params["memory_limit_gib"], params["disk_limit_gib"]) == ("m", 4, 20)
 
 
 async def test_ignore_mode_sends_no_size(fake_sdk: FakeCloud) -> None:
-    """Send no size arguments when the spec ignores sizes."""
+    """Send no size arguments when the spec ignores sizes.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec(resources=ResourceRequest(cpus=1, mode=ResourceMode.IGNORE))):
         pass
     assert fake_sdk.size_calls == []
@@ -593,14 +631,24 @@ async def test_ignore_mode_sends_no_size(fake_sdk: FakeCloud) -> None:
 async def test_the_spec_network_maps_to_the_create_egress(
     fake_sdk: FakeCloud, overrides: dict[str, Any], expected: dict[str, Any]
 ) -> None:
-    """Set the egress policy at create, so it covers the box from its first second."""
+    """Set the egress policy at create, so it covers the box from its first second.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        overrides: The spec network fields.
+        expected: The egress policy document that the create gets.
+    """
     async with SailEnvironment(_spec(**overrides)):
         pass
     assert fake_sdk.boxes[0].params["egress_policy"] == expected
 
 
 async def test_set_network_policy_changes_the_box_egress(fake_sdk: FakeCloud) -> None:
-    """Send a changed policy to the running box."""
+    """Send a changed policy to the running box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec()) as env:
         await env.set_network_policy(NetworkPolicy(allowed_hosts=("api.example.com",)))
         assert fake_sdk.boxes[0].egress == {"mode": "allow", "hosts": ["api.example.com"]}
@@ -609,7 +657,11 @@ async def test_set_network_policy_changes_the_box_egress(fake_sdk: FakeCloud) ->
 
 
 async def test_exec_sends_env_user_timeout_and_cwd(fake_sdk: FakeCloud) -> None:
-    """Merge the spec env, run as root for sudo, and wrap the cwd."""
+    """Merge the spec env, run as root for sudo, and wrap the cwd.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec(env={"BASE": "1", "SHARED": "spec"}), timeouts=_timeouts(run=9.5)) as env:
         await env.exec("echo hi", cwd="/work dir", env={"SHARED": "call"}, sudo=True)
         await env.exec("true", timeout_sec=3)
@@ -623,7 +675,11 @@ async def test_exec_sends_env_user_timeout_and_cwd(fake_sdk: FakeCloud) -> None:
 
 
 async def test_a_timed_out_command_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
-    """Return a timed-out result when Sail reports a timeout."""
+    """Return a timed-out result when Sail reports a timeout.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
         result = await env.exec("true", timeout_sec=1)
@@ -631,7 +687,11 @@ async def test_a_timed_out_command_returns_a_timed_out_result(fake_sdk: FakeClou
 
 
 async def test_a_timed_out_command_without_a_limit_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
-    """Return a timed-out result when Sail reports a timeout and no limit is set."""
+    """Return a timed-out result when Sail reports a timeout and no limit is set.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
         result = await env.exec("true")
@@ -639,7 +699,12 @@ async def test_a_timed_out_command_without_a_limit_returns_a_timed_out_result(fa
 
 
 async def test_a_hung_run_call_returns_a_timed_out_result(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End a run call that the SDK never returns, after the limit and the grace."""
+    """End a run call that the SDK never returns, after the limit and the grace.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(sail, "EXEC_GRACE", 0.01)
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
@@ -648,7 +713,12 @@ async def test_a_hung_run_call_returns_a_timed_out_result(fake_sdk: FakeCloud, m
 
 
 async def test_truncated_output_logs_a_warning(fake_sdk: FakeCloud, caplog: pytest.LogCaptureFixture) -> None:
-    """Warn when Sail kept only the end of the output."""
+    """Warn when Sail kept only the end of the output.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        caplog: Captures the provider log.
+    """
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_truncates = True
         with caplog.at_level(logging.WARNING, logger=sail.__name__):
@@ -657,7 +727,11 @@ async def test_truncated_output_logs_a_warning(fake_sdk: FakeCloud, caplog: pyte
 
 
 async def test_exec_uses_the_current_output_sink(fake_sdk: FakeCloud) -> None:
-    """Send the output to the task sink when the call gives no sink."""
+    """Send the output to the task sink when the call gives no sink.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     chunks: list[tuple[str, str]] = []
     async with SailEnvironment(_spec()) as env:
         with use_output_sink(lambda stream, text: chunks.append((stream, text))):
@@ -666,7 +740,11 @@ async def test_exec_uses_the_current_output_sink(fake_sdk: FakeCloud) -> None:
 
 
 async def test_download_probes_after_an_unknown_read_error(fake_sdk: FakeCloud) -> None:
-    """Return None for a missing file, and raise for a file that exists."""
+    """Return None for a missing file, and raise for a file that exists.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec()) as env:
         await env.upload_files({"/tmp/here.txt": "x"})
         fake_sdk.read_error = FakeSailError
@@ -676,7 +754,11 @@ async def test_download_probes_after_an_unknown_read_error(fake_sdk: FakeCloud) 
 
 
 async def test_a_non_utf8_download_is_infra_without_the_bytes(fake_sdk: FakeCloud) -> None:
-    """Map a file that is not UTF-8 to SandboxInfraError, with no file bytes in the message."""
+    """Map a file that is not UTF-8 to SandboxInfraError, with no file bytes in the message.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     async with SailEnvironment(_spec()) as env:
         await env.upload_files({"/tmp/b.bin": "x"})
         env._sailbox._box.files["/tmp/b.bin"] = b"\xff\xfe secret"
@@ -712,7 +794,11 @@ def test_mapped_does_not_catch_a_cancel() -> None:
 
 
 async def test_a_refused_egress_policy_is_infra(fake_sdk: FakeCloud) -> None:
-    """Map an SDK error from a policy change to SandboxInfraError."""
+    """Map an SDK error from a policy change to SandboxInfraError.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
 
     async def refuse(policy: Any) -> None:
         """Refuse every policy change.
@@ -732,7 +818,11 @@ async def test_a_refused_egress_policy_is_infra(fake_sdk: FakeCloud) -> None:
 
 
 async def test_a_create_error_is_infra_and_leaves_no_box(fake_sdk: FakeCloud) -> None:
-    """Map an SDK create error to SandboxInfraError, with one create call."""
+    """Map an SDK create error to SandboxInfraError, with one create call.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_error = FakeSailError("quota")
     with pytest.raises(SandboxInfraError, match="FakeSailError"):
         await SailEnvironment(_spec()).start()
@@ -741,7 +831,11 @@ async def test_a_create_error_is_infra_and_leaves_no_box(fake_sdk: FakeCloud) ->
 
 
 async def test_a_start_timeout_terminates_the_late_box(fake_sdk: FakeCloud) -> None:
-    """Wait the grace for a create past the start limit, then terminate its box."""
+    """Wait the grace for a create past the start limit, then terminate its box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_delay = 0.2
     with pytest.raises(StartTimeoutError):
         await SailEnvironment(_spec(), timeouts=_timeouts(start=0.05)).start()
@@ -803,7 +897,12 @@ async def _late_tasks_done() -> None:
 async def test_a_create_past_the_grace_is_terminated_when_it_returns(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep a create that outlives the grace, and terminate its box when it arrives."""
+    """Keep a create that outlives the grace, and terminate its box when it arrives.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
     _server_side_create(monkeypatch)
     fake_sdk.create_delay = 0.2
@@ -817,7 +916,12 @@ async def test_a_create_past_the_grace_is_terminated_when_it_returns(
 async def test_a_single_cancel_of_a_server_side_create_terminates_the_box(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Terminate the box after a start timeout, inside the grace."""
+    """Terminate the box after a start timeout, inside the grace.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _server_side_create(monkeypatch)
     fake_sdk.create_delay = 0.2
     with pytest.raises(StartTimeoutError):
@@ -829,7 +933,12 @@ async def test_a_single_cancel_of_a_server_side_create_terminates_the_box(
 async def test_a_stop_during_the_create_grace_terminates_the_box(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Wait for the box in the grace when a stop comes, then terminate it."""
+    """Wait for the box in the grace when a stop comes, then terminate it.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _server_side_create(monkeypatch)
     fake_sdk.create_delay = 0.3
     env = SailEnvironment(_spec(tags={JOB_TAG: "job-grace"}), timeouts=_timeouts(start=0.05))
@@ -845,7 +954,12 @@ async def test_a_stop_during_the_create_grace_terminates_the_box(
 async def test_a_second_cancel_during_the_create_grace_terminates_the_box(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pass the cancel on, and terminate the late box when the handle arrives."""
+    """Pass the cancel on, and terminate the late box when the handle arrives.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
     _server_side_create(monkeypatch)
     fake_sdk.create_delay = 0.3
     starting = asyncio.ensure_future(SailEnvironment(_spec()).start())
@@ -860,7 +974,11 @@ async def test_a_second_cancel_during_the_create_grace_terminates_the_box(
 
 
 async def test_a_stop_during_start_terminates_the_box(fake_sdk: FakeCloud) -> None:
-    """End the start with SandboxInfraError and terminate the box made meanwhile."""
+    """End the start with SandboxInfraError and terminate the box made meanwhile.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_delay = 0.05
     env = SailEnvironment(_spec())
     starting = asyncio.ensure_future(env.start())
@@ -872,7 +990,11 @@ async def test_a_stop_during_start_terminates_the_box(fake_sdk: FakeCloud) -> No
 
 
 async def test_a_cancelled_start_terminates_the_box(fake_sdk: FakeCloud) -> None:
-    """Pass the cancel on and terminate the box made meanwhile."""
+    """Pass the cancel on and terminate the box made meanwhile.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_delay = 0.05
     starting = asyncio.ensure_future(SailEnvironment(_spec()).start())
     await fake_sdk.create_started.wait()
@@ -883,7 +1005,11 @@ async def test_a_cancelled_start_terminates_the_box(fake_sdk: FakeCloud) -> None
 
 
 async def test_a_second_start_raises(fake_sdk: FakeCloud) -> None:
-    """Refuse to start the same sandbox twice."""
+    """Refuse to start the same sandbox twice.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     env = SailEnvironment(_spec())
     async with env:
         pass
@@ -893,7 +1019,11 @@ async def test_a_second_start_raises(fake_sdk: FakeCloud) -> None:
 
 
 async def test_stop_job_sandboxes_goes_on_after_a_failure(fake_sdk: FakeCloud) -> None:
-    """Count only the terminated boxes, and try every box of the job."""
+    """Count only the terminated boxes, and try every box of the job.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     envs = [SailEnvironment(_spec(tags={JOB_TAG: "job-1"})) for _ in range(2)]
     for env in envs:
         await env.start()
@@ -921,6 +1051,7 @@ class FakeUsage:
         self.confirm_error: BaseException | None = None
         self.settle_error: BaseException | None = None
         self.spending: list[int] | None = None
+        self.spend_gate: asyncio.Event | None = None
 
     def begin_create(self) -> None:
         """Record the create call, with the boxes that existed before it."""
@@ -936,16 +1067,20 @@ class FakeUsage:
         self.calls.append(("bind", sailbox_id))
 
     def confirm_created(self, sailbox: Any) -> None:
-        """Bind the box, then record the checked box, or fail as the test sets.
+        """Run the real bind and envelope check, record the checked box, or fail as the test sets.
 
         Args:
             sailbox: The full fake box.
 
         Raises:
             BaseException: The error that the test sets.
+            UsagePendingError: The box is larger than the funded size.
         """
-        self.bind(sailbox.sailbox_id)
-        self.calls.append(("confirm", sailbox.memory_mib))
+        try:
+            # The real check, so the fake size fit must name a size that Skynet funds.
+            SailUsageReservation.confirm_created(self, sailbox)  # type: ignore[arg-type]
+        finally:
+            self.calls.append(("confirm", sailbox.memory_mib))
         if self.confirm_error is not None:
             raise self.confirm_error
 
@@ -970,6 +1105,8 @@ class FakeUsage:
         Raises:
             BaseException: The error that the test sets.
         """
+        if self.spend_gate is not None:
+            await self.spend_gate.wait()
         if self.spending is not None:
             # Shared by the boxes of one test, to see how many waits overlap.
             self.spending[0] += 1
@@ -1043,52 +1180,48 @@ def test_a_protected_box_needs_an_operation_key() -> None:
 async def test_a_protected_box_reserves_before_the_create_and_settles_after_the_terminate(
     fake_sdk: FakeCloud,
 ) -> None:
-    """Reserve the whole lifetime first, confirm the created box, and settle once it terminated."""
+    """Reserve the whole lifetime first, confirm the created box, and settle once it terminated.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     env, made = _protected(lifetime_seconds=300.5)
     async with env:
         pass
     usage = made[0]
     assert usage.operation_key == "box-1"
     assert usage.request["lifetime_ms"] == 301_000
-    assert usage.request["size"] == "cpu-1"
+    assert usage.request["size"] == "s"
     assert usage.request["network_disabled"] is False
     assert usage.calls == [
         ("begin_create", 0),
         ("bind", "sb-1"),
-        ("confirm", 64 * 1024),
+        ("confirm", 16 * 1024),
         ("settle", [True]),
     ]
 
 
 async def test_a_box_over_its_funding_is_terminated_and_settled(fake_sdk: FakeCloud) -> None:
-    """End the start when the box is larger than its funding, and still settle the box that exists."""
+    """End the start when the box is larger than its funding, and still settle the box that exists.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.limits = (1, 32 * 1024, 32)
     env, made = _protected()
-    made_error = UsagePendingError("too large")
-
-    def failing(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
-        """Make a fake reservation whose confirm fails.
-
-        Args:
-            budget: The budget runtime.
-            request: The priced request.
-            operation_key: The box's operation key.
-
-        Returns:
-            The fake reservation.
-        """
-        made.append(FakeUsage(request, operation_key))
-        made[-1].confirm_error = made_error
-        return made[-1]
-
-    env._usage_factory = failing
-    with pytest.raises(UsagePendingError, match="too large"):
+    with pytest.raises(UsagePendingError, match="inside its funding"):
         await env.start()
+    await env.stop()
     assert made[0].names() == ["begin_create", "bind", "confirm", "settle"]
     assert [box.terminated for box in fake_sdk.boxes] == [True]
 
 
 async def test_a_failed_create_releases_the_reservation(fake_sdk: FakeCloud) -> None:
-    """Let the reservation release or keep its hold when the create returns no box."""
+    """Let the reservation release or keep its hold when the create returns no box.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_error = FakeSailError("quota")
     env, made = _protected()
     with pytest.raises(SandboxInfraError):
@@ -1102,11 +1235,9 @@ async def test_a_failed_create_releases_the_reservation(fake_sdk: FakeCloud) -> 
     [
         FakeApiError(402),
         FakeApiError(403),
-        FakeApiError(409),
         FakeApiError(413),
         InvalidArgumentError("bad size"),
         ImageBuildError("build failed"),
-        TypeError("bad keyword"),
     ],
 )
 async def test_a_refused_create_frees_the_reservation(fake_sdk: FakeCloud, error: BaseException) -> None:
@@ -1123,9 +1254,9 @@ async def test_a_refused_create_frees_the_reservation(fake_sdk: FakeCloud, error
     assert made[0].calls[-1] == ("release", True)
 
 
-@pytest.mark.parametrize("error", [FakeApiError(502), FakeApiError(429)])
+@pytest.mark.parametrize("error", [FakeApiError(502), FakeApiError(429), FakeApiError(409), TypeError("bad row")])
 async def test_an_unclear_create_error_keeps_the_hold(fake_sdk: FakeCloud, error: BaseException) -> None:
-    """Keep the hold for a 5xx or a 429, because an earlier SDK retry may have made the box.
+    """Keep the hold for a 5xx, a 429, a 409 or a TypeError, because Sail may have made the box.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1138,7 +1269,9 @@ async def test_an_unclear_create_error_keeps_the_hold(fake_sdk: FakeCloud, error
     assert made[0].calls[-1] == ("release", False)
 
 
-@pytest.mark.parametrize("error", [FakeApiError(429), FakeApiError(403), TypeError("bad answer row")])
+@pytest.mark.parametrize(
+    "error", [FakeApiError(429), FakeApiError(403), FakeApiError(409), TypeError("bad answer row")]
+)
 async def test_a_failed_create_that_made_a_box_is_terminated_and_settled(
     fake_sdk: FakeCloud, error: BaseException
 ) -> None:
@@ -1156,12 +1289,17 @@ async def test_a_failed_create_that_made_a_box_is_terminated_and_settled(
     env, made = _protected()
     with pytest.raises(SandboxInfraError):
         await env.start()
+    await env.stop()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
     assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
 
 
 async def test_a_failed_lookup_after_a_refused_create_keeps_the_hold(fake_sdk: FakeCloud) -> None:
-    """Keep the hold, and raise it from the next stop, when Sail cannot list the boxes."""
+    """Keep the hold, and raise it from the next stop, when Sail cannot list the boxes.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_error = FakeApiError(403)
     fake_sdk.list_error = FakeSailError("list down")
     env, made = _protected()
@@ -1173,7 +1311,11 @@ async def test_a_failed_lookup_after_a_refused_create_keeps_the_hold(fake_sdk: F
 
 
 async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) -> None:
-    """Terminate the box of a cancelled start, then settle it."""
+    """Terminate the box of a cancelled start, then settle it.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_delay = 0.05
     env, made = _protected()
     starting = asyncio.ensure_future(env.start())
@@ -1181,12 +1323,17 @@ async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) 
     starting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await starting
+    await env.stop()
     assert made[0].names() == ["begin_create", "bind", "settle"]
     assert made[0].calls[-1] == ("settle", [True])
 
 
 async def test_a_settle_failure_does_not_hide_the_start_error(fake_sdk: FakeCloud) -> None:
-    """Raise the start error from a failed start, and keep the settle failure for the next stop."""
+    """Raise the start error from a failed start, and keep the settle failure for the next stop.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     env, made = _protected()
 
     def failing(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
@@ -1208,14 +1355,18 @@ async def test_a_settle_failure_does_not_hide_the_start_error(fake_sdk: FakeClou
     env._usage_factory = failing
     with pytest.raises(SandboxInfraError, match="confirm failed"):
         await env.start()
-    assert made[0].names()[-1] == "pending"
     with pytest.raises(UsagePendingError, match="not yet settled"):
         await env.stop()
+    assert made[0].names()[-1] == "pending"
     await env.stop()
 
 
 async def test_a_settle_failure_does_not_hide_a_cancel(fake_sdk: FakeCloud) -> None:
-    """Let a cancelled start end as a cancel even when its settle fails."""
+    """Let a cancelled start end as a cancel even when its settle fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     fake_sdk.create_delay = 0.05
     env, made = _protected()
     starting = asyncio.ensure_future(env.start())
@@ -1229,7 +1380,11 @@ async def test_a_settle_failure_does_not_hide_a_cancel(fake_sdk: FakeCloud) -> N
 
 
 async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -> None:
-    """Keep the hold pending, and raise it from stop, when the terminate fails."""
+    """Keep the hold pending, and raise it from stop, when the terminate fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     env, made = _protected()
     await env.start()
     fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
@@ -1240,7 +1395,11 @@ async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -
 
 
 async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
-    """Raise a failed settle from the first stop only, as a pending usage error."""
+    """Raise a failed settle from the first stop only, as a pending usage error.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     env, made = _protected()
     await env.start()
     made[0].settle_error = RuntimeError("spend API down")
@@ -1252,7 +1411,11 @@ async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
 
 
 async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud) -> None:
-    """Keep sweeping the job when one protected box cannot settle."""
+    """Keep sweeping the job when one protected box cannot settle.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     first, made_first = _protected(tags={JOB_TAG: "job-1"})
     second, _ = _protected(tags={JOB_TAG: "job-1"}, name="box-b")
     for env in (first, second):
@@ -1263,7 +1426,11 @@ async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud)
 
 
 async def test_the_job_sweep_waits_for_all_spends_at_the_same_time(fake_sdk: FakeCloud) -> None:
-    """Stop the job's boxes together, so their minutes-long spend waits overlap."""
+    """Stop the job's boxes together, so their minutes-long spend waits overlap.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
     envs = [_protected(tags={JOB_TAG: "job-2"}, name=f"box-{index}") for index in range(3)]
     spending = [0, 0]
     for env, made in envs:
@@ -1272,3 +1439,157 @@ async def test_the_job_sweep_waits_for_all_spends_at_the_same_time(fake_sdk: Fak
     assert await SailEnvironment.stop_job_sandboxes("job-2") == 3
     assert spending[1] == 3
     assert all(made[0].names()[-1] == "settle" for _, made in envs)
+
+
+async def test_a_failed_start_returns_before_the_spend_wait_ends(fake_sdk: FakeCloud) -> None:
+    """Raise the start error once the box is gone, and settle the box in the next stop.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+
+    def gated(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation whose confirm fails and whose spend waits on a gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        made.append(FakeUsage(request, operation_key))
+        made[-1].confirm_error = SandboxInfraError("confirm failed")
+        return made[-1]
+
+    env._usage_factory = gated
+    gate = asyncio.Event()
+    original = FakeUsage.final_spend
+
+    async def waiting(self: FakeUsage) -> dict[str, Any]:
+        """Wait for the gate, then return the fake spend.
+
+        Args:
+            self: The fake reservation.
+
+        Returns:
+            The fake spend line.
+        """
+        await gate.wait()
+        return await original(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FakeUsage, "final_spend", waiting)
+        with pytest.raises(SandboxInfraError, match="confirm failed"):
+            await env.start()
+        assert [box.terminated for box in fake_sdk.boxes] == [True]
+        assert "settle" not in made[0].names()
+        gate.set()
+        await env.stop()
+    assert made[0].calls[-1] == ("settle", [True])
+
+
+async def test_a_stop_during_a_slow_reserve_releases_the_late_reservation(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wait for a reserve that outlasts the start grace, and release the hold it returns.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Shortens the start grace.
+    """
+    monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
+    monkeypatch.setattr(sail, "STOP_TIMEOUT", 0.01)
+    entered = threading.Event()
+    gate = threading.Event()
+    made: list[FakeUsage] = []
+
+    def slow(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation after the test opens the gate.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        made.append(FakeUsage(request, operation_key))
+        return made[-1]
+
+    env = SailEnvironment(_spec(operation_key="box-1"), budget="budget", usage_factory=slow)
+    starting = asyncio.ensure_future(env.start())
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        stopping = asyncio.ensure_future(env.stop())
+        await asyncio.sleep(0.1)
+        assert not stopping.done()
+    finally:
+        gate.set()
+    await stopping
+    with pytest.raises(SandboxInfraError, match="stopped during its start"):
+        await starting
+    assert made[0].calls == [("release", False)]
+    assert fake_sdk.create_calls == 0
+
+
+async def test_a_create_that_fails_in_its_grace_is_looked_up(fake_sdk: FakeCloud) -> None:
+    """Find, terminate and settle the box of a cancelled create that then fails.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.create_delay = 0.05
+    fake_sdk.create_error = FakeApiError(403)
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
+
+
+async def test_a_lookup_that_finds_two_boxes_keeps_the_hold(fake_sdk: FakeCloud) -> None:
+    """Terminate every box with the name, and keep the hold when there is more than one.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    fake_sdk.create_error = FakeApiError(429)
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    fake_sdk.boxes.append(BoxState(id="sb-old", params={"name": env._name}))
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with pytest.raises(UsagePendingError, match="more than one box"):
+        await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True, True]
+    assert made[0].names() == ["begin_create", "pending"]
+
+
+async def test_protected_boxes_with_one_spec_name_get_different_sail_names(fake_sdk: FakeCloud) -> None:
+    """Free a refused create's hold even when an old box of the same spec name is still listed.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    first, _ = _protected(name="worker")
+    async with first:
+        pass
+    fake_sdk.create_error = FakeApiError(403)
+    second, made = _protected(name="worker")
+    with pytest.raises(SandboxInfraError):
+        await second.start()
+    assert made[0].calls[-1] == ("release", True)
+    assert first._name != second._name
+    assert first._name.startswith("worker-")
+    assert fake_sdk.boxes[0].params["name"] == first._name

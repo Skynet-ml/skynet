@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # but the pricing page publishes only one fee, so the quote and the measured
 # settle use that fee. Without account prices the reported rates are likely
 # zero, so they would drop the creation charge; with account prices Sail's
-# own cost is used. The rates go into the settle evidence for audit.
+# own cost is used, plus the creation charge at Sail's rate for the size.
+# The rates go into the settle evidence for audit.
 _PRICING_URL = "https://docs.sailresearch.com/pricing.md"
 _SPEND_URL = "https://docs.sailresearch.com/api-reference/usage/get-sailbox-spend.md"
 _PRICE_VERSION = "sail-public-2026-11-24"
@@ -75,16 +76,19 @@ _DEFAULT_SIZE = "l"
 _LIFETIME_CEILING_MS = 24 * 3_600_000
 # Sail reports usage in batches of about one minute and shows spend "within
 # a few minutes", so the settle waits before the first read and gives up
-# after the deadline, which keeps the hold pending.
-SPEND_DELAY_SECONDS = 90.0
-SPEND_POLL_SECONDS = 30.0
-SPEND_DEADLINE_SECONDS = 360.0
+# after the deadline, which keeps the hold pending with the last line read.
+# The deadline counts from the first wait. With the terminate (60 s), it must
+# stay well under the 240 s that a session close gives one stop
+# (``_ASYNC_CLOSE_BUDGET_SECONDS`` in the blackbox sandbox runtime).
+SPEND_DELAY_SECONDS = 60.0
+SPEND_POLL_SECONDS = 15.0
+SPEND_DEADLINE_SECONDS = 150.0
 # Two equal reads close together can both come before the last usage
 # batch, so a line counts as final only after it stays the same this long.
 SPEND_AGREE_SECONDS = 60.0
-# Sail documents these as retryable: the request never started (429) or
-# Sail is briefly unavailable (503).
-_TRANSIENT_STATUSES = frozenset({429, 503})
+# Sail documents 429 (the request never started) and 503 as retryable. A
+# 5xx answer is a server fault, not a refusal, so it is read again too.
+_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 _SPEND_TIMEOUT_SECONDS = 30.0
 # The spend window opens before the create, so clock drift between this
 # worker and Sail cannot drop the box's first samples.
@@ -273,12 +277,27 @@ def _box_spend(report: Mapping[str, Any], sailbox_id: str) -> dict[str, Any] | N
     return None
 
 
+def _creation_usd(spend: Mapping[str, Any], fee: Any) -> Decimal:
+    """Price the creation charges of one box's spend line.
+
+    Args:
+        spend: The box's spend line with the report's pricing flags.
+        fee: The fee in USD for one creation.
+
+    Returns:
+        The creation charges in USD, or zero when Sail waives them.
+    """
+    if spend.get("creation_fees_waived") is True:
+        return Decimal(0)
+    return exact_nonnegative(spend["creation_count"]) * exact_nonnegative(fee)
+
+
 def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any]) -> Decimal:
     """Price one box from its spend line.
 
     Sail's own cost is used when Sail has prices set for the account.
-    Otherwise the measured usage is priced at the admitted rates, and the
-    creation at the admitted fee.
+    Otherwise the measured usage is priced at the admitted rates. The
+    creation charge is added in both cases, unless Sail waives it.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -292,17 +311,26 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
     """
     try:
         if spend.get("pricing_configured") is True:
-            return exact_nonnegative(spend["cost_usd_nanos"]) / _NANOS_PER_USD
+            # The spend docs call cost_usd_nanos the cost of the box's usage
+            # and list creation_count and the creation rates apart from it.
+            # They do not say if the cost includes the creation charge, so
+            # the charge is added; the settle clamps the total to the hold.
+            size = (price_snapshot.get("request") or {}).get("size") or _DEFAULT_SIZE
+            rates = spend.get("rates")
+            rate = rates.get(f"{size}_creation_usd_nanos") if isinstance(rates, Mapping) else None
+            fee = (
+                exact_nonnegative(rate) / _NANOS_PER_USD
+                if rate is not None and exact_nonnegative(rate) > 0
+                else price_snapshot["creation_usd"]
+            )
+            return exact_nonnegative(spend["cost_usd_nanos"]) / _NANOS_PER_USD + _creation_usd(spend, fee)
         usage = (
             exact_nonnegative(spend["vcpu_seconds"]) * exact_nonnegative(price_snapshot["vcpu_hour_usd"])
             + exact_nonnegative(spend["memory_gib_seconds"]) * exact_nonnegative(price_snapshot["memory_gib_hour_usd"])
             + exact_nonnegative(spend["state_disk_gib_seconds"])
             * exact_nonnegative(price_snapshot["disk_gib_hour_usd"])
         ) / _SECONDS_PER_HOUR
-        creation = Decimal(0)
-        if spend.get("creation_fees_waived") is not True:
-            creation = exact_nonnegative(spend["creation_count"]) * exact_nonnegative(price_snapshot["creation_usd"])
-        return usage + creation
+        return usage + _creation_usd(spend, price_snapshot["creation_usd"])
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Sail spend report has no usable cost for the box.") from error
 
@@ -483,7 +511,7 @@ class SailUsageReservation:
         """Poll the spend report until the box's line stays the same for a minute.
 
         Only the short spend reads run in threads; the waits do not hold one.
-        A 429 or 503 answer, or a transport error, is read again later.
+        A 429 or 5xx answer, or a transport error, is read again later.
 
         Returns:
             The box's final spend line.
