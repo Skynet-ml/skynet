@@ -46,7 +46,13 @@ def _no_usage_api(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: The pytest monkeypatch fixture.
     """
-    for name in ("DAYTONA_ORGANIZATION_ID", "DAYTONA_API_KEY", "DAYTONA_JWT_TOKEN"):
+    for name in (
+        "DAYTONA_ORGANIZATION_ID",
+        "DAYTONA_API_KEY",
+        "DAYTONA_JWT_TOKEN",
+        "DAYTONA_API_URL",
+        "DAYTONA_SERVER_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -316,6 +322,79 @@ def test_usage_api_transport_error_falls_back_to_measured_time(
     clock[0] = START + 60
     reservation.settle()
     assert _state(reservation).actual_cents == _cents(HOURLY * 60 / 3600)
+
+
+def test_usage_read_sends_the_jwt_before_the_api_key(
+    database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send the JWT when both are set, because the analytics API takes a normal API key only when it is an admin key."""
+    seen: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the authorization header and return one closed period.
+
+        Args:
+            request: The API request.
+
+        Returns:
+            The usage periods.
+        """
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json=[_period()])
+
+    _usage_api(monkeypatch, answer)
+    monkeypatch.setenv("DAYTONA_JWT_TOKEN", "test-jwt")
+    reservation = _started(database)
+    clock[0] = START + 60
+    reservation.settle()
+    assert seen == ["Bearer test-jwt"]
+
+
+@pytest.mark.parametrize("name", ["DAYTONA_API_URL", "DAYTONA_SERVER_URL"])
+def test_usage_read_is_skipped_for_another_daytona_api(
+    database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Settle at measured time and send no token when the Daytona API is not Daytona's own cloud.
+
+    Args:
+        database: Engine of the funded ledger.
+        clock: The settable wall clock.
+        monkeypatch: The pytest monkeypatch fixture.
+        name: The environment variable that names the Daytona API.
+    """
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request and return a high bill.
+
+        Args:
+            request: The API request.
+
+        Returns:
+            The usage periods.
+        """
+        seen.append(request)
+        return httpx.Response(200, json=[_period(price=0.005)])
+
+    _usage_api(monkeypatch, answer)
+    monkeypatch.setenv(name, "https://daytona.example.internal/api")
+    reservation = _started(database)
+    clock[0] = START + 60
+    reservation.settle()
+    assert seen == []
+    assert _state(reservation).actual_cents == _cents(HOURLY * 60 / 3600)
+
+
+def test_usage_read_runs_for_the_default_daytona_api(
+    database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read the bill when the Daytona API is set to Daytona's own default URL."""
+    _usage_api(monkeypatch, lambda _request: httpx.Response(200, json=[_period(price=0.005)]))
+    monkeypatch.setenv("DAYTONA_API_URL", "https://app.daytona.io/api/")
+    reservation = _started(database)
+    clock[0] = START + 60
+    reservation.settle()
+    assert _state(reservation).actual_cents == _cents(Decimal("0.005"))
 
 
 def test_usage_api_with_another_size_settles_at_the_reservation_maximum(

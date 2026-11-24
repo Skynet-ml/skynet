@@ -55,6 +55,9 @@ _SECONDS_PER_HOUR = Decimal(3600)
 # through a private method, so the URL is fixed here. With a normal API key
 # the read fails and the box settles at measured time, which is the floor.
 _ANALYTICS_URL = "https://analytics.app.daytona.io"
+# The analytics host above serves only Daytona's own cloud. A token for
+# another Daytona API (self-hosted, or another region) must never reach it.
+_DEFAULT_API_URL = "https://app.daytona.io/api"
 _USAGE_TIMEOUT_SEC = 10.0
 # The usage window starts a little before the create call and ends a little
 # after the delete, so clock skew cannot cut a period off.
@@ -175,11 +178,16 @@ def _usage_periods(sandbox_id: str, organization: str | None, start: float, end:
         end: Epoch seconds at the window end.
 
     Returns:
-        The decoded periods, or ``None`` when the API is not configured or
-        the read fails.
+        The decoded periods, or ``None`` when the API is not configured,
+        the Daytona API is not Daytona's own cloud, or the read fails.
     """
+    # The SDK reads the same two names, in this order.
+    api_url = os.environ.get("DAYTONA_API_URL") or os.environ.get("DAYTONA_SERVER_URL")
+    if api_url and api_url.rstrip("/") != _DEFAULT_API_URL:
+        return None
     organization = organization or os.environ.get("DAYTONA_ORGANIZATION_ID")
-    token = os.environ.get("DAYTONA_API_KEY") or os.environ.get("DAYTONA_JWT_TOKEN")
+    # The analytics API accepts a JWT or an admin key; a JWT always works.
+    token = os.environ.get("DAYTONA_JWT_TOKEN") or os.environ.get("DAYTONA_API_KEY")
     if not organization or not token:
         return None
     try:
@@ -361,7 +369,7 @@ class DaytonaUsageReservation:
                 "provider": "daytona",
                 "sandbox_id": self.sandbox_id,
                 "actual_sizes": self.actual_sizes,
-                "box_label": self.box_label or None,
+                "box_label": self.box_label,
                 "dispatched_at": self.dispatched_at,
             }
             self.runtime.service.mark_pending(
