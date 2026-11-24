@@ -81,9 +81,9 @@ FIXED_MESSAGE_CODES = {
     SETUP_NOT_CHECKED["metric"]: "submit.preflight.metric_setup_not_checked",
     SCORER_NOT_CHECKED: "submit.preflight.scorer_not_checked",
 }
-# The budget texts with amounts in them (``billing.budgets._admit`` and
-# ``billing.runtime.BudgetRuntime._wait_cannot_help``); their groups become the
-# catalog message's params.
+# The budget texts with amounts in them; their groups become the catalog
+# message's params. New setup checks no longer produce these texts (SKY-925).
+# The patterns stay to localize stored results from earlier checks.
 BUDGET_LIMIT_MESSAGE = re.compile(
     r"The next operation needs up to (?P<needed>\$[\d,]+\.\d{2}), but only "
     r"(?P<remaining>\$[\d,]+\.\d{2}) of the (?P<limit>\$[\d,]+\.\d{2}) limit remain\."

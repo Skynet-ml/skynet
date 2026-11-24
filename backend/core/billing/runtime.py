@@ -13,6 +13,7 @@ from typing import Any, Generic, TypeVar
 
 from .budget_amounts import CENT_SCALE, ceil_cents
 from .budgets import (
+    AccountFundsError,
     BudgetConflictError,
     BudgetFencedError,
     BudgetInFlightError,
@@ -227,20 +228,25 @@ class BudgetRuntime:
             error: The admission refusal, with its limit arithmetic when it has one.
 
         Returns:
-            True when the refusal has no limit arithmetic, or when the scope
-            fits in the room that the pinned coverage leaves.
+            True when the refusal has no arithmetic, when a run's refusal is
+            about the account's funds, or when the scope fits in the room that
+            the pinned coverage leaves.
         """
         if error.scope_units is None or error.room_units is None:
+            return True
+        # A run waits on funds as before; only a setup check tests its own boxes against the funds (SKY-925).
+        if error.funds and self.phase != "setup":
             return True
         with self._changed:
             pinned = sum(self._pinned.values())
         return error.scope_units <= error.room_units - pinned
 
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
-        """Refuse a run operation that only this runtime's own blocked sandboxes keep out.
+        """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
-        Only run work has limit arithmetic: setup work is bounded by the
-        account's funds alone (SKY-925). A run's lanes share
+        Setup work is bounded by the account's funds alone (SKY-925). A setup
+        check runs its samples one at a time inside boxes it opened itself, so
+        its pinned coverage never frees funds while it waits. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
         only when no pinned work box can end: each one has a model call that
@@ -256,11 +262,14 @@ class BudgetRuntime:
 
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
-            It is the stop latch's ``BudgetReached``, after the budget stopped
+            In the setup phase it is an ``AccountFundsError``. In the run phase
+            it is the stop latch's ``BudgetReached``, after the budget stopped
             admitting work, like any other run refusal.
         """
         if self._fits_after_unpinned_work(error):
             return None
+        if self.phase == "setup":
+            return AccountFundsError("The account cannot fund the next operation.")
         with self._changed:
             pinned = sum(self._pinned.values())
             # With no pinned work box, only run-long holds such as snapshots

@@ -118,17 +118,22 @@ class AccountFundsError(BudgetInsufficientError):
 class BudgetInFlightError(BudgetError):
     """Wait for already-covered work before deciding whether funding is exhausted."""
 
-    def __init__(self, message: str, *, scope_units: int | None = None, room_units: int | None = None) -> None:
-        """Keep the limit arithmetic so a caller can tell whether waiting could help.
+    def __init__(
+        self, message: str, *, scope_units: int | None = None, room_units: int | None = None, funds: bool = False
+    ) -> None:
+        """Keep the admission arithmetic so a caller can tell whether waiting could help.
 
         Args:
             message: Internal diagnostic for logs and focused tests.
             scope_units: Coverage the refused operation needs.
-            room_units: The limit's unspent units, reserved work included.
+            room_units: The unspent units of the limit, or of the account's
+                funds when ``funds`` is set, this budget's reserved work included.
+            funds: Whether the account's funds, not the limit, refused the operation.
         """
         super().__init__(message)
         self.scope_units = scope_units
         self.room_units = room_units
+        self.funds = funds
 
 
 class BudgetUnreconciledError(BudgetInFlightError):
@@ -320,7 +325,15 @@ def _admit(
     if hold_delta > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
         if after_release <= wallet_balance:
-            raise BudgetInFlightError("Other covered work currently holds the required wallet funds.")
+            # Other budgets' holds may settle, so the room counts them as free; then a setup check can tell
+            # when only its own boxes block it.
+            room = (wallet_balance + budget.billed_cents) * CENT_SCALE - budget.wallet_settled_units
+            raise BudgetInFlightError(
+                "Other covered work currently holds the required wallet funds.",
+                scope_units=charge,
+                room_units=room,
+                funds=True,
+            )
         raise AccountFundsError("The account cannot fund the next operation.")
 
 

@@ -967,6 +967,38 @@ def test_setup_check_is_bounded_by_the_balance_not_the_limit(engine: Engine) -> 
         runtime.reserve(_quote(51), operation_key="unfunded", cost_kind="model")
 
 
+def test_setup_check_refuses_at_once_when_only_its_own_boxes_hold_the_funds(engine: Engine) -> None:
+    """A check's open boxes never free funds while it waits, so it refuses on the balance instead of hanging."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 40, idempotency_key="own-boxes")
+    runtime = _setup_runtime(service, budget.id, wait=30)
+    box = runtime.reserve(_quote(450), operation_key="box", cost_kind="sandbox", role="runtime")
+    runtime.pin(box.id, cent_units(box.max_cents))
+
+    started = time.monotonic()
+    with pytest.raises(AccountFundsError, match="cannot fund"):
+        runtime.reserve(_quote(80), operation_key="call", cost_kind="model")
+    assert time.monotonic() - started < 5
+
+
+def test_setup_check_waits_for_funds_held_by_other_budgets(engine: Engine) -> None:
+    """Another budget's coverage may settle, so a check blocked only by it waits."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    other = service.create("alice", 40, idempotency_key="other-work")
+    _reserve(service, other.id, "other", cost_kind="sandbox", max_cents=450)
+    budget = service.create("alice", 40, idempotency_key="check")
+    runtime = _setup_runtime(service, budget.id, wait=0)
+
+    with pytest.raises(UsagePendingError):
+        runtime.reserve(_quote(80), operation_key="call", cost_kind="model")
+
+
 def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = True, parked: bool = False) -> Any:
     """Reserve and pin one box, tagged by its key, the way a protected sandbox does.
 

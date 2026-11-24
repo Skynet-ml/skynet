@@ -24,15 +24,18 @@ import { cn } from "@/shared/lib/utils";
 import { centsToBudgetText, parseBudgetInput } from "@/shared/lib/budget-input";
 import { budgetShortfall } from "../lib/budget-limit";
 import { startingLimitCents } from "../lib/run-floor";
+import type { ExecutionBudget } from "@/shared/types/execution-budget";
 import type { WizardV2Context } from "../lib/wizard-v2";
 import { useExecutionBudget } from "../hooks/use-execution-budget";
 import { Segmented } from "@/shared/ui/segmented";
 import { StepCard } from "./blackbox/shared";
 
 /**
- * The one budget surface of both wizards: a spending limit that covers setup
- * checks and the optimization itself. A run has no upfront cost estimate; it
- * spends up to the limit and stops at the budget with its best version. The
+ * The one budget surface of both wizards: a spending limit that covers the
+ * optimization. Setup checks bill the account balance, not the limit
+ * (SKY-925), so the ledger shows the run's own spend and holds. A run has no
+ * upfront cost estimate; it spends up to the limit and stops at the budget
+ * with its best version. The
  * card names the least the limit can be (what the run's boxes hold before
  * the first model call, plus spare for its first calls), and once the
  * budget exists, the server's ledger for it.
@@ -70,15 +73,13 @@ const BUDGET_STEP_BUTTON_CLASS =
 const ISOLATE_START = "⁦";
 const ISOLATE_END = "⁩";
 
-/** Add two server decimal strings exactly, without passing them through a float. */
-function sumDecimals(a: string, b: string): string {
-  const [aWhole = "0", aFraction = ""] = a.split(".");
-  const [bWhole = "0", bFraction = ""] = b.split(".");
-  const scale = Math.max(aFraction.length, bFraction.length);
-  const total =
-    BigInt(aWhole + aFraction.padEnd(scale, "0")) + BigInt(bWhole + bFraction.padEnd(scale, "0"));
-  const digits = total.toString().padStart(scale + 1, "0");
-  return scale === 0 ? digits : `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+/**
+ * The run's own spend and holds, as the server counts them for
+ * ``available_cents``: setup checks bill the balance, not the limit (SKY-925),
+ * and before the budget is attached to a run every hold is a setup check's.
+ */
+export function runLedger(budget: ExecutionBudget): { spent: string; reserved: string } {
+  return { spent: budget.run_spent_cents, reserved: budget.job_id ? budget.reserved_cents : "0" };
 }
 
 const isZero = (amount: string) => !/[1-9]/.test(amount);
@@ -169,8 +170,8 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
   const fieldHint = fieldError == null && parsed.kind === "empty" ? minimumMessage : null;
   const fieldMessage = fieldError ?? fieldHint;
 
-  const spent = budget ? sumDecimals(budget.setup_spent_cents, budget.run_spent_cents) : null;
-  const showLedger = !budgetUncapped && budget != null && spent != null;
+  const ledger = budget ? runLedger(budget) : null;
+  const showLedger = !budgetUncapped && budget != null && ledger != null;
   const pendingTotal =
     budget != null &&
     (budget.uncapped !== budgetUncapped ||
@@ -286,19 +287,19 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
                 label={msg("submit.budget.remaining")}
                 value={ledgerAmount(budget.available_cents)}
               />
-              {!isZero(spent) && (
+              {!isZero(ledger.spent) && (
                 <Row
                   icon={ClockCounterClockwise}
                   label={msg("submit.budget.spent")}
-                  value={ledgerAmount(spent)}
+                  value={ledgerAmount(ledger.spent)}
                 />
               )}
-              {!isZero(budget.reserved_cents) && (
+              {!isZero(ledger.reserved) && (
                 <Row
                   icon={Lock}
                   label={msg("submit.budget.reserved")}
                   tip={msg("submit.budget.reserved_tip")}
-                  value={ledgerAmount(budget.reserved_cents)}
+                  value={ledgerAmount(ledger.reserved)}
                 />
               )}
             </dl>

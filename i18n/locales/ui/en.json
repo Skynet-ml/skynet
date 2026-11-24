@@ -3113,7 +3113,7 @@
   "submit.blackbox.review.models": "Models",
   "submit.blackbox.review.name_suggested": "Suggested from your objective",
   "submit.budget.label": "Spending limit",
-  "submit.budget.explainer": "Covers setup and optimization. Stops when the limit is reached.",
+  "submit.budget.explainer": "Covers the optimization. Setup checks are paid from your balance.",
   "submit.budget.error.empty": "Enter a spending limit to continue.",
   "submit.budget.error.invalid": "Enter a dollar amount, for example {suggested}.",
   "submit.budget.error.fraction": "Amounts go down to the cent — use at most two decimals.",
