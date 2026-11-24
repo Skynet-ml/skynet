@@ -1396,6 +1396,87 @@ async def test_accepted_delete_with_a_late_running_read_settles_at_the_measured_
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
+async def test_running_box_after_a_delete_cut_in_flight_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Poll a running box for DELETE_WAIT after STOP_TIMEOUT cuts the DELETE, then settle the whole lifetime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "DELETE_WAIT", 0.3)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+
+    async def hanging_delete(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hang each DELETE with the box left running.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method != "DELETE":
+            return await _handle(request)
+        CLOUD.requests.append(request)
+        await asyncio.sleep(5)
+        return _json(202, {})
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hanging_delete))
+    env = _protected()
+    await env.start()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await env.stop()
+    elapsed = loop.time() - began
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+    # The old code gave up on the first running read; the stop must use the
+    # DELETE_WAIT and still end within its budget.
+    assert elapsed >= sbx.DELETE_WAIT
+    assert elapsed < sbx.STOP_TIMEOUT + sbx.DELETE_WAIT + 0.5
+
+
+async def test_failed_reads_during_a_slow_delete_settle_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep polling through failed reads after a 202 DELETE, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    # Two reads: the first ends the delete, the second is in the follow-up wait.
+    failing_reads = [2]
+
+    async def flaky_reads(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and fail two reads after the DELETE.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "GET" and CLOUD.calls("DELETE", "") and failing_reads[0] > 0:
+            failing_reads[0] -= 1
+            CLOUD.requests.append(request)
+            return _json(500, {"code": "internal"})
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(flaky_reads))
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.1
+    await env.stop()
+    assert failing_reads == [0]
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_not_found_delete_of_a_listed_box_is_sent_at_most_twice() -> None:
+    """Send the DELETE once more after a notFound 404, not on every poll, and settle the whole lifetime."""
+    env = _protected()
+    await env.start()
+    CLOUD.failures[("DELETE", "")] = (404, "notFound")
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 2
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
 async def test_delete_sets_no_sent_flag_for_a_box_another_delete_removes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Leave ``sent`` clear, and mark the delete on its way, for a box that is already deleting."""
     monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)

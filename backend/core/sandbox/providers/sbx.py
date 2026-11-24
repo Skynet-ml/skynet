@@ -17,8 +17,8 @@ policy bodies come from there. Changes:
   polls the sandbox list by the unique display name for up to
   ``ORPHAN_WAIT`` seconds and deletes the sandbox it finds. Only the listed
   pre-action refusals, a failed connect and no free pooled connection are
-  definite, so a stop after one looks for nothing. A sandbox that shows in the list only after
-  ``ORPHAN_WAIT`` leaks until its sbx lifetime ends.
+  definite, so a stop after one looks for nothing. A sandbox that shows in
+  the list only after ``ORPHAN_WAIT`` leaks until its sbx lifetime ends.
 - A lifetime above the sbx limit of 12 hours is capped, with a warning.
 - The spec sizes map to the first sbx shape that is large enough. The sbx
   shapes have no disk size, so ``disk_mb`` has no effect.
@@ -64,6 +64,7 @@ from core.billing.sbx_usage import BILLING_GRACE_MS, SbxUsageReservation
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -630,12 +631,13 @@ async def _delete(
             delete ends early knows whether sbx may be deleting the sandbox.
 
     Raises:
-        SandboxInfraError: The sandbox has no ETag, or never showed in
-            ``ORPHAN_WAIT`` seconds.
+        SandboxInfraError: The sandbox has no ETag, never showed in
+            ``ORPHAN_WAIT`` seconds, or got a second ``notFound`` DELETE answer
+            while the read still showed it.
         SandboxError: A request failed; see ``_call``.
     """
     state = state if state is not None else _DeleteState()
-    refreshed = False
+    refreshed = resent = False
     missing_since: float | None = None
     while True:
         sandbox = await _read(client, path, uid)
@@ -676,7 +678,13 @@ async def _delete(
                 # sbx did not accept this DELETE, so it proves nothing about
                 # the sandbox: a 404 can be a routing miss, as for a read.
                 state.sent = False
-                if response is not None:
+                if response is None:
+                    # One more DELETE covers a routing miss; more would only
+                    # repeat it on every poll.
+                    if resent:
+                        raise SandboxInfraError("sbx did not find the sandbox to delete twice.")
+                    resent = True
+                else:
                     if refreshed:
                         raise _status_error(response, "delete the sandbox")
                     # The ETag changed or another delete runs: read the sandbox
@@ -700,15 +708,22 @@ async def _wait_gone(client: httpx.AsyncClient, path: str, uid: str | None, stat
 
     Returns:
         True when the sandbox is gone after sbx accepted the DELETE or showed
-        it as deleting. False when it is not deleting and sbx accepted no
-        DELETE, stays missing for ``ORPHAN_WAIT`` with no such proof, a read
-        fails or the wait ends.
+        it as deleting. False when it is not deleting and no DELETE of this
+        stop may have reached sbx, stays missing for ``ORPHAN_WAIT`` with no
+        such proof, or the wait ends.
     """
     missing_since: float | None = None
     try:
         async with asyncio.timeout(DELETE_WAIT):
             while True:
-                sandbox = await _read(client, path, uid)
+                try:
+                    sandbox = await _read(client, path, uid)
+                except SandboxError as error:
+                    # One failed read proves nothing about the sandbox; the
+                    # DELETE_WAIT timeout still bounds the wait.
+                    logger.info("sbx could not read the deleting sandbox: %s", type(error).__name__)
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
                 if sandbox is None:
                     if state.on_its_way:
                         return True
@@ -717,7 +732,9 @@ async def _wait_gone(client: httpx.AsyncClient, path: str, uid: str | None, stat
                         return False
                 elif _status(sandbox) == "deleting":
                     state.on_its_way = True
-                elif not state.accepted:
+                elif not state.sent:
+                    # A DELETE cut off in flight may still reach sbx, so only
+                    # a stop with no such DELETE gives up on a live sandbox.
                     return False
                 await asyncio.sleep(POLL_INTERVAL)
     except Exception as error:
