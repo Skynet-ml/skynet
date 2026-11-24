@@ -492,7 +492,14 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     monkeypatch.setattr(sail, "STOP_TIMEOUT", 1.0)
     monkeypatch.setattr(sail, "_JOB_BOXES", {})
     monkeypatch.setattr(sail, "_LATE_TASKS", set())
+    monkeypatch.setattr(sail, "_SPEND_TASKS", set())
     return CLOUD
+
+
+async def _spent() -> None:
+    """Wait for the background spend tasks that the stops started."""
+    while sail._SPEND_TASKS:
+        await asyncio.wait(set(sail._SPEND_TASKS))
 
 
 class TestSailEnvironmentContract(SandboxEnvironmentContract):
@@ -1072,7 +1079,6 @@ class FakeUsage:
         self.settle_error: BaseException | None = None
         self.spending: list[int] | None = None
         self.spend_gate: asyncio.Event | None = None
-        self.budgets: list[float | None] = []
         self.release_entered = threading.Event()
         self.release_gate: threading.Event | None = None
 
@@ -1127,11 +1133,8 @@ class FakeUsage:
         """Record a pending hold."""
         self.calls.append(("pending", None))
 
-    async def final_spend(self, budget: float | None = None) -> dict[str, Any]:
+    async def final_spend(self) -> dict[str, Any]:
         """Wait a moment for the spend, or fail as the test sets.
-
-        Args:
-            budget: The seconds that the teardown can still wait.
 
         Returns:
             A fake spend line.
@@ -1139,7 +1142,6 @@ class FakeUsage:
         Raises:
             BaseException: The error that the test sets.
         """
-        self.budgets.append(budget)
         if self.spend_gate is not None:
             await self.spend_gate.wait()
         if self.spending is not None:
@@ -1247,6 +1249,7 @@ async def test_a_box_over_its_funding_is_terminated_and_settled(fake_sdk: FakeCl
     with pytest.raises(UsagePendingError, match="inside its funding"):
         await env.start()
     await env.stop()
+    await _spent()
     assert made[0].names() == ["begin_create", "bind", "confirm", "settle"]
     assert [box.terminated for box in fake_sdk.boxes] == [True]
 
@@ -1325,6 +1328,7 @@ async def test_a_failed_create_that_made_a_box_is_terminated_and_settled(
     with pytest.raises(SandboxInfraError):
         await env.start()
     await env.stop()
+    await _spent()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
     assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
 
@@ -1359,12 +1363,13 @@ async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) 
     with pytest.raises(asyncio.CancelledError):
         await starting
     await env.stop()
+    await _spent()
     assert made[0].names() == ["begin_create", "bind", "settle"]
     assert made[0].calls[-1] == ("settle", [True])
 
 
 async def test_a_settle_failure_does_not_hide_the_start_error(fake_sdk: FakeCloud) -> None:
-    """Raise the start error from a failed start, and keep the settle failure for the next stop.
+    """Raise the start error from a failed start, and keep the hold pending when its spend fails.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1390,10 +1395,9 @@ async def test_a_settle_failure_does_not_hide_the_start_error(fake_sdk: FakeClou
     env._usage_factory = failing
     with pytest.raises(SandboxInfraError, match="confirm failed"):
         await env.start()
-    with pytest.raises(UsagePendingError, match="not yet settled"):
-        await env.stop()
-    assert made[0].names()[-1] == "pending"
     await env.stop()
+    await _spent()
+    assert made[0].names()[-1] == "pending"
 
 
 async def test_a_settle_failure_does_not_hide_a_cancel(fake_sdk: FakeCloud) -> None:
@@ -1410,8 +1414,9 @@ async def test_a_settle_failure_does_not_hide_a_cancel(fake_sdk: FakeCloud) -> N
     starting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await starting
-    with pytest.raises(UsagePendingError, match="late spend"):
-        await env.stop()
+    await env.stop()
+    await _spent()
+    assert made[0].names()[-1] == "pending"
 
 
 async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -> None:
@@ -1444,6 +1449,7 @@ async def test_a_box_that_did_not_terminate_is_tried_again(fake_sdk: FakeCloud) 
     assert await SailEnvironment.stop_job_sandboxes("job-1") == 0
     fake_sdk.terminate_fails.clear()
     await env.stop()
+    await _spent()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
     assert sail._JOB_BOXES == {}
     assert made[0].names().count("pending") == 1
@@ -1485,19 +1491,58 @@ async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeyp
     assert made[0].names().count("pending_failed") == 1
 
 
-async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
-    """Raise a failed settle from the first stop only, as a pending usage error.
+async def test_a_failed_spend_keeps_the_hold_pending_once(fake_sdk: FakeCloud) -> None:
+    """Keep the hold pending once when the spend read fails, and never settle it from a later stop.
 
     Args:
         fake_sdk: The fake Sail cloud.
     """
     env, made = _protected()
     await env.start()
-    made[0].settle_error = RuntimeError("spend API down")
-    with pytest.raises(UsagePendingError, match="not yet settled") as raised:
-        await env.stop()
-    assert isinstance(raised.value.__cause__, RuntimeError)
+    made[0].settle_error = UsagePendingError("Sail did not report a final spend for the box in time.")
     await env.stop()
+    await _spent()
+    await env.stop()
+    await _spent()
+    assert made[0].names() == ["begin_create", "bind", "confirm", "pending"]
+
+
+async def test_stop_returns_before_the_spend_arrives(fake_sdk: FakeCloud) -> None:
+    """Return from stop once the box is terminated, and settle once when the spend arrives later.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    made[0].spend_gate = asyncio.Event()
+    # The gate stays closed, so a stop that waits for the spend times out here.
+    await asyncio.wait_for(env.stop(), 1.0)
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert len(sail._SPEND_TASKS) == 1
+    await env.stop()
+    assert "settle" not in made[0].names()
+    made[0].spend_gate.set()
+    await _spent()
+    assert made[0].names() == ["begin_create", "bind", "confirm", "settle"]
+
+
+async def test_a_cancelled_spend_wait_keeps_the_hold_pending_once(fake_sdk: FakeCloud) -> None:
+    """Keep the hold pending when a loop shutdown cancels the spend wait, and keep the cancel.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.start()
+    made[0].spend_gate = asyncio.Event()
+    await env.stop()
+    (task,) = sail._SPEND_TASKS
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.wait({task})
+    assert task.cancelled()
+    assert not sail._SPEND_TASKS
     assert made[0].names() == ["begin_create", "bind", "confirm", "pending"]
 
 
@@ -1516,8 +1561,8 @@ async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud)
     assert [box.terminated for box in fake_sdk.boxes] == [True, True]
 
 
-async def test_the_job_sweep_waits_for_all_spends_at_the_same_time(fake_sdk: FakeCloud) -> None:
-    """Stop the job's boxes together, so their minutes-long spend waits overlap.
+async def test_the_job_sweep_spend_waits_run_at_the_same_time(fake_sdk: FakeCloud) -> None:
+    """Stop the job's boxes together, and let their minutes-long spend waits overlap.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1528,12 +1573,13 @@ async def test_the_job_sweep_waits_for_all_spends_at_the_same_time(fake_sdk: Fak
         await env.start()
         made[0].spending = spending
     assert await SailEnvironment.stop_job_sandboxes("job-2") == 3
+    await _spent()
     assert spending[1] == 3
     assert all(made[0].names()[-1] == "settle" for _, made in envs)
 
 
 async def test_a_failed_start_returns_before_the_spend_wait_ends(fake_sdk: FakeCloud) -> None:
-    """Raise the start error once the box is gone, and settle the box in the next stop.
+    """Raise the start error once the box is gone, and settle the box after the spend arrives.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1559,27 +1605,27 @@ async def test_a_failed_start_returns_before_the_spend_wait_ends(fake_sdk: FakeC
     gate = asyncio.Event()
     original = FakeUsage.final_spend
 
-    async def waiting(self: FakeUsage, budget: float | None = None) -> dict[str, Any]:
+    async def waiting(self: FakeUsage) -> dict[str, Any]:
         """Wait for the gate, then return the fake spend.
 
         Args:
             self: The fake reservation.
-            budget: The seconds that the teardown can still wait.
 
         Returns:
             The fake spend line.
         """
         await gate.wait()
-        return await original(self, budget)
+        return await original(self)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(FakeUsage, "final_spend", waiting)
         with pytest.raises(SandboxInfraError, match="confirm failed"):
             await env.start()
         assert [box.terminated for box in fake_sdk.boxes] == [True]
+        await env.stop()
         assert "settle" not in made[0].names()
         gate.set()
-        await env.stop()
+        await _spent()
     assert made[0].calls[-1] == ("settle", [True])
 
 
@@ -1681,20 +1727,6 @@ async def test_a_reserve_that_outlives_the_teardown_releases_its_hold_later(
     assert fake_sdk.create_calls == 0
 
 
-async def test_the_spend_wait_gets_the_rest_of_the_teardown_budget(fake_sdk: FakeCloud) -> None:
-    """Give the spend wait only the time that is left of the teardown budget.
-
-    Args:
-        fake_sdk: The fake Sail cloud.
-    """
-    env, made = _protected()
-    await env.start()
-    await env.stop()
-    (budget,) = made[0].budgets
-    assert budget is not None
-    assert sail.TEARDOWN_SECONDS - 5 < budget <= sail.TEARDOWN_SECONDS
-
-
 async def test_a_create_that_fails_in_its_grace_is_looked_up(fake_sdk: FakeCloud) -> None:
     """Find, terminate and settle the box of a cancelled create that then fails.
 
@@ -1711,6 +1743,7 @@ async def test_a_create_that_fails_in_its_grace_is_looked_up(fake_sdk: FakeCloud
     with pytest.raises(asyncio.CancelledError):
         await starting
     await env.stop()
+    await _spent()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
     assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [True])]
 
@@ -1846,10 +1879,11 @@ async def test_a_failed_pending_call_does_not_hide_a_cancel(
     env, made = _protected()
     await env.start()
     made[0].settle_error = asyncio.CancelledError()
-    with pytest.raises(asyncio.CancelledError):
-        await env.stop()
-    # The failed mark clears the flag, so the cancel path tries it once more.
-    assert made[0].names().count("pending") == 2
+    await env.stop()
+    (task,) = sail._SPEND_TASKS
+    await asyncio.wait({task})
+    assert task.cancelled()
+    assert made[0].names().count("pending") == 1
 
 
 @pytest.mark.parametrize("path", ["settle", "terminate"])
@@ -1895,8 +1929,11 @@ async def test_a_ledger_error_marks_the_hold_pending_once(
     await env.start()
     if path == "terminate":
         fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
-    with pytest.raises(UsagePendingError):
+        with pytest.raises(UsagePendingError):
+            await env.stop()
+    else:
         await env.stop()
+        await _spent()
     assert made[0].names().count("pending") == (2 if path == "terminate" else 1)
 
 
@@ -2045,6 +2082,7 @@ async def test_only_a_terminated_box_settles_when_its_terminate_fails(
         await env.start()
     if settles:
         await env.stop()
+        await _spent()
         assert made[0].calls[-2:] == [("bind", "sb-1"), ("settle", [False])]
     else:
         with pytest.raises(UsagePendingError, match="did not terminate"):
@@ -2055,6 +2093,7 @@ async def test_only_a_terminated_box_settles_when_its_terminate_fails(
         assert {"job-1": {env}} == sail._JOB_BOXES
         fake_sdk.terminate_fails.clear()
         await env.stop()
+        await _spent()
         assert [box.terminated for box in fake_sdk.boxes] == [True]
         assert made[0].names().count("pending") == 1
         assert made[0].names()[-1] == "settle"
@@ -2165,6 +2204,7 @@ async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(
     if retry_terminates:
         # The job sweep still finds the box after the cancel.
         assert await SailEnvironment.stop_job_sandboxes("job-1") == 1
+        await _spent()
         assert sail._JOB_BOXES == {}
         assert [box.terminated for box in fake_sdk.boxes] == [True]
         assert made[0].names()[-1] == "settle"
@@ -2263,6 +2303,7 @@ async def test_a_stop_after_a_cancelled_teardown_terminates_and_settles_once(fak
     # stops must then only wait for it, never settle again.
     await env.stop()
     await env.stop()
+    await _spent()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
     assert made[0].names().count("pending") == 1
     assert made[0].names().count("settle") == 1
@@ -2315,6 +2356,7 @@ async def test_a_lookup_never_terminates_a_box_with_another_name(
     with pytest.raises(SandboxInfraError):
         await env.start()
     await env.stop()
+    await _spent()
     terminated = {box.id: box.terminated for box in fake_sdk.boxes}
     assert terminated == {"sb-1": True, "sb-other": False}
     assert "settle" in made[0].names()

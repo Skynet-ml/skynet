@@ -605,32 +605,33 @@ def test_a_spend_that_never_arrives_stays_pending(database: Engine) -> None:
     assert spend.now <= sail_usage.SPEND_DEADLINE_SECONDS
 
 
-def test_a_short_budget_ends_the_spend_wait_with_its_last_read(database: Engine) -> None:
-    """Stop the spend wait so the last read ends inside the caller's budget.
+def test_a_spend_that_arrives_after_minutes_settles(database: Engine) -> None:
+    """Settle a box whose line keeps changing for four minutes, as Sail's batches allow.
 
     Args:
         database: Engine of the funded ledger.
     """
-    spend = FakeSpend(SPEND)
+    # Reads come at 60 s and then every 15 s, so 13 changing lines last until 240 s.
+    lines = [{**SPEND, "cost_usd_nanos": 12_000_000 + step} for step in range(12)]
+    spend = FakeSpend(*lines, SPEND)
     reservation = _reservation(database, spend)
     _created(reservation)
-    with pytest.raises(UsagePendingError, match="final spend"):
-        asyncio.run(reservation.final_spend(budget=100.0))
-    # 100 s less the 30 s read timeout leaves room for the first read only.
-    assert len(spend.reads) == 1
-    assert spend.now + sail_usage._SPEND_TIMEOUT_SECONDS <= 100.0
+    reservation.settle()
+    assert _state(database) == "settled"
+    assert 240.0 <= spend.now <= sail_usage.SPEND_DEADLINE_SECONDS
 
 
-def test_a_read_slower_than_the_time_left_ends_inside_the_budget(
+def test_a_read_slower_than_the_time_left_ends_inside_the_deadline(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stop waiting for a spend read at the end of the budget, and keep the hold.
+    """Stop waiting for a spend read at the end of the deadline, and keep the hold.
 
     Args:
         database: Engine of the funded ledger.
-        monkeypatch: Shortens the read timeout.
+        monkeypatch: Shortens the read timeout and the deadline.
     """
     monkeypatch.setattr(sail_usage, "_SPEND_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(sail_usage, "SPEND_DEADLINE_SECONDS", sail_usage.SPEND_DELAY_SECONDS + 0.05)
     gate = threading.Event()
     spend = FakeSpend(SPEND)
     reservation = _reservation(database, spend)
@@ -660,7 +661,7 @@ def test_a_read_slower_than_the_time_left_ends_inside_the_budget(
         started = time.monotonic()
         try:
             with pytest.raises(UsagePendingError, match="final spend"):
-                await reservation.final_spend(budget=sail_usage.SPEND_DELAY_SECONDS + 0.1)
+                await reservation.final_spend()
             return time.monotonic() - started
         finally:
             gate.set()
@@ -674,7 +675,8 @@ def test_a_line_that_never_settles_stays_pending_with_its_last_read(database: En
     Args:
         database: Engine of the funded ledger.
     """
-    lines = [{**SPEND, "cost_usd_nanos": 12_000_000 + step} for step in range(20)]
+    # More lines than reads before the deadline, so the line never settles.
+    lines = [{**SPEND, "cost_usd_nanos": 12_000_000 + step} for step in range(60)]
     spend = FakeSpend(*lines)
     reservation = _reservation(database, spend)
     _created(reservation)

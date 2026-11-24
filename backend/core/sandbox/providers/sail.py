@@ -14,8 +14,9 @@ from ``harbor/environments/sail.py``. Changes:
   exists. After a failed create the provider looks up the box by its name,
   which gets a random suffix: a found box is terminated and settled, and the
   hold is released only when Sail clearly refused the create and the lookup
-  finds no box. A failed start returns its error once the box is gone; the
-  spend wait goes on in the stop task. Sail has no lifetime extension, so
+  finds no box. A failed start returns its error once the box is gone.
+  Sail shows the spend minutes after the terminate, so the spend wait and
+  the settle go on in a background task after ``stop()`` returns. Sail has no lifetime extension, so
   the box never extends its funding.
 - The provider adds no retry of its own (SKY-406 D3, D10). An SDK error
   maps to ``SandboxInfraError``, because the SDK error classes are not known.
@@ -30,7 +31,7 @@ from ``harbor/environments/sail.py``. Changes:
 - The spec sizes map to ``Sailbox.size_for``. The spec image comes from a
   registry; ``DEFAULT_IMAGE`` is used when the spec names none.
 - ``stop_job_sandboxes`` stops the Sailboxes that this process started for
-  the job at the same time, so their spend waits overlap. Sail has no list
+  the job at the same time. Sail has no list
   call in the Harbor code, so boxes of other processes end only at their
   lifetime limit.
 - Harbor's Dockerfile and compose builds, the DinD strategy, directory
@@ -82,11 +83,6 @@ CREATE_GRACE = 30.0
 # The SDK timeout should end a command first; this margin only catches a
 # hung SDK call.
 EXEC_GRACE = 30.0
-# A session close gives one stop 240 s (``_ASYNC_CLOSE_BUDGET_SECONDS`` in the
-# blackbox sandbox runtime). The teardown keeps 15 s of it for the ledger
-# calls (bind, release, pending and settle). Those calls have no own bound:
-# they are short database writes, and the 15 s margin assumes they stay short.
-TEARDOWN_SECONDS = 225.0
 OUTPUT_BUFFER_BYTES = 64 * 1024 * 1024
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
@@ -120,6 +116,9 @@ _GONE_STATUSES = frozenset({"terminated"})
 # Strong references to the creates that outlive their start, and to the
 # terminate calls of their late boxes, so the event loop does not drop them.
 _LATE_TASKS: set[asyncio.Future[Any]] = set()
+# Strong references to the spend waits that outlive their stop(), so the
+# event loop does not drop them.
+_SPEND_TASKS: set[asyncio.Future[None]] = set()
 
 
 @contextlib.contextmanager
@@ -245,6 +244,40 @@ def _on_late_release(release: asyncio.Future[Any]) -> None:
     _LATE_TASKS.discard(release)
     if not release.cancelled() and release.exception() is not None:
         logger.warning("Sail could not release a late hold: %s", type(release.exception()).__name__)
+
+
+async def _settle_spend(usage: Any) -> None:
+    """Wait for the spend of a terminated box, then settle its hold once.
+
+    The teardown hands the hold to this task and keeps no reference, so no
+    retry path can settle it again. A spend that does not arrive, a failed
+    read or a cancel keeps the hold pending.
+
+    Args:
+        usage: The usage reservation of the terminated box.
+    """
+    try:
+        spend = await usage.final_spend()
+    except BaseException:
+        # A failed pending call must not replace the first error or a cancel.
+        try:
+            await asyncio.to_thread(usage.pending)
+        except Exception as pending_error:
+            logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
+        raise
+    # settle_spend marks the hold pending itself when it fails.
+    await asyncio.to_thread(usage.settle_spend, spend)
+
+
+def _on_spend_done(task: asyncio.Future[None]) -> None:
+    """Forget a finished spend wait and log its failure.
+
+    Args:
+        task: The finished spend task.
+    """
+    _SPEND_TASKS.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Sail sandbox usage stays pending: %s", type(task.exception()).__name__)
 
 
 def _egress_policy(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> Any:
@@ -396,8 +429,8 @@ class SailEnvironment(SandboxEnvironment):
         except BaseException as error:
             # Wait for the teardown but not through stop(): a settle failure
             # would hide the start error. It stays for a later stop() call.
-            # The spend wait takes minutes, so the error returns once the box
-            # is gone and the settle goes on in the stop task.
+            # The error returns once the box is gone; the spend wait goes on
+            # in a background task.
             if self._stop_task is None:
                 self._stop_task = asyncio.ensure_future(self._teardown())
             gone = asyncio.ensure_future(self._box_gone.wait())
@@ -699,10 +732,14 @@ class SailEnvironment(SandboxEnvironment):
             )
 
     async def stop(self) -> None:
-        """Terminate the Sailbox once and settle its reservation. Safe to call again and before start.
+        """Terminate the Sailbox once and hand its reservation to the spend task. Safe to call again and before start.
+
+        The call returns once the terminate is confirmed. It does not wait
+        for the spend: a background task settles the reservation later.
 
         Raises:
-            UsagePendingError: The settle failed, so the reservation stays pending.
+            UsagePendingError: The box did not terminate, or the ledger call
+                failed, so the reservation stays pending.
             BudgetError: The ledger refused the settlement.
         """
         if self._stop_task is None:
@@ -716,11 +753,9 @@ class SailEnvironment(SandboxEnvironment):
     async def _teardown(self) -> None:
         """End a running start, terminate the Sailbox, then settle its reservation.
 
-        The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``, and
-        the whole teardown stays inside ``TEARDOWN_SECONDS``.
+        The start and reserve waits share ``CREATE_GRACE + STOP_TIMEOUT``.
         """
         loop = asyncio.get_running_loop()
-        end = loop.time() + TEARDOWN_SECONDS
         waits_end = loop.time() + CREATE_GRACE + STOP_TIMEOUT
         starting = self._starting
         if starting is not None and not starting.done():
@@ -795,21 +830,20 @@ class SailEnvironment(SandboxEnvironment):
                     if not boxes:
                         del _JOB_BOXES[job_id]
         try:
-            await self._settle(sailbox, end)
+            await self._settle(sailbox)
         finally:
             self._box_gone.set()
 
-    async def _settle(self, sailbox: Any, end: float) -> None:
-        """Settle, release or keep pending the reservation of a protected box.
+    async def _settle(self, sailbox: Any) -> None:
+        """Release, keep pending or start the settle of the reservation of a protected box.
 
         A box that did not terminate can still run and spend, so its hold
-        stays pending. The spend waits run on the event loop; only the ledger
-        calls use threads. A failure keeps the reservation pending, and
-        ``stop()`` raises it.
+        stays pending. A terminated box goes to ``_settle_spend``. Only the
+        ledger calls use threads. A failure keeps the reservation pending,
+        and ``stop()`` raises it.
 
         Args:
             sailbox: The SDK handle of the box, or ``None`` when no box came back.
-            end: The event loop time when the teardown must end.
         """
         usage, self._usage = self._usage, None
         if usage is None:
@@ -833,21 +867,11 @@ class SailEnvironment(SandboxEnvironment):
                 await self._mark_pending(usage)
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
             self._box_gone.set()
-            # The spend wait needs up to SPEND_DEADLINE_SECONDS. After a slow
-            # start or a slow failed create, less time can be left, so these
-            # paths end pending by design and the ledger sweep settles them.
-            try:
-                spend = await usage.final_spend(budget=end - asyncio.get_running_loop().time())
-            except BaseException:
-                # A failed pending call must not replace a cancel in flight.
-                try:
-                    await self._mark_pending(usage)
-                except Exception as pending_error:
-                    logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
-                raise
-            # settle_spend marks the hold pending itself when it fails.
-            self._pending_marked = True
-            await asyncio.to_thread(usage.settle_spend, spend)
+            # Sail shows the spend minutes after the terminate, longer than a
+            # stop may take, so a task that owns the hold waits for it.
+            task = asyncio.ensure_future(_settle_spend(usage))
+            _SPEND_TASKS.add(task)
+            task.add_done_callback(_on_spend_done)
         except Exception as error:
             logger.warning("Sail sandbox %s usage stays pending: %s", self._name, type(error).__name__)
             if isinstance(error, UsagePendingError | BudgetError):
@@ -941,8 +965,8 @@ class SailEnvironment(SandboxEnvironment):
     async def stop_job_sandboxes(cls, job_id: str) -> int:
         """Stop every Sailbox that this process started for the job, all at the same time.
 
-        Each stop terminates its box and then waits minutes for Sail's spend,
-        so the stops run together and the waits overlap.
+        Each stop can wait up to ``STOP_TIMEOUT`` for its terminate, so the
+        stops run together and the waits overlap.
 
         Args:
             job_id: The job tag value.

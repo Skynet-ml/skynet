@@ -6,8 +6,9 @@ whole lifetime, so it is a ceiling. After the box stops, the settle reads
 the box's spend from ``GET /v1/sailboxes/spend``. Sail reports usage in
 batches of about one minute, so the settle waits, then polls until the
 box's line stays the same for at least a minute. The waits are async, so a
-settle holds no worker thread. A box whose spend does not arrive stays
-pending. The settled amount never passes the reservation.
+settle holds no worker thread. The provider runs the wait in a background
+task after its stop, so no stop waits for it. A box whose spend does not
+arrive stays pending. The settled amount never passes the reservation.
 """
 
 from __future__ import annotations
@@ -81,15 +82,14 @@ _DEFAULT_SIZE = "l"
 # Skynet's own bound on one funded box, not a Sail limit.
 _LIFETIME_CEILING_MS = 24 * 3_600_000
 # Sail reports usage in batches of about one minute and shows spend "within
-# a few minutes", so the settle waits before the first read and gives up
-# after the deadline, which keeps the hold pending with the last line read.
-# The deadline counts from the first wait. The real bound is the provider's
-# ``TEARDOWN_SECONDS`` (``core/sandbox/providers/sail.py``): the teardown
-# passes the time it has left as the ``final_spend`` budget, so the spend
-# wait ends inside the 240 s that a session close gives one stop.
+# a few minutes" (https://docs.sailresearch.com/sailboxes-billing.md), so the
+# settle waits before the first read and gives up after the deadline, which
+# keeps the hold pending with the last line read. The deadline counts from
+# the first wait. Ten minutes covers several batches after "a few minutes";
+# the wait runs in a background task, so no stop waits for it.
 SPEND_DELAY_SECONDS = 60.0
 SPEND_POLL_SECONDS = 15.0
-SPEND_DEADLINE_SECONDS = 150.0
+SPEND_DEADLINE_SECONDS = 600.0
 # Two equal reads close together can both come before the last usage
 # batch, so a line counts as final only after it stays the same this long.
 SPEND_AGREE_SECONDS = 60.0
@@ -548,15 +548,11 @@ class SailUsageReservation:
             raise UsagePendingError("The Sail create returned no box identity to settle.")
         return self.sailbox_id, self.create_sent_at - _WINDOW_MARGIN
 
-    async def final_spend(self, budget: float | None = None) -> dict[str, Any]:
+    async def final_spend(self) -> dict[str, Any]:
         """Poll the spend report until the box's line stays the same for a minute.
 
         Only the short spend reads run in threads; the waits do not hold one.
         A 429 or 5xx answer, or a transport error, is read again later.
-
-        Args:
-            budget: The seconds that the caller can still wait, including the
-                last read; ``None`` waits up to ``SPEND_DEADLINE_SECONDS``.
 
         Returns:
             The box's final spend line.
@@ -568,11 +564,7 @@ class SailUsageReservation:
             httpx.HTTPStatusError: When Sail refuses the read for good.
         """
         sailbox_id, since = self._identity()
-        wait_for = SPEND_DEADLINE_SECONDS
-        if budget is not None:
-            # The last read starts before the deadline and can take its timeout.
-            wait_for = min(wait_for, budget - _SPEND_TIMEOUT_SECONDS)
-        give_up = self._clock() + wait_for
+        give_up = self._clock() + SPEND_DEADLINE_SECONDS
         reads_end = give_up + _SPEND_TIMEOUT_SECONDS
         wait = SPEND_DELAY_SECONDS
         previous: dict[str, Any] | None = None
@@ -584,7 +576,7 @@ class SailUsageReservation:
             wait = SPEND_POLL_SECONDS
             try:
                 # The httpx timeout bounds each phase, so a slow trickle could
-                # pass it; this bounds the whole read inside the budget.
+                # pass it; this bounds the whole read inside the deadline.
                 report = await asyncio.wait_for(
                     asyncio.to_thread(self._fetch, sailbox_id, since),
                     max(0.0, min(_SPEND_TIMEOUT_SECONDS, reads_end - self._clock())),
