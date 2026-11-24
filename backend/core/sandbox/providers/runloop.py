@@ -475,6 +475,7 @@ class RunloopEnvironment(SandboxEnvironment):
 
         Raises:
             StartTimeoutError: The devbox did not run within the start timeout.
+            UsagePendingError: A protected devbox does not have its funded size.
         """
         if self._budget is not None and self._usage is None:
             await self._reserve()
@@ -499,13 +500,20 @@ class RunloopEnvironment(SandboxEnvironment):
                     if _refused_create(error):
                         self._create_refused = error
                     raise
+                if self._usage is not None:
+                    # The SDK keeps only the id of the created devbox, so read
+                    # its view to check the size that Runloop gave it.
+                    with _mapped("read the devbox"):
+                        view = await self._devbox.get_info()
         except TimeoutError:
             if not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
         if self._usage is not None:
             # The teardown waits for this call, so it never settles an unbound hold.
-            self._binding = asyncio.ensure_future(asyncio.to_thread(self._usage.bind, self._devbox.id))
+            self._binding = asyncio.ensure_future(
+                asyncio.to_thread(self._usage.confirm, self._devbox.id, view.launch_parameters)
+            )
             await asyncio.shield(self._binding)
 
     async def _network_policy_id(self, client: Any) -> str | None:

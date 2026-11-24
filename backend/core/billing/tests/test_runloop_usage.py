@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -121,6 +122,8 @@ def test_quote_covers_the_whole_lifetime_at_the_published_rates() -> None:
         {"disk_gb": 1},
         {"disk_gb": 66},
         {"disk_gb": True},
+        {"memory_gb": 5},
+        {"disk_gb": 17},
     ],
 )
 def test_unbounded_devboxes_are_not_quoted(change: dict[str, Any]) -> None:
@@ -146,12 +149,73 @@ def test_a_reservation_without_a_lifetime_is_not_priced(database: Engine) -> Non
     assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
 
 
+def _view(**launch: Any) -> SimpleNamespace:
+    """Return a ``DevboxView`` of the funded size, with some launch fields replaced.
+
+    Args:
+        **launch: Launch parameters to replace.
+
+    Returns:
+        The view of devbox ``dbx-1``.
+    """
+    funded = {"custom_cpu_cores": 2.0, "custom_gb_memory": 4, "custom_disk_size": 16, "keep_alive_time_seconds": 3600}
+    return SimpleNamespace(id="dbx-1", launch_parameters=SimpleNamespace(**{**funded, **launch}))
+
+
+def test_a_matching_devbox_is_confirmed(database: Engine) -> None:
+    """Bind a devbox with the funded size and keep-alive, and record its sizes."""
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+    USAGE.confirm(reservation, _view())
+    assert reservation.devbox_id == "dbx-1"
+    assert reservation.actual_sizes == {"vcpus": 2, "memory_gb": 4, "disk_gb": 16, "keep_alive_seconds": 3600}
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [{"custom_cpu_cores": 4}, {"custom_gb_memory": 8}, {"keep_alive_time_seconds": 7200}, {"custom_cpu_cores": None}],
+)
+def test_a_devbox_of_another_size_is_not_confirmed(database: Engine, launch: dict[str, Any]) -> None:
+    """Bind the devbox but refuse a size or keep-alive that differs from the funded one.
+
+    Args:
+        database: The funded ledger.
+        launch: The launch fields that differ.
+    """
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+    with pytest.raises(UsagePendingError):
+        USAGE.confirm(reservation, _view(**launch))
+    assert reservation.devbox_id == "dbx-1"
+
+
+def test_a_larger_devbox_settles_measured_time_at_its_size(database: Engine) -> None:
+    """Price measured time of a larger devbox at its larger size, clamped to the reservation."""
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
+    with pytest.raises(UsagePendingError):
+        USAGE.confirm(reservation, _view(custom_cpu_cores=4, custom_gb_memory=8))
+    reservation.record_stop(600_000)
+    reservation.settle()
+    operation = runtime.service.get_operation(reservation.operation.id, "alice")
+    larger = 4 * Decimal("0.108") + 8 * Decimal("0.0252") + 16 * Decimal("0.00034236")
+    assert operation.actual_cents == 600 * larger / 3600 * 100
+    assert operation.state == "settled"
+    reservation_two = USAGE.reserve(runtime, CREATE, operation_key="box-two")
+    reservation_two.bind("dbx-2")
+    reservation_two.actual_sizes = {"vcpus": 16, "memory_gb": 64, "disk_gb": 64, "keep_alive_seconds": 3600}
+    reservation_two.record_stop(3_600_000)
+    reservation_two.settle()
+    clamped = runtime.service.get_operation(reservation_two.operation.id, "alice")
+    assert clamped.actual_cents == clamped.max_cents
+
+
 def test_reported_usage_settles_at_its_counters(database: Engine) -> None:
     """Charge the vCPU, memory and disk seconds that Runloop reports, and unpin the hold."""
     runtime = _runtime(database)
     reservation = USAGE.reserve(runtime, CREATE, operation_key="box-one")
     assert reservation.operation.id in runtime._pinned
-    USAGE.confirm(reservation, type("Devbox", (), {"id": "dbx-1"})())
+    USAGE.confirm(reservation, _view())
     reservation.record_stop(700_000)
     reservation.record_usage(REPORT)
     USAGE.settle(reservation)

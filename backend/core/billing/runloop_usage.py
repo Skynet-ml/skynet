@@ -6,7 +6,9 @@ seconds that Runloop's ``GET /v1/devboxes/{id}/usage`` reports. When that
 report is missing or not final, it settles from the measured time between the
 create call and the confirmed shutdown, which bounds the billed time from
 above. With neither, the hold stays pending for reconciliation instead of
-charging the whole keep-alive. Every settlement stays inside the reservation.
+charging the whole keep-alive. The create is checked against the funded size
+and keep-alive; measured time of a box of another size is priced at the
+larger of the two sizes. Every settlement stays inside the reservation.
 """
 
 from __future__ import annotations
@@ -72,7 +74,13 @@ def _size(request: Mapping[str, Any]) -> tuple[int, int, int]:
     vcpus, memory, disk = request.get("vcpus"), request.get("memory_gb"), request.get("disk_gb")
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (vcpus, memory, disk)):
         raise UnpricedOperationError("Runloop requires an explicit vCPU, memory and disk size.")
-    if vcpus not in {1, *range(2, 17, 2)} or not 2 * vcpus <= memory <= min(64, 8 * vcpus) or not 2 <= disk <= 64:
+    if (
+        vcpus not in {1, *range(2, 17, 2)}
+        or not 2 * vcpus <= memory <= min(64, 8 * vcpus)
+        or (memory != 1 and memory % 2)
+        or not 2 <= disk <= 64
+        or disk % 2
+    ):
         raise UnpricedOperationError("Runloop requires a supported custom devbox size.")
     return vcpus, memory, disk
 
@@ -89,6 +97,33 @@ def _hourly_usd(vcpus: int, memory_gb: int, disk_gb: int) -> Decimal:
         The hourly price in USD.
     """
     return vcpus * _CPU_HOUR_USD + memory_gb * _MEMORY_GB_HOUR_USD + disk_gb * _DISK_GB_HOUR_USD
+
+
+def _launch_sizes(launch: Any) -> dict[str, int] | None:
+    """Read the size and keep-alive that Runloop gave a devbox.
+
+    Args:
+        launch: The ``launch_parameters`` of the SDK ``DevboxView``, or a
+            mapping of its fields.
+
+    Returns:
+        The vCPUs, memory GiB, disk GiB and keep-alive seconds, or ``None``
+        when a field is missing or not a whole number.
+    """
+    names = ("custom_cpu_cores", "custom_gb_memory", "custom_disk_size", "keep_alive_time_seconds")
+    if isinstance(launch, Mapping):
+        values = [launch.get(name) for name in names]
+    else:
+        values = [getattr(launch, name, None) for name in names]
+    if values[2] is None:
+        # Runloop gives a custom size with no disk its default disk.
+        values[2] = DEFAULT_DISK_GB
+    if any(
+        isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or not float(value).is_integer()
+        for value in values
+    ):
+        return None
+    return dict(zip(("vcpus", "memory_gb", "disk_gb", "keep_alive_seconds"), map(int, values), strict=True))
 
 
 def quote_runloop_devbox(request: Mapping[str, Any]) -> OperationQuote:
@@ -245,6 +280,7 @@ class RunloopUsageReservation:
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile its exact devbox.")
         self.devbox_id: str | None = None
+        self.actual_sizes: dict[str, int] | None = None
         self.usage: dict[str, Any] | None = None
         self.measured_ms: int | None = None
 
@@ -261,6 +297,31 @@ class RunloopUsageReservation:
             raise UsagePendingError("Runloop returned a second devbox for one admitted operation.")
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, devbox_id)
         self.devbox_id = devbox_id
+
+    def confirm(self, devbox_id: str, launch: Any) -> None:
+        """Bind the created devbox and check that it has the funded size and keep-alive.
+
+        The settle of a box of another size prices measured time at the
+        larger sizes, so the caller stops the box and settles it as usual.
+
+        Args:
+            devbox_id: The Runloop devbox id.
+            launch: The ``launch_parameters`` of the created devbox.
+
+        Raises:
+            UsagePendingError: When the size or the keep-alive differs from
+                the funded one, or cannot be read.
+        """
+        self.bind(devbox_id)
+        sizes = _launch_sizes(launch)
+        if sizes is None:
+            raise UsagePendingError("Runloop did not report the size of the admitted devbox.")
+        self.actual_sizes = sizes
+        funded = (self.vcpus, self.memory_gb, self.disk_gb)
+        if (sizes["vcpus"], sizes["memory_gb"], sizes["disk_gb"]) != funded or (
+            sizes["keep_alive_seconds"] * 1000 > self.lifetime_ms
+        ):
+            raise UsagePendingError("Runloop did not confirm the admitted size and keep-alive of the devbox.")
 
     def record_usage(self, usage: Any) -> None:
         """Keep Runloop's usage report of the stopped devbox.
@@ -290,6 +351,9 @@ class RunloopUsageReservation:
 
         Raises:
             ValueError: When the lifetime does not grow.
+            UnpricedOperationError: When the new lifetime has no price.
+            UsagePendingError: When covered work did not settle before ``deadline``.
+            BudgetReached: When the budget cannot pay for the extension.
         """
         if lifetime_ms <= self.lifetime_ms:
             raise ValueError("An extension must lengthen the funded lifetime.")
@@ -307,8 +371,10 @@ class RunloopUsageReservation:
     def release(self, reason: str) -> None:
         """Release the hold of a devbox that Runloop never created.
 
-        Use it only when the create call was never sent, or Runloop refused it
-        with a 4xx answer. Any other failure keeps the hold pending.
+        The provider calls it only when the create call was never sent, or
+        when Runloop answered the create POST with a status in its
+        ``_REFUSED_STATUSES`` and a clean tag search then found no devbox.
+        Any other failure keeps the hold pending.
 
         Args:
             reason: Why no devbox exists, for the evidence.
@@ -345,7 +411,13 @@ class RunloopUsageReservation:
                 pass
         if self.measured_ms is not None:
             cpu_rate, memory_rate, disk_rate = _rates(self.quote.price_snapshot)
-            hourly = self.vcpus * cpu_rate + self.memory_gb * memory_rate + self.disk_gb * disk_rate
+            actual = self.actual_sizes or {}
+            # A box of another size than funded is priced at the larger size;
+            # the settle clamps the charge to the reservation.
+            vcpus = max(self.vcpus, actual.get("vcpus", 0))
+            memory = max(self.memory_gb, actual.get("memory_gb", 0))
+            disk = max(self.disk_gb, actual.get("disk_gb", 0))
+            hourly = vcpus * cpu_rate + memory * memory_rate + disk * disk_rate
             seconds = math.ceil(self.measured_ms / 1000)
             return Decimal(seconds) * hourly / _SECONDS_PER_HOUR, "measured"
         # Charging the whole keep-alive here would bill a box that ran for a
@@ -405,6 +477,7 @@ class RunloopUsageReservation:
                     "devbox_id": self.devbox_id,
                     "usage": self.usage,
                     "measured_ms": self.measured_ms,
+                    "actual_sizes": self.actual_sizes,
                     "provider_usd": str(usd),
                 },
             )
@@ -452,13 +525,13 @@ class RunloopUsage:
         return RunloopUsageReservation(runtime, request, operation_key=operation_key, reserved=reserved)
 
     def confirm(self, reservation: RunloopUsageReservation, session: Any) -> None:
-        """Bind the created devbox to its reservation.
+        """Bind the created devbox and check its size and keep-alive.
 
         Args:
             reservation: The devbox's claimed reservation.
-            session: The SDK devbox handle.
+            session: The SDK ``DevboxView`` of the created devbox.
         """
-        reservation.bind(session.id)
+        reservation.confirm(session.id, session.launch_parameters)
 
     def extend(self, reservation: RunloopUsageReservation, lifetime_ms: int, *, deadline: float) -> None:
         """Fund a longer keep-alive before Runloop grants it.

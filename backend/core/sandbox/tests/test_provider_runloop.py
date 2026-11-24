@@ -138,6 +138,7 @@ class FakeCloud:
     exec_hangs: bool = False
     policy_conflict: SimpleNamespace | None = None
     usage_error: BaseException | None = None
+    size_override: dict[str, Any] = field(default_factory=dict)
     ids: Any = field(default_factory=lambda: itertools.count(1))
 
     def run(self, box: BoxState, command: str) -> tuple[int, str, str]:
@@ -289,6 +290,15 @@ class FakeDevbox:
         CLOUD.calls.append(f"shutdown:{self.id}")
         self._box.status = "shutdown"
 
+    async def get_info(self) -> SimpleNamespace:
+        """Return the box view, like ``DevboxView``.
+
+        Returns:
+            The id and the launch parameters that the cloud gave the box.
+        """
+        CLOUD.calls.append(f"info:{self.id}")
+        return SimpleNamespace(id=self.id, launch_parameters=SimpleNamespace(**self._box.launch))
+
 
 class FakeSDK:
     """Stand in for ``AsyncRunloopSDK``."""
@@ -329,7 +339,7 @@ class FakeSDK:
             name=params["name"],
             metadata=dict(params["metadata"]),
             env=dict(params["environment_variables"]),
-            launch=dict(params["launch_parameters"]),
+            launch={**params["launch_parameters"], **CLOUD.size_override},
         )
         CLOUD.boxes[box.id] = box
         if CLOUD.create_hangs:
@@ -1030,6 +1040,16 @@ class FakeReservation:
         self.events.append(f"bind:{devbox_id}")
         self.devbox_id = devbox_id
 
+    def confirm(self, devbox_id: str, launch: Any) -> None:
+        """Bind the devbox and keep its launch parameters.
+
+        Args:
+            devbox_id: The devbox id.
+            launch: The launch parameters of the created devbox.
+        """
+        self.bind(devbox_id)
+        self.launch = launch
+
     def record_stop(self, measured_ms: int) -> None:
         """Record the measured time.
 
@@ -1349,6 +1369,48 @@ async def test_a_failed_bind_still_shuts_down_and_settles(fake_sdk: FakeCloud) -
     assert f"shutdown:{box.id}" in fake_sdk.calls
     assert reservation.events == ["bind-failed", f"bind:{box.id}", "stop", "usage", "settle"]
     await env.stop()
+
+
+async def test_a_protected_devbox_reads_its_size_after_the_create(fake_sdk: FakeCloud) -> None:
+    """Read the created devbox's view and pass its launch parameters to the reservation."""
+    env = _protected()
+    await env.start()
+    (box,) = fake_sdk.boxes.values()
+    (reservation,) = FakeReservation.made
+    assert fake_sdk.calls[fake_sdk.calls.index("create") + 1] == f"info:{box.id}"
+    assert reservation.launch.custom_cpu_cores == 1
+    await env.stop()
+
+
+async def test_a_larger_devbox_is_stopped_and_settled(fake_sdk: FakeCloud) -> None:
+    """Stop and settle a devbox that the reservation refuses for its size, and fail the start."""
+
+    class SizeCheck(FakeReservation):
+        """Refuse a devbox larger than funded."""
+
+        def confirm(self, devbox_id: str, launch: Any) -> None:
+            """Bind, then refuse a larger box.
+
+            Args:
+                devbox_id: The devbox id.
+                launch: The launch parameters of the created devbox.
+
+            Raises:
+                UsagePendingError: When the box has more vCPUs than funded.
+            """
+            super().confirm(devbox_id, launch)
+            if launch.custom_cpu_cores != self.request["vcpus"]:
+                raise UsagePendingError("size")
+
+    fake_sdk.size_override = {"custom_cpu_cores": 4}
+    env = _protected()
+    env._usage_factory = SizeCheck
+    with pytest.raises(UsagePendingError, match="size"):
+        await env.start()
+    (box,) = fake_sdk.boxes.values()
+    (reservation,) = FakeReservation.made
+    assert box.status == "shutdown"
+    assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
 
 
 async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -> None:
