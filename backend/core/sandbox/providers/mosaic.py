@@ -142,6 +142,22 @@ def _classes(*classes: type[BaseException] | None) -> tuple[type[BaseException],
     return tuple(cls for cls in classes if cls is not None)
 
 
+def _is_gone(error: BaseException | None) -> bool:
+    """Tell whether an SDK error says that the sandbox no longer exists.
+
+    Args:
+        error: The error of a call, or ``None``.
+
+    Returns:
+        True for a not-found error, or an SDK error with status 404 or 410.
+    """
+    if error is None:
+        return False
+    if isinstance(error, _classes(NotFoundError)):
+        return True
+    return isinstance(error, _classes(MosaicError)) and getattr(error, "status", None) in (404, 410)
+
+
 def _error_group(error: BaseException) -> type[SandboxError]:
     """Choose the sandbox error group of one SDK error.
 
@@ -718,7 +734,8 @@ class MosaicEnvironment(SandboxEnvironment):
 
         The destroy and the settle share one ``STOP_TIMEOUT`` deadline. A
         cleanup that runs past it goes on in the background. Its settle error
-        is then only logged, and the hold stays pending.
+        is logged and stored, the hold stays pending, and the next ``stop()``
+        raises the error.
 
         Raises:
             UsagePendingError: The settle failed, so the hold stays pending.
@@ -737,11 +754,38 @@ class MosaicEnvironment(SandboxEnvironment):
         """End a running start, destroy the sandbox or the lost create's box, then settle the hold."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + STOP_TIMEOUT
-        if self._starting is not None and not self._starting.done():
+        starting = self._starting
+        if starting is not None and not starting.done():
             # A stop during the start: end the wait for the create first.
-            self._starting.cancel()
-            with contextlib.suppress(BaseException):
-                await self._starting
+            starting.cancel()
+            await asyncio.wait({starting}, timeout=max(0.0, deadline - loop.time()))
+            if not starting.done():
+                # A reservation or create thread cannot be cancelled and can
+                # outlive the stop limit. The rest of the teardown waits for
+                # it in the background, so its hold is still released.
+                late = asyncio.ensure_future(self._teardown_after_start(starting))
+                _BACKGROUND_CLEANUPS.add(late)
+                late.add_done_callback(functools.partial(_cleanup_done, "end the sandbox start"))
+                logger.warning("Mosaic did not end the sandbox start in time; it goes on in the background.")
+                return
+        await self._teardown_rest(deadline)
+
+    async def _teardown_after_start(self, starting: asyncio.Future[Any]) -> None:
+        """Wait for a slow start to end, then destroy and settle with a new deadline.
+
+        Args:
+            starting: The cancelled start task.
+        """
+        await asyncio.wait({starting})
+        await self._teardown_rest(asyncio.get_running_loop().time() + STOP_TIMEOUT)
+
+    async def _teardown_rest(self, deadline: float) -> None:
+        """Destroy the sandbox or the lost create's box, then settle the hold.
+
+        Args:
+            deadline: The loop time at which the stop stops waiting.
+        """
+        loop = asyncio.get_running_loop()
         if self._expiry is not None:
             self._expiry.cancel()
         box, box_id, call = self._box, self._box_id, self._create_call
@@ -799,10 +843,11 @@ class MosaicEnvironment(SandboxEnvironment):
                 and box_id is not None
                 and usage.sandbox_id == box_id
                 and not confirm.cancelled()
-                and isinstance(confirm.exception(), _classes(MosaicError))
+                and _is_gone(confirm.exception())
             ):
-                # Our own destroy made the confirm's info() read fail; a shape
-                # mismatch raises UsagePendingError instead and keeps the hold.
+                # Our own destroy made the confirm's info() read fail with a
+                # not-found error. Any other error, and a shape mismatch
+                # (UsagePendingError), keeps the whole hold.
                 usage.accept_sent_shape()
         if box_id is not None:
             await self._close_usage(usage, [(box_id, None, destroyed)])

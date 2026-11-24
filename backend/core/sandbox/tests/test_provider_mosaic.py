@@ -1294,12 +1294,18 @@ async def test_a_stop_during_a_hanging_confirm_destroys_the_box_first(
 
 @pytest.mark.parametrize(
     ("error", "sent_shape"),
-    [(FakeNotFoundError("gone", status=404), True), (UsagePendingError("shape mismatch"), False)],
+    [
+        (FakeNotFoundError("gone", status=404), True),
+        (FakeMosaicError("gone", status=410), True),
+        (FakeMosaicError("500", status=500), False),
+        (FakeRateLimitError("429", status=429), False),
+        (UsagePendingError("shape mismatch"), False),
+    ],
 )
 async def test_a_stop_during_a_failing_confirm_charges_the_sent_shape_only_for_a_read_error(
     fake_sdk: FakeCloud, usages: list[FakeUsage], error: Exception, sent_shape: bool
 ) -> None:
-    """Charge the sent shape when our destroy broke the confirm's read, never for a shape mismatch.
+    """Charge the sent shape only when the confirm's read found no box after our destroy.
 
     Args:
         fake_sdk: The fake Mosaic account.
@@ -1333,6 +1339,46 @@ async def test_a_stop_during_a_failing_confirm_charges_the_sent_shape_only_for_a
     assert box.state == "destroyed"
     expected = ["dispatched", f"confirm:{box.id}", "stopped", *(["sent_shape"] if sent_shape else []), "settle"]
     assert usages[0].calls == expected
+
+
+async def test_a_reservation_slower_than_the_stop_limit_is_released_later(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return from a stop in time while the reservation write runs, then release its hold.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.05)
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation after a blocking write longer than the stop limit.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        time.sleep(0.3)
+        return FakeUsage(*args, **kwargs)
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    began = time.monotonic()
+    await env.stop()
+    assert time.monotonic() - began < 0.2
+    assert usages == []
+    with pytest.raises(SandboxInfraError):
+        await start
+    await _wait_for_the_background_cleanup()
+    assert fake_sdk.boxes == {}
+    assert len(usages) == 1
+    assert usages[0].calls[-1].startswith("release:")
 
 
 async def test_the_destroy_and_the_settle_share_one_stop_deadline(
