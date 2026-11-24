@@ -18,6 +18,11 @@ Adapted from Harbor 0.25.0 (Apache-2.0), langsmith.py. Changes:
 - The spec network mode maps to the sandbox proxy access list. A policy
   cannot change after start.
 
+With a budget the box is protected (SKY-552). It reserves its whole lifetime
+before the create call, confirms the created size, stops itself when the
+lifetime ends, and settles the measured time after the delete, also after a
+failed or cancelled start. The box has no keepalive, so it never extends.
+
 The factory refuses this provider in production (SKY-406 D1).
 """
 
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -32,10 +38,13 @@ import math
 import os
 import re
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, ClassVar
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
+from core.billing.langsmith_usage import LangSmithUsageReservation
+from core.billing.operation_pricing import json_fingerprint
+
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
     SandboxFatalError,
@@ -92,7 +101,7 @@ logger = logging.getLogger(__name__)
 
 # The sandbox proxy applies deny-all and allowlist access lists at create
 # time; it cannot change them on a running sandbox.
-LANGSMITH_CAPABILITIES = EnvironmentCapabilities(name="langsmith", network_modes=frozenset(NetworkMode))
+LANGSMITH_CAPABILITIES = EnvironmentCapabilities(name="langsmith", network_modes=frozenset(NetworkMode), billable=True)
 
 _API_URL_ENV = "LANGSMITH_SANDBOX_API_URL"
 _API_KEY_ENVS = ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY")
@@ -136,13 +145,15 @@ class LangSmithEnvironment(SandboxEnvironment):
         request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         startup_timeout_seconds: float = _DEFAULT_STARTUP_TIMEOUT_SECONDS,
         timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = LangSmithUsageReservation,
     ) -> None:
         """Create a stopped LangSmith sandbox.
 
         Args:
             spec: The sandbox to open. The image is the snapshot name when
-                ``snapshot`` is not set. The lifetime is not applied; the TTLs
-                bound an orphaned sandbox.
+                ``snapshot`` is not set. Only a protected box applies the
+                lifetime; the TTLs bound an orphaned sandbox.
             api_key: The LangSmith API key; ``None`` lets the SDK read
                 ``LANGSMITH_API_KEY``.
             api_url: The sandbox API endpoint; ``None`` reads
@@ -157,10 +168,13 @@ class LangSmithEnvironment(SandboxEnvironment):
             startup_timeout_seconds: The time limit of ``start``.
             timeouts: The phase timeouts; the run phase is the default
                 ``exec`` time limit. ``None`` means one hour.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
             SandboxSpecError: The spec asks for a feature that this provider
-                cannot apply.
+                cannot apply, or a protected box has no operation key, no
+                fixed size, or a TTL of zero.
             SandboxFatalError: The ``langsmith`` extra is not installed.
             ValueError: A TTL is negative or not a multiple of 60.
         """
@@ -169,6 +183,24 @@ class LangSmithEnvironment(SandboxEnvironment):
             raise SandboxFatalError("The LangSmith sandbox needs the `langsmith` extra.")
         self._idle_ttl = _validate_ttl_seconds("idle_ttl_seconds", idle_ttl_seconds)
         self._delete_after_stop = _validate_ttl_seconds("delete_after_stop_seconds", delete_after_stop_seconds)
+        if budget is not None:
+            resources = spec.resources
+            if spec.operation_key is None:
+                raise SandboxSpecError("A protected LangSmith sandbox needs an operation key.")
+            # The quote prices the funded size; a server default size has no price.
+            if resources.mode is ResourceMode.IGNORE or resources.memory_mb is None or resources.disk_mb is None:
+                raise SandboxSpecError("A protected LangSmith sandbox needs a fixed CPU, memory and disk size.")
+            # A TTL of zero turns the server stop or delete off, so a crashed
+            # worker would leave a box with no cost bound.
+            if not self._idle_ttl or not self._delete_after_stop:
+                raise SandboxSpecError("A protected LangSmith sandbox needs nonzero idle and delete TTLs.")
+            self.capabilities = dataclasses.replace(LANGSMITH_CAPABILITIES, protected=True)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._settle_error: Exception | None = None
+        self._expiry: asyncio.Task[None] | None = None
+        self._create_running = False
         self._api_key = api_key
         self._api_url = api_url or os.environ.get(_API_URL_ENV) or None
         self._snapshot = snapshot or spec.image
@@ -211,6 +243,8 @@ class LangSmithEnvironment(SandboxEnvironment):
                 the server or the connection failed.
             SandboxRejectedError: The server refused the request, or the image
                 did not start.
+            BudgetError: The budget refused the reservation of a protected box.
+            UsagePendingError: The created box is larger than its reservation.
         """
         if self._box is not None:
             return
@@ -218,10 +252,18 @@ class LangSmithEnvironment(SandboxEnvironment):
         # The client exists before the create call, so stop() can delete by
         # name a sandbox that the server made before the create failed.
         client = self._client = self._new_client()
+        # A stop() while this is set leaves the settle to the start cleanup,
+        # because the box can still appear after that stop's delete.
+        self._create_running = True
         try:
+            await self._reserve()
+            if self._client is not client:
+                raise SandboxInfraError("The LangSmith sandbox stopped during start.")
             async with asyncio.timeout(self._startup_timeout) as deadline:
                 with _mapped_errors(start_timeout=self._startup_timeout):
                     box = await client.create_sandbox(**self._create_kwargs())
+            if self._usage is not None and self._client is client:
+                await asyncio.shield(asyncio.to_thread(self._usage.confirm_created, box))
         except TimeoutError:
             await self._stop_failed_start(client)
             if not deadline.expired():
@@ -238,11 +280,14 @@ class LangSmithEnvironment(SandboxEnvironment):
         if self._client is not client:
             await self._stop_failed_start(client)
             raise SandboxInfraError("The LangSmith sandbox stopped during start.")
+        self._create_running = False
         self._box = box
         type(self)._running.add(self)
+        if self._usage is not None:
+            self._expiry = asyncio.ensure_future(self._expire())
 
     async def stop(self) -> None:
-        """Delete the sandbox and close the client.
+        """Delete the sandbox, settle its reservation and close the client.
 
         A cancel during the delete, also a repeated one, waits for the delete
         to finish, then passes one cancel on, so the sandbox never outlives
@@ -250,7 +295,23 @@ class LangSmithEnvironment(SandboxEnvironment):
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: The ledger refused the settlement.
         """
+        await self._halt()
+        # Only one stop caller gets a settle failure, so a second stop returns quietly.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
+
+    async def _halt(self) -> None:
+        """Delete the sandbox once, settle it unless a create still runs, and close the client.
+
+        Raises:
+            asyncio.CancelledError: The task was cancelled during the delete.
+        """
+        if self._expiry is not None and self._expiry is not asyncio.current_task():
+            self._expiry.cancel()
         client = self._client
         if client is None:
             if self._stop_task is not None:
@@ -260,8 +321,83 @@ class LangSmithEnvironment(SandboxEnvironment):
         self._client = None
         self._box = None
         type(self)._running.discard(self)
-        self._stop_task = asyncio.ensure_future(_teardown(client, name))
+        self._stop_task = asyncio.ensure_future(self._delete_and_settle(client, name, settle=not self._create_running))
         await _wait_through_cancels(self._stop_task)
+
+    async def _delete_and_settle(self, client: Any, name: str | None, *, settle: bool = True) -> None:
+        """Delete the sandbox by name, then settle its reservation.
+
+        Args:
+            client: The SDK client; the delete closes it.
+            name: The sandbox name.
+            settle: False while a create still runs, because the box can
+                appear after this delete.
+        """
+        gone = await _teardown(client, name)
+        usage = self._usage
+        if not settle or usage is None:
+            return
+        self._usage = None
+        if gone:
+            usage.mark_deleted()
+        try:
+            await asyncio.to_thread(usage.settle)
+        except Exception as error:
+            logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
+            self._settle_error = error
+
+    async def _reserve(self) -> None:
+        """Reserve the whole lifetime of a protected box before its create call.
+
+        Raises:
+            BudgetError: The budget refused the reservation.
+        """
+        if self._budget is None or self._usage is not None:
+            return
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(
+                self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+            )
+        )
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled and may still reserve; keep its
+            # result so the cleanup settles it instead of leaking it.
+            while not reserving.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(reserving)
+            if not reserving.cancelled() and reserving.exception() is None:
+                self._usage = reserving.result()
+            raise
+
+    def _usage_request(self) -> dict[str, Any]:
+        """Build the create parameters that the reservation prices.
+
+        Returns:
+            The size, times and network of the create call.
+        """
+        kwargs = self._create_kwargs()
+        return {
+            "name": self._name,
+            "snapshot": kwargs.get("snapshot"),
+            "lifetime_ms": math.ceil(self.spec.lifetime_seconds * 1000),
+            "startup_ms": math.ceil(self._startup_timeout * 1000),
+            "idle_ttl_seconds": self._idle_ttl,
+            "delete_after_stop_seconds": self._delete_after_stop,
+            "vcpus": kwargs.get("vcpus"),
+            "mem_bytes": kwargs.get("mem_bytes"),
+            "fs_capacity_bytes": kwargs.get("fs_capacity_bytes"),
+            "network_disabled": self.spec.network_disabled,
+            "allowed_hosts": sorted(set(self.spec.allowed_hosts)),
+            "environment_fingerprint": json_fingerprint(dict(self.spec.env)),
+        }
+
+    async def _expire(self) -> None:
+        """Stop a protected box when its funded lifetime ends."""
+        await asyncio.sleep(self.spec.lifetime_seconds)
+        logger.warning("LangSmith sandbox %s reached its funded lifetime; it stops now.", self._name)
+        await self._halt()
 
     async def exec(
         self,
@@ -426,13 +562,16 @@ class LangSmithEnvironment(SandboxEnvironment):
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
         """
+        self._create_running = False
         if self._client is client:
-            await self.stop()
-            return
-        # A stop() ran during the create. Its delete came before the server
-        # made the sandbox, and it closed this client, so delete by name
-        # again with a new client.
-        await _wait_through_cancels(asyncio.ensure_future(_teardown(self._new_client(), self._name)))
+            await self._halt()
+        else:
+            # A stop() ran during the create. Its delete came before the server
+            # made the sandbox, and it closed this client, so delete by name
+            # again with a new client.
+            await _wait_through_cancels(asyncio.ensure_future(self._delete_and_settle(self._new_client(), self._name)))
+        # The start error goes on to the caller; the reservation stays pending.
+        self._settle_error = None
 
     def _require_running(self) -> Any:
         """Return the SDK sandbox, or raise when the sandbox is stopped.
@@ -567,21 +706,26 @@ def _http_status(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-async def _teardown(client: Any, name: str | None) -> None:
+async def _teardown(client: Any, name: str | None) -> bool:
     """Delete one sandbox by name and close the client, and log a failure instead of raising it.
 
     Args:
         client: The SDK ``AsyncSandboxClient``.
         name: The sandbox name; ``None`` when no create call ran.
+
+    Returns:
+        True when the sandbox is gone, False when the delete failed.
     """
     try:
         if name is not None:
             await asyncio.wait_for(client.delete_sandbox(name), _DELETE_TIMEOUT_SECONDS)
+        return True
     except ResourceNotFoundError:
-        pass
+        return True
     except Exception as exc:
         # Only the class name: SDK messages can carry request details.
         logger.warning("Could not delete the LangSmith sandbox %s: %s.", name, type(exc).__name__)
+        return False
     finally:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)

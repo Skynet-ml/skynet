@@ -15,7 +15,10 @@ from typing import Any
 
 import pytest
 
+from core.billing.budgets import BudgetError
+from core.billing.runtime import UsagePendingError
 from core.sandbox import SandboxSpec, factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.errors import (
     SandboxFatalError,
     SandboxInfraError,
@@ -900,3 +903,224 @@ async def test_broken_json_of_a_create_response_is_transient(transport_failures:
     with pytest.raises(SandboxTransientError) as caught:
         await env.start()
     assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+
+
+_PROTECTED_SPEC = SandboxSpec(
+    lifetime_seconds=60,
+    resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048),
+    operation_key="op-1",
+)
+
+
+class FakeUsage:
+    """Stand in for ``LangSmithUsageReservation``: record each billing call in order."""
+
+    events: list[Any]
+    error: BaseException | None = None
+
+    def __init__(self, budget: Any, request: Mapping[str, Any], *, operation_key: str) -> None:
+        """Record the reservation, or raise the refusal that the test set.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced create parameters.
+            operation_key: The box identity.
+
+        Raises:
+            BaseException: The refusal that the test set.
+        """
+        if self.error is not None:
+            raise self.error
+        self.request = dict(request)
+        self.deleted = False
+        self.events.append(("reserve", operation_key))
+
+    def confirm_created(self, box: Any) -> None:
+        """Record the confirm.
+
+        Args:
+            box: The created SDK box.
+        """
+        self.events.append(("confirm", box))
+
+    def mark_deleted(self) -> None:
+        """Record the confirmed delete."""
+        self.deleted = True
+
+    def settle(self) -> None:
+        """Record the settle, and fail like the real reservation when the delete is not confirmed.
+
+        Raises:
+            UsagePendingError: The delete is not confirmed.
+        """
+        self.events.append(("settle", self.deleted))
+        if not self.deleted:
+            raise UsagePendingError("not deleted")
+
+
+@pytest.fixture
+def usage() -> type[FakeUsage]:
+    """Give each test its own fake reservation class and event list.
+
+    Returns:
+        A ``FakeUsage`` subclass.
+    """
+    return type("BoundFakeUsage", (FakeUsage,), {"events": []})
+
+
+def _protected(usage: type[FakeUsage], spec: SandboxSpec = _PROTECTED_SPEC, **kwargs: Any) -> LangSmithEnvironment:
+    """Build a protected provider on the fake reservation.
+
+    Args:
+        usage: The fake reservation class.
+        spec: The sandbox spec.
+        **kwargs: More provider options.
+
+    Returns:
+        The provider.
+    """
+    return LangSmithEnvironment(spec, budget=object(), usage_factory=usage, **kwargs)
+
+
+def test_capabilities_are_billable_and_a_budget_makes_the_box_protected(usage: type[FakeUsage]) -> None:
+    """Declare the provider billable, so the bridge passes a budget, and mark a funded box protected."""
+    assert LangSmithEnvironment.capabilities.billable is True
+    assert LangSmithEnvironment(_SPEC).capabilities.protected is False
+    assert _protected(usage).capabilities.protected is True
+
+
+@pytest.mark.parametrize(
+    ("spec", "options"),
+    [
+        (SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048)), {}),
+        (SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=2), operation_key="op-1"), {}),
+        (
+            SandboxSpec(
+                lifetime_seconds=60,
+                resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048, mode=ResourceMode.IGNORE),
+                operation_key="op-1",
+            ),
+            {},
+        ),
+        (_PROTECTED_SPEC, {"idle_ttl_seconds": 0}),
+        (_PROTECTED_SPEC, {"delete_after_stop_seconds": 0}),
+    ],
+)
+def test_protected_box_refuses_a_spec_with_no_cost_bound(
+    usage: type[FakeUsage], spec: SandboxSpec, options: dict[str, Any]
+) -> None:
+    """Refuse a protected box with no operation key, no fixed size, or a TTL that turns the server bound off."""
+    with pytest.raises(SandboxSpecError):
+        _protected(usage, spec, **options)
+
+
+async def test_protected_box_reserves_before_create_and_settles_after_delete(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Reserve, create, confirm, delete, then settle at the confirmed delete, once."""
+    env = _protected(usage)
+    await env.start()
+    reservation_request = env._usage.request
+    box = server.boxes[env.name]
+    assert usage.events == [("reserve", "op-1"), ("confirm", box)]
+    assert reservation_request["vcpus"] == server.creates[0]["vcpus"] == 2
+    assert reservation_request["mem_bytes"] == server.creates[0]["mem_bytes"] == 1024 * 1024 * 1024
+    assert reservation_request["fs_capacity_bytes"] == server.creates[0]["fs_capacity_bytes"] == 2048 * 1024 * 1024
+    assert reservation_request["lifetime_ms"] == 60_000
+    assert reservation_request["idle_ttl_seconds"] == server.creates[0]["idle_ttl_seconds"]
+    await env.stop()
+    await env.stop()
+    assert usage.events[2:] == [("settle", True)]
+    assert server.deletes == [env.name]
+
+
+async def test_budget_refusal_creates_no_box(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Raise the budget refusal before any create call."""
+    usage.error = BudgetError("no headroom")
+    env = _protected(usage)
+    with pytest.raises(BudgetError):
+        await env.start()
+    assert server.creates == []
+    assert usage.events == []
+
+
+async def test_failed_create_settles_the_reservation(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the partial box and settle its reservation when the create fails, and raise the create error."""
+    server.create_then_fail = True
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.boxes == {}
+
+
+async def test_cancelled_create_settles_the_reservation(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete the box and settle its reservation when the start is cancelled during the create."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+
+
+async def test_stop_during_create_settles_only_after_the_last_delete(
+    server: FakeServer, usage: type[FakeUsage]
+) -> None:
+    """Hold the settle while a create runs, then settle once after the delete of the late box."""
+    server.create_gate = asyncio.Event()
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    assert usage.events == [("reserve", "op-1")]
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.boxes == {}
+
+
+async def test_failed_delete_keeps_the_reservation_pending(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Settle without a confirmed delete, raise the pending error once, and keep later stops quiet."""
+    env = _protected(usage)
+    await env.start()
+    server.boxes.clear()
+    server.delete_gate = asyncio.Event()
+    server.delete_gate.set()
+
+    async def broken_delete(name: str) -> None:
+        """Fail the delete like a lost connection.
+
+        Args:
+            name: The sandbox name.
+
+        Raises:
+            FakeConnectionError: Always.
+        """
+        raise FakeConnectionError(name)
+
+    env._client.delete_sandbox = broken_delete
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert usage.events[-1] == ("settle", False)
+    await env.stop()
+
+
+async def test_protected_box_stops_when_its_funded_lifetime_ends(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Delete and settle a protected box when its funded lifetime ends without a stop call."""
+    spec = SandboxSpec(
+        lifetime_seconds=0.05,
+        resources=ResourceRequest(cpus=2, memory_mb=1024, disk_mb=2048),
+        operation_key="op-1",
+    )
+    env = _protected(usage, spec)
+    await env.start()
+    await asyncio.wait_for(env._expiry, 5)
+    assert server.boxes == {}
+    assert usage.events[-1] == ("settle", True)
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+    await env.stop()
