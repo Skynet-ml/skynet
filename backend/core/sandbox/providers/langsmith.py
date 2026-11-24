@@ -911,13 +911,17 @@ async def _settle_late(
         elif settling.done() and not settling.cancelled():
             logger.info("LangSmith sandbox %s usage settled before the cancel.", name)
         raise
+    except Exception as error:
+        # Log before the close, because a cancel during the close replaces this error.
+        logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
+        raise
     finally:
-        # A cut-short close would leak the client and end a settled task as cancelled.
+        # A cut-short close would leak the client.
         await _wait_through_cancels(asyncio.ensure_future(_close(client)))
 
 
 def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
-    """Forget a finished proof wait and log its failure or its cancel.
+    """Forget a finished proof wait and log its cancel; ``_settle_late`` logs its failure.
 
     Args:
         name: The sandbox name.
@@ -930,8 +934,9 @@ def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
             "Background settle for LangSmith sandbox %s was cancelled; its usage hold may be dispatched or pending.",
             name,
         )
-    elif task.exception() is not None:
-        logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(task.exception()).__name__)
+    else:
+        # Read the error so asyncio does not report it as never retrieved.
+        task.exception()
 
 
 async def _delete(client: Any, name: str) -> float | None:

@@ -1726,6 +1726,27 @@ async def test_cancel_during_the_background_close_lets_the_close_finish(
     assert server.closed == 1
 
 
+async def test_settle_error_is_logged_when_a_cancel_comes_during_the_close(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the settle error before the close, so a cancel during the close does not hide it."""
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = await _handed_off(server, env)
+    server.get_error = FakeConnectionError("lookup lost")
+    server.close_gate = asyncio.Event()
+    clock.offset = _PAST_THE_POLL
+    with caplog.at_level(logging.WARNING, logger=langsmith.logger.name):
+        await asyncio.wait_for(server.close_started.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        server.close_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+    assert usage.events == [("reserve", "op-1"), ("settle", False)]
+    assert server.closed == 1
+    assert f"LangSmith sandbox {env.name} usage stays pending: UsagePendingError." in caplog.text
+
+
 async def test_settle_error_after_a_hand_off_is_only_logged(
     server: FakeServer, usage: type[FakeUsage], clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1737,7 +1758,7 @@ async def test_settle_error_after_a_hand_off_is_only_logged(
     with caplog.at_level(logging.WARNING, logger=langsmith.logger.name):
         await _settled()
     assert usage.events == [("reserve", "op-1"), ("settle", False)]
-    assert f"LangSmith sandbox {env.name} usage stays pending: UsagePendingError." in caplog.text
+    assert caplog.text.count(f"LangSmith sandbox {env.name} usage stays pending: UsagePendingError.") == 1
     assert not langsmith._SETTLE_TASKS
 
 
