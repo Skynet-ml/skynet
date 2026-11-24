@@ -17,6 +17,10 @@ command wrapper, the file calls and the named network policy flow come from
 - The spec sizes map to Runloop custom sizes, and a memory request that
   Runloop cannot give is rejected at construction.
 - ``stop_job_sandboxes`` finds the devboxes of a job by their metadata.
+- With a budget the devbox is protected: it reserves its whole keep-alive
+  lifetime before the create call and settles after the shutdown, from
+  Runloop's usage report or else from the measured time
+  (``core.billing.runloop_usage``).
 - Harbor's blueprint and snapshot builds, storage-object uploads, directory
   transfer and user switching are left out. The devbox runs as root.
 """
@@ -25,16 +29,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import math
 import os
 import re
 import shlex
+import time
 import uuid
-from collections.abc import Awaitable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import Any
+
+from core.billing.operation_pricing import json_fingerprint
+from core.billing.runloop_usage import DEFAULT_DISK_GB, RunloopUsageReservation
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
@@ -106,6 +115,7 @@ RUNLOOP_CAPABILITIES = EnvironmentCapabilities(
     max_vcpus=16,
     even_vcpus=True,
     max_disk_mb=64 * 1024,
+    billable=True,
 )
 
 
@@ -269,16 +279,30 @@ class RunloopEnvironment(SandboxEnvironment):
 
     capabilities = RUNLOOP_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = RunloopUsageReservation,
+    ) -> None:
         """Check the spec and prepare the create call.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; ``None`` sets no start or run limit.
+            budget: The ``BudgetRuntime`` that funds the devbox, or ``None``.
+            usage_factory: Makes the usage reservation of a protected devbox.
 
         Raises:
-            SandboxSpecError: Runloop cannot open this spec.
+            SandboxSpecError: Runloop cannot open this spec, or a protected
+                spec has no operation key.
         """
+        if budget is not None:
+            if spec.operation_key is None:
+                raise SandboxSpecError("A protected Runloop sandbox needs an operation key.")
+            self.capabilities = dataclasses.replace(RUNLOOP_CAPABILITIES, protected=True)
         super().__init__(spec)
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
@@ -295,6 +319,13 @@ class RunloopEnvironment(SandboxEnvironment):
         self._create_dispatched = False
         self._started = False
         self._stop_task: asyncio.Future[None] | None = None
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._binding: asyncio.Future[Any] | None = None
+        self._create_sent_at: float | None = None
+        self._create_refused: SandboxRejectedError | None = None
+        self._orphan_id: str | None = None
 
     @classmethod
     def preflight(cls) -> None:
@@ -350,12 +381,54 @@ class RunloopEnvironment(SandboxEnvironment):
         finally:
             self._starting = None
 
+    def _usage_request(self) -> dict[str, Any]:
+        """Build the usage request that the reservation prices.
+
+        It leaves out the box name and tag, so every box of one pool sends the
+        same request.
+
+        Returns:
+            The size, lifetime and network parameters of the create.
+        """
+        launch = self._create_params["launch_parameters"]
+        hosts = sorted({host.lower() for host in self.spec.allowed_hosts})
+        return {
+            "lifetime_ms": launch["keep_alive_time_seconds"] * 1000,
+            "vcpus": launch.get("custom_cpu_cores"),
+            "memory_gb": launch.get("custom_gb_memory"),
+            "disk_gb": launch.get("custom_disk_size", DEFAULT_DISK_GB),
+            "network_disabled": self.spec.network_disabled,
+            **({"allowed_hosts": hosts} if hosts else {}),
+            "environment_fingerprint": json_fingerprint(dict(self.spec.env)),
+        }
+
+    async def _reserve(self) -> None:
+        """Reserve the whole lifetime of a protected devbox before the create call."""
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(
+                self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+            )
+        )
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled and may still reserve; keep its
+            # result so the teardown releases it instead of leaking it.
+            while not reserving.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(reserving)
+            if not reserving.cancelled() and reserving.exception() is None:
+                self._usage = reserving.result()
+            raise
+
     async def _create(self) -> None:
-        """Find the network policy, then create the devbox and keep it.
+        """Reserve the budget, find the network policy, then create the devbox and keep it.
 
         Raises:
             StartTimeoutError: The devbox did not run within the start timeout.
         """
+        if self._budget is not None and self._usage is None:
+            await self._reserve()
         client = self._client
         params = dict(self._create_params)
         limit = self._start_limit
@@ -365,16 +438,27 @@ class RunloopEnvironment(SandboxEnvironment):
                 if policy_id is not None:
                     params["launch_parameters"] = {**params["launch_parameters"], "network_policy_id": policy_id}
                 self._create_dispatched = True
-                with _mapped("create the devbox"):
-                    # The devbox is kept here, not in start(), so a stop that
-                    # cancels the start right after the create still sees it.
-                    self._devbox = await client.devbox.create(
-                        **params, polling_config=_polling(), idempotency_key=self._box_tag
-                    )
+                self._create_sent_at = time.monotonic()
+                try:
+                    with _mapped("create the devbox"):
+                        # The devbox is kept here, not in start(), so a stop that
+                        # cancels the start right after the create still sees it.
+                        self._devbox = await client.devbox.create(
+                            **params, polling_config=_polling(), idempotency_key=self._box_tag
+                        )
+                except SandboxRejectedError as error:
+                    # A 4xx answer proves Runloop made no devbox, so the
+                    # teardown can release the hold.
+                    self._create_refused = error
+                    raise
         except TimeoutError:
             if not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
+        if self._usage is not None:
+            # The teardown waits for this call, so it never settles an unbound hold.
+            self._binding = asyncio.ensure_future(asyncio.to_thread(self._usage.bind, self._devbox.id))
+            await asyncio.shield(self._binding)
 
     async def _network_policy_id(self, client: Any) -> str | None:
         """Find or create the shared network policy that the spec needs.
@@ -601,13 +685,60 @@ class RunloopEnvironment(SandboxEnvironment):
         self._client = self._devbox = None
         if client is None:
             return
+        box_id = devbox.id if devbox is not None else None
+        stopped = False
         try:
             if devbox is not None:
-                await _bounded(devbox.shutdown(), "shut the devbox down")
+                stopped = await _bounded(devbox.shutdown(), "shut the devbox down")
             elif self._create_dispatched:
-                await _bounded(self._shut_down_orphan(client), "shut the lost devbox down")
+                stopped = await _bounded(self._shut_down_orphan(client), "shut the lost devbox down")
+                box_id = self._orphan_id
+            stopped_at = time.monotonic()
+            if self._usage is not None:
+                await self._settle(client, box_id, stopped_at if stopped else None)
         finally:
             await _bounded(client.aclose(), "close the client")
+
+    async def _settle(self, client: Any, box_id: str | None, stopped_at: float | None) -> None:
+        """Settle or release the budget hold of a protected devbox.
+
+        A billing failure is logged, not raised: the hold then stays pending
+        for reconciliation and never charges more than its reservation.
+
+        Args:
+            client: The SDK client.
+            box_id: The devbox id, or ``None`` when no devbox was found.
+            stopped_at: ``time.monotonic()`` of the confirmed shutdown, or
+                ``None`` when the shutdown is not confirmed.
+        """
+        usage = self._usage
+        if self._binding is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._binding)
+        try:
+            if box_id is None:
+                if not self._create_dispatched:
+                    await asyncio.to_thread(usage.release, "The create call was never sent.")
+                elif self._create_refused is not None:
+                    await asyncio.to_thread(usage.release, str(self._create_refused))
+                else:
+                    # A lost create may still have made a devbox that the tag
+                    # search did not find, so the hold waits for reconciliation.
+                    await asyncio.to_thread(usage.pending)
+                return
+            if usage.devbox_id is None:
+                await asyncio.to_thread(usage.bind, box_id)
+            if stopped_at is not None and self._create_sent_at is not None:
+                usage.record_stop(math.ceil((stopped_at - self._create_sent_at) * 1000))
+                try:
+                    report = await asyncio.wait_for(client.api.devboxes.retrieve_resource_usage(box_id), STOP_TIMEOUT)
+                    usage.record_usage(report)
+                except Exception as error:
+                    # The measured time still bounds the bill from above.
+                    logger.warning("Runloop gave no usage report for devbox %s: %s", box_id, type(error).__name__)
+            await asyncio.to_thread(usage.settle)
+        except Exception as error:
+            logger.warning("Runloop devbox %s usage stays pending: %s", box_id, type(error).__name__)
 
     async def _shut_down_orphan(self, client: Any) -> None:
         """Shut down the devbox of a create that ended before it returned.
@@ -617,6 +748,7 @@ class RunloopEnvironment(SandboxEnvironment):
         """
         async for box in client.api.devboxes.list(limit=_LIST_LIMIT):
             if (box.metadata or {}).get(BOX_TAG) == self._box_tag:
+                self._orphan_id = box.id
                 if box.status not in _ENDED_STATUSES:
                     await client.api.devboxes.shutdown(box.id)
                 return

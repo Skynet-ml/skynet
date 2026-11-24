@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from core.billing.operation_pricing import UnpricedOperationError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
@@ -28,6 +29,7 @@ from core.sandbox.errors import (
     SandboxTransientError,
     StartTimeoutError,
 )
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import runloop
 from core.sandbox.providers.runloop import BOX_TAG, RunloopEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -118,6 +120,7 @@ class FakeCloud:
     create_hangs: bool = False
     exec_hangs: bool = False
     policy_conflict: SimpleNamespace | None = None
+    usage_error: BaseException | None = None
     ids: Any = field(default_factory=lambda: itertools.count(1))
 
     def run(self, box: BoxState, command: str) -> tuple[int, str, str]:
@@ -285,6 +288,7 @@ class FakeSDK:
             devboxes=SimpleNamespace(
                 list=self._list_boxes,
                 shutdown=self._shutdown,
+                retrieve_resource_usage=self._usage,
                 executions=SimpleNamespace(await_completed=self._await_completed),
             ),
             network_policies=SimpleNamespace(list=self._list_policies, create=self._create_policy),
@@ -340,6 +344,34 @@ class FakeSDK:
         """
         CLOUD.calls.append(f"shutdown:{box_id}")
         CLOUD.boxes[box_id].status = "shutdown"
+
+    async def _usage(self, box_id: str) -> SimpleNamespace:
+        """Report the resource usage of a box, like ``DevboxResourceUsageView``.
+
+        Args:
+            box_id: The devbox id.
+
+        Returns:
+            One minute of use at 1 vCPU, 2 GiB of memory and 16 GiB of disk.
+
+        Raises:
+            BaseException: The usage error that the cloud holds.
+        """
+        CLOUD.calls.append(f"usage:{box_id}")
+        if CLOUD.usage_error is not None:
+            raise CLOUD.usage_error
+        status = CLOUD.boxes[box_id].status
+        return SimpleNamespace(
+            id=box_id,
+            status=status,
+            start_time_ms=0,
+            end_time_ms=60_000 if status == "shutdown" else None,
+            total_active_seconds=60,
+            total_elapsed_seconds=60,
+            vcpu_seconds=60,
+            memory_gb_seconds=120,
+            disk_gb_seconds=960,
+        )
 
     async def _await_completed(self, execution_id: str, *, devbox_id: str, polling_config: Any) -> None:
         """Wait for the command, forever when the cloud says it hangs.
@@ -946,3 +978,227 @@ async def test_stop_job_sandboxes_counts_only_successful_shutdowns(
     assert await RunloopEnvironment.stop_job_sandboxes("job-7") == 1
     for env in envs:
         await env.stop()
+
+
+class FakeReservation:
+    """Stand in for ``RunloopUsageReservation`` and record what the provider asks of it."""
+
+    made: list[FakeReservation] = []
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record the reservation and the cloud calls made before it.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+        """
+        self.budget = budget
+        self.request = request
+        self.operation_key = operation_key
+        self.calls_before = list(CLOUD.calls)
+        self.events: list[str] = []
+        self.devbox_id: str | None = None
+        self.usage: Any = None
+        self.measured_ms: int | None = None
+        self.settle_error: BaseException | None = None
+        FakeReservation.made.append(self)
+
+    def bind(self, devbox_id: str) -> None:
+        """Record the devbox id.
+
+        Args:
+            devbox_id: The devbox id.
+        """
+        self.events.append(f"bind:{devbox_id}")
+        self.devbox_id = devbox_id
+
+    def record_stop(self, measured_ms: int) -> None:
+        """Record the measured time.
+
+        Args:
+            measured_ms: Wall time in milliseconds.
+        """
+        self.events.append("stop")
+        self.measured_ms = measured_ms
+
+    def record_usage(self, usage: Any) -> None:
+        """Record the usage report.
+
+        Args:
+            usage: The usage report.
+        """
+        self.events.append("usage")
+        self.usage = usage
+
+    def settle(self) -> None:
+        """Record the settle, or raise the settle error.
+
+        Raises:
+            BaseException: The settle error, when one is set.
+        """
+        self.events.append("settle")
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def release(self, reason: str) -> None:
+        """Record the release.
+
+        Args:
+            reason: Why no devbox exists.
+        """
+        self.events.append("release")
+
+    def pending(self) -> None:
+        """Record that the hold stays pending."""
+        self.events.append("pending")
+
+
+def _protected(**overrides: Any) -> RunloopEnvironment:
+    """Return a protected environment that records its reservation.
+
+    Args:
+        **overrides: Spec fields to replace.
+
+    Returns:
+        The environment.
+    """
+    FakeReservation.made = []
+    spec = _spec(**{"operation_key": "op-1", **overrides})
+    return RunloopEnvironment(spec, budget="budget", usage_factory=FakeReservation)
+
+
+def test_runloop_is_billable_and_has_a_usage_adapter() -> None:
+    """Let the protected bridge pass a budget, and hosted Skynet find the adapter."""
+    assert RunloopEnvironment.capabilities.billable
+    assert usage_adapter("runloop") is not None
+
+
+def test_a_protected_spec_needs_an_operation_key() -> None:
+    """Refuse a budget without a stable operation key."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        RunloopEnvironment(_spec(), budget="budget", usage_factory=FakeReservation)
+
+
+async def test_protected_devbox_reserves_before_create_and_settles_from_the_report(fake_sdk: FakeCloud) -> None:
+    """Reserve before the create, bind the devbox, then settle from Runloop's usage report."""
+    env = _protected(allowed_hosts=("B.example", "a.example"))
+    assert env.capabilities.protected
+    await env.start()
+    (reservation,) = FakeReservation.made
+    assert "create" not in reservation.calls_before
+    assert reservation.request == {
+        "lifetime_ms": 300_000,
+        "vcpus": 1,
+        "memory_gb": 2,
+        "disk_gb": 16,
+        "network_disabled": False,
+        "allowed_hosts": ["a.example", "b.example"],
+        "environment_fingerprint": reservation.request["environment_fingerprint"],
+    }
+    assert reservation.operation_key == "op-1"
+    await env.stop()
+    (box,) = fake_sdk.boxes.values()
+    assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
+    assert reservation.usage.status == "shutdown"
+    assert reservation.measured_ms is not None
+    assert fake_sdk.calls[-3:] == [f"shutdown:{box.id}", f"usage:{box.id}", "aclose"]
+
+
+async def test_a_usage_api_failure_settles_from_measured_time(fake_sdk: FakeCloud) -> None:
+    """Settle from the measured time when Runloop gives no usage report."""
+    env = _protected()
+    await env.start()
+    fake_sdk.usage_error = FakeInternalServerError("500")
+    await env.stop()
+    (reservation,) = FakeReservation.made
+    assert reservation.events[1:] == ["stop", "settle"]
+    assert reservation.usage is None
+
+
+async def test_an_unconfirmed_shutdown_settles_without_measured_time(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle with no measured time when the shutdown fails, so the full reservation is charged."""
+    env = _protected()
+    await env.start()
+
+    async def broken(self: FakeDevbox) -> None:
+        """Fail the shutdown."""
+        raise FakeInternalServerError("500")
+
+    monkeypatch.setattr(FakeDevbox, "shutdown", broken)
+    await env.stop()
+    (reservation,) = FakeReservation.made
+    assert reservation.events[1:] == ["settle"]
+
+
+async def test_a_failed_settle_does_not_fail_the_stop(fake_sdk: FakeCloud) -> None:
+    """Log a settle failure and still close the client."""
+    env = _protected()
+    await env.start()
+    FakeReservation.made[0].settle_error = RuntimeError("ledger down")
+    await env.stop()
+    assert fake_sdk.calls[-1] == "aclose"
+
+
+async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Runloop refuses the create with a 4xx answer."""
+    fake_sdk.create_error = FakeBadRequestError("bad size")
+    env = _protected()
+    with pytest.raises(SandboxRejectedError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["release"]
+
+
+async def test_a_lost_create_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold pending when the create failed and no devbox carries the tag."""
+    fake_sdk.create_error = FakeRateLimitError("slow down")
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["pending"]
+
+
+async def test_a_create_that_was_never_sent_releases_the_hold(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release the hold when the start fails before the create call."""
+
+    async def broken(self: RunloopEnvironment, client: Any) -> str | None:
+        """Fail the network policy lookup."""
+        raise SandboxFatalError("policy")
+
+    monkeypatch.setattr(RunloopEnvironment, "_network_policy_id", broken)
+    env = _protected()
+    with pytest.raises(SandboxFatalError):
+        await env.start()
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["release"]
+    assert "create" not in fake_sdk.calls
+
+
+async def test_a_cancelled_start_settles_the_orphan_devbox(fake_sdk: FakeCloud) -> None:
+    """Find the devbox of a cancelled create by its tag, shut it down and settle it."""
+    fake_sdk.create_hangs = True
+    env = _protected()
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    (reservation,) = FakeReservation.made
+    assert box.status == "shutdown"
+    assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
+
+
+async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -> None:
+    """Refuse a protected devbox whose size Runloop picks, because it has no price."""
+    spec = _spec(operation_key="op-1", resources=ResourceRequest(cpus=1, mode=ResourceMode.IGNORE))
+    env = RunloopEnvironment(spec, budget="budget")
+    with pytest.raises(UnpricedOperationError):
+        await env.start()
+    assert "create" not in fake_sdk.calls
