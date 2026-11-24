@@ -4,7 +4,9 @@ A box settles at the larger of two amounts: the price that Daytona's
 analytics API reports for it, and its measured wall-clock time at the
 published rates. Daytona can post a charge up to 48 hours after the usage,
 so a report at settle time can be incomplete; the measured amount is the
-floor. The charge never exceeds the reservation.
+floor. Measured time uses the larger of the funded and the actual box
+sizes. A bill for another size settles at the reservation maximum. The
+charge never exceeds the reservation.
 """
 
 from __future__ import annotations
@@ -48,7 +50,10 @@ _MEMORY_GIB_HOUR_USD = Decimal("0.0162")
 _DISK_GIB_HOUR_USD = Decimal("0.000108")
 _SECONDS_PER_HOUR = Decimal(3600)
 # Per-sandbox usage periods with a ``price`` field, read on 2026-11-24 from
-# https://www.daytona.io/docs/analytics-openapi.json.
+# https://www.daytona.io/docs/analytics-openapi.json. The API accepts only a
+# JWT or an admin API key, and SDK 0.231.0 reads its URL from /config only
+# through a private method, so the URL is fixed here. With a normal API key
+# the read fails and the box settles at measured time, which is the floor.
 _ANALYTICS_URL = "https://analytics.app.daytona.io"
 _USAGE_TIMEOUT_SEC = 10.0
 # The usage window starts a little before the create call and ends a little
@@ -159,11 +164,13 @@ def _http_client() -> httpx.Client:
     return httpx.Client(base_url=_ANALYTICS_URL, timeout=_USAGE_TIMEOUT_SEC)
 
 
-def _usage_periods(sandbox_id: str, start: float, end: float) -> list[Any] | None:
+def _usage_periods(sandbox_id: str, organization: str | None, start: float, end: float) -> list[Any] | None:
     """Read a box's usage periods from Daytona's analytics API.
 
     Args:
         sandbox_id: The Daytona box id.
+        organization: The box's organization id, or ``None`` to use
+            ``DAYTONA_ORGANIZATION_ID``.
         start: Epoch seconds at the window start.
         end: Epoch seconds at the window end.
 
@@ -171,7 +178,7 @@ def _usage_periods(sandbox_id: str, start: float, end: float) -> list[Any] | Non
         The decoded periods, or ``None`` when the API is not configured or
         the read fails.
     """
-    organization = os.environ.get("DAYTONA_ORGANIZATION_ID")
+    organization = organization or os.environ.get("DAYTONA_ORGANIZATION_ID")
     token = os.environ.get("DAYTONA_API_KEY") or os.environ.get("DAYTONA_JWT_TOKEN")
     if not organization or not token:
         return None
@@ -250,12 +257,10 @@ class DaytonaUsageReservation:
         """
         self.runtime = runtime
         self.request = dict(request)
-        # The provider sets the label that only this box carries, so a
-        # reconciler can find a box whose id never came back. It stays out of
-        # the request, so equal boxes keep one fingerprint.
-        self.box_label: dict[str, str] = {}
         self.quote = quote_daytona_sandbox(request)
         self.box = box_tag(operation_key)
+        self.actual_sizes: dict[str, int] | None = None
+        self.organization_id: str | None = None
         if reserved is None:
             self.operation = runtime.reserve(
                 self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime"
@@ -283,16 +288,26 @@ class DaytonaUsageReservation:
         # time is never shorter than the time Daytona bills.
         self.dispatched_at = time.time()
         self.sandbox_id: str | None = None
+        # The label value is the operation id, which the ledger already
+        # holds, so a reconciler can find a box whose id never came back.
+        # It stays out of the request, so equal boxes keep one fingerprint.
+        self.box_label = {"skynet-box": self.operation.id}
 
     def bind(self, sandbox: Any) -> None:
-        """Record the box id, so the settle and the reconciler can find the box.
+        """Record the box id, sizes and organization, so the settle and the reconciler can find the box.
 
         A box that a timed-out or cancelled create made gets its id here,
-        without the size check, before its settle.
+        without the size check.
 
         Args:
             sandbox: The Daytona box handle.
         """
+        sizes = (getattr(sandbox, "cpu", None), getattr(sandbox, "memory", None), getattr(sandbox, "disk", None))
+        if all(_whole(size) for size in sizes):
+            self.actual_sizes = dict(zip(("vcpus", "memory_gib", "disk_gib"), sizes, strict=True))
+        organization = getattr(sandbox, "organization_id", None)
+        if isinstance(organization, str) and organization:
+            self.organization_id = organization
         if self.sandbox_id == sandbox.id:
             return
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox.id)
@@ -300,6 +315,8 @@ class DaytonaUsageReservation:
 
     def confirm_created(self, sandbox: Any) -> None:
         """Bind the created box and check that it has the funded size.
+
+        The settle of a box of another size uses the larger sizes.
 
         Args:
             sandbox: The Daytona box handle.
@@ -343,6 +360,7 @@ class DaytonaUsageReservation:
             evidence = {
                 "provider": "daytona",
                 "sandbox_id": self.sandbox_id,
+                "actual_sizes": self.actual_sizes,
                 "box_label": self.box_label or None,
                 "dispatched_at": self.dispatched_at,
             }
@@ -392,7 +410,7 @@ class DaytonaUsageReservation:
         """Settle the deleted box at the larger of its billed price and its measured time.
 
         Raises:
-            UsagePendingError: When the box identity is unknown or the bill shows another size.
+            UsagePendingError: When the box identity is unknown.
             BudgetError: When the evidence breaks the reserved bounds.
         """
         try:
@@ -404,17 +422,33 @@ class DaytonaUsageReservation:
                 raise UsagePendingError("Cloud sandbox creation has not returned an exact box identity.")
             ended = time.time()
             seconds = max(1, math.ceil(ended - self.dispatched_at))
-            sizes = {name: self.request[name] for name in ("vcpus", "memory_gib", "disk_gib")}
+            funded = {name: self.request[name] for name in ("vcpus", "memory_gib", "disk_gib")}
+            actual = self.actual_sizes or funded
+            # A box of another size than funded is charged at the larger size
+            # in each dimension, never below what it can cost.
+            sizes = {name: max(funded[name], actual[name]) for name in funded}
             periods = _usage_periods(
-                self.sandbox_id, self.dispatched_at - _WINDOW_MARGIN_SEC, ended + _WINDOW_MARGIN_SEC
+                self.sandbox_id,
+                self.organization_id,
+                self.dispatched_at - _WINDOW_MARGIN_SEC,
+                ended + _WINDOW_MARGIN_SEC,
             )
-            billed = billed_usd(periods, **sizes) if periods is not None else None
             measured = _usd(seconds, **sizes, rates=self.quote.price_snapshot["rates"])
+            size_mismatch = False
+            try:
+                billed = billed_usd(periods, **actual) if periods is not None else None
+            except UsagePendingError:
+                # The box is deleted and the charge is capped; a hold kept
+                # for a size the ledger cannot price would never close.
+                billed, size_mismatch = None, True
             # Daytona can post a charge up to 48 hours late, so a closed
             # report can still miss periods; never settle below measured time.
             usd = measured if billed is None else max(billed, measured)
             source = "usage-api" if billed is not None and billed >= measured else "measured"
-            charge, clamped = self._charge(usd)
+            if size_mismatch:
+                charge, clamped, source = self.quote.maximum, True, "size-mismatch"
+            else:
+                charge, clamped = self._charge(usd)
             self.runtime.service.settle(
                 self.operation.id,
                 self.runtime.username,
@@ -426,7 +460,10 @@ class DaytonaUsageReservation:
                     "sandbox_id": self.sandbox_id,
                     "source": source,
                     "measured_seconds": seconds,
-                    "periods": periods if billed is not None else None,
+                    "periods": periods if billed is not None or size_mismatch else None,
+                    "funded_sizes": funded,
+                    "actual_sizes": self.actual_sizes,
+                    "size_mismatch": size_mismatch,
                     "billed_usd": None if billed is None else str(billed),
                     "measured_usd": str(measured),
                     "provider_usd": str(usd),

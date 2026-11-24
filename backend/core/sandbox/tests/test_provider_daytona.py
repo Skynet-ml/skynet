@@ -11,14 +11,16 @@ import asyncio
 import itertools
 import shlex
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetService
@@ -27,6 +29,7 @@ from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.sandbox import JOB_TAG, NetworkPolicy, ResourceRequest, SandboxSpec, factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -849,8 +852,10 @@ class FakeUsage:
             operation_key: The box's operation key.
         """
         self.calls: list[Any] = [("reserve", budget, request, operation_key)]
-        self.box_label: dict[str, str] = {}
+        self.box_label = {"skynet-box": uuid.uuid4().hex}
         self.settle_error: Exception | None = None
+        self.raise_in: str | None = None
+        self.deleted_at_bind: list[bool] = []
         FakeUsage.made.append(self)
 
     made: ClassVar[list[FakeUsage]] = []
@@ -864,12 +869,18 @@ class FakeUsage:
         self.calls.append(("confirm", sandbox.id))
 
     def bind(self, sandbox: Any) -> None:
-        """Record the bind call.
+        """Record the bind call and whether the box was already deleted, or raise when ``raise_in`` names it.
 
         Args:
             sandbox: The box.
+
+        Raises:
+            RuntimeError: ``raise_in`` is ``"bind"``.
         """
         self.calls.append(("bind", sandbox.id))
+        self.deleted_at_bind.append(sandbox.deleted)
+        if self.raise_in == "bind":
+            raise RuntimeError("ledger down")
 
     def settle(self) -> None:
         """Record the settle call, or raise the set error.
@@ -882,13 +893,18 @@ class FakeUsage:
             raise self.settle_error
 
     def fail(self, error: BaseException, *, refused: bool) -> None:
-        """Record the fail call.
+        """Record the fail call, or raise when ``raise_in`` names it.
 
         Args:
             error: The create failure.
             refused: Whether Daytona made no box.
+
+        Raises:
+            RuntimeError: ``raise_in`` is ``"fail"``.
         """
         self.calls.append(("fail", type(error), refused))
+        if self.raise_in == "fail":
+            raise RuntimeError("ledger down")
 
     def pending(self) -> None:
         """Record the pending call."""
@@ -953,7 +969,7 @@ async def test_protected_box_reserves_confirms_and_settles(fake_sdk: type[FakeCl
         "op-1",
     )
     box_id = fake_sdk.boxes[0].id
-    assert made.calls[1:] == [("confirm", box_id), ("bind", box_id), ("settle",)]
+    assert made.calls[1:] == [("bind", box_id), ("confirm", box_id), ("bind", box_id), ("settle",)]
     assert fake_sdk.boxes[0].labels == made.box_label
     assert set(made.box_label) == {"skynet-box"}
     (params,) = fake_sdk.created
@@ -1002,7 +1018,7 @@ async def test_refusal_after_the_box_exists_settles_and_deletes_it(
     with pytest.raises(SandboxFatalError):
         await env.start()
     await env.stop()
-    assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "bind", "settle"]
     assert fake_sdk.boxes[0].deleted
 
 
@@ -1015,7 +1031,7 @@ async def test_refusal_looks_again_when_the_list_lags(fake_sdk: type[FakeClient]
         await env.start()
     await env.stop()
     assert fake_sdk.list_calls == 2
-    assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "bind", "settle"]
     assert fake_sdk.boxes[0].deleted
 
 
@@ -1185,7 +1201,7 @@ async def test_create_timeout_settles_the_box_it_made(fake_sdk: type[FakeClient]
     with pytest.raises(StartTimeoutError):
         await env.start()
     await env.stop()
-    assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "bind", "settle"]
     assert fake_sdk.boxes[0].deleted
 
 
@@ -1199,7 +1215,7 @@ async def test_cancel_during_create_settles_the_box(fake_sdk: type[FakeClient], 
     with pytest.raises(asyncio.CancelledError):
         await task
     await env.stop()
-    assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "bind", "settle"]
     assert fake_sdk.boxes[0].deleted
 
 
@@ -1210,7 +1226,7 @@ async def test_failed_delete_keeps_the_hold_pending(fake_sdk: type[FakeClient], 
     fake_sdk.boxes[0].fail_delete = FakeDaytonaError("delete broke")
     with pytest.raises(SandboxInfraError):
         await env.stop()
-    assert _names(usage.made[0]) == ["reserve", "confirm", "pending"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "confirm", "pending"]
 
 
 async def test_settle_failure_raises_a_pending_error(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
@@ -1222,7 +1238,7 @@ async def test_settle_failure_raises_a_pending_error(fake_sdk: type[FakeClient],
         await env.stop()
     assert "secret" not in str(raised.value)
     await env.stop()
-    assert _names(usage.made[0]) == ["reserve", "confirm", "bind", "settle"]
+    assert _names(usage.made[0]) == ["reserve", "bind", "confirm", "bind", "settle", "pending"]
 
 
 async def test_failed_reserve_creates_no_box(fake_sdk: type[FakeClient]) -> None:
@@ -1245,3 +1261,129 @@ async def test_failed_reserve_creates_no_box(fake_sdk: type[FakeClient]) -> None
         await env.start()
     await env.stop()
     assert fake_sdk.created == []
+
+
+def _ledger(tmp_path: Path) -> tuple[Engine, BudgetService, BudgetRuntime]:
+    """Create a funded local ledger and a budget runtime on it.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite ledger.
+
+    Returns:
+        The engine, the budget service and a runtime for a 50-cent budget.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    return engine, service, runtime
+
+
+async def test_size_mismatch_settles_measured_time_at_the_larger_size(
+    fake_sdk: type[FakeClient], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail the start of a box of another size, then delete it and settle at the larger size on stop.
+
+    Args:
+        fake_sdk: The fake SDK.
+        tmp_path: Per-test directory for the SQLite ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.delenv("DAYTONA_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    monkeypatch.setattr(daytona, "Resources", lambda **sizes: {**sizes, "memory": 2})
+    engine, service, runtime = _ledger(tmp_path)
+    made: list[DaytonaUsageReservation] = []
+
+    def reserve(*args: Any, **kwargs: Any) -> DaytonaUsageReservation:
+        """Make the real reservation and keep it for the checks.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The real reservation.
+        """
+        made.append(DaytonaUsageReservation(*args, **kwargs))
+        return made[-1]
+
+    env = DaytonaEnvironment(_PROTECTED, budget=runtime, usage_factory=reserve)
+    try:
+        with pytest.raises(UsagePendingError):
+            await env.start()
+        await env.stop()
+        assert fake_sdk.boxes[0].deleted
+        operation_id = made[0].operation.id
+        assert service.get_operation(operation_id, "alice").state == "settled"
+        (settled,) = [item for item in service.get_reconciliation(operation_id, "alice").evidence if "source" in item]
+        assert settled["funded_sizes"] == {"vcpus": 2, "memory_gib": 1, "disk_gib": 3}
+        assert settled["actual_sizes"] == {"vcpus": 2, "memory_gib": 2, "disk_gib": 3}
+        larger = Decimal("0.0504") * 2 + Decimal("0.0162") * 2 + Decimal("0.000108") * 3
+        assert Decimal(settled["measured_usd"]) == settled["measured_seconds"] * larger / 3600
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "refusal"])
+async def test_box_id_reaches_the_ledger_before_the_delete(
+    fake_sdk: type[FakeClient], usage: type[FakeUsage], failure: str
+) -> None:
+    """Bind a box that a failed create made before the delete, so a crash leaves a hold that names it.
+
+    Args:
+        fake_sdk: The fake SDK.
+        usage: The fake usage class.
+        failure: How the create fails after Daytona made the box.
+    """
+    if failure == "timeout":
+        fake_sdk.create_times_out = True
+    else:
+        fake_sdk.fail_after_box = FakeForbiddenError("status read refused")
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    with pytest.raises(SandboxError):
+        await env.start()
+    await env.stop()
+    assert usage.made[0].deleted_at_bind[0] is False
+    assert fake_sdk.boxes[0].deleted
+
+
+@pytest.mark.parametrize("step", ["bind", "fail"])
+async def test_failed_ledger_step_after_the_delete_marks_the_hold_pending(
+    fake_sdk: type[FakeClient], usage: type[FakeUsage], step: str
+) -> None:
+    """Mark the hold pending when the bind or the release fails after the delete.
+
+    Args:
+        fake_sdk: The fake SDK.
+        usage: The fake usage class.
+        step: The reservation call that fails.
+    """
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    if step == "fail":
+        fake_sdk.create_error = FakeDaytonaError("something else")
+        with pytest.raises(SandboxError):
+            await env.start()
+    else:
+        await env.start()
+    usage.made[0].raise_in = step
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert _names(usage.made[0])[-2:] == [step, "pending"]
+
+
+async def test_each_reservation_gets_its_own_box_label(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Label each new reservation's box with a new label, so a lookup never finds an older box."""
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    for _ in range(2):
+        await env.start()
+        await env.stop()
+    first, second = usage.made
+    assert first.box_label != second.box_label
+    assert [box.labels for box in fake_sdk.boxes] == [first.box_label, second.box_label]

@@ -166,9 +166,6 @@ class DaytonaEnvironment(SandboxEnvironment):
         self._usage: Any = None
         self._create_error: BaseException | None = None
         self._create_sent = False
-        # A label that only this box carries, so a failed create can still
-        # find the box it made.
-        self._box_label = {"skynet-box": uuid.uuid4().hex} if budget is not None else {}
 
     @classmethod
     def preflight(cls) -> None:
@@ -203,7 +200,9 @@ class DaytonaEnvironment(SandboxEnvironment):
             image=self.spec.image or DEFAULT_IMAGE,
             resources=_resources(self.spec, protected=self._budget is not None),
             env_vars=dict(self.spec.env) or None,
-            labels={**self.spec.tags, **self._box_label} or None,
+            # The reservation's own label lets a failed create still find the
+            # box it made; each reservation has a new one.
+            labels={**self.spec.tags, **(self._usage.box_label if self._usage is not None else {})} or None,
             # ephemeral deletes the box when it stops, and the TTL deletes a
             # box that a crashed worker never stopped.
             ephemeral=True,
@@ -253,7 +252,6 @@ class DaytonaEnvironment(SandboxEnvironment):
         )
         try:
             self._usage = await asyncio.shield(reserving)
-            self._usage.box_label = dict(self._box_label)
         except asyncio.CancelledError:
             # The thread cannot be cancelled and may still reserve; keep its
             # result so stop() releases it instead of leaking it.
@@ -262,7 +260,6 @@ class DaytonaEnvironment(SandboxEnvironment):
                     await asyncio.wait({reserving})
             if not reserving.cancelled() and reserving.exception() is None:
                 self._usage = reserving.result()
-                self._usage.box_label = dict(self._box_label)
             raise
 
     def _usage_request(self, ttl_minutes: int) -> dict[str, Any]:
@@ -315,7 +312,6 @@ class DaytonaEnvironment(SandboxEnvironment):
                 usage,
                 create_error=create_error,
                 create_sent=create_sent,
-                box_label=self._box_label,
             )
         )
         try:
@@ -489,12 +485,16 @@ class DaytonaEnvironment(SandboxEnvironment):
         with _translated("create"):
             try:
                 self._create_sent = True
-                return await self._client.create(params, timeout=CREATE_TIMEOUT_SEC)
+                sandbox = await self._client.create(params, timeout=CREATE_TIMEOUT_SEC)
             except DaytonaTimeoutError as error:
                 # The SDK timeout is not a TimeoutError, and the box can
                 # already exist. Keep it, so stop() deletes it.
                 await self._keep_timed_out_box(error.sandbox_id)
                 raise StartTimeoutError(CREATE_TIMEOUT_SEC) from error
+        # This runs also when the start was cancelled, because the create
+        # runs in a shielded task.
+        await _bind_early(self._usage, sandbox)
+        return sandbox
 
     async def _keep_timed_out_box(self, sandbox_id: str | None) -> None:
         """Find the box that a timed-out create made, so stop() can delete it.
@@ -511,6 +511,8 @@ class DaytonaEnvironment(SandboxEnvironment):
             self._sandbox = await self._client.get(sandbox_id)
         except Exception:
             logger.warning("Daytona could not find the timed-out box %s.", sandbox_id, exc_info=True)
+            return
+        await _bind_early(self._usage, self._sandbox)
 
     def _require_running(self) -> Any:
         """Return the running box.
@@ -547,7 +549,6 @@ async def _delete_and_settle(
     *,
     create_error: BaseException | None,
     create_sent: bool,
-    box_label: Mapping[str, str],
 ) -> None:
     """Delete a box, then settle or release its reservation.
 
@@ -557,7 +558,6 @@ async def _delete_and_settle(
         usage: The reservation of a protected box, or ``None``.
         create_error: The create failure, or ``None``.
         create_sent: True once the create call was sent to Daytona.
-        box_label: The label that only this box carries.
 
     Raises:
         SandboxError: Daytona failed the delete call.
@@ -569,15 +569,17 @@ async def _delete_and_settle(
         # The create can make a box and still fail or lose its answer, so
         # look for the box by its own label before the hold is released.
         try:
-            sandbox = await asyncio.wait_for(_find_box(client, box_label), DELETE_TIMEOUT_SEC)
+            sandbox = await asyncio.wait_for(_find_box(client, usage.box_label), DELETE_TIMEOUT_SEC)
             if sandbox is None and create_error is not None and _refused(create_error):
                 # A refusal can also come from the status poll after the box
                 # exists, and the list can lag that box; look once more.
                 await asyncio.sleep(LOOKUP_RETRY_SEC)
-                sandbox = await asyncio.wait_for(_find_box(client, box_label), DELETE_TIMEOUT_SEC)
+                sandbox = await asyncio.wait_for(_find_box(client, usage.box_label), DELETE_TIMEOUT_SEC)
             looked_up = True
         except Exception as error:
             logger.warning("The sandbox lookup after a failed create failed: %s", type(error).__name__)
+        if sandbox is not None:
+            await _bind_early(usage, sandbox)
     try:
         await _delete_and_close(sandbox, client)
     except BaseException:
@@ -598,11 +600,35 @@ async def _delete_and_settle(
             error = create_error or SandboxInfraError("The sandbox was never created.")
             refused = not create_sent or (looked_up and _refused(error))
             await asyncio.to_thread(usage.fail, error, refused=refused)
-    except (UsagePendingError, BudgetError):
-        raise
-    except Exception as error:
+    except BaseException as error:
+        # A failed bind or release must still leave the hold pending, so a
+        # reconciler can find it.
+        try:
+            await asyncio.to_thread(usage.pending)
+        except Exception as pending_error:
+            logger.warning("The sandbox reservation did not mark pending: %s", type(pending_error).__name__)
+        if isinstance(error, (UsagePendingError, BudgetError)) or not isinstance(error, Exception):
+            raise
         # The text of a database error can hold details the run must not see.
         raise UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.") from error
+
+
+async def _bind_early(usage: Any, sandbox: Any) -> None:
+    """Record a box id in the ledger as soon as the box is known, before any delete.
+
+    A worker crash after this point leaves a hold that names its box. A
+    failure only logs, because the settle binds again and reports it.
+
+    Args:
+        usage: The reservation of a protected box, or ``None``.
+        sandbox: The box.
+    """
+    if usage is None:
+        return
+    try:
+        await asyncio.to_thread(usage.bind, sandbox)
+    except Exception as error:
+        logger.warning("The sandbox id did not reach the ledger before the delete: %s", type(error).__name__)
 
 
 async def _find_box(client: Any, box_label: Mapping[str, str]) -> Any:

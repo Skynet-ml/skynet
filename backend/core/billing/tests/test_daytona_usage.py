@@ -318,15 +318,61 @@ def test_usage_api_transport_error_falls_back_to_measured_time(
     assert _state(reservation).actual_cents == _cents(HOURLY * 60 / 3600)
 
 
-def test_usage_api_with_another_size_keeps_the_hold_pending(
+def test_usage_api_with_another_size_settles_at_the_reservation_maximum(
     database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep the hold pending when the bill shows a size other than the funded one."""
+    """Settle at the reservation maximum and record the mismatch when the bill shows another size."""
     _usage_api(monkeypatch, lambda _request: httpx.Response(200, json=[_period(cpu=4)]))
     reservation = _started(database)
+    clock[0] = START + 60
+    reservation.settle()
+    settled = _state(reservation)
+    assert settled.state == "settled"
+    assert settled.actual_cents == reservation.quote.maximum.total
+    evidence = reservation.runtime.service.get_reconciliation(reservation.operation.id, "alice").evidence
+    (settle,) = [item for item in evidence if item.get("source") == "size-mismatch"]
+    assert settle["size_mismatch"] is True
+    assert settle["periods"] == [_period(cpu=4)]
+
+
+def test_settle_prices_measured_time_at_the_larger_actual_size(database: Engine, clock: list[float]) -> None:
+    """Price measured time at the larger of the funded and actual sizes, so a bigger box is not undercharged."""
+    reservation = DaytonaUsageReservation(_runtime(database), CREATE, operation_key="box-op")
     with pytest.raises(UsagePendingError):
-        reservation.settle()
-    assert _state(reservation).state == "pending"
+        reservation.confirm_created(_box(cpu=4, memory=1, disk=1))
+    assert reservation.actual_sizes == {"vcpus": 4, "memory_gib": 1, "disk_gib": 1}
+    clock[0] = START + 60
+    reservation.settle()
+    larger = Decimal("0.0504") * 4 + Decimal("0.0162") + Decimal("0.000108") * 3
+    assert _state(reservation).actual_cents == _cents(larger * 60 / 3600)
+    assert _cents(larger * 60 / 3600) > _cents(HOURLY * 60 / 3600)
+
+
+def test_settle_reads_usage_for_the_box_organization(
+    database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read the usage of the organization that owns the box, not the configured default."""
+    seen: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request path and return one closed period.
+
+        Args:
+            request: The API request.
+
+        Returns:
+            The usage periods.
+        """
+        seen.append(request.url.path)
+        return httpx.Response(200, json=[_period()])
+
+    _usage_api(monkeypatch, answer)
+    reservation = DaytonaUsageReservation(_runtime(database), CREATE, operation_key="box-op")
+    reservation.confirm_created(SimpleNamespace(id="box-1", cpu=2, memory=1, disk=3, organization_id="org-box"))
+    assert reservation.organization_id == "org-box"
+    clock[0] = START + 60
+    reservation.settle()
+    assert seen == ["/organization/org-box/sandbox/box-1/usage"]
 
 
 @pytest.mark.parametrize("source", ["api", "measured"])
@@ -392,12 +438,10 @@ def test_fail_releases_only_a_refusal(database: Engine, refused: bool, state: st
 
 def test_pending_evidence_names_the_box_label(database: Engine) -> None:
     """Put the box label into the pending evidence, so a box whose id never came back can be matched."""
-    label = {"skynet-box": "abc123"}
     reservation = DaytonaUsageReservation(_runtime(database), CREATE, operation_key="box-op")
-    reservation.box_label = label
     reservation.fail(RuntimeError("create lost"), refused=False)
     (evidence,) = reservation.runtime.service.get_reconciliation(reservation.operation.id, "alice").evidence
-    assert evidence["box_label"] == label
+    assert evidence["box_label"] == {"skynet-box": reservation.operation.id}
     assert evidence["sandbox_id"] is None
 
 
