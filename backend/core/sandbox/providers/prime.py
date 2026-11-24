@@ -19,6 +19,11 @@ the command call, the file calls and the network policy flow come from
 - ``stop_job_sandboxes`` finds the sandboxes of a job by their labels.
 - The network policy can change after the start (``set_network``), and the
   provider waits until Prime applies it.
+- With a budget the sandbox is protected. It reserves its whole timeout
+  before the create call, checks the created size, and settles from
+  Prime's own ``created_at`` and ``terminated_at`` after the delete
+  (``core.billing.prime_usage``). Prime has no call that makes a running
+  sandbox live longer, so a reservation never extends.
 - Harbor's Compose mode (and its PyYAML use), GPUs, user switching and
   directory transfer are left out. The sandbox runs commands as root.
 """
@@ -27,15 +32,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import math
 import os
 import re
 import shlex
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
+
+from core.billing.prime_usage import PrimeUsageReservation
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
@@ -98,9 +107,12 @@ _HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
 _NO_STATUS_TRANSIENT = re.compile(r"\b(?:failed|timed out)\b")
 _FATAL_STATUSES = frozenset({401, 402})
 _REJECTED_STATUSES = frozenset({400, 404, 409, 422})
+_USAGE_FIELDS = ("cpu_cores", "memory_gb", "disk_size_gb", "timeout_minutes", "gpu_count")
+_RECORD_FIELDS = ("id", "status", *_USAGE_FIELDS, "created_at", "started_at", "terminated_at")
 
 PRIME_CAPABILITIES = EnvironmentCapabilities(
     name="prime",
+    billable=True,
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
 )
@@ -214,6 +226,19 @@ async def _labelled(client: Any, label: str) -> AsyncIterator[Any]:
         cursor = page.next_cursor
 
 
+def _record(sandbox: Any) -> dict[str, Any]:
+    """Copy the billing fields of an SDK sandbox into a plain record.
+
+    Args:
+        sandbox: The SDK ``Sandbox``.
+
+    Returns:
+        The id, status, size, timeout and timestamps, with ISO text for each time.
+    """
+    record = {name: getattr(sandbox, name, None) for name in _RECORD_FIELDS}
+    return {name: value.isoformat() if isinstance(value, datetime) else value for name, value in record.items()}
+
+
 def _create_fields(spec: SandboxSpec, box_tag: str) -> dict[str, Any]:
     """Map the spec to the fields of a Prime create request.
 
@@ -253,17 +278,36 @@ class PrimeEnvironment(SandboxEnvironment):
 
     capabilities = PRIME_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = PrimeUsageReservation,
+    ) -> None:
         """Check the spec and prepare the create request.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; ``None`` sets no start or run limit.
+            budget: The ``BudgetRuntime`` that funds the sandbox, or ``None``.
+            usage_factory: Makes the usage reservation of a protected sandbox.
 
         Raises:
-            SandboxSpecError: Prime cannot open this spec.
+            SandboxSpecError: Prime cannot open this spec, or a protected
+                sandbox has no operation key.
         """
+        if budget is not None:
+            if not spec.operation_key:
+                raise SandboxSpecError("A protected Prime sandbox needs an operation key.")
+            self.capabilities = dataclasses.replace(PRIME_CAPABILITIES, protected=True)
         super().__init__(spec)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
+        self._settle_error: Exception | None = None
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
         self._box_tag = uuid.uuid4().hex
@@ -301,7 +345,8 @@ class PrimeEnvironment(SandboxEnvironment):
     async def start(self) -> None:
         """Create the sandbox and wait until it runs.
 
-        Any failure or cancel deletes the sandbox before the error goes on.
+        Any failure or cancel deletes the sandbox and settles, keeps or
+        releases its reservation before the error goes on.
 
         Raises:
             SandboxSpecError: The SDK rejected the create request fields.
@@ -323,7 +368,11 @@ class PrimeEnvironment(SandboxEnvironment):
         try:
             await self._starting
         except BaseException as error:
-            await self.stop()
+            # The teardown gets the start error, so it can release the hold
+            # of a create that Prime refused.
+            if self._stop_task is None:
+                self._stop_task = asyncio.ensure_future(self._teardown(error))
+            await asyncio.shield(self._stop_task)
             task = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and task is not None and not task.cancelling():
                 raise SandboxInfraError("The Prime sandbox stopped during its start.") from None
@@ -332,15 +381,17 @@ class PrimeEnvironment(SandboxEnvironment):
             self._starting = None
 
     async def _create(self) -> None:
-        """Create the sandbox, keep its id and wait until it runs.
+        """Reserve the budget, create the sandbox, keep its id and wait until it runs.
 
         Raises:
             SandboxSpecError: The SDK rejected the create request fields.
             StartTimeoutError: The sandbox did not run within the start timeout.
+            UsagePendingError: Prime created a sandbox larger than funded.
         """
         client = self._client
         limit = self._start_limit
         request = self._create_request()
+        await self._reserve(request)
         try:
             async with asyncio.timeout(limit) as deadline:
                 # Set only now: a request that the SDK refuses never reaches
@@ -351,11 +402,53 @@ class PrimeEnvironment(SandboxEnvironment):
                     # The id is kept here, not in start(), so a stop that
                     # cancels the start right after the create still sees it.
                     self._sandbox_id = sandbox.id
+                    if self._usage is not None:
+                        await self._billing(self._usage.confirm_created, _record(sandbox))
                     await client.wait_for_creation(sandbox.id, max_attempts=_UNBOUNDED_WAIT)
         except TimeoutError:
             if not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
+
+    async def _reserve(self, request: Any) -> None:
+        """Reserve the whole timeout of a protected sandbox before its create.
+
+        Args:
+            request: The SDK create request, with the SDK defaults filled in.
+        """
+        if self._budget is None:
+            return
+        fields = {name: getattr(request, name) for name in _USAGE_FIELDS}
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(self._usage_factory, self._budget, fields, operation_key=self.spec.operation_key)
+        )
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled and may still reserve; keep its
+            # result so the teardown releases it instead of leaking it.
+            while not reserving.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(reserving)
+            if not reserving.cancelled() and reserving.exception() is None:
+                self._usage = reserving.result()
+            raise
+
+    async def _billing(self, call: Callable[..., Any], *args: Any) -> Any:
+        """Run one reservation call in a thread that a cancel cannot cut short.
+
+        The teardown awaits the same call before it settles, so a settle never
+        races a confirm that is still running.
+
+        Args:
+            call: The reservation method.
+            *args: Its arguments.
+
+        Returns:
+            The result of the call.
+        """
+        self._billing_call = asyncio.ensure_future(asyncio.to_thread(call, *args))
+        return await asyncio.shield(self._billing_call)
 
     def _create_request(self) -> Any:
         """Build the SDK create request from the prepared fields.
@@ -518,40 +611,124 @@ class PrimeEnvironment(SandboxEnvironment):
                 raise SandboxInfraError("Prime did not apply the network policy in time.") from None
 
     async def stop(self) -> None:
-        """Delete the sandbox once and close the client. Safe to call again."""
-        if self._stop_task is None:
-            self._stop_task = asyncio.ensure_future(self._teardown())
-        await asyncio.shield(self._stop_task)
+        """Delete the sandbox once, settle its reservation and close the client. Safe to call again.
 
-    async def _teardown(self) -> None:
-        """End a running start, delete the sandbox and close the client."""
+        Raises:
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: The ledger refused the settlement.
+        """
+        if self._stop_task is None:
+            self._stop_task = asyncio.ensure_future(self._teardown(None))
+        await asyncio.shield(self._stop_task)
+        # Only one stop caller gets a settle failure, like the Vercel box.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
+
+    async def _teardown(self, error: BaseException | None) -> None:
+        """End a running start, delete the sandbox, settle its reservation and close the client.
+
+        Args:
+            error: The start failure, or ``None`` for a normal stop.
+        """
         if self._starting is not None and not self._starting.done():
             # A stop during the start: end the create first, so no sandbox
             # appears after this teardown has looked for it.
             self._starting.cancel()
             with contextlib.suppress(BaseException):
                 await self._starting
+        if self._billing_call is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._billing_call)
         client, sandbox_id = self._client, self._sandbox_id
         self._client = self._sandbox_id = None
         if client is None:
             return
         try:
+            searched = False
             if sandbox_id is not None:
                 await _bounded(client.delete(sandbox_id), "delete the sandbox")
             elif self._create_dispatched:
-                await _bounded(self._delete_orphan(client), "delete the lost sandbox")
+                orphan = asyncio.ensure_future(self._delete_orphan(client))
+                searched = await _bounded(orphan, "delete the lost sandbox")
+                sandbox_id = orphan.result() if searched else None
+            await self._settle(client, sandbox_id, error, searched=searched)
         finally:
             await _bounded(client.aclose(), "close the client")
 
-    async def _delete_orphan(self, client: Any) -> None:
+    async def _settle(
+        self, client: Any, sandbox_id: str | None, error: BaseException | None, *, searched: bool
+    ) -> None:
+        """Settle, keep or release the reservation of a deleted sandbox.
+
+        Args:
+            client: The SDK client.
+            sandbox_id: The deleted sandbox, or ``None`` when none was found.
+            error: The start failure, or ``None`` for a normal stop.
+            searched: True when the label search for a lost sandbox finished.
+        """
+        usage = self._usage
+        if usage is None:
+            return
+        record: dict[str, Any] = {}
+        try:
+            if sandbox_id is None:
+                # Only a create that never left, or that Prime refused with no
+                # sandbox under its label, proves that nothing runs.
+                refused = searched and isinstance(error, SandboxRejectedError | SandboxFatalError)
+                if not self._create_dispatched or refused:
+                    await asyncio.to_thread(usage.release, type(error).__name__ if error else "not created")
+                else:
+                    await asyncio.to_thread(usage.pending)
+                return
+            record = await self._final_record(client, sandbox_id)
+            if usage.sandbox_id is None:
+                await asyncio.to_thread(usage.confirm_created, record)
+            await asyncio.to_thread(usage.settle, record)
+        except Exception as billing_error:
+            logger.warning("Prime sandbox usage stays pending: %s", type(billing_error).__name__)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(usage.pending, record)
+            if sandbox_id is not None:
+                self._settle_error = billing_error
+
+    async def _final_record(self, client: Any, sandbox_id: str) -> dict[str, Any]:
+        """Read the sandbox until Prime shows its end time.
+
+        Args:
+            client: The SDK client.
+            sandbox_id: The deleted sandbox.
+
+        Returns:
+            The last record read; it has no ``terminated_at`` when Prime did
+            not show one within ``STOP_TIMEOUT``, so the settle stays pending.
+        """
+        record: dict[str, Any] = {}
+        try:
+            async with asyncio.timeout(STOP_TIMEOUT):
+                while True:
+                    with _mapped("read the sandbox"):
+                        record = _record(await client.get(sandbox_id))
+                    if record["terminated_at"] is not None:
+                        return record
+                    await asyncio.sleep(POLL_INTERVAL)
+        except Exception as read_error:
+            logger.warning("Prime did not show the sandbox end: %s", type(read_error).__name__)
+        return record
+
+    async def _delete_orphan(self, client: Any) -> str | None:
         """Delete the sandbox of a create that ended before it returned.
 
         Args:
             client: The SDK client.
+
+        Returns:
+            The id of the deleted sandbox, or ``None`` when none was found.
         """
         async for sandbox in _labelled(client, f"{BOX_TAG}={self._box_tag}"):
             await client.delete(sandbox.id)
-            return
+            return sandbox.id
+        return None
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:

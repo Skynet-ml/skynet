@@ -11,12 +11,14 @@ import asyncio
 import itertools
 import shlex
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -27,6 +29,7 @@ from core.sandbox.errors import (
     SandboxTransientError,
     StartTimeoutError,
 )
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import prime
 from core.sandbox.providers.prime import BOX_TAG, PrimeEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -67,6 +70,11 @@ class FakeUploadTimeoutError(RuntimeError):
     """Stand in for ``UploadTimeoutError``."""
 
 
+# The SDK model defaults; its validator sets a 5 GB disk when an image is given.
+_SDK_DEFAULTS = {"cpu_cores": 1.0, "memory_gb": 1.0, "disk_size_gb": 5.0, "timeout_minutes": 60, "gpu_count": 0}
+_CREATED_AT = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+
 class FakeCreateRequest(dict):
     """Stand in for ``CreateSandboxRequest``: keep the fields as a dict."""
 
@@ -78,6 +86,21 @@ class FakeCreateRequest(dict):
         """
         super().__init__(fields)
 
+    def __getattr__(self, name: str) -> Any:
+        """Read a field like the SDK model, with the SDK default when it is not set.
+
+        Args:
+            name: The field name.
+
+        Returns:
+            The field value.
+        """
+        if name in self:
+            return self[name]
+        if name in _SDK_DEFAULTS:
+            return _SDK_DEFAULTS[name]
+        raise AttributeError(name)
+
 
 @dataclass
 class BoxState:
@@ -87,6 +110,7 @@ class BoxState:
     labels: list[str]
     request: dict[str, Any]
     status: str = "PENDING"
+    terminated_at: datetime | None = None
     files: dict[str, str] = field(default_factory=dict)
     dirs: set[str] = field(default_factory=lambda: {"/", "/tmp"})
 
@@ -114,6 +138,8 @@ class FakeCloud:
     # The get_network calls before Prime reports the policy as applied; None never applies it.
     apply_after: int | None = 0
     ids: Any = field(default_factory=lambda: itertools.count(1))
+    # The seconds between the create and the end that the delete records; None records no end.
+    run_seconds: float | None = 90.0
 
     def run(self, box: BoxState, command: str, env: dict[str, str] | None) -> tuple[int, str, str]:
         """Run one raw command in a tiny shell model.
@@ -179,7 +205,39 @@ class FakeClient:
         CLOUD.boxes[box.id] = box
         if CLOUD.create_hangs:
             await asyncio.Event().wait()
-        return SimpleNamespace(id=box.id)
+        return self._view(box)
+
+    @staticmethod
+    def _view(box: BoxState) -> SimpleNamespace:
+        """Return the SDK ``Sandbox`` view of a fake sandbox.
+
+        Args:
+            box: The sandbox.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        sizes = {name: box.request.get(name, default) for name, default in _SDK_DEFAULTS.items()}
+        return SimpleNamespace(
+            id=box.id,
+            status=box.status,
+            created_at=_CREATED_AT,
+            started_at=None,
+            terminated_at=box.terminated_at,
+            **sizes,
+        )
+
+    async def get(self, sandbox_id: str) -> SimpleNamespace:
+        """Read one sandbox.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Returns:
+            An object like ``Sandbox``.
+        """
+        CLOUD.calls.append(f"get:{sandbox_id}")
+        return self._view(CLOUD.boxes[sandbox_id])
 
     async def wait_for_creation(self, sandbox_id: str, *, max_attempts: int) -> None:
         """Wait until the sandbox runs, forever when the cloud says it hangs.
@@ -333,7 +391,10 @@ class FakeClient:
             sandbox_id: The sandbox id.
         """
         CLOUD.calls.append(f"delete:{sandbox_id}")
-        CLOUD.boxes[sandbox_id].status = "TERMINATED"
+        box = CLOUD.boxes[sandbox_id]
+        box.status = "TERMINATED"
+        if CLOUD.run_seconds is not None:
+            box.terminated_at = _CREATED_AT + timedelta(seconds=CLOUD.run_seconds)
 
     async def aclose(self) -> None:
         """Close the client."""
@@ -852,3 +913,192 @@ async def test_an_upload_timeout_is_transient(fake_sdk: FakeCloud) -> None:
         with pytest.raises(SandboxTransientError) as caught:
             await env.upload_files({"/tmp/a.txt": "x"})
     assert caught.value.__cause__ is error
+
+
+@dataclass
+class FakeUsage:
+    """Record the reservation calls that a protected sandbox makes."""
+
+    budget: Any
+    request: dict[str, Any]
+    operation_key: str
+    created_before: list[str]
+    calls: list[tuple[str, Any]] = field(default_factory=list)
+    sandbox_id: str | None = None
+    settle_error: Exception | None = None
+
+    def confirm_created(self, record: dict[str, Any]) -> None:
+        """Bind the created sandbox.
+
+        Args:
+            record: The sandbox record.
+        """
+        self.sandbox_id = record["id"]
+        self.calls.append(("confirm", record))
+
+    def settle(self, record: dict[str, Any] | None = None) -> None:
+        """Record the settle, or fail it.
+
+        Args:
+            record: The final sandbox record.
+
+        Raises:
+            Exception: The ``settle_error`` the test set.
+        """
+        self.calls.append(("settle", record))
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def pending(self, record: dict[str, Any] | None = None) -> None:
+        """Record that the hold stays pending.
+
+        Args:
+            record: The last sandbox record.
+        """
+        self.calls.append(("pending", record))
+
+    def release(self, reason: str) -> None:
+        """Record the release of a hold with no sandbox.
+
+        Args:
+            reason: Why no sandbox exists.
+        """
+        self.calls.append(("release", reason))
+
+
+class UsageRecorder:
+    """Make fake reservations and keep each one."""
+
+    def __init__(self, settle_error: Exception | None = None) -> None:
+        """Start with no reservation.
+
+        Args:
+            settle_error: The error each settle raises, or ``None``.
+        """
+        self.made: list[FakeUsage] = []
+        self.settle_error = settle_error
+
+    def __call__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make one reservation and record the cloud calls made before it.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced create fields.
+            operation_key: The sandbox identity.
+
+        Returns:
+            The fake reservation.
+        """
+        usage = FakeUsage(budget, request, operation_key, list(CLOUD.calls), settle_error=self.settle_error)
+        self.made.append(usage)
+        return usage
+
+
+def _protected(recorder: UsageRecorder, **kwargs: Any) -> PrimeEnvironment:
+    """Return a protected sandbox that reserves through the recorder.
+
+    Args:
+        recorder: The fake usage factory.
+        **kwargs: Extra provider options.
+
+    Returns:
+        The sandbox.
+    """
+    return PrimeEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=recorder, **kwargs)
+
+
+def test_prime_is_billable_and_has_a_usage_adapter() -> None:
+    """Declare Prime billable, so the broker passes a budget, and find its usage adapter."""
+    assert prime.PRIME_CAPABILITIES.billable is True
+    assert usage_adapter("prime") is not None
+
+
+def test_a_protected_sandbox_needs_an_operation_key() -> None:
+    """Refuse a budget without the stable identity the ledger needs."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        PrimeEnvironment(_spec(), budget=object(), usage_factory=UsageRecorder())
+
+
+async def test_a_protected_sandbox_reserves_before_the_create_and_settles_after_the_delete(
+    fake_sdk: FakeCloud,
+) -> None:
+    """Reserve the funded size, confirm the created sandbox and settle its ended record."""
+    recorder = UsageRecorder()
+    env = _protected(recorder)
+    assert env.capabilities.protected is True
+    async with env:
+        pass
+    (usage,) = recorder.made
+    assert "create" not in usage.created_before
+    assert usage.operation_key == "op-1"
+    assert usage.request == {**_SDK_DEFAULTS, "cpu_cores": 1.0, "timeout_minutes": 5}
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    record = usage.calls[1][1]
+    assert record["id"] == "sbx-1"
+    assert record["created_at"] == _CREATED_AT.isoformat()
+    assert record["terminated_at"] == (_CREATED_AT + timedelta(seconds=90)).isoformat()
+    assert fake_sdk.calls.index("delete:sbx-1") < fake_sdk.calls.index("get:sbx-1")
+    assert fake_sdk.calls[-1] == "aclose"
+
+
+async def test_a_start_timeout_settles_the_created_sandbox(fake_sdk: FakeCloud) -> None:
+    """Settle the sandbox that never reached running, and keep the start error."""
+    fake_sdk.wait_hangs = True
+    recorder = UsageRecorder()
+    with pytest.raises(StartTimeoutError):
+        await _protected(recorder, timeouts=_timeouts(start=0.05)).start()
+    assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle"]
+
+
+async def test_a_cancelled_create_settles_the_lost_sandbox(fake_sdk: FakeCloud) -> None:
+    """Find a sandbox whose create never returned, bind it and settle it."""
+    fake_sdk.create_hangs = True
+    recorder = UsageRecorder()
+    start = asyncio.ensure_future(_protected(recorder).start())
+    await asyncio.sleep(0.01)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[1][1]["status"] == "TERMINATED"
+
+
+async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold when Prime refused the create and no sandbox carries the label."""
+    fake_sdk.create_error = FakeAPIError("HTTP 422: bad field")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxRejectedError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("release", "SandboxRejectedError")]
+
+
+async def test_a_transient_create_error_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
+    """Keep the hold when a 5xx answer leaves it unknown whether Prime made a sandbox."""
+    fake_sdk.create_error = FakeAPIError("HTTP 503: unavailable")
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxTransientError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("pending", None)]
+
+
+async def test_a_failed_settle_is_raised_once_by_stop(fake_sdk: FakeCloud) -> None:
+    """Raise the settle failure from the first stop only, and keep the hold pending."""
+    recorder = UsageRecorder(settle_error=UsagePendingError("not final"))
+    env = _protected(recorder)
+    await env.start()
+    with pytest.raises(UsagePendingError, match="not final"):
+        await env.stop()
+    await env.stop()
+    assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle", "pending"]
+
+
+async def test_a_sandbox_with_no_end_time_settles_with_no_end(fake_sdk: FakeCloud) -> None:
+    """Stop waiting after the stop timeout, so the settle sees no end and stays pending."""
+    fake_sdk.run_seconds = None
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    record = recorder.made[0].calls[-1][1]
+    assert record["terminated_at"] is None
+    assert fake_sdk.calls.count("get:sbx-1") > 1
