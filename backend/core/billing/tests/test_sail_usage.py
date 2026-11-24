@@ -787,3 +787,76 @@ def test_a_failed_settle_of_a_pending_hold_raises_its_own_error(database: Engine
     with pytest.raises(UsagePendingError, match="spend"):
         reservation.settle_spend({})
     assert _state(database) == "pending"
+
+
+@pytest.mark.parametrize("step", ["settle_spend", "settle"])
+def test_a_failed_pending_mark_keeps_the_first_error(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """Raise the settle error, not the error of the pending mark that follows it.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: Makes the pending mark and the spend read fail.
+        step: The settle call that fails.
+    """
+    reservation = _reservation(database, FakeSpend(SPEND))
+    _created(reservation)
+
+    def fail_mark(*args: Any, **kwargs: Any) -> None:
+        """Fail like a ledger that cannot write.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    async def no_spend(budget: float | None = None) -> dict[str, Any]:
+        """Fail like a spend that never arrives.
+
+        Args:
+            budget: Ignored.
+
+        Raises:
+            UsagePendingError: Always.
+        """
+        raise UsagePendingError("no spend")
+
+    monkeypatch.setattr(reservation.runtime.service, "mark_pending", fail_mark)
+    monkeypatch.setattr(reservation, "final_spend", no_spend)
+    with pytest.raises(UsagePendingError):
+        if step == "settle":
+            reservation.settle()
+        else:
+            reservation.settle_spend({})
+
+
+def test_a_failed_reject_still_unpins_the_hold(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unpin the hold of a box that was never created, even when the reject fails.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: Makes the reject fail.
+    """
+    reservation = _reservation(database, FakeSpend(SPEND))
+
+    def fail_reject(*args: Any, **kwargs: Any) -> None:
+        """Fail like a ledger that cannot write.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(reservation.runtime.service, "reject", fail_reject)
+    with pytest.raises(RuntimeError):
+        reservation.release()
+    assert reservation.runtime._pinned == {}

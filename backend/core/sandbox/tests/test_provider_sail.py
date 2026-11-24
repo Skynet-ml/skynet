@@ -1044,6 +1044,11 @@ async def test_stop_job_sandboxes_goes_on_after_a_failure(fake_sdk: FakeCloud) -
     fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
     assert await SailEnvironment.stop_job_sandboxes("job-1") == 1
     assert [box.terminated for box in fake_sdk.boxes] == [False, True]
+    # The box that did not terminate stays listed, so the next sweep tries again.
+    assert {"job-1": {envs[0]}} == sail._JOB_BOXES
+    fake_sdk.terminate_fails.clear()
+    assert await SailEnvironment.stop_job_sandboxes("job-1") == 1
+    assert [box.terminated for box in fake_sdk.boxes] == [True, True]
     assert sail._JOB_BOXES == {}
     assert await SailEnvironment.stop_job_sandboxes("job-1") == 0
 
@@ -1424,6 +1429,62 @@ async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -
     assert "settle" not in made[0].names()
 
 
+async def test_a_box_that_did_not_terminate_is_tried_again(fake_sdk: FakeCloud) -> None:
+    """Keep a box that did not terminate, so the job sweep and a later stop try again.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected(tags={JOB_TAG: "job-1"})
+    await env.start()
+    fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
+    with pytest.raises(UsagePendingError, match="did not terminate"):
+        await env.stop()
+    assert {"job-1": {env}} == sail._JOB_BOXES
+    assert await SailEnvironment.stop_job_sandboxes("job-1") == 0
+    fake_sdk.terminate_fails.clear()
+    await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert sail._JOB_BOXES == {}
+    assert made[0].names().count("pending") == 1
+    assert made[0].names().count("settle") == 1
+
+
+async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Try the pending mark again after it fails, and stop once it works.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the first pending write fail.
+    """
+
+    def flaky_pending(self: FakeUsage) -> None:
+        """Fail the first call like a ledger that cannot write, then record the mark.
+
+        Args:
+            self: The fake reservation.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        if "pending_failed" not in self.names():
+            self.calls.append(("pending_failed", None))
+            raise RuntimeError("ledger down")
+        self.calls.append(("pending", None))
+
+    monkeypatch.setattr(FakeUsage, "pending", flaky_pending)
+    env, made = _protected()
+    await env.start()
+    fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert made[0].names().count("pending") == 1
+    with pytest.raises(UsagePendingError, match="did not terminate"):
+        await env.stop()
+    assert made[0].names().count("pending") == 1
+    assert made[0].names().count("pending_failed") == 1
+
+
 async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
     """Raise a failed settle from the first stop only, as a pending usage error.
 
@@ -1787,14 +1848,15 @@ async def test_a_failed_pending_call_does_not_hide_a_cancel(
     made[0].settle_error = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
         await env.stop()
-    assert made[0].names().count("pending") == 1
+    # The failed mark clears the flag, so the cancel path tries it once more.
+    assert made[0].names().count("pending") == 2
 
 
 @pytest.mark.parametrize("path", ["settle", "terminate"])
 async def test_a_ledger_error_marks_the_hold_pending_once(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """Call pending once when a ledger write fails after a pending call.
+    """Try a failed pending call once more, and never repeat a mark that the settle made.
 
     Args:
         fake_sdk: The fake Sail cloud.
@@ -1835,7 +1897,7 @@ async def test_a_ledger_error_marks_the_hold_pending_once(
         fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
     with pytest.raises(UsagePendingError):
         await env.stop()
-    assert made[0].names().count("pending") == 1
+    assert made[0].names().count("pending") == (2 if path == "terminate" else 1)
 
 
 async def test_a_cancelled_teardown_during_the_start_releases_a_late_hold(fake_sdk: FakeCloud) -> None:
@@ -1978,7 +2040,7 @@ async def test_only_a_terminated_box_settles_when_its_terminate_fails(
     fake_sdk.create_makes_box = True
     fake_sdk.lost_box_status = status
     fake_sdk.terminate_fails.add("sb-1")
-    env, made = _protected()
+    env, made = _protected(tags={JOB_TAG: "job-1"})
     with pytest.raises(SandboxInfraError, match="create the Sailbox"):
         await env.start()
     if settles:
@@ -1989,6 +2051,14 @@ async def test_only_a_terminated_box_settles_when_its_terminate_fails(
             await env.stop()
         assert made[0].calls[-1] == ("pending", None)
         assert "settle" not in made[0].names()
+        # The found box stays kept, so the job sweep and a later stop see it.
+        assert {"job-1": {env}} == sail._JOB_BOXES
+        fake_sdk.terminate_fails.clear()
+        await env.stop()
+        assert [box.terminated for box in fake_sdk.boxes] == [True]
+        assert made[0].names().count("pending") == 1
+        assert made[0].names()[-1] == "settle"
+        assert sail._JOB_BOXES == {}
 
 
 async def test_a_reserve_that_ends_with_the_cancel_of_the_start_wait_releases_its_hold(

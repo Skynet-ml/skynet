@@ -524,13 +524,16 @@ class SailUsageReservation:
             self.pending()
             return
         reason = "Sail refused the create call" if refused else "the create call was never sent"
-        self.runtime.service.reject(
-            self.operation.id,
-            self.runtime.username,
-            evidence_key=f"sail-unsent:{self.operation.id}",
-            evidence={"provider": "sail", "reason": reason, "sailbox_name": self.sailbox_name},
-        )
-        self.runtime.unpin(self.operation.id)
+        try:
+            self.runtime.service.reject(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"sail-unsent:{self.operation.id}",
+                evidence={"provider": "sail", "reason": reason, "sailbox_name": self.sailbox_name},
+            )
+        finally:
+            # No box can exist, so the pin has no use even when the reject fails.
+            self.runtime.unpin(self.operation.id)
 
     def _identity(self) -> tuple[str, dt.datetime]:
         """Return the box id and the start of its spend window.
@@ -658,7 +661,11 @@ class SailUsageReservation:
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            # A failed pending call must not replace the first error.
+            try:
+                self.pending()
+            except Exception as pending_error:
+                logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
             raise
 
     def settle(self) -> None:
@@ -672,7 +679,11 @@ class SailUsageReservation:
         try:
             spend = asyncio.run(self.final_spend())
         except BaseException:
-            self.pending()
+            # A failed pending call must not replace the first error.
+            try:
+                self.pending()
+            except Exception as pending_error:
+                logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
             raise
         self.settle_spend(spend)
 

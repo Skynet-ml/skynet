@@ -782,12 +782,18 @@ class SailEnvironment(SandboxEnvironment):
                 self._sailbox = sailbox
                 await self._pend_after_cancel(self._usage)
                 raise
-            job_id = self._job_id
-            boxes = _JOB_BOXES.get(job_id) if job_id is not None else None
-            if job_id is not None and boxes is not None:
-                boxes.discard(self)
-                if not boxes:
-                    del _JOB_BOXES[job_id]
+            if not self._terminated:
+                # The box can still run, so a later stop() or the job sweep
+                # needs the handle to try the terminate again.
+                self._keep(sailbox)
+                self._stop_task = None
+            else:
+                job_id = self._job_id
+                boxes = _JOB_BOXES.get(job_id) if job_id is not None else None
+                if job_id is not None and boxes is not None:
+                    boxes.discard(self)
+                    if not boxes:
+                        del _JOB_BOXES[job_id]
         try:
             await self._settle(sailbox, end)
         finally:
@@ -818,6 +824,12 @@ class SailEnvironment(SandboxEnvironment):
                 # A create in its grace returns the handle without a confirm.
                 await asyncio.to_thread(usage.bind, sailbox.sailbox_id)
             if not self._terminated:
+                # The box can still run. Keep its handle, its job entry and its
+                # usage, so a later stop() or the job sweep terminates and
+                # settles it; a found box of a failed create has no handle yet.
+                self._keep(sailbox)
+                self._usage = usage
+                self._stop_task = None
                 await self._mark_pending(usage)
                 raise UsagePendingError("The Sailbox did not terminate, so its usage stays pending.")
             self._box_gone.set()
@@ -845,7 +857,7 @@ class SailEnvironment(SandboxEnvironment):
                 # record the hold as pending, best effort, so it is reconciled.
                 if not self._pending_marked:
                     try:
-                        await asyncio.to_thread(usage.pending)
+                        await self._mark_pending(usage)
                     except Exception as pending_error:
                         logger.warning("Sail could not mark the hold pending: %s", type(pending_error).__name__)
                 pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
@@ -869,7 +881,13 @@ class SailEnvironment(SandboxEnvironment):
         if self._pending_marked:
             return
         self._pending_marked = True
-        await asyncio.to_thread(usage.pending)
+        try:
+            await asyncio.to_thread(usage.pending)
+        except Exception:
+            # The mark did not happen, so a later path must try it again. A
+            # cancel keeps the flag: the thread still runs the call.
+            self._pending_marked = False
+            raise
 
     async def _pend_after_cancel(self, usage: Any) -> None:
         """Keep the hold pending, best effort, after a cancel ends the teardown.
