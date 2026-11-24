@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { useSettingsModal, useUserPrefs } from "@/features/settings";
-import { updateModelPrivacy, type InterviewOption } from "@/shared/lib/api";
+import { updateModelPrivacy, updateSetupBilling, type InterviewOption } from "@/shared/lib/api";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
 import { isLocalMode } from "@/shared/lib/runtime-env";
@@ -23,6 +23,7 @@ import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 import { ArrowRight, X } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
+import { Switch } from "@/shared/ui/primitives/switch";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 import type { ModelDataPolicy } from "@/shared/types/api";
 
@@ -340,6 +341,9 @@ function IntakeSurface() {
     if (final.privacy) {
       await updateModelPrivacy({ data_policy: final.privacy }).catch(() => undefined);
     }
+    if (final.setup_from_wallet !== null) {
+      await updateSetupBilling({ from_wallet: final.setup_from_wallet }).catch(() => undefined);
+    }
     return final;
   };
 
@@ -480,20 +484,44 @@ function IntakeSurface() {
         }));
         const current = choices.findIndex((c) => c.value === answers.billing);
         return (
-          <Choices
-            options={options}
-            selected={
-              draft.answered.includes("billing") && current >= 0 ? options[current]!.label : []
-            }
-            ariaLabel={msg("experience.intake.billing.title")}
-            onSelect={(_, index) => {
-              const billing = choices[index]?.value ?? "platform";
-              answerStop(
-                "billing",
-                billing === "byok" ? { billing } : { billing, byok_provider: null },
-              );
-            }}
-          />
+          <>
+            <Choices
+              options={options}
+              selected={
+                draft.answered.includes("billing") && current >= 0 ? options[current]!.label : []
+              }
+              ariaLabel={msg("experience.intake.billing.title")}
+              onSelect={(_, index) => {
+                const billing = choices[index]?.value ?? "platform";
+                answerStop(
+                  "billing",
+                  billing === "byok" ? { billing } : { billing, byok_provider: null },
+                );
+              }}
+            />
+            {/* Changes only the draft: the stop still moves on when a billing choice is picked. */}
+            <label className="mt-3 flex items-start gap-3 text-sm">
+              <Switch
+                checked={answers.setup_from_wallet !== false}
+                onCheckedChange={(next) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    answers: { ...prev.answers, setup_from_wallet: next },
+                  }))
+                }
+                aria-describedby="intake-setup-billing-hint"
+              />
+              <span className="space-y-0.5">
+                <span className="block font-medium">{msg("settings.setup_billing.label")}</span>
+                <span
+                  id="intake-setup-billing-hint"
+                  className="block text-xs text-muted-foreground"
+                >
+                  {msg("settings.setup_billing.description")}
+                </span>
+              </span>
+            </label>
+          </>
         );
       }
       case "privacy": {

@@ -773,7 +773,9 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             """Return the budget the key made, if any."""
             return record["budgets"].get(idempotency_key)
 
-        def create(self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool) -> Any:
+        def create(
+            self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool, setup_in_total: bool
+        ) -> Any:
             """Make a budget for the key."""
             record["creates"].append((username, total_cents, idempotency_key, uncapped))
             budget = SimpleNamespace(id="budget-1", revision=3, total_cents=total_cents, job_id=None)
@@ -792,6 +794,7 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         return SimpleNamespace(status=status, may_advance=status == "succeeded")
 
     monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
+    monkeypatch.setattr(remote_mcp_repo, "bills_setup_from_wallet", lambda engine, username: True)
     monkeypatch.setattr(remote_mcp_repo, "resolve_submission_replay_keys", keys)
     monkeypatch.setattr(remote_mcp_repo, "_enforce_balance", lambda store, user, source: record["balance"].append(user))
     monkeypatch.setattr(remote_mcp_repo, "checked_preflight", check)

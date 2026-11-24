@@ -22,7 +22,7 @@ Der gewählte Betrag ist der Betrag, der Ihrem Guthaben gutgeschrieben wird. Die
 
 ## Durchlaufbudgets
 
-Jeder Durchlauf hat ein Ausgabenlimit. Das Limit ist der Höchstbetrag, den der Durchlauf ausgeben darf. Es deckt die Optimierung ab. Einrichtungsprüfungen werden aus Ihrem Guthaben bezahlt.
+Jeder Durchlauf hat ein Ausgabenlimit. Das Limit ist der Höchstbetrag, den der Durchlauf ausgeben darf. Es deckt die Optimierung ab. Einrichtungsprüfungen werden aus Ihrem Guthaben bezahlt. Damit sie im Limit neuer Durchläufe zählen, schalten Sie **Einrichtung über mein Guthaben abrechnen** unter **Einstellungen → Optimierung** aus. Kontinuierliche Pläne zählen die Einrichtung immer zum Zyklusbudget.
 
 Ein Durchlauf hat vor dem Start keine Kostenschätzung. Er gibt bis zu seinem Limit aus, stoppt am Budget und behält seine beste Version. Unter [Durchläufe](/docs/concepts/runs) erfahren Sie, wie Skynet entscheidet, wann es stoppt.
 

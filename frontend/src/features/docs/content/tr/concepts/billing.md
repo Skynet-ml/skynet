@@ -22,7 +22,7 @@ Seçtiğiniz tutar, bakiyenize giren tutardır. Bakiye yükleme ücreti bunun ü
 
 ## Çalıştırma bütçeleri
 
-Her çalıştırmanın bir harcama limiti vardır. Limit, çalıştırmanın harcayabileceği en yüksek tutardır. Optimizasyonu kapsar. Kurulum kontrolleri bakiyenizden ödenir.
+Her çalıştırmanın bir harcama limiti vardır. Limit, çalıştırmanın harcayabileceği en yüksek tutardır. Optimizasyonu kapsar. Kurulum kontrolleri bakiyenizden ödenir. Bunları yeni çalıştırmaların limitine saymak için **Ayarlar → Optimizasyon** bölümünde **Kurulumu bakiyemden öde** seçeneğini kapatın. Sürekli planlar kurulumu her zaman döngü bütçesine sayar.
 
 Bir çalıştırmanın başlamadan önce maliyet tahmini yoktur. Limitine kadar harcar, bütçesinde durur ve en iyi sürümünü korur. Skynet'in ne zaman durmaya karar verdiğini görmek için [Çalıştırmalar](/docs/concepts/runs) sayfasını okuyun.
 

@@ -102,6 +102,7 @@ from ._helpers import (
     strip_api_key,
 )
 from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
+from .setup_billing import bills_setup_from_wallet
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,8 @@ def _ensure_api_budget(
         from_balance: Whether the account balance, not the user's own limit,
             set the request's limit.
         setup_in_total: Whether a new budget counts setup against its limit,
-            as a continuous-plan check does (SKY-925).
+            as a continuous-plan check does (SKY-925). When False, the
+            owner's setup billing setting decides.
     """
     if payload.execution_budget_id is not None:
         return
@@ -155,6 +157,8 @@ def _ensure_api_budget(
         # A retry reuses the original approved total: the balance it would be
         # recomputed from moves once the first attempt's check reserves spend.
         budget = service.find_by_creation_key(user.username, budget_creation_key)
+        # The account's choice applies only to a new budget; a replay keeps its stored flag.
+        counts_setup = budget is None and (setup_in_total or not bills_setup_from_wallet(engine, user.username))
         if budget is None and settings.local_mode:
             # Local mode charges no managed spend or platform fee, so the
             # budget only records usage and never stops the run.
@@ -164,7 +168,7 @@ def _ensure_api_budget(
                 total,
                 idempotency_key=budget_creation_key,
                 uncapped=True,
-                setup_in_total=setup_in_total,
+                setup_in_total=counts_setup,
             )
         elif budget is None:
             spendable = _enforce_balance(job_store, user.username, payload.token_source)
@@ -173,7 +177,7 @@ def _ensure_api_budget(
                 total = cost_ceiling_budget(spendable or 0, payload.token_source)
             require_funded_lease(total, spendable, from_balance=from_balance)
             budget = service.create(
-                user.username, total, idempotency_key=budget_creation_key, setup_in_total=setup_in_total
+                user.username, total, idempotency_key=budget_creation_key, setup_in_total=counts_setup
             )
     except BudgetError as error:
         raise budget_http_error(error) from error

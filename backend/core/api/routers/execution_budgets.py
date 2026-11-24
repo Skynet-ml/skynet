@@ -23,6 +23,7 @@ from ...billing.budgets import (
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from .setup_billing import bills_setup_from_wallet
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)]
@@ -198,7 +199,11 @@ def create_execution_budgets_router(*, job_store: Any) -> APIRouter:
         try:
             return budget_response(
                 ledger().create(
-                    user.username, request.total_cents, idempotency_key=idempotency_key, uncapped=request.uncapped
+                    user.username,
+                    request.total_cents,
+                    idempotency_key=idempotency_key,
+                    uncapped=request.uncapped,
+                    setup_in_total=not bills_setup_from_wallet(job_store.engine, user.username),
                 )
             )
         except BudgetError as error:

@@ -159,6 +159,14 @@ def test_validate_patch_rejects_bad_providers_and_budgets() -> None:
     assert validate_profile_patch("[]", provider_slugs=_SLUGS) == {}
 
 
+def test_validate_patch_keeps_only_a_strict_setup_billing_flag() -> None:
+    """Accept the setup billing answer as a boolean or its text, and drop anything else."""
+    assert validate_profile_patch({"setup_from_wallet": False}, provider_slugs=_SLUGS) == {"setup_from_wallet": False}
+    assert validate_profile_patch({"setup_from_wallet": " True "}, provider_slugs=_SLUGS) == {"setup_from_wallet": True}
+    for junk in ("maybe", 0, 1, None, [], "yes"):
+        assert validate_profile_patch({"setup_from_wallet": junk}, provider_slugs=_SLUGS) == {}
+
+
 def test_platform_billing_drops_byok_provider() -> None:
     """A platform-billed patch carries no BYOK provider."""
     patch = validate_profile_patch({"billing": "platform", "byok_provider": "openai"}, provider_slugs=_SLUGS)

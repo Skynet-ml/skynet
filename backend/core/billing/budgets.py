@@ -694,11 +694,9 @@ class BudgetService:
         total = _total(total_cents)
         key = _identifier(idempotency_key)
         # Only a set flag widens the fingerprint so earlier replays keep matching.
-        fingerprint = _fingerprint(
-            {"total": total}
-            | ({"uncapped": True} if uncapped else {})
-            | ({"setup_in_total": True} if setup_in_total else {})
-        )
+        # ``setup_in_total`` stays out: it follows an account setting that may
+        # change between retries, and a replay keeps the stored flag.
+        fingerprint = _fingerprint({"total": total} | ({"uncapped": True} if uncapped else {}))
         with self._transaction() as session:
             wallet = self._wallet(session, username)
             budget = session.scalar(

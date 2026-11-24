@@ -57,7 +57,10 @@ _PHASE_BRIEFS = {
         "nothing to set up) or the user's own provider key (billing 'byok'). When "
         "they bring a key, learn which provider it is from (byok_provider, one of "
         "``byok_providers``) before finishing. Offer exactly two options, platform "
-        "credits first; never add 'Use the default': platform credits is the default."
+        "credits first; never add 'Use the default': platform credits is the default. "
+        "Ask at most one short yes/no question on setup checks: they bill the balance "
+        "outside the run's spending limit (setup_from_wallet true, the default) or count "
+        "against that limit (false). Set setup_from_wallet only when the user answers it."
     ),
     "privacy": (
         "Learn whether model providers may use the user's data: allow (providers may "
@@ -108,9 +111,9 @@ class IntakeInterviewTurnSig(dspy.Signature):
     In ``profile_patch_json`` extract every setting the user's own words
     settle so far, for ANY phase of the agenda, omitting keys you do not
     know: billing (platform | byok), byok_provider (one of
-    ``byok_providers``), privacy (allow | no_training | zdr), trust (ask | auto_safe | yolo),
-    level. Never ask the level and
-    set it only when the user's own words clearly show it: 'guided' when
+    ``byok_providers``), setup_from_wallet (true | false), privacy
+    (allow | no_training | zdr), trust (ask | auto_safe | yolo), level.
+    Never ask the level and set it only when the user's own words clearly show it: 'guided' when
     they say they are new to machine learning, 'expert' when they name
     optimizers, data splits, metrics, or DSPy/GEPA settings; otherwise omit
     it.
@@ -151,6 +154,21 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"true", "yes", "1"}
 
 
+def _flag(value: Any) -> bool | None:
+    """Read a strict boolean, as JSON or as its text spelling.
+
+    Args:
+        value: Raw value.
+
+    Returns:
+        The boolean, or ``None`` when the value is neither true nor false.
+    """
+    if isinstance(value, bool):
+        return value
+    cleaned = str(value).strip().lower() if isinstance(value, str) else None
+    return {"true": True, "false": False}.get(cleaned or "")
+
+
 def _enum(value: Any, allowed: Iterable[str], aliases: dict[str, str] | None = None) -> str | None:
     """Coerce ``value`` onto an enum, tolerating case, spaces and known aliases.
 
@@ -185,6 +203,7 @@ def validate_profile_patch(raw: Any, *, provider_slugs: Iterable[str]) -> dict[s
     checks: dict[str, Any] = {
         "billing": lambda v: _enum(v, BILLING),
         "byok_provider": lambda v: v.strip().lower() if isinstance(v, str) and v.strip().lower() in slugs else None,
+        "setup_from_wallet": _flag,
         "privacy": lambda v: _enum(v, PRIVACY, _PRIVACY_ALIASES),
         "trust": lambda v: _enum(v, TRUST_MODES),
         "level": lambda v: _enum(v, LEVELS, _LEVEL_ALIASES),

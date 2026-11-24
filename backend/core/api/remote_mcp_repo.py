@@ -96,6 +96,7 @@ from .routers.connectors import connector_secret
 from .routers.execution_budgets import budget_http_error
 from .routers.hardening import _load as _load_hardening_job
 from .routers.models import box_hold_cents, call_hold_cents
+from .routers.setup_billing import bills_setup_from_wallet
 from .routers.submissions import (
     _BLACKBOX_WORKFLOW,
     _enforce_balance,
@@ -1054,7 +1055,11 @@ def preflight_draft(
             if not settings.local_mode:
                 _enforce_balance(job_store, user.username, request.token_source)
             budget = budgets.create(
-                user.username, max_cost_cents, idempotency_key=budget_key, uncapped=settings.local_mode
+                user.username,
+                max_cost_cents,
+                idempotency_key=budget_key,
+                uncapped=settings.local_mode,
+                setup_in_total=not bills_setup_from_wallet(job_store.engine, user.username),
             )
     except BudgetError as error:
         raise budget_http_error(error) from error

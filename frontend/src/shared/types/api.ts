@@ -815,6 +815,11 @@ export interface ModelPrivacySettings {
   data_policy: ModelDataPolicy;
 }
 
+/** Whether new runs bill their setup checks to the balance, outside the spending limit. */
+export interface SetupBillingSettings {
+  from_wallet: boolean;
+}
+
 export interface CatalogProvider {
   slug: string;
   label: string;

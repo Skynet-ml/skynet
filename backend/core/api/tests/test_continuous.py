@@ -43,6 +43,7 @@ from core.storage.models import (
     ContinuousPlanModel,
     ExecutionBudgetModel,
     JobModel,
+    SetupBillingPreferenceModel,
 )
 from core.worker import continuous
 
@@ -1571,6 +1572,37 @@ def test_the_sidebar_flags_every_run_of_a_plan(env: _Env) -> None:
 
 def test_a_plan_cycle_budget_counts_its_setup_in_the_total(env: _Env) -> None:
     """A plan cycle keeps the policy from before SKY-925, while the source run's budget does not."""
+    source_id = _incumbent(env)
+    _, _, cycle = _started(env)
+    service = BudgetService(engine=env.store.engine)
+
+    assert service.get(cycle.execution_budget_id, "alice").setup_in_total
+    assert not service.get(env.store.get_job(source_id)["execution_budget_id"], "alice").setup_in_total
+
+
+def _choose_setup_billing(env: _Env, *, from_wallet: bool) -> None:
+    """Store alice's setup billing setting.
+
+    Args:
+        env: Test environment.
+        from_wallet: Whether setup bills the wallet only.
+    """
+    with Session(env.store.engine) as session:
+        session.add(SetupBillingPreferenceModel(username="alice", from_wallet=from_wallet))
+        session.commit()
+
+
+def test_a_run_budget_counts_setup_in_its_total_when_the_owner_turns_wallet_billing_off(env: _Env) -> None:
+    """The setting off makes a new run's budget count setup against its limit."""
+    _choose_setup_billing(env, from_wallet=False)
+    source_id = _incumbent(env)
+    budget_id = env.store.get_job(source_id)["execution_budget_id"]
+    assert BudgetService(engine=env.store.engine).get(budget_id, "alice").setup_in_total
+
+
+def test_a_plan_cycle_counts_setup_in_its_total_whatever_the_owner_chose(env: _Env) -> None:
+    """A plan cycle ignores the setting: with wallet billing on, it still counts setup."""
+    _choose_setup_billing(env, from_wallet=True)
     source_id = _incumbent(env)
     _, _, cycle = _started(env)
     service = BudgetService(engine=env.store.engine)

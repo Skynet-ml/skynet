@@ -22,7 +22,7 @@ L'importo che scegli è l'importo che entra nel tuo saldo. La commissione di ric
 
 ## Budget delle esecuzioni
 
-Ogni esecuzione ha un limite di spesa. Il limite è il massimo che l'esecuzione può spendere. Copre l'ottimizzazione. I controlli di configurazione vengono pagati dal tuo saldo.
+Ogni esecuzione ha un limite di spesa. Il limite è il massimo che l'esecuzione può spendere. Copre l'ottimizzazione. I controlli di configurazione vengono pagati dal tuo saldo. Per contarli nel limite delle nuove esecuzioni, disattiva **Addebita la configurazione sul mio saldo** in **Impostazioni → Ottimizzazione**. I piani continui contano sempre la configurazione nel budget del ciclo.
 
 Un'esecuzione non ha una stima dei costi prima di partire. Spende fino al suo limite, si ferma al budget e conserva la sua versione migliore. Leggi [Esecuzioni](/docs/concepts/runs) per vedere come Skynet decide quando fermarsi.
 

@@ -577,6 +577,25 @@ class ModelPrivacyPreferenceModel(Base):
     )
 
 
+class SetupBillingPreferenceModel(Base):
+    """Whether a caller's new runs bill their setup checks to the wallet only.
+
+    A missing row means ``True``: setup stays out of the run's spending limit
+    (SKY-925). ``False`` makes new budgets count setup against their limit.
+    """
+
+    __tablename__ = "setup_billing_preferences"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    from_wallet: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class AgentEnginePreferenceModel(Base):
     """Which engine runs a caller's agent turns when no model is picked.
 

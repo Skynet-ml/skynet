@@ -22,7 +22,7 @@ O valor que você escolhe é o valor que entra no seu saldo. A taxa de recarga �
 
 ## Orçamentos de execução
 
-Cada execução tem um limite de gastos. O limite é o máximo que a execução pode gastar. Ele cobre a otimização. As verificações de configuração são pagas com o seu saldo.
+Cada execução tem um limite de gastos. O limite é o máximo que a execução pode gastar. Ele cobre a otimização. As verificações de configuração são pagas com o seu saldo. Para contá-las no limite das novas execuções, desative **Cobrar a configuração do meu saldo** em **Definições → Otimização**. Os planos contínuos sempre contam a configuração no orçamento do ciclo.
 
 Uma execução não tem uma estimativa de custo antes de começar. Ela gasta até o seu limite, para no orçamento e mantém a melhor versão. Leia [Execuções](/docs/concepts/runs) para ver como o Skynet decide quando parar.
 
