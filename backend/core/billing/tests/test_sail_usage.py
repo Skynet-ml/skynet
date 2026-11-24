@@ -102,15 +102,17 @@ def _runtime(database: Engine) -> BudgetRuntime:
 class FakeSpend:
     """Answer spend reads from a script and count the waits."""
 
-    def __init__(self, *answers: Any, rates: Mapping[str, int] | None = None) -> None:
+    def __init__(self, *answers: Any, rates: Mapping[str, int] | None = None, configured: bool = True) -> None:
         """Keep the answers in order; the last one repeats.
 
         Args:
             *answers: Spend lines, ``None`` for a report without the box, or an error to raise.
             rates: The ``rates`` object of the report, or ``None`` for none.
+            configured: Whether the account has its own Sail prices.
         """
         self.answers = list(answers)
         self.rates = rates
+        self.configured = configured
         self.waits: list[float] = []
         self.reads: list[tuple[str, dt.datetime]] = []
         self.now = 0.0
@@ -133,7 +135,7 @@ class FakeSpend:
         if isinstance(answer, BaseException):
             raise answer
         return {
-            "pricing_configured": True,
+            "pricing_configured": self.configured,
             "creation_fees_waived": False,
             "rates": self.rates,
             "sailboxes": [] if answer is None else [answer],
@@ -219,6 +221,38 @@ def test_quote_funds_the_creation_and_every_limit_for_the_whole_lifetime() -> No
     assert quote.maximum.total == Decimal("17.54")
     assert quote.price_snapshot["envelope"] == {"vcpus": 1, "memory_gib": 16, "disk_gib": 32}
     assert quote.price_snapshot["source"] == "https://docs.sailresearch.com/pricing.md"
+
+
+def test_quote_funds_whole_minutes_of_the_lifetime() -> None:
+    """Quote a 90 s lifetime the same as 120 s, because Sail bills whole minutes."""
+    ninety = quote_sail_sandbox({**CREATE, "lifetime_ms": 90_000})
+    assert ninety.maximum == quote_sail_sandbox({**CREATE, "lifetime_ms": 120_000}).maximum
+    assert ninety.maximum.total > quote_sail_sandbox({**CREATE, "lifetime_ms": 60_000}).maximum.total
+
+
+def test_a_box_at_its_limits_for_its_whole_lifetime_settles_in_full(database: Engine) -> None:
+    """Settle a 90 s box at its limits at the full billed minutes, with no clamp.
+
+    Args:
+        database: Engine of the funded ledger.
+    """
+    request = {**CREATE, "lifetime_ms": 90_000}
+    line = {
+        **SPEND,
+        "cost_usd_nanos": 0,
+        "running_seconds": 90,
+        "vcpu_seconds": 90,
+        "memory_gib_seconds": 16 * 90,
+        "state_disk_gib_seconds": 32 * 90,
+    }
+    reservation = _reservation(database, FakeSpend(line, configured=False), request)
+    _created(reservation)
+    reservation.settle()
+    settled = reservation.runtime.service.get_operation(reservation.operation.id, "alice")
+    assert settled.actual_cents == settled.max_cents
+    with Session(database) as session:
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
+    assert "clamped" not in evidence
 
 
 def test_quote_rounds_a_raised_limit_up_to_a_power_of_two_and_defaults_to_size_l() -> None:

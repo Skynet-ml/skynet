@@ -853,6 +853,7 @@ class SailEnvironment(SandboxEnvironment):
         usage, self._usage = self._usage, None
         if usage is None:
             return None
+        kept = False
         try:
             if sailbox is None and self._create_failed:
                 sailbox = await self._find_failed_create(usage)
@@ -870,6 +871,7 @@ class SailEnvironment(SandboxEnvironment):
                 self._keep(sailbox)
                 self._usage = usage
                 self._stop_task = None
+                kept = True
             if usage.sailbox_id is None:
                 # A create in its grace returns the handle without a confirm.
                 await asyncio.to_thread(usage.bind, sailbox.sailbox_id)
@@ -887,6 +889,11 @@ class SailEnvironment(SandboxEnvironment):
             task.add_done_callback(_on_spend_done)
             return None
         except Exception as error:
+            if kept and self._usage is not usage:
+                # A later teardown took the usage during the bind and owns the
+                # hold now, so this failure must not mark it or reach a caller.
+                logger.warning("Sail sandbox %s bind failed after a later stop: %s", self._name, type(error).__name__)
+                return None
             logger.warning("Sail sandbox %s usage stays pending: %s", self._name, type(error).__name__)
             # Any error, a BudgetError too, can come before a pending call;
             # record the hold as pending, best effort, so it is reconciled.

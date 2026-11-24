@@ -1740,6 +1740,54 @@ async def test_a_stop_during_a_bind_starts_one_spend_task(fake_sdk: FakeCloud, m
     assert "pending" not in made[0].names()
 
 
+async def test_a_failed_bind_after_a_later_stop_leaves_the_hold_to_that_stop(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mark nothing and raise nothing when a bind fails after a concurrent stop took the usage.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Blocks the first bind, then makes it fail.
+    """
+    bind = FakeUsage.bind
+    entered = threading.Event()
+    release = threading.Event()
+
+    def refused_bind(self: FakeUsage, sailbox_id: str) -> None:
+        """Block the first bind until the test releases it, then refuse it.
+
+        Args:
+            self: The fake reservation.
+            sailbox_id: The Sail id of the box.
+
+        Raises:
+            BudgetConflictError: On the first call.
+        """
+        if not entered.is_set():
+            entered.set()
+            release.wait(5)
+            raise BudgetConflictError("refused")
+        bind(self, sailbox_id)
+
+    monkeypatch.setattr(FakeUsage, "bind", refused_bind)
+    fake_sdk.create_error = FakeApiError(500)
+    fake_sdk.create_makes_box = True
+    fake_sdk.terminate_fails.add("sb-1")
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    assert await asyncio.to_thread(entered.wait, 5)
+    fake_sdk.terminate_fails.clear()
+    await env.stop()
+    release.set()
+    with pytest.raises(SandboxInfraError, match="create the Sailbox"):
+        await starting
+    await env.stop()
+    await _spent()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert "pending" not in made[0].names()
+    assert made[0].names().count("settle") == 1
+
+
 async def test_a_failed_pending_mark_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """Try the pending mark again after it fails, and stop once it works.
 

@@ -214,7 +214,10 @@ def quote_sail_sandbox(request: Mapping[str, Any]) -> OperationQuote:
         raise UnpricedOperationError("Sail requires a bounded box lifetime.")
     vcpus, memory_gib, disk_gib = sail_envelope(request)
     hourly = vcpus * _VCPU_HOUR_USD + memory_gib * _MEMORY_GIB_HOUR_USD + disk_gib * _DISK_GIB_HOUR_USD
-    maximum = _CREATION_USD + Decimal(lifetime_ms) / _MS_PER_HOUR * hourly
+    # Sail bills whole minutes (_PRICING_URL), so a 90 s box at its limits
+    # bills 120 s; the hold funds the whole last minute.
+    billed_ms = -(-lifetime_ms // 60_000) * 60_000
+    maximum = _CREATION_USD + Decimal(billed_ms) / _MS_PER_HOUR * hourly
     return operation_quote(
         request,
         maximum,
@@ -335,9 +338,11 @@ def _billed_minutes(spend: Mapping[str, Any], measured: dict[str, Decimal]) -> d
             raise UsagePendingError("The Sail spend report has usage but no running time for the box.")
         return measured
     billed = (running / 60).to_integral_value(rounding=ROUND_CEILING) * 60
-    # Sail can count disk-seconds outside the running time and round them by
-    # itself, so the charge is never below either rule. Round up, so an
-    # inexact quotient never charges less than Sail bills.
+    # The second term of the max is a deliberate safe floor, not Sail's own
+    # rule: each counter rounded up to a multiple of 60 resource-seconds.
+    # Sail can count disk-seconds outside the running time, so the charge is
+    # never below either value. Round up, so an inexact quotient never
+    # charges less than Sail bills.
     with localcontext() as context:
         context.rounding = ROUND_CEILING
         return {
