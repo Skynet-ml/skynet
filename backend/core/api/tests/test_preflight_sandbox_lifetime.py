@@ -16,6 +16,7 @@ class _Gateway:
     """Stand in for the model gateway without any paid transport."""
 
     def __init__(self, runtime: Any) -> None:
+        """Keep the runtime the stub gateway wraps."""
         self.runtime = runtime
 
     def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
