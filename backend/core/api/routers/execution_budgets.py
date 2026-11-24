@@ -59,6 +59,7 @@ class ExecutionBudgetResponse(BaseModel):
     external_spent_cents: Decimal
     pending_operations: int
     blocked_reason: str | None
+    setup_in_total: bool
 
 
 def budget_response(snapshot: BudgetSnapshot) -> ExecutionBudgetResponse:

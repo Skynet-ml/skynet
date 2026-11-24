@@ -52,6 +52,7 @@ def _budget() -> ExecutionBudgetResponse:
         external_spent_cents=zero,
         pending_operations=0,
         blocked_reason=None,
+        setup_in_total=False,
     )
 
 

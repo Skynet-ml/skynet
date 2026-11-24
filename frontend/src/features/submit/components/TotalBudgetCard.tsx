@@ -88,11 +88,14 @@ const ISOLATE_END = "⁩";
 /**
  * The spend and holds the limit counts, as the server reports them for
  * ``available_cents``: ``run_spent_cents`` includes setup only for a
- * ``setup_in_total`` budget (SKY-925), and before the budget is attached to a
- * run every hold is a setup check's.
+ * ``setup_in_total`` budget (SKY-925). Before the budget is attached to a run,
+ * every hold is a setup check's, so the limit counts it only for a
+ * ``setup_in_total`` budget. The budget's own flag decides, not the account
+ * setting, which can change after the budget exists.
  */
 export function runLedger(budget: ExecutionBudget): { spent: string; reserved: string } {
-  return { spent: budget.run_spent_cents, reserved: budget.job_id ? budget.reserved_cents : "0" };
+  const countsHolds = budget.job_id != null || budget.setup_in_total;
+  return { spent: budget.run_spent_cents, reserved: countsHolds ? budget.reserved_cents : "0" };
 }
 
 const isZero = (amount: string) => !/[1-9]/.test(amount);

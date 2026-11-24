@@ -67,8 +67,14 @@ void test("the budget ledger counts the run's own spend and holds, not the setup
     pending_operations: 1,
     blocked_reason: null,
     uncapped: false,
+    setup_in_total: false,
   };
   assert.deepEqual(runLedger(budget), { spent: "0", reserved: "0" });
+  // A setup_in_total limit counts the setup check's holds before attach, as available_cents does.
+  assert.deepEqual(runLedger({ ...budget, setup_in_total: true, run_spent_cents: "60" }), {
+    spent: "60",
+    reserved: "12.5",
+  });
   assert.deepEqual(runLedger({ ...budget, job_id: "job-1", run_spent_cents: "40.25" }), {
     spent: "40.25",
     reserved: "12.5",

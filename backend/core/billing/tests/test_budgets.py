@@ -550,6 +550,7 @@ def test_a_continuous_plan_budget_counts_setup_against_its_limit(engine: Engine)
     assert attached.available_cents == 40
     assert attached.limit_spent_cents == 60
     assert execution_budgets.budget_response(attached).run_spent_cents == 60
+    assert execution_budgets.budget_response(attached).setup_in_total is True
     with pytest.raises(BudgetTotalConflictError) as lowered:
         service.update_total(budget.id, "alice", 59, expected_revision=attached.revision)
     assert lowered.value.minimum_total_cents == 60
@@ -602,6 +603,7 @@ def test_a_wizard_budget_leaves_setup_out_of_its_limit(engine: Engine) -> None:
     assert not attached.setup_in_total
     assert attached.available_cents == 100
     assert execution_budgets.budget_response(attached).run_spent_cents == 0
+    assert execution_budgets.budget_response(attached).setup_in_total is False
 
 
 def test_a_continuous_plan_check_keeps_one_lease_of_its_limit(engine: Engine) -> None:
