@@ -108,7 +108,7 @@ export function Ribbon({ d, viewBox, className }: { d: string; viewBox: string; 
       viewBox={viewBox}
       preserveAspectRatio="none"
       aria-hidden="true"
-      className={cn("pointer-events-none absolute z-[2] overflow-visible rtl:-scale-x-100", className)}
+      className={cn("pointer-events-none absolute z-0 overflow-visible rtl:-scale-x-100", className)}
     >
       <path d={d} fill="none" strokeLinecap="round" strokeWidth={26} className="translate-y-[5px] stroke-[#6e2f10] opacity-35" />
       <path d={d} fill="none" strokeLinecap="round" strokeWidth={26} className="stroke-primary-fill" />

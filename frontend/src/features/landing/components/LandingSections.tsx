@@ -39,7 +39,7 @@ export function BigStatement() {
       <Ribbon
         viewBox="0 0 800 360"
         d="M-30 30 C 200 10, 330 120, 470 190 S 700 300, 830 340"
-        className="start-0 top-10 h-[360px] w-[62%] max-[860px]:top-[70px] max-[860px]:h-60 max-[860px]:w-full"
+        className="start-0 top-10 h-[360px] w-[46%] max-[860px]:hidden"
       />
       <h2
         className={cn(
@@ -50,7 +50,7 @@ export function BigStatement() {
         {msg("landing.big_title")}
       </h2>
       <div className="mt-[90px] grid grid-cols-2 gap-12 max-[860px]:mt-14 max-[860px]:grid-cols-1">
-        <div className="col-start-2 max-w-[46ch] max-[860px]:col-start-1">
+        <div className="relative z-[1] col-start-2 max-w-[46ch] max-[860px]:col-start-1">
           <p className="mb-[22px] text-[17px] leading-[1.55]">{msg("landing.big_body")}</p>
           <Button asChild variant="outline">
             <Link href={HOW_A_RUN_WORKS}>{msg("landing.how_run_works")}</Link>
@@ -277,7 +277,7 @@ export function SecondStatement() {
       <Ribbon
         viewBox="0 0 500 640"
         d="M520 -10 C 300 60, 120 120, 200 260 S 480 420, 340 560 S 120 620, 60 660"
-        className="end-0 top-[120px] h-[640px] w-[52%] max-[860px]:hidden"
+        className="start-0 top-[300px] h-[640px] w-[52%] max-[860px]:hidden"
       />
       <h2 className={cn("relative z-[1] max-w-[14ch] text-[clamp(46px,6.6vw,92px)] font-medium leading-none tracking-[-.04em]", DISPLAY)}>
         {msg("landing.second_title")}
