@@ -1196,18 +1196,24 @@ async def test_a_sandbox_whose_reads_fail_settles_at_its_whole_lifetime(
     assert usage.seconds == [5 * 60]
 
 
-async def test_a_sandbox_still_running_after_an_accepted_delete_settles_at_its_whole_lifetime(
-    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("status", ["RUNNING", "TERMINATING"])
+async def test_a_sandbox_still_live_after_an_accepted_delete_settles_at_its_whole_lifetime(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
-    """Charge the whole funded lifetime when Prime accepts the delete but the box still shows RUNNING."""
+    """Charge the whole funded lifetime when Prime accepts the delete but the box still shows a live status.
+
+    Args:
+        status: The status the box keeps after the delete.
+    """
 
     async def accept(self: FakeClient, sandbox_id: str) -> None:
-        """Accept the delete and leave the box running.
+        """Accept the delete and leave the box in the live status.
 
         Args:
             sandbox_id: The sandbox id.
         """
         CLOUD.calls.append(f"delete:{sandbox_id}")
+        CLOUD.boxes[sandbox_id].status = status
 
     monkeypatch.setattr(FakeClient, "delete", accept)
     recorder = UsageRecorder()
@@ -1215,7 +1221,7 @@ async def test_a_sandbox_still_running_after_an_accepted_delete_settles_at_its_w
         pass
     (usage,) = recorder.made
     assert [name for name, _ in usage.calls] == ["confirm", "settle"]
-    assert usage.calls[-1][1]["status"] == "RUNNING"
+    assert usage.calls[-1][1]["status"] == status
     assert usage.seconds == [5 * 60]
 
 

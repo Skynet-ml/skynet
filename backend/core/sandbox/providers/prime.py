@@ -810,7 +810,9 @@ class PrimeEnvironment(SandboxEnvironment):
             and the last record shows an ended status, it is the local time
             from the create sent to the delete answer. Otherwise it is the
             whole funded lifetime: the box may run until Prime ends it at
-            its timeout. prime-sandboxes 0.5.8 has no stopping status.
+            its timeout. ``Sandbox.status`` is a plain string, so any status
+            outside ERROR, TERMINATED and TIMEOUT, TERMINATING included,
+            counts as live.
         """
         record: dict[str, Any] = {}
         try:
