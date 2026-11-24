@@ -1517,8 +1517,9 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
     task.cancel()
     await asyncio.sleep(0)
     task.cancel()
-    with pytest.raises((FakeInvalidError, asyncio.CancelledError)):
+    with pytest.raises(asyncio.CancelledError) as raised:
         await asyncio.wait_for(task, 2)
+    assert isinstance(raised.value.__cause__, FakeInvalidError)
     (usage,) = budget.reservations
     assert usage.calls == ["sent"]
     fake_modal.list_gate.set()

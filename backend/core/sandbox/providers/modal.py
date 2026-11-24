@@ -132,7 +132,9 @@ _SERVER_ANSWER_ERRORS: frozenset[type[BaseException]] = frozenset(
     if error is not None
 )
 # A create that failed on the client side may still make its box on Modal.
-# The second lookup waits longer than a create takes to land.
+# The second lookup waits longer than a create takes to land. 30 s is an
+# estimate, not a measured bound: a box that Modal makes later than this is
+# the documented residual case, and it runs unbilled until its timeout.
 _RECHECK_DELAY_SEC = 30.0
 
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
@@ -277,7 +279,9 @@ class ModalEnvironment(SandboxEnvironment):
             raise
         except Exception as error:
             self._usage = None
-            await _fail_usage_through_cancels(usage, self._app_name, error)
+            if await _fail_usage_through_cancels(usage, self._app_name, error):
+                # A cancel is never swallowed; the create error stays as its cause.
+                raise asyncio.CancelledError from error
             raise
         self._sandbox = sandbox
         self._termination_requested = False
@@ -817,7 +821,7 @@ async def _fail_usage(usage: Any | None, app_name: str | None = None, error: Bas
 
 async def _fail_usage_through_cancels(
     usage: Any | None, app_name: str | None = None, error: BaseException | None = None
-) -> None:
+) -> bool:
     """Run :func:`_fail_usage` so that a cancel cannot stop it halfway.
 
     The cleanup waits at most ``_CANCEL_GRACE_SEC``, also through repeat
@@ -827,16 +831,20 @@ async def _fail_usage_through_cancels(
         usage: The usage reservation, or ``None``.
         app_name: The Modal app of the box, for the lookup after a failed create.
         error: The create error, or ``None`` for a cancelled create.
+
+    Returns:
+        True when a cancel arrived during the wait, so the caller must raise it.
     """
     cleanup = asyncio.ensure_future(_fail_usage(usage, app_name, error))
-    await _wait_through_cancels(cleanup, _CANCEL_GRACE_SEC)
+    cancelled = await _wait_through_cancels(cleanup, _CANCEL_GRACE_SEC)
     if not cleanup.done():
         _keep_late_terminate(cleanup)
     elif not cleanup.cancelled() and cleanup.exception() is not None:
         logger.error("Could not clean up a failed modal create.", exc_info=cleanup.exception())
+    return cancelled
 
 
-async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> None:
+async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> bool:
     """Wait until the task ends or the grace time passes, and absorb each cancel meanwhile.
 
     The task itself is never cancelled, because Modal may already have done
@@ -845,9 +853,13 @@ async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> 
     Args:
         task: The task to wait for.
         grace_sec: The longest wait in seconds.
+
+    Returns:
+        True when a cancel arrived during the wait, so the caller must raise it.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_sec
+    cancelled = False
     while not task.done():
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -855,8 +867,9 @@ async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> 
         try:
             await asyncio.wait({task}, timeout=remaining)
         except asyncio.CancelledError:
-            # The caller re-raises its own cancel after this wait.
-            continue
+            # The caller raises the cancel after this wait.
+            cancelled = True
+    return cancelled
 
 
 def _release_late_reservation(reserving: asyncio.Future[Any]) -> None:
