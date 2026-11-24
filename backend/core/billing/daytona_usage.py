@@ -1,9 +1,10 @@
 """Reserve Daytona sandbox compute and settle it at billed or measured usage (SKY-545).
 
-A box settles at the price that Daytona's analytics API reports for it when
-that report is complete. Daytona can post a charge up to 48 hours after the
-usage, so a box whose report is not complete yet settles at its measured
-wall-clock time and the published rates. Both stay inside the reservation.
+A box settles at the larger of two amounts: the price that Daytona's
+analytics API reports for it, and its measured wall-clock time at the
+published rates. Daytona can post a charge up to 48 hours after the usage,
+so a report at settle time can be incomplete; the measured amount is the
+floor. The charge never exceeds the reservation.
 """
 
 from __future__ import annotations
@@ -200,7 +201,7 @@ def billed_usd(periods: list[Any], *, vcpus: int, memory_gib: int, disk_gib: int
 
     Returns:
         The billed USD, or ``None`` when the report is empty, still open or
-        malformed, so the caller falls back to measured time.
+        malformed, so the caller uses measured time alone.
 
     Raises:
         UsagePendingError: When a period bills a size other than the admitted one.
@@ -279,6 +280,20 @@ class DaytonaUsageReservation:
         self.dispatched_at = time.time()
         self.sandbox_id: str | None = None
 
+    def bind(self, sandbox: Any) -> None:
+        """Record the box id, so the settle and the reconciler can find the box.
+
+        A box that a timed-out or cancelled create made gets its id here,
+        without the size check, before its settle.
+
+        Args:
+            sandbox: The Daytona box handle.
+        """
+        if self.sandbox_id == sandbox.id:
+            return
+        self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox.id)
+        self.sandbox_id = sandbox.id
+
     def confirm_created(self, sandbox: Any) -> None:
         """Bind the created box and check that it has the funded size.
 
@@ -288,8 +303,7 @@ class DaytonaUsageReservation:
         Raises:
             UsagePendingError: When the box size differs from the funded one.
         """
-        self.sandbox_id = sandbox.id
-        self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox.id)
+        self.bind(sandbox)
         funded = (self.request["vcpus"], self.request["memory_gib"], self.request["disk_gib"])
         if (sandbox.cpu, sandbox.memory, sandbox.disk) != funded:
             raise UsagePendingError("The cloud sandbox did not confirm the admitted CPU, memory and disk sizes.")
@@ -366,7 +380,7 @@ class DaytonaUsageReservation:
         return charge, False
 
     def settle(self) -> None:
-        """Settle the deleted box at its billed price, or at measured time when no bill is final.
+        """Settle the deleted box at the larger of its billed price and its measured time.
 
         Raises:
             UsagePendingError: When the box identity is unknown or the bill shows another size.
@@ -385,11 +399,12 @@ class DaytonaUsageReservation:
             periods = _usage_periods(
                 self.sandbox_id, self.dispatched_at - _WINDOW_MARGIN_SEC, ended + _WINDOW_MARGIN_SEC
             )
-            usd = billed_usd(periods, **sizes) if periods is not None else None
-            source = "usage-api"
-            if usd is None:
-                source = "measured"
-                usd = _usd(seconds, **sizes, rates=self.quote.price_snapshot["rates"])
+            billed = billed_usd(periods, **sizes) if periods is not None else None
+            measured = _usd(seconds, **sizes, rates=self.quote.price_snapshot["rates"])
+            # Daytona can post a charge up to 48 hours late, so a closed
+            # report can still miss periods; never settle below measured time.
+            usd = measured if billed is None else max(billed, measured)
+            source = "usage-api" if billed is not None and billed >= measured else "measured"
             charge, clamped = self._charge(usd)
             self.runtime.service.settle(
                 self.operation.id,
@@ -402,7 +417,9 @@ class DaytonaUsageReservation:
                     "sandbox_id": self.sandbox_id,
                     "source": source,
                     "measured_seconds": seconds,
-                    "periods": periods if source == "usage-api" else None,
+                    "periods": periods if billed is not None else None,
+                    "billed_usd": None if billed is None else str(billed),
+                    "measured_usd": str(measured),
                     "provider_usd": str(usd),
                     "clamped": clamped,
                 },

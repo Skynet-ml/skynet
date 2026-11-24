@@ -234,11 +234,11 @@ def test_reserve_then_settle_at_measured_time(database: Engine, clock: list[floa
 def test_settle_uses_the_billed_price_from_the_usage_api(
     database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Settle at the sum of the closed period prices that the analytics API reports."""
+    """Settle at the billed sum of the closed periods when it is above the measured time."""
     seen: list[httpx.Request] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
-        """Return two closed periods.
+        """Return two closed periods that cost more than the measured time.
 
         Args:
             request: The API request.
@@ -247,17 +247,30 @@ def test_settle_uses_the_billed_price_from_the_usage_api(
             The usage periods.
         """
         seen.append(request)
-        return httpx.Response(200, json=[_period(price=0.001), _period(price=0.0005)])
+        return httpx.Response(200, json=[_period(price=0.003), _period(price=0.002)])
 
     _usage_api(monkeypatch, answer)
     reservation = _started(database)
     clock[0] = START + 120
     reservation.settle()
-    assert _state(reservation).actual_cents == _cents(Decimal("0.0015"))
+    assert Decimal("0.005") > HOURLY * 120 / 3600
+    assert _state(reservation).actual_cents == _cents(Decimal("0.005"))
     (request,) = seen
     assert request.url.path == "/organization/org-1/sandbox/box-1/usage"
     assert request.headers["Authorization"] == "Bearer test-key"
     assert set(request.url.params) == {"from", "to"}
+
+
+def test_settle_never_goes_below_the_measured_time(
+    database: Engine, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle at measured time when the closed periods bill less, because late charges can still come."""
+    _usage_api(monkeypatch, lambda _request: httpx.Response(200, json=[_period(price=0.001), _period(price=0.0005)]))
+    reservation = _started(database)
+    clock[0] = START + 120
+    reservation.settle()
+    assert Decimal("0.0015") < HOURLY * 120 / 3600
+    assert _state(reservation).actual_cents == _cents(HOURLY * 120 / 3600)
 
 
 @pytest.mark.parametrize(
@@ -348,6 +361,18 @@ def test_settle_without_a_box_identity_keeps_the_hold_pending(database: Engine) 
     with pytest.raises(UsagePendingError):
         reservation.settle()
     assert _state(reservation).state == "pending"
+
+
+def test_bind_records_the_box_without_a_size_check(database: Engine, clock: list[float]) -> None:
+    """Bind a box that no confirm saw, so its hold can settle; a second bind changes nothing."""
+    reservation = DaytonaUsageReservation(_runtime(database), CREATE, operation_key="box-op")
+    box = SimpleNamespace(id="box-1", cpu=None, memory=None, disk=None)
+    reservation.bind(box)
+    reservation.bind(box)
+    assert _state(reservation).provider_request_id == "box-1"
+    clock[0] = START + 30
+    reservation.settle()
+    assert _state(reservation).state == "settled"
 
 
 def test_confirm_refuses_a_box_of_another_size(database: Engine) -> None:

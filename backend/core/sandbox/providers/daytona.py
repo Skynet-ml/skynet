@@ -162,6 +162,10 @@ class DaytonaEnvironment(SandboxEnvironment):
         self._usage_factory = usage_factory
         self._usage: Any = None
         self._create_error: BaseException | None = None
+        self._create_sent = False
+        # A label that only this box carries, so a failed create can still
+        # find the box it made.
+        self._box_label = {"skynet-box": uuid.uuid4().hex} if budget is not None else {}
 
     @classmethod
     def preflight(cls) -> None:
@@ -196,7 +200,7 @@ class DaytonaEnvironment(SandboxEnvironment):
             image=self.spec.image or DEFAULT_IMAGE,
             resources=_resources(self.spec, protected=self._budget is not None),
             env_vars=dict(self.spec.env) or None,
-            labels=dict(self.spec.tags) or None,
+            labels={**self.spec.tags, **self._box_label} or None,
             # ephemeral deletes the box when it stops, and the TTL deletes a
             # box that a crashed worker never stopped.
             ephemeral=True,
@@ -291,12 +295,24 @@ class DaytonaEnvironment(SandboxEnvironment):
             BudgetError: The usage evidence breaks the reserved bounds.
         """
         sandbox, client, usage = self._sandbox, self._client, self._usage
+        create_error, create_sent = self._create_error, self._create_sent
         self._sandbox = None
         self._client = None
         self._usage = None
+        self._create_error = None
+        self._create_sent = False
         if sandbox is None and client is None and usage is None:
             return
-        cleanup = asyncio.ensure_future(_delete_and_settle(sandbox, client, usage, self._create_error))
+        cleanup = asyncio.ensure_future(
+            _delete_and_settle(
+                sandbox,
+                client,
+                usage,
+                create_error=create_error,
+                create_sent=create_sent,
+                box_label=self._box_label,
+            )
+        )
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
@@ -467,6 +483,7 @@ class DaytonaEnvironment(SandboxEnvironment):
         """
         with _translated("create"):
             try:
+                self._create_sent = True
                 return await self._client.create(params, timeout=CREATE_TIMEOUT_SEC)
             except DaytonaTimeoutError as error:
                 # The SDK timeout is not a TimeoutError, and the box can
@@ -518,20 +535,39 @@ def _require_sdk() -> None:
         raise SandboxFatalError("The Daytona sandbox needs the `daytona` package: install the `daytona` extra.")
 
 
-async def _delete_and_settle(sandbox: Any, client: Any, usage: Any, create_error: BaseException | None) -> None:
+async def _delete_and_settle(
+    sandbox: Any,
+    client: Any,
+    usage: Any,
+    *,
+    create_error: BaseException | None,
+    create_sent: bool,
+    box_label: Mapping[str, str],
+) -> None:
     """Delete a box, then settle or release its reservation.
 
     Args:
-        sandbox: The box, or ``None`` when no box was made.
+        sandbox: The box, or ``None`` when no box handle came back.
         client: The client, or ``None``.
         usage: The reservation of a protected box, or ``None``.
         create_error: The create failure, or ``None``.
+        create_sent: True once the create call was sent to Daytona.
+        box_label: The label that only this box carries.
 
     Raises:
         SandboxError: Daytona failed the delete call.
         UsagePendingError: The settle failed, so the reservation stays pending.
         BudgetError: The usage evidence breaks the reserved bounds.
     """
+    looked_up = False
+    if usage is not None and sandbox is None and create_sent and client is not None:
+        # The create can make a box and still fail or lose its answer, so
+        # look for the box by its own label before the hold is released.
+        try:
+            sandbox = await asyncio.wait_for(_find_box(client, box_label), DELETE_TIMEOUT_SEC)
+            looked_up = True
+        except Exception as error:
+            logger.warning("The sandbox lookup after a failed create failed: %s", type(error).__name__)
     try:
         await _delete_and_close(sandbox, client)
     except BaseException:
@@ -546,10 +582,12 @@ async def _delete_and_settle(sandbox: Any, client: Any, usage: Any, create_error
         return
     try:
         if sandbox is not None:
+            await asyncio.to_thread(usage.bind, sandbox)
             await asyncio.to_thread(usage.settle)
         else:
             error = create_error or SandboxInfraError("The sandbox was never created.")
-            await asyncio.to_thread(usage.fail, error, refused=_refused(error))
+            refused = not create_sent or (looked_up and _refused(error))
+            await asyncio.to_thread(usage.fail, error, refused=refused)
     except (UsagePendingError, BudgetError):
         raise
     except Exception as error:
@@ -557,19 +595,50 @@ async def _delete_and_settle(sandbox: Any, client: Any, usage: Any, create_error
         raise UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.") from error
 
 
+async def _find_box(client: Any, box_label: Mapping[str, str]) -> Any:
+    """Find the box that carries a label.
+
+    Args:
+        client: The Daytona client.
+        box_label: The label that only one box carries.
+
+    Returns:
+        The box, or ``None`` when Daytona lists no such box.
+
+    Raises:
+        SandboxError: Daytona failed the list call.
+    """
+    with _translated("list"):
+        async for box in client.list(ListSandboxesQuery(labels=dict(box_label))):
+            return box
+    return None
+
+
 def _refused(error: BaseException) -> bool:
-    """Report whether a create failure means that Daytona made no box.
+    """Report whether Daytona answered the create call with a refusal.
+
+    Only the SDK error types of a 401, 403 or 429 answer count. The caller
+    also checks that no box carries the box label, because the same errors
+    can come from a status read after the box exists.
 
     Args:
         error: The create failure.
 
     Returns:
-        True for an auth, permission or rate-limit answer. A timeout or an
-        unknown failure can leave a box, so it is not a refusal.
+        True for an authentication, permission or rate-limit answer.
     """
-    if isinstance(error, StartTimeoutError | _MissingError):
-        return False
-    return isinstance(error, SandboxFatalError | SandboxTransientError)
+    cause = error.__cause__
+    refusals = tuple(
+        kind
+        for kind in (
+            DaytonaAuthenticationError,
+            DaytonaAuthorizationError,
+            DaytonaForbiddenError,
+            DaytonaRateLimitError,
+        )
+        if kind is not None
+    )
+    return bool(refusals) and isinstance(cause, refusals)
 
 
 async def _delete_and_close(sandbox: Any, client: Any) -> None:
