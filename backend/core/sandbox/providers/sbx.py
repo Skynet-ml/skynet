@@ -58,7 +58,7 @@ from urllib.parse import quote
 
 import httpx
 
-from core.billing.sbx_usage import SbxUsageReservation
+from core.billing.sbx_usage import BILLING_GRACE_MS, SbxUsageReservation
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
@@ -471,7 +471,8 @@ async def _uncancellable(future: asyncio.Future[Any]) -> Any:
         return await asyncio.shield(future)
     except asyncio.CancelledError:
         while not future.done():
-            with contextlib.suppress(asyncio.CancelledError):
+            # The call's own error must not replace the cancel being raised.
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await asyncio.shield(future)
         raise
 
@@ -577,7 +578,7 @@ async def _read(client: httpx.AsyncClient, path: str, uid: str | None) -> dict[s
 
 
 async def _delete(
-    client: httpx.AsyncClient, path: str, uid: str | None = None, accepted: asyncio.Event | None = None
+    client: httpx.AsyncClient, path: str, uid: str | None = None, sent: asyncio.Event | None = None
 ) -> None:
     """Delete one sandbox with its current ETag and wait until it is gone.
 
@@ -585,25 +586,28 @@ async def _delete(
         client: The management client.
         path: The API path of the sandbox.
         uid: The uid of the sandbox, when known, to find it in the list.
-        accepted: Set when sbx accepts the DELETE, so a caller whose wait for
-            the delete ends early knows the sandbox is on its way out.
+        sent: Set before the DELETE goes out, so a caller whose wait for
+            the delete ends early, even while the call is in flight, knows
+            sbx may be deleting the sandbox.
 
     Raises:
         SandboxInfraError: The sandbox has no ETag or stopped deleting.
         SandboxError: A request failed; see ``_call``.
     """
-    sent = refreshed = False
+    deleting = refreshed = False
     while True:
         sandbox = await _read(client, path, uid)
         if sandbox is None:
             return
         status = _status(sandbox)
         if status != "deleting":
-            if sent:
+            if deleting:
                 raise SandboxInfraError(f"The sbx sandbox stopped deleting: {status}.")
             etag = _core(sandbox).get("etag")
             if not isinstance(etag, str) or not etag:
                 raise SandboxInfraError("sbx gave no ETag for the sandbox delete.")
+            if sent is not None:
+                sent.set()
             response = await _call(
                 client,
                 "DELETE",
@@ -621,9 +625,7 @@ async def _delete(
                 # it does not retry a failed call blindly.
                 refreshed = True
                 continue
-            sent = True
-            if accepted is not None:
-                accepted.set()
+            deleting = True
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -987,6 +989,11 @@ class SbxEnvironment(SandboxEnvironment):
         # The path and uid of the lost sandbox that a stop found.
         self._orphan: tuple[str, str | None] | None = None
         self._start_limit = timeouts.seconds(Phase.START) if timeouts else None
+        if budget is not None:
+            # The hold assumes the sbx timeout clock starts within the billing
+            # grace of the create call, so a protected box must run by then.
+            grace = BILLING_GRACE_MS / 1000
+            self._start_limit = grace if self._start_limit is None else min(self._start_limit, grace)
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts else None
         tag = uuid.uuid4().hex
         self._create_key = tag
@@ -1418,24 +1425,25 @@ class SbxEnvironment(SandboxEnvironment):
         # measured runtime, "leaked" runs to its sbx timeout and settles at the
         # whole lifetime, "unknown" keeps the hold, "none" releases it. Each
         # branch sets its worst case first, so a cancel mid-delete never
-        # releases the hold of a live sandbox. A delete that sbx accepted but
-        # that outlasts STOP_TIMEOUT gets DELETE_WAIT more before "leaked".
+        # releases the hold of a live sandbox. A delete that went out but
+        # outlasts STOP_TIMEOUT gets DELETE_WAIT more before "leaked": only a
+        # sandbox that is deleting and then gone counts as deleted.
         ended = "none"
-        accepted = asyncio.Event()
+        sent = asyncio.Event()
         try:
             if path is not None:
                 ended = "leaked"
-                if await _bounded(_delete(management, path, uid, accepted), "delete the sandbox") or (
-                    accepted.is_set() and await _wait_gone(management, path, uid)
+                if await _bounded(_delete(management, path, uid, sent), "delete the sandbox") or (
+                    sent.is_set() and await _wait_gone(management, path, uid)
                 ):
                     ended = "deleted"
                     self._stop_usage_clock()
             elif self._create_dispatched:
                 ended = "unknown"
-                deleted = await _bounded(self._delete_orphan(management, accepted), "delete the lost sandbox")
+                deleted = await _bounded(self._delete_orphan(management, sent), "delete the lost sandbox")
                 if self._orphan is not None:
                     ended = "leaked"
-                    if deleted or (accepted.is_set() and await _wait_gone(management, *self._orphan)):
+                    if deleted or (sent.is_set() and await _wait_gone(management, *self._orphan)):
                         ended = "deleted"
                         self._stop_usage_clock()
         finally:
@@ -1477,7 +1485,7 @@ class SbxEnvironment(SandboxEnvironment):
         except Exception as error:
             logger.warning("sbx sandbox usage stays pending: %s", type(error).__name__)
 
-    async def _delete_orphan(self, client: httpx.AsyncClient, accepted: asyncio.Event) -> None:
+    async def _delete_orphan(self, client: httpx.AsyncClient, sent: asyncio.Event) -> None:
         """Delete the sandbox of a create whose outcome is unknown.
 
         The list can show a new sandbox late, and a cancelled create can still
@@ -1485,7 +1493,7 @@ class SbxEnvironment(SandboxEnvironment):
 
         Args:
             client: The management client.
-            accepted: Set when sbx accepts the DELETE of the found sandbox.
+            sent: Set before the DELETE of the found sandbox goes out.
 
         Raises:
             SandboxInfraError: The sandbox list is invalid.
@@ -1503,7 +1511,7 @@ class SbxEnvironment(SandboxEnvironment):
             return
         uid = sandbox.get("uid")
         self._orphan = (_resource_path(sandbox.get("name"), "sandboxes"), uid if isinstance(uid, str) and uid else None)
-        await _delete(client, *self._orphan, accepted)
+        await _delete(client, *self._orphan, sent)
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:

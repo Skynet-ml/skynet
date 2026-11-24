@@ -275,25 +275,29 @@ def test_hosted_skynet_finds_the_sbx_adapter() -> None:
     assert sbx_usage.USAGE.name == "sbx"
 
 
-def test_refused_release_keeps_the_hold_pending(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the hold pending, not lost, when the ledger refuses the release."""
+@pytest.mark.parametrize("error", [BudgetError("refused"), RuntimeError("database down")])
+def test_failed_release_keeps_the_hold_pending(
+    database: Engine, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Keep the hold pending, not lost, and raise, when the release fails for any reason."""
     runtime = _runtime(database)
     reservation = SbxUsageReservation(runtime, REQUEST, operation_key="box")
 
     def refuse(*args: Any, **kwargs: Any) -> None:
-        """Refuse the release.
+        """Fail the release.
 
         Args:
             *args: Ignored.
             **kwargs: Ignored.
 
         Raises:
-            BudgetError: Always.
+            Exception: Always, the test's error.
         """
-        raise BudgetError("refused")
+        raise error
 
     monkeypatch.setattr(runtime.service, "reject", refuse)
-    reservation.release()
+    with pytest.raises(type(error)):
+        reservation.release()
     assert _state(runtime, reservation) == "pending"
 
 

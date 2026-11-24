@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
+from core.billing.sbx_usage import BILLING_GRACE_MS
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -1107,6 +1108,69 @@ async def test_accepted_delete_that_never_ends_settles_the_whole_lifetime(monkey
     assert RESERVED[0].calls == ["start", "confirm", "settle"]
 
 
+async def test_delete_in_flight_at_stop_timeout_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait for the box when STOP_TIMEOUT cuts a DELETE that sbx took, and settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+
+    async def slow_delete_answer(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and hold each DELETE answer past STOP_TIMEOUT.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "DELETE":
+            await asyncio.sleep(5)
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(slow_delete_answer))
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+def test_protected_box_must_run_within_the_billing_grace() -> None:
+    """Cap the start limit of a protected box at the billing grace, and keep a smaller one."""
+    grace = BILLING_GRACE_MS / 1000
+    assert SbxEnvironment(_spec(operation_key="box-1"), budget=object())._start_limit == grace
+    long_start = PhaseTimeouts(start=grace * 2, setup=30, run=30, score=30)
+    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=long_start, budget=object())._start_limit == grace
+    short_start = PhaseTimeouts(start=5, setup=30, run=30, score=30)
+    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=short_start, budget=object())._start_limit == 5
+    assert SbxEnvironment(_spec())._start_limit is None
+
+
+async def test_uncancellable_raises_the_cancel_when_the_call_fails_after_it() -> None:
+    """Raise the cancel, not the call's own error, when the thread fails after a cancel."""
+    release = threading.Event()
+
+    def failing_call() -> None:
+        """Fail once the test lets the thread go on.
+
+        Raises:
+            ValueError: Always.
+        """
+        release.wait(5)
+        raise ValueError("late failure")
+
+    task = asyncio.ensure_future(sbx._uncancellable(asyncio.ensure_future(asyncio.to_thread(failing_call))))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_failed_start_settles_the_sandbox_it_made() -> None:
     """Settle a box whose start failed after sbx made the sandbox."""
     CLOUD.final_status = "failed"
@@ -1370,6 +1434,21 @@ async def test_found_orphan_whose_delete_fails_settles_the_whole_lifetime() -> N
     with pytest.raises(asyncio.CancelledError):
         await task
     assert RESERVED[0].calls == ["start", "settle"]
+
+
+async def test_found_orphan_whose_accepted_delete_is_slow_settles_at_the_measured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait past STOP_TIMEOUT for the accepted delete of a found lost sandbox, then settle at the measured runtime."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.6
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "stop", "settle"]
 
 
 async def test_orphan_not_found_after_a_cancelled_create_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:

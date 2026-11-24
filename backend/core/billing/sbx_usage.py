@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from .budget_amounts import cent_units
-from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
+from .budgets import BudgetConflictError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, operation_quote
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from .usage_tags import box_tag
@@ -237,7 +237,7 @@ class SbxUsageReservation:
     def release(self) -> None:
         """Release the hold of a create that sbx refused or that never went out.
 
-        If the ledger refuses the release, the hold stays pending instead.
+        If the release fails, the hold stays pending and the error goes on.
         """
         try:
             self.runtime.service.reject(
@@ -246,9 +246,9 @@ class SbxUsageReservation:
                 evidence_key=f"sbx-refusal:{self.operation.id}",
                 evidence={"provider": "sbx", "sent": self.started_at is not None},
             )
-        except BudgetError:
+        except BaseException:
             self.pending()
-            return
+            raise
         self.runtime.unpin(self.operation.id)
 
     def settle(self) -> None:
