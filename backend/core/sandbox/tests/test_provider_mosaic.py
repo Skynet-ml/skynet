@@ -23,6 +23,7 @@ from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -112,6 +113,7 @@ class FakeCloud:
     list_delay: float = 0.0
     page_size: int | None = None
     page_limits: list[int | None] = field(default_factory=list)
+    list_states: list[str | None] = field(default_factory=list)
     users: list[str | None] = field(default_factory=list)
     destroy_fails: set[str] = field(default_factory=set)
     exec_hangs: bool = False
@@ -215,16 +217,23 @@ class FakeSandbox:
 
     @classmethod
     def list_page(
-        cls, *, metadata: dict[str, str], limit: int | None = None, cursor: str | None = None
+        cls,
+        *,
+        metadata: dict[str, str],
+        limit: int | None = None,
+        cursor: str | None = None,
+        state: str | None = None,
     ) -> tuple[list[SimpleNamespace], str | None]:
         """Return one page of the boxes whose metadata holds every given pair.
 
-        Ended boxes count against the page, as on the server.
+        Like the server, the list leaves out destroyed boxes unless ``state``
+        names them. Ended boxes that it lists count against the page.
 
         Args:
             metadata: The metadata filter.
             limit: The page size the caller asks for.
             cursor: The offset of this page, or ``None`` for the first page.
+            state: The comma-separated states to list, or ``None`` for every box that still exists.
 
         Returns:
             Sandbox summaries and the cursor of the next page, or ``None``.
@@ -234,6 +243,7 @@ class FakeSandbox:
         """
         CLOUD.calls.append("list")
         CLOUD.page_limits.append(limit)
+        CLOUD.list_states.append(state)
         if CLOUD.list_delay:
             time.sleep(CLOUD.list_delay)
         if CLOUD.list_error is not None:
@@ -242,6 +252,7 @@ class FakeSandbox:
             SimpleNamespace(id=box.id, state=box.state, metadata=dict(box.params["metadata"]))
             for box in list(CLOUD.boxes.values())
             if metadata.items() <= box.params["metadata"].items()
+            and (box.state in state.split(",") if state is not None else box.state != "destroyed")
         ]
         size = min(n for n in (limit, CLOUD.page_size, len(matches) or 1) if n is not None)
         start = int(cursor or 0)
@@ -900,12 +911,12 @@ async def test_stop_job_sandboxes_reads_every_page(fake_sdk: FakeCloud) -> None:
     fake_sdk.page_size = 2
     for index in range(2):
         fake_sdk.boxes[f"old-{index}"] = BoxState(
-            id=f"old-{index}", params={"metadata": {JOB_TAG: "job-p"}}, state="destroyed"
+            id=f"old-{index}", params={"metadata": {JOB_TAG: "job-p"}}, state="destroying"
         )
     for index in range(3):
         fake_sdk.boxes[f"live-{index}"] = BoxState(id=f"live-{index}", params={"metadata": {JOB_TAG: "job-p"}})
     assert await MosaicEnvironment.stop_job_sandboxes("job-p") == 3
-    assert all(box.state == "destroyed" for box in fake_sdk.boxes.values())
+    assert all(fake_sdk.boxes[f"live-{index}"].state == "destroyed" for index in range(3))
     assert fake_sdk.calls.count("list") == 3
     assert set(fake_sdk.page_limits) == {mosaic.LIST_PAGE_SIZE}
 
@@ -1297,19 +1308,65 @@ async def test_a_lost_create_without_a_listed_box_keeps_the_hold_pending(
     assert usages[0].calls == ["dispatched", "pending"]
 
 
-async def test_a_rate_limited_create_without_a_listed_box_releases_the_hold(
-    fake_sdk: FakeCloud, usages: list[FakeUsage]
+@pytest.mark.parametrize(
+    "error",
+    [
+        FakeRateLimitError("429", status=429),
+        FakeMosaicError("in flight", status=409, code="idempotency_key_in_flight"),
+        FakeMosaicError("in flight", status=422, code="idempotency_key_in_flight"),
+    ],
+)
+async def test_a_retried_create_without_a_listed_box_keeps_the_hold_pending(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], error: Exception
 ) -> None:
-    """Release the hold when Mosaic refused the create with a 429 and then lists no box with the tag.
+    """Keep the hold pending after a final 429 or in-flight answer, because an earlier SDK retry may have started a box.
 
     Args:
         fake_sdk: The fake Mosaic account.
         usages: The fake reservations of the test.
+        error: The create's final SDK error.
     """
-    fake_sdk.create_error = FakeRateLimitError("429", status=429)
+    fake_sdk.create_error = error
+    with pytest.raises(SandboxError):
+        await _protected().start()
+    assert usages[0].calls == ["dispatched", "pending"]
+
+
+async def test_the_lost_create_lookup_lists_ended_boxes(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ask Mosaic for destroyed boxes too, so a lost create's box that already ended is settled, not missed.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    fake_sdk.create_error = FakeMosaicError("lost", code="transport")
+    fake_sdk.create_error_after_box = True
+    original = FakeSandbox.create
+
+    def create_then_end(**params: Any) -> Any:
+        """Make the box, mark it destroyed, then fail like a lost create.
+
+        Args:
+            **params: The create arguments.
+
+        Returns:
+            Never; the create always raises.
+        """
+        try:
+            return original(**params)
+        finally:
+            for box in fake_sdk.boxes.values():
+                box.state = "destroyed"
+
+    monkeypatch.setattr(FakeSandbox, "create", staticmethod(create_then_end))
     with pytest.raises(SandboxTransientError):
         await _protected().start()
-    assert usages[0].calls == ["dispatched", "release:SandboxTransientError"]
+    (box,) = fake_sdk.boxes.values()
+    assert fake_sdk.list_states == [mosaic._EVERY_STATE]
+    assert usages[0].calls == ["dispatched", f"bind:{box.id}", "stopped", "settle"]
 
 
 async def test_a_rate_limited_create_with_a_failed_list_keeps_the_hold_pending(

@@ -309,10 +309,10 @@ def test_settle_without_a_known_box_keeps_the_hold(database: Engine) -> None:
     assert _operation(runtime, reservation).state == "pending"
 
 
-def test_a_lost_box_bound_by_its_id_settles_at_the_measured_time(
+def test_a_lost_box_bound_by_its_id_is_charged_the_whole_hold(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Charge the measured time of a box that the provider found only by its tag.
+    """Charge the whole hold for a box found only by its tag, because nobody confirmed its shape.
 
     Args:
         database: Engine of the funded ledger.
@@ -327,7 +327,7 @@ def test_a_lost_box_bound_by_its_id_settles_at_the_measured_time(
     USAGE.settle(reservation)
     operation = _operation(runtime, reservation)
     assert operation.state == "settled"
-    assert operation.actual_cents == Decimal("2.5")
+    assert operation.actual_cents == operation.max_cents == Decimal(5)
 
 
 def test_a_box_with_another_shape_is_not_confirmed(database: Engine) -> None:

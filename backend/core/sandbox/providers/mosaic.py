@@ -25,8 +25,10 @@ process poll loop, the file calls and the lost-create cleanup come from
   an inactivity limit, not a lifetime cap, so the provider destroys the box
   itself when its funded lifetime ends. The stop settles the hold whenever
   the box id is known, also for a lost create's box found by its tag. It
-  releases the hold only when Mosaic refused the create and then lists no
-  box with the tag, and keeps it pending in every other case.
+  releases the hold only when Mosaic refused the create with a 4xx answer or
+  a refused token and then lists no box with the tag, and keeps it pending
+  in every other case. A lost create's box is charged the whole hold,
+  because its shape is never confirmed.
 - A ``sudo`` command runs as the ``root`` user.
 - Harbor's snapshot builds, volumes, secrets, SSH, pause, the ``/workspace``
   transfer staging and directory transfer are left out.
@@ -103,6 +105,13 @@ POLL_INTERVAL = 0.1
 LIST_PAGE_SIZE = 500
 _TRANSIENT_CODES = frozenset({"transport", "client_timeout"})
 _ENDED_STATES = frozenset({"destroyed", "destroying", "deleted"})
+# Without a state filter Mosaic lists only boxes that still exist; the
+# lost-create lookup must also see a box that already ended.
+_EVERY_STATE = "running,paused,archived,destroyed"
+# Mosaic answers 409 ``idempotency_key_in_flight`` while the first create
+# under the key still runs (``IdempotencyKey`` in its openapi.json), so a box
+# may exist.
+_IN_FLIGHT_CODES = frozenset({"idempotency_key_in_flight", "reattach_in_flight"})
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
 _TIMEOUT_EXIT_CODE = 124
@@ -186,16 +195,22 @@ def _refusal(error: BaseException | None) -> str | None:
         error: The create's SDK error, or ``None``.
 
     Returns:
-        The sandbox error group of a 4xx answer, a refused token or a rate
-        limit, or ``None`` for any other outcome. A refusal alone does not
-        prove that no box exists; only an empty list after it does.
+        The sandbox error group of a 4xx answer or a refused token, or
+        ``None`` for any other outcome. A refusal alone does not prove that
+        no box exists; only an empty list after it does.
     """
-    if error is None or not isinstance(error, _classes(MosaicError)):
+    # The SDK retries a dropped answer, a 429 and a 5xx under the same
+    # idempotency key, so a final 429 can follow an attempt that started a
+    # box which the list does not show yet.
+    if (
+        error is None
+        or not isinstance(error, _classes(MosaicError))
+        or isinstance(error, _classes(RateLimitError))
+        or getattr(error, "code", None) in _IN_FLIGHT_CODES
+    ):
         return None
     group = _error_group(error)
-    if isinstance(error, _classes(RateLimitError)) or group in (SandboxRejectedError, SandboxFatalError):
-        return group.__name__
-    return None
+    return group.__name__ if group in (SandboxRejectedError, SandboxFatalError) else None
 
 
 async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
@@ -228,11 +243,13 @@ def _cleanup_done(action: str, task: asyncio.Future[None]) -> None:
         logger.warning("Mosaic could not %s: %s", action, type(task.exception()).__name__)
 
 
-async def _list_all(metadata: Mapping[str, str]) -> list[Any]:
+async def _list_all(metadata: Mapping[str, str], state: str | None = None) -> list[Any]:
     """List every sandbox with this metadata, page by page.
 
     Args:
         metadata: The metadata filter.
+        state: The comma-separated states to list, or ``None`` for every
+            sandbox that still exists.
 
     Returns:
         The sandbox summaries of all pages.
@@ -245,7 +262,7 @@ async def _list_all(metadata: Mapping[str, str]) -> list[Any]:
     while True:
         with _mapped("list the sandboxes"):
             page, cursor = await asyncio.to_thread(
-                Sandbox.list_page, metadata=dict(metadata), limit=LIST_PAGE_SIZE, cursor=cursor
+                Sandbox.list_page, metadata=dict(metadata), limit=LIST_PAGE_SIZE, cursor=cursor, state=state
             )
         found.extend(page)
         if cursor is None:
@@ -816,7 +833,7 @@ class MosaicEnvironment(SandboxEnvironment):
         # The create failed or still runs; the server may still have made the
         # box, so look for it by its tag.
         boxes = []
-        for summary in await _list_all({BOX_TAG: self._box_tag}):
+        for summary in await _list_all({BOX_TAG: self._box_tag}, state=_EVERY_STATE):
             if summary.state in _ENDED_STATES:
                 boxes.append((summary.id, None, True))
             else:

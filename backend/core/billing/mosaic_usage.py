@@ -1,8 +1,8 @@
 """Reserve Mosaic sandbox compute and settle it from Mosaic's usage history or the measured lifetime.
 
 Mosaic bills one rate for each billing unit-hour of awake time. A box's
-units are ``max(ceil(vcpu / 2), ceil(memory_mb / 4096))``. Hibernation,
-egress and creation are free. The quote funds the box's whole lifetime at
+units are ``max(ceil(vcpu / 2), ceil(memory_mb / 4096))``. Hibernation and
+egress are free, and no creation fee is published. The quote funds the box's whole lifetime at
 its units, so the funded hold is a ceiling. The settle reads Mosaic's
 per-sandbox usage history. When that history is not final and complete,
 the settle charges the measured wall time from the create call to the
@@ -28,8 +28,8 @@ from .usage_tags import box_tag
 from .vercel_usage import vercel_charge_policy
 
 # Read 2026-11-24 from https://sandbox.mosaicos.com/pricing/ ("$0.05 / hour"
-# of active compute for one 2 vCPU / 4 GB unit; hibernation and egress $0, no
-# creation fee) and https://sandbox.mosaicos.com/llms.txt (whole billing
+# of active compute for one 2 vCPU / 4 GB unit; hibernation and egress $0; no
+# creation fee is published) and https://sandbox.mosaicos.com/llms.txt (whole billing
 # units: max(ceil(vCPU / 2), ceil(MiB / 4096))).
 _PRICING_URL = "https://sandbox.mosaicos.com/pricing/"
 _PRICE_VERSION = "mosaic-sandbox-public-2026-11-24"
@@ -267,10 +267,14 @@ class MosaicUsageReservation:
     def bind(self, sandbox_id: str, handle: Any = None) -> None:
         """Record the id of this operation's box, so the settle can charge it.
 
+        A bound box's shape stays unconfirmed until ``confirm_created``
+        checks it, so a box found only by its tag is charged the whole hold.
+
         Args:
             sandbox_id: The Mosaic sandbox id.
             handle: The SDK ``Sandbox``, or ``None`` when only the id is known.
         """
+        self._shape_unconfirmed = True
         self.sandbox_id = sandbox_id
         self._handle = handle
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, sandbox_id)
@@ -289,7 +293,6 @@ class MosaicUsageReservation:
             UsagePendingError: Mosaic reports another vCPU count or memory size.
         """
         self.bind(sandbox.id, sandbox)
-        self._shape_unconfirmed = True
         summary = sandbox.info()
         if summary.vcpu != self.request["vcpu"] or summary.memory_mb != self.request["memory_mb"]:
             raise UsagePendingError("The cloud sandbox did not confirm the admitted CPU and memory.")
