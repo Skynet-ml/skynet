@@ -22,8 +22,9 @@ With a budget the box is protected (SKY-552). It reserves its whole lifetime
 before the create call, confirms the created size, and stops itself when the
 lifetime ends. It settles the measured time only on proof that the box is
 gone: a get by name returns 404 after the delete, and, when the create had
-no answer, only after the time in which that create can still land (so a
-stop can wait about 20 minutes; see ``LangSmithEnvironment.stop``). A
+no answer, only after the time in which that create can still land. That
+wait can take about 20 minutes, so ``stop`` hands it and the settle to a
+tracked background task (SKY-927; see ``LangSmithEnvironment.stop``). A
 create that never left, or that the server refused with no box by its name,
 releases the hold. Any other case keeps the hold pending. The box has no
 keepalive, so it never extends.
@@ -36,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -131,6 +133,9 @@ _CREATE_LANDING_GRACE_SECONDS = 60
 _GONE_POLL_SECONDS = 2
 # The server answered these before it made a box, unless a lookup finds one.
 _REFUSED_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
+# Strong references to the proof waits that outlive their stop(), so the
+# event loop does not drop them.
+_SETTLE_TASKS: set[asyncio.Future[None]] = set()
 
 
 class LangSmithEnvironment(SandboxEnvironment):
@@ -352,22 +357,32 @@ class LangSmithEnvironment(SandboxEnvironment):
         to finish, then passes one cancel on, so the sandbox never outlives
         ``stop``.
 
-        A protected box waits for a 404 proof. After an answered create this
-        takes about one poll. After a create without an answer (a timeout,
-        a cancel, a 5xx), the proof counts only after the create window, so
-        ``stop`` and a cancelled ``start`` can block for the start limit plus
-        60 s grace, the 60 s poll window, one last pass of up to about 122 s
-        (get, delete, poll pause), and the client close (up to 60 s). The
-        first delete (up to 60 s) counts inside the create window, because the
-        poll starts at the later of the proof time and the delete's end. With
-        the default 900 s start limit that is up to about 1,200 s (20 minutes),
-        plus the ledger calls. This is deliberate:
-        an earlier settle could miss a box that the create still makes.
+        A protected box waits for a 404 proof. After an answered create, a
+        refused create or a create window that already ended, the proof can
+        come at once, so ``stop`` waits for it: for a refused create the
+        lookup by name (up to 60 s), the delete (up to 60 s), the 60 s poll
+        window, one last pass of up to about 122 s (get, delete,
+        poll pause), the client close (up to 60 s) and the ledger calls. An
+        answered create usually takes one poll.
+
+        After a create without an answer (a timeout, a cancel, a 5xx), a
+        404 counts only after the create window: the start limit plus 60 s
+        grace, about 16 minutes by default. An earlier settle could miss a
+        box that the create still makes. So ``stop`` and a cancelled
+        ``start`` send the delete (up to 60 s), then return. A tracked
+        background task waits for the proof, settles the hold, or marks it
+        pending without a proof, and closes the client. That task owns the
+        hold alone, so a later ``stop``, the job sweep and the lifetime stop
+        do not touch it. Its settle error goes to the log, not to a caller.
+        A cancel of that task (an event-loop shutdown) marks the hold pending,
+        unless the settle already runs (then the settle decides). A cancel
+        before the task starts does not mark the hold at all.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
-            UsagePendingError: The settle failed, so the reservation stays pending.
-            BudgetError: The ledger refused the settlement.
+            UsagePendingError: The settle on the fast path failed, so the
+                reservation stays pending.
+            BudgetError: The ledger refused the settlement on the fast path.
         """
         await self._halt()
         # Only one stop caller gets a settle failure, so a second stop returns quietly.
@@ -398,26 +413,42 @@ class LangSmithEnvironment(SandboxEnvironment):
     async def _delete_and_settle(self, client: Any, name: str | None, *, settle: bool = True) -> None:
         """Delete the sandbox by name, then release or settle its reservation on proof.
 
+        When the proof cannot come yet, a background task takes the usage and
+        the client, and this returns after the delete.
+
         Args:
-            client: The SDK client; this closes it.
+            client: The SDK client; this closes it, or the background task does.
             name: The sandbox name.
             settle: False while a create still runs, because the box can
                 appear after this delete.
         """
         usage = self._usage if settle else None
+        handed_off = False
         try:
             if usage is None:
                 await _teardown(client, name)
                 return
+            # Taken before any await, so no other stop path can settle or release this hold.
             self._usage = None
             try:
-                if self._proof_after is None:
+                proof_after = self._proof_after
+                if proof_after is None:
                     await asyncio.to_thread(usage.release, "create-not-sent")
                     return
                 if self._refused is not None and name is not None and await _absent(client, name):
                     await asyncio.to_thread(usage.release, f"create-refused-{self._refused}")
                     return
-                ended_at = await _teardown(client, name, proof_after=self._proof_after)
+                deleted_at = await _teardown(client, name)
+                if name is not None and proof_after > time.monotonic():
+                    late = asyncio.ensure_future(
+                        _settle_late(client, name, usage, proof_after, deleted_at, answered=self._answered)
+                    )
+                    _SETTLE_TASKS.add(late)
+                    late.add_done_callback(functools.partial(_on_settle_done, name))
+                    handed_off = True
+                    logger.info("LangSmith sandbox %s waits for its delete proof in the background.", name)
+                    return
+                ended_at = deleted_at if name is None else await _gone(client, name, proof_after, deleted_at)
                 if ended_at is not None:
                     # Without a create answer, the box can have lived until the proof.
                     usage.mark_deleted(ended_at if self._answered else None)
@@ -426,8 +457,8 @@ class LangSmithEnvironment(SandboxEnvironment):
                 logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
                 self._settle_error = error
         finally:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)
+            if not handed_off:
+                await _close(client)
 
     async def _reserve(self) -> None:
         """Reserve the whole lifetime of a protected box before its create call.
@@ -798,27 +829,114 @@ def _http_status(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-async def _teardown(client: Any, name: str | None, *, proof_after: float | None = None) -> float | None:
+async def _teardown(client: Any, name: str | None) -> float | None:
     """Delete one sandbox by name, and log a failure instead of raising it.
+
+    A failed delete of a protected box is retried in the bounded proof poll,
+    so it does not leave the hold pending at once.
 
     Args:
         client: The SDK ``AsyncSandboxClient``.
         name: The sandbox name; ``None`` when no create call ran.
-        proof_after: For a protected box, the instant after which a 404 on a
-            get proves the box gone; ``None`` trusts the delete alone.
 
     Returns:
-        The end of the box's life: the instant the last successful delete
-        call returned, or a later instant at which the box was still seen.
-        None when the delete failed or no proof came.
+        The instant the delete call returned, or None when it failed.
     """
     if name is None:
         return time.monotonic()
-    deleted_at = await _delete(client, name)
-    if proof_after is None:
-        return deleted_at
-    # A failed delete is retried in the bounded poll, so it does not leave the hold pending at once.
-    return await _gone(client, name, proof_after, deleted_at)
+    return await _delete(client, name)
+
+
+async def _close(client: Any) -> None:
+    """Close the SDK client, bounded in time, and ignore a failure.
+
+    Args:
+        client: The SDK ``AsyncSandboxClient``.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)
+
+
+async def _settle_late(
+    client: Any, name: str, usage: Any, proof_after: float, deleted_at: float | None, *, answered: bool
+) -> None:
+    """Wait for the delete proof of a create without an answer, then settle the hold once and close the client.
+
+    The stop hands the usage to this task and keeps no reference, so no
+    other path can settle, release or mark it. Without a proof, the settle
+    raises and marks the hold pending itself.
+
+    Args:
+        client: The SDK client; this closes it.
+        name: The sandbox name.
+        usage: The usage reservation of the box.
+        proof_after: The instant after which a 404 proves the box gone.
+        deleted_at: The instant the first delete call returned, or None when it failed.
+        answered: True when the server answered the create.
+
+    Raises:
+        asyncio.CancelledError: The event loop cancelled the task. A cancel
+            before the settle marks the hold pending. A cancel during the
+            settle waits for it, and the settle decides. A cancel during the
+            client close waits for the close and does not change the hold.
+            A cancel before the task starts leaves the hold dispatched and
+            the client open, and is only logged.
+        UsagePendingError: No delete proof came, so the hold stays pending.
+        BudgetError: The ledger refused the settlement.
+    """
+    settling: asyncio.Future[None] | None = None
+    try:
+        ended_at = await _gone(client, name, proof_after, deleted_at)
+        if ended_at is not None:
+            usage.mark_deleted(ended_at if answered else None)
+        # The settle thread cannot be cancelled, so a cancel waits for it; the settle then owns the outcome.
+        settling = asyncio.ensure_future(asyncio.to_thread(usage.settle))
+        await _wait_through_cancels(settling)
+        settling.result()
+    except asyncio.CancelledError:
+        if settling is None:
+            marking = asyncio.ensure_future(asyncio.to_thread(usage.pending))
+            # A failed pending call must not replace the cancel.
+            with contextlib.suppress(asyncio.CancelledError):
+                await _wait_through_cancels(marking)
+            if marking.exception() is not None:
+                logger.warning(
+                    "Could not mark the LangSmith sandbox %s usage pending: %s.",
+                    name,
+                    type(marking.exception()).__name__,
+                )
+        elif settling.done() and not settling.cancelled() and settling.exception() is not None:
+            # The cancel replaces the settle error, so log it here or nobody reads it.
+            logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(settling.exception()).__name__)
+        elif settling.done() and not settling.cancelled():
+            logger.info("LangSmith sandbox %s usage settled before the cancel.", name)
+        raise
+    except Exception as error:
+        # Log before the close, because a cancel during the close replaces this error.
+        logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
+        raise
+    finally:
+        # A cut-short close would leak the client.
+        await _wait_through_cancels(asyncio.ensure_future(_close(client)))
+
+
+def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
+    """Forget a finished proof wait and log its cancel; ``_settle_late`` logs its failure.
+
+    Args:
+        name: The sandbox name.
+        task: The finished proof wait.
+    """
+    _SETTLE_TASKS.discard(task)
+    if task.cancelled():
+        # A cancel before the first step skips the pending mark, so this log is the only trace of that hold.
+        logger.warning(
+            "Background settle for LangSmith sandbox %s was cancelled; its usage hold may be dispatched or pending.",
+            name,
+        )
+    else:
+        # Read the error so asyncio does not report it as never retrieved.
+        task.exception()
 
 
 async def _delete(client: Any, name: str) -> float | None:
