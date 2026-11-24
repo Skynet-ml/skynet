@@ -63,7 +63,7 @@ def _billed_usd(milliseconds: int, rate: Decimal) -> Decimal:
     Returns:
         The cost in USD.
     """
-    return Decimal(math.ceil(milliseconds / 1000) * 1000) * rate / _MS_PER_HOUR
+    return Decimal(-(-milliseconds // 1000) * 1000) * rate / _MS_PER_HOUR
 
 
 def quote_sbx_sandbox(request: Mapping[str, Any]) -> OperationQuote:

@@ -82,6 +82,7 @@ class FakeCloud:
     list_hides: int = 0
     hidden: set[str] = field(default_factory=set)
     delete_answers: list[int] = field(default_factory=list)
+    deleting_until: float = 0.0
     process_create_hangs: bool = False
     exec_hangs: bool = False
     credential_token: str = "runtime-token"
@@ -295,6 +296,8 @@ async def _management(request: httpx.Request) -> httpx.Response:
         return _not_found()
     if request.method == "GET":
         if box.status == "deleting":
+            if asyncio.get_running_loop().time() < CLOUD.deleting_until:
+                return _json(200, _sandbox(box))
             del CLOUD.boxes[box.id]
             return _not_found()
         if box.id in CLOUD.hidden:
@@ -581,7 +584,7 @@ async def test_cancelled_create_deletes_the_sandbox_it_made() -> None:
     assert len(CLOUD.calls("DELETE", "")) == 1
 
 
-@pytest.mark.parametrize("status", [400, 409, 422, 429])
+@pytest.mark.parametrize("status", [400, 402, 405, 409, 413, 415, 422, 429])
 async def test_definite_4xx_create_looks_for_no_sandbox(status: int) -> None:
     """Send no list and no delete after a 4xx create answer."""
     CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
@@ -1079,6 +1082,31 @@ async def test_failed_delete_settles_at_the_whole_lifetime() -> None:
     assert RESERVED[0].calls == ["start", "confirm", "settle"]
 
 
+async def test_slow_accepted_delete_settles_at_the_measured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wait past STOP_TIMEOUT for an accepted delete, and settle at the measured runtime when the box goes."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = asyncio.get_running_loop().time() + 0.3
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_accepted_delete_that_never_ends_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle without a stop time when an accepted delete outlasts DELETE_WAIT too."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(sbx, "DELETE_WAIT", 0.2)
+    monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.01)
+    env = _protected()
+    await env.start()
+    CLOUD.deleting_until = float("inf")
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
+
+
 async def test_failed_start_settles_the_sandbox_it_made() -> None:
     """Settle a box whose start failed after sbx made the sandbox."""
     CLOUD.final_status = "failed"
@@ -1088,7 +1116,7 @@ async def test_failed_start_settles_the_sandbox_it_made() -> None:
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
-@pytest.mark.parametrize("status", [400, 409, 422, 429])
+@pytest.mark.parametrize("status", [400, 402, 405, 409, 413, 415, 422, 429])
 async def test_refused_create_releases_the_hold(status: int) -> None:
     """Release the hold when sbx refuses the create, as it made no sandbox."""
     CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
@@ -1277,6 +1305,46 @@ async def test_cancel_during_the_client_closes_still_settles(monkeypatch: pytest
     with pytest.raises(asyncio.CancelledError):
         await env.stop()
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_cancel_while_the_bill_closes_still_closes_the_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Close both clients when a cancel hits the stop while the settle thread runs."""
+    env = _protected()
+    await env.start()
+    settling = threading.Event()
+    release = threading.Event()
+    closed: list[httpx.AsyncClient] = []
+
+    def slow_settle(self: FakeUsage) -> None:
+        """Hold the settle thread until the test cancels the stop.
+
+        Args:
+            self: The fake usage.
+        """
+        settling.set()
+        release.wait(5)
+        self.calls.append("settle")
+
+    async def record_close(client: httpx.AsyncClient) -> None:
+        """Record a client close.
+
+        Args:
+            client: The client to close.
+        """
+        closed.append(client)
+
+    monkeypatch.setattr(FakeUsage, "settle", slow_settle)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", record_close)
+    stopping = asyncio.ensure_future(env.stop())
+    await asyncio.to_thread(settling.wait, 5)
+    assert env._stop_task is not None
+    env._stop_task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+    assert len(closed) == 2
 
 
 async def _cancel_a_hanging_create(env: SbxEnvironment) -> asyncio.Future[None]:
