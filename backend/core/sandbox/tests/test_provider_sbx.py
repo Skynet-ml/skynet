@@ -1138,12 +1138,12 @@ async def test_delete_in_flight_at_stop_timeout_settles_at_the_measured_runtime(
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
 
 
-def test_protected_box_must_run_within_the_billing_grace() -> None:
-    """Cap the start limit of a protected box at the billing grace, and keep a smaller one."""
-    grace = BILLING_GRACE_MS / 1000
-    assert SbxEnvironment(_spec(operation_key="box-1"), budget=object())._start_limit == grace
-    long_start = PhaseTimeouts(start=grace * 2, setup=30, run=30, score=30)
-    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=long_start, budget=object())._start_limit == grace
+def test_protected_box_must_run_within_half_the_billing_grace() -> None:
+    """Cap the start limit of a protected box at half the billing grace, and keep a smaller one."""
+    half = BILLING_GRACE_MS / 2000
+    assert SbxEnvironment(_spec(operation_key="box-1"), budget=object())._start_limit == half
+    long_start = PhaseTimeouts(start=half * 4, setup=30, run=30, score=30)
+    assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=long_start, budget=object())._start_limit == half
     short_start = PhaseTimeouts(start=5, setup=30, run=30, score=30)
     assert SbxEnvironment(_spec(operation_key="box-1"), timeouts=short_start, budget=object())._start_limit == 5
     assert SbxEnvironment(_spec())._start_limit is None
@@ -1169,6 +1169,31 @@ async def test_uncancellable_raises_the_cancel_when_the_call_fails_after_it() ->
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_stop_waits_for_a_lagging_list_before_it_counts_a_box_deleted() -> None:
+    """Delete, then settle at the measured runtime, a box that the list shows only after a lag."""
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    CLOUD.hidden.add(box.id)
+    CLOUD.list_hides = 3
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_box_that_never_shows_for_the_delete_settles_the_whole_lifetime() -> None:
+    """Settle without a stop time when no DELETE went out because the box never showed."""
+    env = _protected()
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    CLOUD.hidden.add(box.id)
+    CLOUD.list_hides = 10**6
+    await env.stop()
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "confirm", "settle"]
 
 
 async def test_failed_start_settles_the_sandbox_it_made() -> None:
@@ -1449,6 +1474,34 @@ async def test_found_orphan_whose_accepted_delete_is_slow_settles_at_the_measure
     assert len(CLOUD.calls("DELETE", "")) == 1
     assert CLOUD.boxes == {}
     assert RESERVED[0].calls == ["start", "stop", "settle"]
+
+
+async def test_found_orphan_with_an_invalid_name_settles_the_whole_lifetime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle, not keep pending, a lost sandbox the stop found when its listed name is invalid."""
+
+    async def bad_names(request: httpx.Request) -> httpx.Response:
+        """Serve every call, and give each listed sandbox an invalid name.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        response = await _handle(request)
+        if request.method == "GET" and request.url.path == "/sandboxes/v1/sandboxes":
+            page = json.loads(response.content)
+            for sandbox in page["sandboxes"]:
+                sandbox["name"] = "other/x"
+            return _json(response.status_code, page)
+        return response
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(bad_names))
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "settle"]
 
 
 async def test_orphan_not_found_after_a_cancelled_create_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:

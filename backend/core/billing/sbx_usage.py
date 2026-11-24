@@ -46,9 +46,10 @@ LIFETIME_CEILING_MS = 43_200_000
 # and the CLI says expiry cannot pass 24 hours "from creation"
 # (https://docs.docker.com/reference/cli/sbx/create/), both read 2026-11-24.
 # Neither says when the server starts that clock, so this assumes it starts
-# no later than this grace after the create call. A sandbox whose delete fails
-# then bills at most its lifetime plus the grace, and settle never charges
-# more than the hold.
+# no later than this grace after the create call. The provider makes a
+# protected box run within half the grace, and the other half covers the
+# delete. A sandbox whose delete fails then bills at most its lifetime plus
+# the grace, and settle never charges more than the hold.
 BILLING_GRACE_MS = 600_000
 _MS_PER_HOUR = Decimal(3_600_000)
 
