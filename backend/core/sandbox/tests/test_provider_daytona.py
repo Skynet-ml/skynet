@@ -17,7 +17,9 @@ from typing import Any, ClassVar
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
 from core.sandbox import JOB_TAG, NetworkPolicy, ResourceRequest, SandboxSpec, factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.errors import (
     SandboxFatalError,
     SandboxInfraError,
@@ -26,6 +28,7 @@ from core.sandbox.errors import (
     StartTimeoutError,
 )
 from core.sandbox.factory import ProductionNotAllowedError
+from core.sandbox.metering import usage_adapter
 from core.sandbox.providers import daytona
 from core.sandbox.providers.daytona import DaytonaEnvironment
 from core.sandbox.resources import ResourceMode
@@ -271,6 +274,9 @@ class FakeBox:
     fail_mkdir: bool = False
     delete_delay: float = 0.0
     network_updates: list[dict[str, Any]] = field(default_factory=list)
+    cpu: int | None = None
+    memory: int | None = None
+    disk: int | None = None
 
     def __post_init__(self) -> None:
         """Attach the process and file APIs."""
@@ -348,7 +354,15 @@ class FakeClient:
         if cls.create_error is not None:
             raise cls.create_error
         cls.created.append(params)
-        box = FakeBox(id=f"box-{next(cls._ids)}", labels=dict(params.labels or {}), env=dict(params.env_vars or {}))
+        sizes = params.resources or {}
+        box = FakeBox(
+            id=f"box-{next(cls._ids)}",
+            labels=dict(params.labels or {}),
+            env=dict(params.env_vars or {}),
+            cpu=sizes.get("cpu"),
+            memory=sizes.get("memory"),
+            disk=sizes.get("disk"),
+        )
         cls.boxes.append(box)
         if cls.create_times_out:
             raise FakeTimeoutError(f"Sandbox {box.id} failed to become ready", sandbox_id=box.id)
@@ -786,3 +800,216 @@ def test_factory_refuses_the_daytona_provider_in_production(monkeypatch: pytest.
         factory.create_environment("daytona", _SPEC)
     with pytest.raises(ProductionNotAllowedError):
         factory.preflight("daytona")
+
+
+_PROTECTED = SandboxSpec(lifetime_seconds=125, operation_key="op-1")
+
+
+class FakeUsage:
+    """Record the reservation calls that a protected box makes."""
+
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+        """Record the reserve call.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced create parameters.
+            operation_key: The box's operation key.
+        """
+        self.calls: list[Any] = [("reserve", budget, request, operation_key)]
+        self.settle_error: Exception | None = None
+        FakeUsage.made.append(self)
+
+    made: ClassVar[list[FakeUsage]] = []
+
+    def confirm_created(self, sandbox: Any) -> None:
+        """Record the confirm call.
+
+        Args:
+            sandbox: The created box.
+        """
+        self.calls.append(("confirm", sandbox.id))
+
+    def settle(self) -> None:
+        """Record the settle call, or raise the set error.
+
+        Raises:
+            Exception: ``settle_error`` is set.
+        """
+        self.calls.append(("settle",))
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def fail(self, error: BaseException, *, refused: bool) -> None:
+        """Record the fail call.
+
+        Args:
+            error: The create failure.
+            refused: Whether Daytona made no box.
+        """
+        self.calls.append(("fail", type(error), refused))
+
+    def pending(self) -> None:
+        """Record the pending call."""
+        self.calls.append(("pending",))
+
+
+@pytest.fixture
+def usage() -> type[FakeUsage]:
+    """Reset the fake usage records.
+
+    Returns:
+        The fake usage class.
+    """
+    FakeUsage.made = []
+    return FakeUsage
+
+
+def _names(made: FakeUsage) -> list[str]:
+    """Return the call names that one fake usage recorded.
+
+    Args:
+        made: The fake usage.
+
+    Returns:
+        The call names in order.
+    """
+    return [call[0] for call in made.calls]
+
+
+def test_usage_adapter_is_registered() -> None:
+    """Find the Daytona usage adapter, so hosted Skynet can meter the provider."""
+    adapter = usage_adapter("daytona")
+    assert adapter is not None
+    assert adapter.name == "daytona"
+
+
+def test_protected_box_needs_an_operation_key_and_sizes() -> None:
+    """Refuse a protected box that has no operation key or that ignores sizes."""
+    with pytest.raises(SandboxSpecError, match="operation key"):
+        DaytonaEnvironment(_SPEC, budget=object(), usage_factory=FakeUsage)
+    ignored = SandboxSpec(lifetime_seconds=60, operation_key="k", resources=ResourceRequest(mode=ResourceMode.IGNORE))
+    with pytest.raises(SandboxSpecError, match="explicit sizes"):
+        DaytonaEnvironment(ignored, budget=object(), usage_factory=FakeUsage)
+
+
+async def test_protected_box_reserves_confirms_and_settles(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Reserve the whole lifetime before the create, confirm after it and settle after the delete."""
+    budget = object()
+    async with DaytonaEnvironment(_PROTECTED, budget=budget, usage_factory=usage):
+        pass
+    (made,) = usage.made
+    assert made.calls[0] == (
+        "reserve",
+        budget,
+        {
+            "lifetime_ms": 3 * 60_000 + 60_000,
+            "vcpus": 2,
+            "memory_gib": 1,
+            "disk_gib": 3,
+            "image": "python:3.12.15-slim",
+        },
+        "op-1",
+    )
+    assert made.calls[1:] == [("confirm", fake_sdk.boxes[0].id), ("settle",)]
+    (params,) = fake_sdk.created
+    assert params.resources == {"cpu": 2, "memory": 1, "disk": 3}
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_unprotected_box_keeps_the_provider_default_sizes(fake_sdk: type[FakeClient]) -> None:
+    """Send no memory or disk size for a box without a budget."""
+    async with DaytonaEnvironment(_SPEC):
+        pass
+    assert fake_sdk.created[0].resources == {"cpu": 2}
+
+
+@pytest.mark.parametrize(
+    ("error", "refused"),
+    [
+        (FakeAuthenticationError("bad key"), True),
+        (FakeRateLimitError("slow down"), True),
+        (FakeDaytonaError("something else"), False),
+    ],
+)
+async def test_failed_create_releases_only_a_refusal(
+    fake_sdk: type[FakeClient], usage: type[FakeUsage], error: Exception, refused: bool
+) -> None:
+    """Release the hold when Daytona refused the create, and keep it when a box can exist."""
+    fake_sdk.create_error = error
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    with pytest.raises(Exception):  # noqa: B017 - the group mapping is tested above
+        await env.start()
+    await env.stop()
+    (made,) = usage.made
+    assert made.calls[1][0] == "fail"
+    assert made.calls[1][2] is refused
+
+
+async def test_create_timeout_settles_the_box_it_made(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Settle a box that a timed-out create made, after the delete."""
+    fake_sdk.create_times_out = True
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    await env.stop()
+    assert _names(usage.made[0]) == ["reserve", "settle"]
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_cancel_during_create_settles_the_box(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Settle a box that Daytona made during a cancelled start."""
+    fake_sdk.create_delay = 0.05
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert _names(usage.made[0]) == ["reserve", "settle"]
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_failed_delete_keeps_the_hold_pending(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Keep the whole hold when the delete fails, because the box can still run."""
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    await env.start()
+    fake_sdk.boxes[0].fail_delete = FakeDaytonaError("delete broke")
+    with pytest.raises(SandboxInfraError):
+        await env.stop()
+    assert _names(usage.made[0]) == ["reserve", "confirm", "pending"]
+
+
+async def test_settle_failure_raises_a_pending_error(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Raise a usage error without database details when the settle fails."""
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    await env.start()
+    usage.made[0].settle_error = RuntimeError("db password=secret")
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert "secret" not in str(raised.value)
+    await env.stop()
+    assert _names(usage.made[0]) == ["reserve", "confirm", "settle"]
+
+
+async def test_failed_reserve_creates_no_box(fake_sdk: type[FakeClient]) -> None:
+    """Create no box when the reservation fails."""
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        """Refuse the reservation.
+
+        Args:
+            *_args: Ignored.
+            **_kwargs: Ignored.
+
+        Raises:
+            UsagePendingError: Always.
+        """
+        raise UsagePendingError("no funds")
+
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=refuse)
+    with pytest.raises(UsagePendingError):
+        await env.start()
+    await env.stop()
+    assert fake_sdk.created == []

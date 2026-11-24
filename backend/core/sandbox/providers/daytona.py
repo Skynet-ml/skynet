@@ -16,6 +16,9 @@ and ``harbor/environments/daytona/utils.py``. Changes:
   apart and no status polling is needed.
 - ``stop_job_sandboxes`` finds the boxes of a job by their ``JOB_TAG`` label.
 - The factory refuses this provider in production (SKY-406 D1).
+- A protected box reserves its whole funded lifetime before the create call
+  and settles after the delete (SKY-545). Its TTL is fixed at create, so the
+  lifetime never grows and the box never extends its reservation.
 """
 
 from __future__ import annotations
@@ -29,10 +32,14 @@ import os
 import posixpath
 import shlex
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, ClassVar
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
+from core.billing.budgets import BudgetError
+from core.billing.daytona_usage import DaytonaUsageReservation
+from core.billing.runtime import UsagePendingError
+
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
     SandboxError,
@@ -91,6 +98,11 @@ DAYTONA_CAPABILITIES = EnvironmentCapabilities(
 DEFAULT_IMAGE = "python:3.12.15-slim"
 CREATE_TIMEOUT_SEC = 300.0
 DELETE_TIMEOUT_SEC = 60.0
+# Daytona's default box size, from https://www.daytona.io/docs/en/sandboxes
+# (read 2026-11-24). A protected box sends these sizes when the spec leaves
+# them open, so the box gets its usual size and the quote prices it exactly.
+DEFAULT_MEMORY_GIB = 1
+DEFAULT_DISK_GIB = 3
 
 _TRANSIENT_MARKERS = ("limit exceeded", "too many requests", "capacity", "rate limit")
 _BUILD_MARKERS = ("build_failed", "failed to build")
@@ -114,23 +126,42 @@ class DaytonaEnvironment(SandboxEnvironment):
 
     capabilities: ClassVar[EnvironmentCapabilities] = DAYTONA_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, timeouts: PhaseTimeouts | None = None) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        timeouts: PhaseTimeouts | None = None,
+        budget: Any | None = None,
+        usage_factory: Callable[..., Any] = DaytonaUsageReservation,
+    ) -> None:
         """Check the spec and create a stopped Daytona sandbox.
 
         Args:
             spec: The sandbox to open.
             timeouts: The phase timeouts; the run phase is the default
                 ``exec`` timeout. ``None`` means no default timeout.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: The provider cannot open this spec.
+            SandboxSpecError: The provider cannot open this spec, or a
+                protected box has no operation key or ignores sizes.
             SandboxFatalError: The ``daytona`` extra is not installed.
         """
         super().__init__(spec)
         _require_sdk()
+        if budget is not None:
+            if spec.operation_key is None:
+                raise SandboxSpecError("A protected Daytona sandbox needs an operation key.")
+            if spec.resources.mode is ResourceMode.IGNORE:
+                raise SandboxSpecError("A protected Daytona sandbox needs explicit sizes to price.")
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts is not None else None
         self._client: Any = None
         self._sandbox: Any = None
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any = None
+        self._create_error: BaseException | None = None
 
     @classmethod
     def preflight(cls) -> None:
@@ -157,18 +188,20 @@ class DaytonaEnvironment(SandboxEnvironment):
         """
         if self._sandbox is not None:
             return
+        ttl_minutes = max(1, math.ceil(self.spec.lifetime_seconds / 60))
+        await self._reserve(ttl_minutes)
         if self._client is None:
             self._client = _client()
         params = CreateSandboxFromImageParams(
             image=self.spec.image or DEFAULT_IMAGE,
-            resources=_resources(self.spec),
+            resources=_resources(self.spec, protected=self._budget is not None),
             env_vars=dict(self.spec.env) or None,
             labels=dict(self.spec.tags) or None,
             # ephemeral deletes the box when it stops, and the TTL deletes a
             # box that a crashed worker never stopped.
             ephemeral=True,
             auto_stop_interval=0,
-            ttl_minutes=max(1, math.ceil(self.spec.lifetime_seconds / 60)),
+            ttl_minutes=ttl_minutes,
             **_network_kwargs(self._network_policy or NetworkPolicy(), clear=False),
         )
         create = asyncio.ensure_future(self._create(params))
@@ -184,20 +217,86 @@ class DaytonaEnvironment(SandboxEnvironment):
                     await asyncio.wait({create})
             if not create.cancelled() and create.exception() is None:
                 self._sandbox = create.result()
+            elif not create.cancelled():
+                self._create_error = create.exception()
+            raise
+        except BaseException as error:
+            self._create_error = error
+            raise
+        if self._usage is not None:
+            # A size mismatch fails the start; the caller's stop() then
+            # deletes the box and settles it.
+            await asyncio.shield(asyncio.to_thread(self._usage.confirm_created, self._sandbox))
+
+    async def _reserve(self, ttl_minutes: int) -> None:
+        """Reserve the whole funded lifetime of a protected box before the create call.
+
+        Args:
+            ttl_minutes: The box TTL that Daytona enforces.
+        """
+        if self._budget is None or self._usage is not None:
+            return
+        reserving = asyncio.ensure_future(
+            asyncio.to_thread(
+                self._usage_factory,
+                self._budget,
+                self._usage_request(ttl_minutes),
+                operation_key=self.spec.operation_key,
+            )
+        )
+        try:
+            self._usage = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled and may still reserve; keep its
+            # result so stop() releases it instead of leaking it.
+            while not reserving.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({reserving})
+            if not reserving.cancelled() and reserving.exception() is None:
+                self._usage = reserving.result()
             raise
 
+    def _usage_request(self, ttl_minutes: int) -> dict[str, Any]:
+        """Return the create parameters that the reservation prices.
+
+        The request has no per-box name, so pool lease slices for equal boxes
+        share one fingerprint.
+
+        Args:
+            ttl_minutes: The box TTL that Daytona enforces.
+
+        Returns:
+            The funded lifetime, sizes and image of the box.
+        """
+        sizes = _sizes(self.spec, protected=True)
+        return {
+            # The TTL counts from the create; the delete timeout covers a box
+            # whose delete runs at the end of the TTL.
+            "lifetime_ms": ttl_minutes * 60_000 + math.ceil(DELETE_TIMEOUT_SEC * 1000),
+            "vcpus": sizes["cpu"],
+            "memory_gib": sizes["memory"],
+            "disk_gib": sizes["disk"],
+            "image": self.spec.image or DEFAULT_IMAGE,
+        }
+
     async def stop(self) -> None:
-        """Delete the box and close the client. Safe before start and when called twice.
+        """Delete the box, close the client and settle the reservation. Safe before start and when called twice.
 
         A cancel during the delete waits for the delete to finish, also
         through more cancels, then passes the cancel on.
+
+        Raises:
+            SandboxError: Daytona failed the delete call; the reservation stays pending.
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: The usage evidence breaks the reserved bounds.
         """
-        sandbox, client = self._sandbox, self._client
+        sandbox, client, usage = self._sandbox, self._client, self._usage
         self._sandbox = None
         self._client = None
-        if sandbox is None and client is None:
+        self._usage = None
+        if sandbox is None and client is None and usage is None:
             return
-        cleanup = asyncio.ensure_future(_delete_and_close(sandbox, client))
+        cleanup = asyncio.ensure_future(_delete_and_settle(sandbox, client, usage, self._create_error))
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
@@ -419,6 +518,60 @@ def _require_sdk() -> None:
         raise SandboxFatalError("The Daytona sandbox needs the `daytona` package: install the `daytona` extra.")
 
 
+async def _delete_and_settle(sandbox: Any, client: Any, usage: Any, create_error: BaseException | None) -> None:
+    """Delete a box, then settle or release its reservation.
+
+    Args:
+        sandbox: The box, or ``None`` when no box was made.
+        client: The client, or ``None``.
+        usage: The reservation of a protected box, or ``None``.
+        create_error: The create failure, or ``None``.
+
+    Raises:
+        SandboxError: Daytona failed the delete call.
+        UsagePendingError: The settle failed, so the reservation stays pending.
+        BudgetError: The usage evidence breaks the reserved bounds.
+    """
+    try:
+        await _delete_and_close(sandbox, client)
+    except BaseException:
+        if usage is not None:
+            # The box may still run until its TTL, so keep the whole hold.
+            try:
+                await asyncio.to_thread(usage.pending)
+            except Exception as error:
+                logger.warning("The sandbox reservation did not mark pending: %s", type(error).__name__)
+        raise
+    if usage is None:
+        return
+    try:
+        if sandbox is not None:
+            await asyncio.to_thread(usage.settle)
+        else:
+            error = create_error or SandboxInfraError("The sandbox was never created.")
+            await asyncio.to_thread(usage.fail, error, refused=_refused(error))
+    except (UsagePendingError, BudgetError):
+        raise
+    except Exception as error:
+        # The text of a database error can hold details the run must not see.
+        raise UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.") from error
+
+
+def _refused(error: BaseException) -> bool:
+    """Report whether a create failure means that Daytona made no box.
+
+    Args:
+        error: The create failure.
+
+    Returns:
+        True for an auth, permission or rate-limit answer. A timeout or an
+        unknown failure can leave a box, so it is not a refusal.
+    """
+    if isinstance(error, StartTimeoutError | _MissingError):
+        return False
+    return isinstance(error, SandboxFatalError | SandboxTransientError)
+
+
 async def _delete_and_close(sandbox: Any, client: Any) -> None:
     """Delete a box and close its client; a box that is already gone counts as deleted.
 
@@ -486,26 +639,44 @@ def _classify(error: Exception, action: str) -> SandboxError:
     return SandboxInfraError(message)
 
 
-def _resources(spec: SandboxSpec) -> Any:
-    """Build the Daytona resource request from the spec.
+def _sizes(spec: SandboxSpec, *, protected: bool) -> dict[str, int]:
+    """Return the Daytona box sizes for the spec.
 
     Args:
         spec: The sandbox spec.
+        protected: True for a metered box, which always sends every size.
 
     Returns:
-        A ``Resources`` object, or ``None`` when the spec ignores sizes.
+        The CPU count, and memory and disk in GiB when known.
     """
     request = spec.resources
-    if request.mode is ResourceMode.IGNORE:
-        return None
     sizes: dict[str, int] = {"cpu": request.cpus}
     # Daytona sizes memory and disk in whole GiB; round up so the box is
     # never smaller than the request.
     if request.memory_mb is not None:
         sizes["memory"] = math.ceil(request.memory_mb / 1024)
+    elif protected:
+        sizes["memory"] = DEFAULT_MEMORY_GIB
     if request.disk_mb is not None:
         sizes["disk"] = math.ceil(request.disk_mb / 1024)
-    return Resources(**sizes)
+    elif protected:
+        sizes["disk"] = DEFAULT_DISK_GIB
+    return sizes
+
+
+def _resources(spec: SandboxSpec, *, protected: bool = False) -> Any:
+    """Build the Daytona resource request from the spec.
+
+    Args:
+        spec: The sandbox spec.
+        protected: True for a metered box, which always sends every size.
+
+    Returns:
+        A ``Resources`` object, or ``None`` when the spec ignores sizes.
+    """
+    if spec.resources.mode is ResourceMode.IGNORE:
+        return None
+    return Resources(**_sizes(spec, protected=protected))
 
 
 def _network_kwargs(policy: NetworkPolicy, *, clear: bool) -> dict[str, Any]:
