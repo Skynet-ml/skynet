@@ -6069,6 +6069,78 @@ _ENTRIES = [
 ]
 
 
+# The image PATH part of the sudo listing: ``/usr/local/bin:/usr/bin``, with sudo in ``/usr/bin``.
+_SUDO_PATH = [
+    *_entry("pathdir", "/usr/local/bin", "755 directory"),
+    *_entry("pathdir", "/usr/bin", "755 directory"),
+    *_entry("sudo", "/usr/bin/sudo", "4755 regular file"),
+]
+
+
+# The sudo and PAM files that a Debian image with sudo has, in probe order, and the entries of its folders.
+_CONF = {
+    "/etc/sudo.conf": "644 regular file",
+    "/usr/etc/sudo.conf": "none",
+    "/etc/sudoers": "440 regular file",
+    "/etc/environment": "644 regular file",
+    "/etc/default/locale": "644 regular file",
+    "/etc/pam.conf": "none",
+    "/etc/passwd": "644 regular file",
+    "/etc/group": "644 regular file",
+    "/etc/shadow": "640 regular file",
+    "/etc/gshadow": "640 regular file",
+    "/etc/login.defs": "644 regular file",
+    "/etc/default/login": "none",
+    "/etc/sudoers.d": "755 directory",
+    "/etc/pam.d": "755 directory",
+    "/usr/lib/pam.d": "none",
+    "/usr/etc/pam.d": "none",
+    "/usr/lib/security": "none",
+    "/etc/security": "755 directory",
+}
+_CONF_ENTRIES = {
+    "/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "440 regular file"),
+    "/etc/pam.d": _entry("entry", "/etc/pam.d/sudo", "644 regular file"),
+    "/etc/security": [
+        *_entry("entry", "/etc/security/limits.conf", "644 regular file"),
+        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+    ],
+}
+
+
+def _sudo_lines(
+    root: dict[str, list[str] | None] | None = None,
+    path: list[str] = _SUDO_PATH,
+    conf: dict[str, list[str]] | None = None,
+    entries: dict[str, list[str]] | None = None,
+    done: bool = True,
+) -> list[str]:
+    """Write the sudo part of the probe's output, as a Debian image with sudo prints it.
+
+    Args:
+        root: The walks of ``folder/sudo`` for root's PATH folders that differ from one root-owned
+            4755 ``/usr/bin/sudo``, by entry; ``None`` makes an entry a ``nosudo`` line.
+        path: The ``pathdir`` and ``sudo`` lines of the image PATH.
+        conf: The walks of the sudo and PAM files and folders that differ from ``_CONF``, by path.
+        entries: The ``entry`` lines and walks of a folder that differ from ``_CONF_ENTRIES``, by folder.
+        done: Whether the part ends with its last line.
+
+    Returns:
+        The lines.
+    """
+    found = {"/usr/bin/sudo": _walk("/usr/bin/sudo", "4755 regular file")} | (root or {})
+    lines = []
+    for folder in repo_staging._ROOT_PATH.split(":"):
+        walk = found.get(f"{folder}/sudo")
+        lines += [f"nosudo {folder}/sudo"] if walk is None else [f"sudo {folder}/sudo", *walk]
+    lines += path
+    walks = {name: _walk(name, last) for name, last in _CONF.items()} | (conf or {})
+    listed = _CONF_ENTRIES | (entries or {})
+    for name, walk in walks.items():
+        lines += [f"conf {name}", *walk, *listed.get(name, [])]
+    return [*lines, repo_staging._SUDO_DONE] if done else lines
+
+
 def _listing(
     clean: list[str] = _ENTRIES,
     box: list[str] = _ENTRIES,
@@ -6076,6 +6148,7 @@ def _listing(
     programs: dict[str, list[str]] | None = None,
     folders: dict[str, list[str]] | None = None,
     tools: dict[str, list[str] | None] | None = None,
+    sudo: list[str] | None = None,
 ) -> str:
     """Write the probe's whole standard output.
 
@@ -6088,6 +6161,7 @@ def _listing(
         folders: The walks of root's PATH folders that differ from a root-owned 755 folder, by folder.
         tools: The walks of ``folder/tool`` entries that differ from one root-owned file in ``/usr/bin``
             for each tool, by entry; ``None`` makes an entry a ``notool`` line.
+        sudo: The sudo part; the default is :func:`_sudo_lines` with no changes.
 
     Returns:
         The probe's standard output.
@@ -6102,6 +6176,7 @@ def _listing(
         for name in repo_staging._ROOT_TOOLS:
             walk = found.get(f"{folder}/{name}")
             fixed += [f"notool {folder}/{name}"] if walk is None else [f"tool {folder}/{name}", *walk]
+    fixed += _sudo_lines() if sudo is None else sudo
     return "\n".join([*base, *fixed, "run clean", *clean, "run box", *box]) + "\n"
 
 
@@ -7666,6 +7741,439 @@ def test_a_root_owned_python_chain_passes(probe: str) -> None:
     assert not repo_staging._trusted_python(CommandResult(exit_code=1, stdout=probe))
 
 
+_BOX_SUDO = _listing(
+    sudo=_sudo_lines(root={"/usr/local/bin/sudo": _walk("/usr/local/bin/sudo", "1000 755 regular file")})
+)
+_SUDO_PARTS = _sudo_lines()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _BOX_SUDO,
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4775 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4757 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "4711 regular file")})),
+        _listing(sudo=_sudo_lines(root={"/usr/bin/sudo": _walk("/usr/bin/sudo", "755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                root={
+                    "/usr/local/sbin/sudo": [
+                        *_walk("/usr/local/sbin/sudo", "777 symbolic link"),
+                        "link /tmp/sudo",
+                        *_walk("/tmp/sudo", modes={"/tmp": "1777 directory"}),
+                    ]
+                }
+            )
+        ),
+        _listing(sudo=_sudo_lines(root={"/sbin/sudo": _walk("/sbin/sudo", "none")})),
+        _listing(sudo=_SUDO_PARTS[1:]),
+        _listing(sudo=["sudo /usr/local/sbin/sudo", *_SUDO_PARTS[1:]]),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry(
+                        "pathdir",
+                        "/home/box/bin",
+                        "none",
+                        {"/home": "755 directory", "/home/box": "1000 755 directory"},
+                    ),
+                    *_SUDO_PATH,
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "775 directory"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "750 directory"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/bin", "755 regular file"), *_SUDO_PATH])),
+        _listing(sudo=_sudo_lines(path=["pathdir bin", *_SUDO_PATH])),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/bin", "755 directory"),
+                    *_entry("sudo", "/usr/bin/sudo", "1000 755 regular file"),
+                ]
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/local/libexec/guard", "755 directory"),
+                    *_entry("sudo", "/usr/local/libexec/guard/sudo", "777 symbolic link"),
+                    "link /tmp/sudo",
+                    *_walk("/tmp/sudo", modes={"/tmp": "1777 directory"}),
+                    *_SUDO_PATH,
+                ]
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/opt/bin", "755 directory"),
+                    *_entry("sudo", "/opt/bin/sudo", "644 regular file"),
+                ]
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/opt/bin", "755 directory"),
+                    *_entry("sudo", "/opt/bin/sudo", "4754 regular file"),
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "1000 440 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "660 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers": _walk("/etc/sudoers", "755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "775 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1777 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "1000 755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "750 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "440 regular file")})),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "1000 440 regular file")})
+        ),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "660 regular file")})
+        ),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/box", "755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/sudoers.d": [
+                        *_entry("entry", "/etc/sudoers.d/box", "777 symbolic link"),
+                        "link gone",
+                        "none /etc/sudoers.d/gone",
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/sudoers.d/a/b", "440 regular file")})
+        ),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": _entry("entry", "/etc/other", "440 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": ["entry /etc/sudoers.d/box"]})),
+        _listing(sudo=_sudo_lines(done=False)),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/sudoers"]),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "664 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.conf": _walk("/etc/pam.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/locale": _walk("/etc/default/locale", "1000 644 regular file")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/etc/default/locale": _walk("/etc/default/locale", modes={"/etc/default": "1000 755 directory"})}
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/shadow": _walk("/etc/shadow", "1000 640 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/group": _walk("/etc/group", "664 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/gshadow": _walk("/etc/gshadow", "1000 0 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/login.defs": _walk("/etc/login.defs", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "646 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/passwd": _walk("/etc/passwd", "646 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "775 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "1000 755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/pam.d": _walk("/etc/pam.d", "750 directory")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/sudo", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/.sudo", "666 regular file")})),
+        _listing(sudo=_sudo_lines(entries={"/etc/pam.d": _entry("entry", "/etc/pam.d/sudo.d", "755 directory")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/security": _walk("/etc/security", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(entries={"/etc/security": _entry("entry", "/etc/security/limits.d", "1000 755 directory")})
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/box.conf", "1000 644 regular file"),
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/more", "755 directory"),
+                    ]
+                }
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory")},
+                entries={"/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "1000 644 regular file")},
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/usr/lib/pam.d": [
+                        *_walk("/usr/lib/pam.d", "777 symbolic link"),
+                        "link /home/box/pamd",
+                        *_walk("/home/box/pamd", "1000 755 directory", modes={"/home/box": "1000 755 directory"}),
+                    ]
+                }
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/usr/lib/security": _walk("/usr/lib/security", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/lib/security": _walk("/usr/lib/security", "755 directory")},
+                entries={"/usr/lib/security": _entry("entry", "/usr/lib/security/pam_box.so", "1000 755 regular file")},
+            )
+        ),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /etc/pam.d"]),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/lib/pam.d"]),
+        _listing(sudo=_sudo_lines(conf={"/usr/etc/sudo.conf": _walk("/usr/etc/sudo.conf", "1000 644 regular file")})),
+        _listing(sudo=_sudo_lines(conf={"/usr/etc/pam.d": _walk("/usr/etc/pam.d", "1000 755 directory")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={"/usr/etc/pam.d": _walk("/usr/etc/pam.d", "755 directory")},
+                entries={"/usr/etc/pam.d": _entry("entry", "/usr/etc/pam.d/sudo", "1000 644 regular file")},
+            )
+        ),
+        _listing(sudo=[line for line in _SUDO_PARTS if line != "conf /usr/etc/pam.d"]),
+    ],
+    ids=[
+        "box-owned-sudo-before-usr-bin",
+        "group-writable-sudo",
+        "other-writable-sudo",
+        "sudo-that-others-cannot-read",
+        "sudo-is-a-folder",
+        "sudo-link-into-tmp",
+        "sudo-line-for-a-missing-sudo",
+        "no-line-for-usr-local-sbin-sudo",
+        "sudo-line-without-its-walk",
+        "box-owned-path-folder-before-sudo",
+        "group-writable-path-folder-before-sudo",
+        "path-folder-that-others-cannot-search",
+        "path-folder-is-a-file",
+        "relative-path-folder",
+        "box-owned-sudo-on-the-path",
+        "path-sudo-link-into-tmp",
+        "unrunnable-path-sudo-before-a-box-folder",
+        "path-sudo-that-others-cannot-run",
+        "box-owned-sudoers",
+        "group-writable-sudoers",
+        "sudoers-is-a-folder",
+        "group-writable-sudoers-d",
+        "other-writable-sudoers-d",
+        "box-owned-sudoers-d",
+        "sudoers-d-that-others-cannot-list",
+        "sudoers-d-is-a-file",
+        "box-owned-file-in-sudoers-d",
+        "group-writable-file-in-sudoers-d",
+        "folder-in-sudoers-d",
+        "dangling-link-in-sudoers-d",
+        "nested-sudoers-d-entry",
+        "sudoer-outside-sudoers-d",
+        "sudoer-without-its-walk",
+        "no-sudo-done-line",
+        "no-sudoers-line",
+        "box-owned-sudo-conf",
+        "group-writable-etc-environment",
+        "box-owned-pam-conf",
+        "box-owned-etc-default-locale",
+        "box-owned-etc-default",
+        "box-owned-etc-shadow",
+        "group-writable-etc-group",
+        "box-owned-etc-gshadow",
+        "box-owned-etc-login-defs",
+        "box-owned-etc-default-login",
+        "other-writable-etc-default-login",
+        "other-writable-etc-passwd",
+        "group-writable-pam-d",
+        "box-owned-pam-d",
+        "pam-d-that-others-cannot-list",
+        "box-owned-file-in-pam-d",
+        "other-writable-hidden-file-in-pam-d",
+        "folder-in-pam-d",
+        "box-owned-etc-security",
+        "box-owned-folder-in-etc-security",
+        "box-owned-file-in-a-security-folder",
+        "folder-two-levels-into-etc-security",
+        "box-owned-usr-lib-pam-d",
+        "box-owned-file-in-usr-lib-pam-d",
+        "usr-lib-pam-d-link-to-a-box-folder",
+        "box-owned-usr-lib-security",
+        "box-owned-module-in-usr-lib-security",
+        "no-pam-d-line",
+        "no-usr-lib-pam-d-line",
+        "box-owned-vendor-sudo-conf",
+        "box-owned-usr-etc-pam-d",
+        "box-owned-file-in-usr-etc-pam-d",
+        "no-usr-etc-pam-d-line",
+    ],
+)
+def test_an_image_whose_sudo_the_box_user_could_change_is_refused(probe: str) -> None:
+    """A sudo, sudoers or PAM file that the box user could change, or a short sudo listing, refuses (SKY-912).
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert not repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
+
+
+def test_a_run_image_with_a_box_writable_sudo_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The image check stops a ``[run]`` image whose sudo the box user owns, and names the sudo rule (SKY-912).
+
+    Args:
+        monkeypatch: Pytest monkeypatch.
+    """
+    files = {**_BOX_TREE, "ascent.toml": _BOX_TREE["ascent.toml"].split("\n[metric]")[0]}
+    _, staged = _stage_with(files, monkeypatch)
+    runtime = _ImageRuntime(probe=_BOX_SUDO)
+    try:
+        with pytest.raises(repo_staging.BoxImageError, match=r"(?s)has no trusted Python.*/etc/sudoers\.d"):
+            _prepare(staged, runtime)
+    finally:
+        staged.cleanup()
+    assert [spec.operation_key for spec in runtime.specs] == ["image-check:job-1:run"]
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _listing(sudo=_sudo_lines(entries={"/etc/sudoers.d": []})),
+        _listing(
+            sudo=_sudo_lines(conf={"/etc/sudoers.d": _walk("/etc/sudoers.d", "none")}, entries={"/etc/sudoers.d": []})
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                root={"/usr/bin/sudo": None},
+                path=[
+                    *_entry("pathdir", "/usr/local/bin", "755 directory"),
+                    *_entry("pathdir", "/usr/bin", "755 directory"),
+                ],
+                conf={
+                    "/etc/sudoers": _walk("/etc/sudoers", "none"),
+                    "/etc/sudoers.d": _walk("/etc/sudoers.d", "none"),
+                },
+                entries={"/etc/sudoers.d": []},
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                root={
+                    "/bin/sudo": [
+                        *_walk("/bin", "777 symbolic link"),
+                        "link usr/bin",
+                        "0 755 directory /usr",
+                        "0 755 directory /usr/bin",
+                        "0 4755 regular file /usr/bin/sudo",
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                path=[
+                    *_entry("pathdir", "/usr/local/libexec/guard", "755 directory"),
+                    *_entry("sudo", "/usr/local/libexec/guard/sudo", "777 symbolic link"),
+                    "link /usr/bin/sudo",
+                    *_walk("/usr/bin/sudo", "4755 regular file"),
+                ]
+            )
+        ),
+        _listing(sudo=_sudo_lines(path=[*_entry("pathdir", "/opt/tools/bin", "none"), *_SUDO_PATH])),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/sudoers.d": [
+                        *_entry("entry", "/etc/sudoers.d/.hidden", "440 regular file"),
+                        *_entry("entry", "/etc/sudoers.d/README", "440 regular file"),
+                        *_entry("entry", "/etc/sudoers.d/box", "440 regular file"),
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/etc/pam.conf": _walk("/etc/pam.conf", "644 regular file"),
+                    "/etc/pam.d": _walk("/etc/pam.d", "none"),
+                    "/etc/security": _walk("/etc/security", "none"),
+                },
+                entries={"/etc/pam.d": [], "/etc/security": []},
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/sudo.conf": _walk("/etc/sudo.conf", "none")})),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/etc/default/locale": _walk("/etc/default/locale", "none"),
+                    "/etc/shadow": _walk("/etc/shadow", "0 regular file"),
+                    "/etc/gshadow": _walk("/etc/gshadow", "none"),
+                    "/etc/login.defs": _walk("/etc/login.defs", "none"),
+                }
+            )
+        ),
+        _listing(sudo=_sudo_lines(conf={"/etc/environment": _walk("/etc/environment", "644 regular empty file")})),
+        _listing(sudo=_sudo_lines(conf={"/etc/default/login": _walk("/etc/default/login", "644 regular file")})),
+        _listing(
+            sudo=_sudo_lines(
+                entries={
+                    "/etc/security": [
+                        *_entry("entry", "/etc/security/limits.d", "755 directory"),
+                        *_entry("entry", "/etc/security/limits.d/box.conf", "644 regular file"),
+                        *_entry("entry", "/etc/security/namespace.init", "755 regular file"),
+                        *_entry("entry", "/etc/security/opasswd", "600 regular file"),
+                    ]
+                }
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/usr/lib/pam.d": _walk("/usr/lib/pam.d", "755 directory"),
+                    "/usr/lib/security": _walk("/usr/lib/security", "755 directory"),
+                },
+                entries={
+                    "/usr/lib/pam.d": _entry("entry", "/usr/lib/pam.d/sudo", "644 regular file"),
+                    "/usr/lib/security": _entry("entry", "/usr/lib/security/pam_vendor.so", "644 regular file"),
+                },
+            )
+        ),
+        _listing(
+            sudo=_sudo_lines(
+                conf={
+                    "/usr/etc/sudo.conf": _walk("/usr/etc/sudo.conf", "644 regular file"),
+                    "/usr/etc/pam.d": _walk("/usr/etc/pam.d", "755 directory"),
+                },
+                entries={"/usr/etc/pam.d": _entry("entry", "/usr/etc/pam.d/sudo", "644 regular file")},
+            )
+        ),
+    ],
+    ids=[
+        "empty-sudoers-d",
+        "no-sudoers-d",
+        "no-sudo-at-all",
+        "merged-usr-bin-sudo",
+        "guard-link-first-on-the-path",
+        "missing-path-folder-before-sudo",
+        "three-sudoers-d-files",
+        "no-pam-d-and-no-etc-security",
+        "no-sudo-conf",
+        "no-locale-file-and-a-mode-0-shadow",
+        "empty-etc-environment",
+        "root-owned-etc-default-login",
+        "files-in-a-security-folder",
+        "root-owned-usr-lib-pam-d-and-usr-lib-security",
+        "root-owned-vendor-sudo-conf-and-usr-etc-pam-d",
+    ],
+)
+def test_a_root_owned_sudo_and_sudoers_pass(probe: str) -> None:
+    """Root-owned sudo, sudoers and PAM files pass, and a missing sudo leaves the refusal to the root probe (SKY-912).
+
+    Args:
+        probe: What the trusted interpreter probe prints.
+    """
+    assert repo_staging._trusted_python(CommandResult(exit_code=0, stdout=probe))
+
+
 @pytest.mark.parametrize(
     ("variables", "names"),
     [
@@ -7774,6 +8282,28 @@ def test_the_path_script_skips_a_dangling_optional_program(tmp_path: Path) -> No
     )
 
     assert done.returncode == 0, done.stderr
+
+
+def test_the_path_script_refuses_a_sudo_that_is_not_an_elf_file(tmp_path: Path) -> None:
+    """The ELF scan stops at a sudo script, whose interpreter the walk would never see (SKY-912).
+
+    Args:
+        tmp_path: The folder that holds the sudo script.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    sudo = tmp_path / "sudo"
+    sudo.write_text("#!/bin/sh\n")
+    sudo.chmod(0o755)
+    script = repo_staging._PATH_SCRIPT.replace("'/usr/local/sbin/sudo'", repr(str(sudo)))
+    assert script != repo_staging._PATH_SCRIPT
+    base = getattr(sys, "_base_executable", sys.executable)
+    done = subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+    assert done.returncode != 0
+    assert "a sudo is not an ELF file" in done.stderr
 
 
 def test_the_probe_root_path_is_the_vercel_root_path() -> None:
@@ -7991,6 +8521,62 @@ def test_the_trusted_python_probe_names_the_image_env_of_the_box_run(tmp_path: P
     assert repo_staging._root_variables(done) == ["BASH_ENV", "CDPATH", "LD_LIBRARY_PATH"]
 
 
+def _sudo_part(stdout: str) -> list[str]:
+    """Take the sudo part of a real probe's output, last line first.
+
+    Args:
+        stdout: What the probe printed.
+
+    Returns:
+        The lines from the first ``_ROOT_PATH`` sudo line to ``_SUDO_DONE``, reversed.
+    """
+    lines = stdout.splitlines()
+    first = repo_staging._ROOT_PATH.split(":")[0]
+    start = next(at for at, line in enumerate(lines) if line in (f"sudo {first}/sudo", f"nosudo {first}/sudo"))
+    return lines[start : lines.index(repo_staging._SUDO_DONE) + 1][::-1]
+
+
+def test_the_real_probe_passes_the_host_sudo_and_pam_files(tmp_path: Path) -> None:
+    """The real shell walks the host's sudo, sudoers and PAM files, and the judge accepts a Debian-style host (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    python = _fake_python(tmp_path.resolve())
+    # Red Hat ships a mode-4111 sudo, and Red Hat and Alpine a mode-0750 /etc/sudoers.d.
+    # The check refuses both by design.
+    for path in (*(f"{folder}/sudo" for folder in repo_staging._ROOT_PATH.split(":")), *repo_staging._SUDO_FOLDERS):
+        need = 0o005 if path in repo_staging._SUDO_FOLDERS else 0o004
+        if Path(path).exists() and Path(path).stat().st_mode & need != need:
+            pytest.skip(f"the host's {path} is a layout that the check refuses by design")
+
+    done = _run_probe(python, PATH="/usr/local/bin:/usr/bin:/bin")
+
+    assert done.returncode == 0, done.stderr
+    part = _sudo_part(done.stdout)
+    assert f"conf {repo_staging._DEEP_FOLDER}" in part
+    assert repo_staging._trusted_sudo(part)
+
+
+def test_the_real_probe_refuses_a_sudo_that_the_box_user_could_change(tmp_path: Path) -> None:
+    """The real shell walks a sudo in a temporary folder first on PATH, and the judge refuses it (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    root = tmp_path.resolve()
+    python = _fake_python(root)
+    (root / "sudo").write_text("#!/bin/sh\n")
+    (root / "sudo").chmod(0o755)
+
+    done = _run_probe(python, PATH=f"{root}:/usr/bin:/bin")
+
+    assert done.returncode == 0, done.stderr
+    part = _sudo_part(done.stdout)
+    assert f"sudo {root}/sudo" in part
+    assert not repo_staging._trusted_sudo(part)
+
+
 @pytest.mark.parametrize("locale", ["C.UTF-8", "en_US.ISO-8859-1", None])
 def test_the_box_run_of_the_probe_uses_the_image_locale(tmp_path: Path, locale: str | None) -> None:
     """The box run gets the image's own ``LC_ALL`` or none, never the probe's ``C`` (SKY-737).
@@ -8050,6 +8636,671 @@ def test_the_path_script_prints_each_variable_name_without_its_value() -> None:
         "LD_PRELOAD",
     ]
     assert "do-not-print" not in done.stdout
+
+
+_UBUNTU_SUDO_STACK = "session required pam_env.so readenv=1 envfile=LOCALE user_readenv=0\n"
+_STOCK_SSHD_LINE = "session required pam_env.so user_readenv=1 envfile=LOCALE\n"
+_MOTD_LINE = "session optional pam_motd.so noupdate\n"
+
+
+def _run_path_script_with_pam_files(
+    tmp_path: Path,
+    environment: str,
+    default_locale: str,
+    conf: str,
+    *,
+    drop_in: bool = False,
+    sudo_stack: str = _UBUNTU_SUDO_STACK,
+    pam_conf: str = "",
+    locked: bool = False,
+    other_stacks: dict[str, str] | None = None,
+    modules: dict[str, str] | None = None,
+    environment_links: dict[str, str] | None = None,
+    environment_mode: int = 0o755,
+    environment_box_owns: str = "",
+    vendor_stacks: dict[str, str] | None = None,
+    sudo_conf: str | None = None,
+    vendor_sudo_conf: str | None = None,
+    sudo_conf_folder: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run the interpreter script with temporary pam_env and PAM stack files in place of the real ones.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        environment: The text of the stand-in ``/etc/environment``.
+        default_locale: The text of the stand-in ``/etc/default/locale``.
+        conf: The text of the stand-in ``/etc/security/pam_env.conf``.
+        drop_in: Whether a stand-in ``/etc/security/pam_env.conf.d`` folder exists.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``; ``LOCALE`` names the stand-in locale file.
+        pam_conf: The text of the stand-in ``/etc/pam.conf``.
+        locked: Whether the stand-in drop-in folder path is in a folder that nobody may search.
+        other_stacks: The text of other stand-in files in ``/etc/pam.d``, by name; ``LOCALE`` as in ``sudo_stack``.
+        modules: Links to make in a stand-in module folder, which then replaces the real ones, by name to target.
+        environment_links: Links to make in a stand-in ``/usr/lib/environment.d``, by name to target;
+            ``ENVIRONMENT`` names the stand-in ``/etc/environment``.
+        environment_mode: The mode of the stand-in ``/usr/lib/environment.d``.
+        environment_box_owns: ``folder``, or a link name in ``environment_links``, that the box user (uid 1000)
+            owns in place of root; only root can give it away.
+        vendor_stacks: The text of stand-in files in a second stack folder, ``/usr/lib/pam.d``, by name.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``; ``None`` leaves it missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``; ``None`` leaves it missing.
+        sudo_conf_folder: Whether the stand-in ``/etc/sudo.conf`` is a folder, which the script cannot read.
+
+    Returns:
+        The finished script.
+    """
+    folder = tmp_path / "pam_env.conf.d"
+    if drop_in:
+        folder.mkdir()
+    if locked:
+        (tmp_path / "locked").mkdir(mode=0)
+        folder = tmp_path / "locked" / "pam_env.conf.d"
+    stacks = tmp_path / "pam.d"
+    stacks.mkdir()
+    (stacks / "sudo").write_text(sudo_stack.replace("LOCALE", str(tmp_path / "locale")))
+    for name, text in (other_stacks or {}).items():
+        (stacks / name).write_text(text.replace("LOCALE", str(tmp_path / "locale")))
+    script = repo_staging._PATH_SCRIPT.replace('"/etc/security/pam_env.conf.d"', repr(str(folder)))
+    if modules:
+        (tmp_path / "lib" / "security").mkdir(parents=True)
+        for name, target in modules.items():
+            (tmp_path / "lib" / "security" / target).touch()
+            (tmp_path / "lib" / "security" / name).symlink_to(target)
+        stand_in_libs = f"({str(tmp_path / 'lib')!r},)"
+        script = script.replace('("/lib", "/lib64", "/usr/lib", "/usr/lib64")', stand_in_libs)
+        assert stand_in_libs in script
+    if environment_links is not None:
+        environment_d = tmp_path / "environment.d"
+        environment_d.mkdir()
+        environment_d.chmod(environment_mode)
+        for name, target in environment_links.items():
+            (environment_d / name).symlink_to(target.replace("ENVIRONMENT", str(tmp_path / "environment")))
+        if environment_box_owns:
+            owned = environment_d if environment_box_owns == "folder" else environment_d / environment_box_owns
+            os.lchown(owned, 1000, 1000)
+        script = script.replace('"/usr/lib/environment.d"', repr(str(environment_d)))
+        # A test that does not run as root stands in its own user for root, as the shell probe tests do.
+        script = script.replace("ROOT_UID = 0\n", f"ROOT_UID = {os.geteuid()}\n")
+        assert f"ROOT_UID = {os.geteuid()}\n" in script
+    stand_in_stacks = f"({str(stacks)!r},)"
+    if vendor_stacks is not None:
+        vendor = tmp_path / "vendor-pam.d"
+        vendor.mkdir()
+        for name, text in vendor_stacks.items():
+            (vendor / name).write_text(text)
+        stand_in_stacks = f"({str(stacks)!r}, {str(vendor)!r})"
+    script = script.replace('("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")', stand_in_stacks)
+    assert stand_in_stacks in script
+    # The host's own sudo.conf files must not decide a test.
+    sudo_confs = (tmp_path / "sudo.conf", tmp_path / "vendor-sudo.conf")
+    for stand_in, text in zip(sudo_confs, (sudo_conf, vendor_sudo_conf), strict=True):
+        if text is not None:
+            stand_in.write_text(text)
+    if sudo_conf_folder:
+        sudo_confs[0].mkdir()
+    stand_in_confs = f"SUDO_CONFS = ({str(sudo_confs[0])!r}, {str(sudo_confs[1])!r})"
+    script = script.replace('SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")', stand_in_confs)
+    assert stand_in_confs in script
+    files = {"/etc/environment": environment, "/etc/default/locale": default_locale}
+    files["/etc/security/pam_env.conf"] = conf
+    files["/etc/pam.conf"] = pam_conf
+    for real, text in files.items():
+        stand_in = tmp_path / real.rsplit("/", 1)[1]
+        stand_in.write_text(text)
+        script = script.replace(f'"{real}"', repr(str(stand_in)))
+    assert all(f'"{real}"' not in script for real in [*files, "/etc/security/pam_env.conf.d"])
+    base = getattr(sys, "_base_executable", sys.executable)
+    return subprocess.run(
+        [base, "-I", "-S", "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"}
+    )
+
+
+def test_the_path_script_passes_stock_pam_environment_files(tmp_path: Path) -> None:
+    """Stock pam_env files, systemd's environment.d link, pam_motd, and user_readenv in login and sshd pass (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n',
+        '# File generated by update-locale\nLANG="C.UTF-8"\n',
+        "# Comment only\n#LANG DEFAULT=C\n\n",
+        sudo_stack=_UBUNTU_SUDO_STACK
+        + "@include common-session\n"
+        + "auth [success=1 default=ignore] pam_unix.so nullok\n",
+        pam_conf="# PAM configuration file\nsudo session required pam_unix.so\n",
+        other_stacks={
+            "common-session": "session required pam_unix.so\n",
+            "login": "session optional pam_motd.so motd=/run/motd.dynamic\nsession optional pam_motd.so noupdate\n",
+            "sshd": _STOCK_SSHD_LINE + "session optional pam_motd.so motd=/run/motd.dynamic\n",
+        },
+        environment_links={"99-environment.conf": "ENVIRONMENT"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    stdout = done.stdout
+    lines = stdout.split("\n")
+    assert {"env PATH", "env LANG", "locale LANG=C.UTF-8"} <= set(lines)
+    assert repo_staging._root_variables(subprocess.CompletedProcess([], 0, stdout, "")) == []
+
+
+def test_the_path_script_refuses_root_variables_from_pam_environment_files(tmp_path: Path) -> None:
+    """A loader variable in /etc/environment and a pam_env.conf locale reach root, so the check refuses them (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        "export LD_PRELOAD=/tmp/x.so\n",
+        "LC_ALL='en_US.ISO-8859-1'\n",
+        "LANGUAGE DEFAULT=C.UTF-8\n",
+    )
+
+    assert done.returncode == 0, done.stderr
+    stdout = done.stdout
+    lines = stdout.split("\n")
+    assert {"env LD_PRELOAD", "locale LC_ALL=en_US.ISO-8859-1", "locale LANGUAGE=?"} <= set(lines)
+    assert "/tmp/x.so" not in stdout
+    assert repo_staging._root_variables(subprocess.CompletedProcess([], 0, stdout, "")) == [
+        "LANGUAGE",
+        "LC_ALL",
+        "LD_PRELOAD",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("environment", "drop_in", "sudo_stack", "pam_conf", "reason"),
+    [
+        ("LD_\\\nPRELOAD=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "", "continues a line"),
+        ("LD_PRELOAD#=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "", "not letters, digits and underscores"),
+        ("", True, _UBUNTU_SUDO_STACK, "", "which the check does not read"),
+        ("", False, "session required pam_env.so envfile=/home/box/env\n", "", "gives pam_env envfile=/home/box/env"),
+        ("", False, "session required pam_env.so \\\n conffile=/tmp/c\n", "", "sudo continues a line"),
+        ("", False, "session required pam_env.so \\ \t\n", "", "sudo continues a line"),
+        ("", False, "# note \\\nsession optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session required pam_env.so readenv=1 user_readenv=1\n", "", "gives pam_env user_readenv=1"),
+        ("", False, _STOCK_SSHD_LINE, "", "sudo gives pam_env user_readenv=1"),
+        (
+            "",
+            False,
+            _UBUNTU_SUDO_STACK,
+            "sudo session required pam_env.so envfile=/home/box/env\n",
+            "pam.conf gives pam_env envfile=/home/box/env",
+        ),
+        (
+            "",
+            False,
+            _UBUNTU_SUDO_STACK,
+            "sudo session optional pam_mkhomedir.so\n",
+            "pam.conf, which sudo reaches, loads pam_mkhomedir.so",
+        ),
+        ("", False, "@include /home/box/stack\n", "", "includes /home/box/stack, which is not a PAM file name"),
+        ("", False, "session include /run/motd.dynamic\n", "", "includes /run/motd.dynamic, which is not a PAM"),
+        ("", False, "session substack [/etc/environment]\n", "", "includes [/etc/environment], which is not a PAM"),
+        ("", False, "session optional pam_permit.so /run/motd.dynamic\n", "", "names /run/motd.dynamic"),
+        ("", False, "session optional pam_permit.so motd=/etc/motd\n", "", "names motd=/etc/motd"),
+        ("", False, "session required pam_limits.so conf=limits\n", "", "gives pam_limits conf=limits"),
+        ("", False, "session required pam_limits.so [conf=limits]\n", "", "gives pam_limits [conf=limits]"),
+        ("", False, "session optional /home/box/evil.so\n", "", "names /home/box/evil.so"),
+        ("", False, "session optional ../../home/box/evil.so\n", "", "names ../../home/box/evil.so"),
+        ("", False, "session optional pam_exec.so /home/box/x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session optional pam_exec.so x.sh\n", "", "runs pam_exec.so"),
+        ("", False, "session optional pam_xauth.so\n", "", "runs pam_xauth.so"),
+        ("", False, "session optional pam_xauth.so xauthpath=xauth\n", "", "runs pam_xauth.so"),
+        ("", False, "session required pam_env.so [envfile=env]\n", "", "gives pam_env [envfile=env]"),
+        (
+            "",
+            False,
+            "session required pam_env.so [envfile=/home/box/my env]\n",
+            "",
+            "gives pam_env [envfile=/home/box/my env]",
+        ),
+        ("", False, "session required pam_env.so [envfile=/etc/environment x]\n", "", "[envfile=/etc/environment x]"),
+        ("", False, "session required pam_env.so [envfile=/etc/environment\\]\n", "", "does not close [envfile"),
+        ("", False, "session required pam_alias.so conffile=c\n", "", "gives pam_env conffile=c"),
+        (
+            "",
+            False,
+            "session required pam_env.so [readenv=1]envfile=/home/box/env\n",
+            "",
+            "gives pam_env envfile=/home/box/env",
+        ),
+        ("", False, "session required pam_env.so envfile=/etc/environment\x0bx\n", "", "sudo has a character"),
+        (
+            "",
+            False,
+            "session required pam_env.so readenv=1 envfile=/etc/environment\rX user_readenv=0\n",
+            "",
+            "sudo has a character that is not printable",
+        ),
+        ("LANG=C.UTF-8\rLD_PRELOAD=/tmp/x.so\n", False, _UBUNTU_SUDO_STACK, "", "file has a character"),
+        (
+            "",
+            False,
+            "session optional pam_permit.so " + "x" * 992 + "@include box\n",
+            "",
+            "sudo has a line longer than 1022 characters",
+        ),
+    ],
+    ids=[
+        "line-continuation",
+        "odd-name",
+        "drop-in-folder",
+        "other-envfile",
+        "continued-conffile",
+        "continued-with-spaces",
+        "comment-backslash",
+        "user-readenv",
+        "stock-sshd-line-in-sudo",
+        "pam-conf",
+        "pam-conf-module",
+        "include-path",
+        "include-motd-path",
+        "substack-bracketed-environment-path",
+        "motd-path-not-as-motd-value",
+        "motd-value-not-stock",
+        "relative-limits-conf",
+        "bracketed-relative-limits-conf",
+        "module-path",
+        "relative-module-path",
+        "exec-argument",
+        "exec-relative",
+        "xauth",
+        "xauth-relative-path",
+        "bracket-relative",
+        "bracket-space",
+        "bracket-space-stock-prefix",
+        "bracket-escape",
+        "module-alias",
+        "bracket-then-word",
+        "vertical-tab",
+        "carriage-return-in-envfile",
+        "carriage-return-in-environment",
+        "long-line",
+    ],
+)
+def test_the_path_script_refuses_pam_environment_files_that_it_cannot_read_as_pam_does(
+    tmp_path: Path, environment: str, drop_in: bool, sudo_stack: str, pam_conf: str, reason: str
+) -> None:
+    """A continued line, an odd name, a drop-in folder, another pam_env source or a PAM path fails the script (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        environment: The text of the stand-in ``/etc/environment``.
+        drop_in: Whether a stand-in ``pam_env.conf.d`` folder exists.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``.
+        pam_conf: The text of the stand-in ``/etc/pam.conf``.
+        reason: Text that the script's error must contain.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path, environment, "", "", drop_in=drop_in, sudo_stack=sudo_stack, pam_conf=pam_conf
+    )
+
+    assert done.returncode != 0
+    assert reason in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("sudo_stack", "other_stacks", "modules", "reason"),
+    [
+        ("session optional pam_motd.so\n", {}, {}, "sudo, which sudo reaches, loads pam_motd.so"),
+        ("@include common-session\n", {"common-session": "session optional pam_motd.so\n"}, {}, "loads pam_motd.so"),
+        ("session substack box\n", {"box": "session optional pam_motd.so\n"}, {}, "box, which sudo reaches"),
+        (_UBUNTU_SUDO_STACK, {"other": "session optional pam_motd.so\n"}, {}, "other, which sudo reaches"),
+        ("session optional pam_foo.so x.sh\n", {}, {"pam_foo.so": "pam_exec.so"}, "runs pam_foo.so"),
+        ("session optional pam_bar.so\n", {}, {"pam_bar.so": "pam_motd.so"}, "loads pam_bar.so"),
+        ("session optional pam_evil\n", {}, {}, "loads pam_evil, which is not a stock module"),
+        ("session optional pam_permit\n", {}, {}, "loads pam_permit, which is not a stock module"),
+        ("session optional pam_mkhomedir.so\n", {}, {}, "loads pam_mkhomedir.so, which is not a stock module"),
+        ("session required pam_namespace.so\n", {}, {}, "loads pam_namespace.so, which is not a stock module"),
+        ("-session optional pam_new.so\n", {}, {}, "loads pam_new.so, which is not a stock module"),
+        ("session [default=ignore] pam_new.so\n", {}, {}, "loads pam_new.so"),
+        ("session optional pam_unix.so\n", {}, {"pam_unix.so": "pam_motd.so"}, "loads pam_unix.so"),
+        (
+            "session [include] pam_new.so\n",
+            {"pam_new.so": _MOTD_LINE},
+            {},
+            "pam_new.so, which sudo reaches, loads pam_motd",
+        ),
+        ("session [include] pam_unix.so\n", {"pam_unix.so": _MOTD_LINE}, {}, "pam_unix.so, which sudo reaches, loads"),
+        ("session [substack] pam_env.so\n", {"pam_env.so": _MOTD_LINE}, {}, "pam_env.so, which sudo reaches, loads"),
+        ("[@include] box1\n", {"box1": _MOTD_LINE}, {}, "box1, which sudo reaches, loads pam_motd.so"),
+        ("[@include] box1\n", {"box1": "@include box2\n", "box2": _MOTD_LINE}, {}, "box2, which sudo reaches, loads"),
+        ("session optional [pam_foo.so]\n", {}, {"pam_foo.so": "pam_exec.so"}, "runs [pam_foo.so]"),
+        ("auth include [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
+        ("auth substack [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
+        ("@include [box]\n", {"box": _MOTD_LINE}, {}, "box, which sudo reaches, loads pam_motd.so"),
+    ],
+    ids=[
+        "motd-in-sudo",
+        "motd-in-an-include",
+        "motd-in-a-substack",
+        "motd-in-other",
+        "exec-link",
+        "motd-link",
+        "name-without-so",
+        "stock-name-without-so",
+        "mkhomedir",
+        "namespace",
+        "unknown-module",
+        "unknown-module-after-a-bracket",
+        "stock-name-linked-to-motd",
+        "bracketed-include-control",
+        "bracketed-include-control-stock-name",
+        "bracketed-substack-control-stock-name",
+        "bracketed-debian-include",
+        "bracketed-debian-include-chain",
+        "bracketed-exec-link",
+        "bracketed-include-target",
+        "bracketed-substack-target",
+        "bracketed-debian-include-target",
+    ],
+)
+def test_the_path_script_refuses_a_module_that_is_not_stock_where_sudo_reaches_it(
+    tmp_path: Path, sudo_stack: str, other_stacks: dict[str, str], modules: dict[str, str], reason: str
+) -> None:
+    """A module outside the stock list, by name or by its link target, in a stack that sudo reaches fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``.
+        other_stacks: The text of other stand-in files in ``/etc/pam.d``, by name.
+        modules: Links to make in a stand-in module folder, by name to target.
+        reason: Text that the script's error must contain.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path, "", "", "", sudo_stack=sudo_stack, other_stacks=other_stacks, modules=modules
+    )
+
+    assert done.returncode != 0
+    assert reason in done.stderr
+
+
+@pytest.mark.parametrize(
+    "environment_links",
+    [
+        {"99-environment.conf": "ENVIRONMENT", "10-box.conf": "/home/box/env"},
+        {"99-environment.conf": "/etc/default/locale"},
+    ],
+    ids=["one-other-link", "link-to-another-file"],
+)
+def test_the_path_script_refuses_an_environment_d_link_that_is_not_etc_environment(
+    tmp_path: Path, environment_links: dict[str, str]
+) -> None:
+    """/usr/lib/environment.d passes only when each entry resolves to /etc/environment (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        environment_links: Links to make in the stand-in folder, by name to target.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", environment_links=environment_links)
+
+    assert done.returncode != 0
+    assert "environment.d, which the check does not read" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "box_owns"),
+    [(0o775, ""), (0o757, ""), (0o755, "folder"), (0o755, "99-environment.conf")],
+    ids=["group-writable-folder", "other-writable-folder", "box-folder", "box-link"],
+)
+def test_the_path_script_refuses_an_environment_d_that_the_box_user_could_change(
+    tmp_path: Path, mode: int, box_owns: str
+) -> None:
+    """/usr/lib/environment.d passes only when root owns the folder and each link, and only root may write it (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        mode: The mode of the stand-in folder.
+        box_owns: ``folder``, or the link name, that the box user owns; empty when root owns both.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    if box_owns and os.geteuid() != 0:
+        pytest.skip("only root can give a file to another user")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        "",
+        "",
+        "",
+        environment_links={"99-environment.conf": "ENVIRONMENT"},
+        environment_mode=mode,
+        environment_box_owns=box_owns,
+    )
+
+    assert done.returncode != 0
+    assert "environment.d, which the check does not read" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("sudo_stack", "vendor_stacks", "refusal"),
+    [
+        ("@include common-motd\n", {"common-motd": _MOTD_LINE}, "vendor-pam.d/common-motd, which sudo reaches"),
+        ("", {"other": _MOTD_LINE}, "vendor-pam.d/other, which sudo reaches"),
+        ("", {"sudo-i": _MOTD_LINE}, "vendor-pam.d/sudo-i, which sudo reaches"),
+        ("", {"login": _MOTD_LINE, "common-motd": _MOTD_LINE}, None),
+    ],
+    ids=["included-vendor-file", "vendor-other", "vendor-sudo-i", "unreached-vendor-files"],
+)
+def test_the_path_script_follows_sudo_into_the_vendor_pam_folder(
+    tmp_path: Path, sudo_stack: str, vendor_stacks: dict[str, str], refusal: str | None
+) -> None:
+    """Sudo reaches a stack that only a vendor folder such as /usr/lib/pam.d has, so a module there counts (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_stack: The text of the stand-in ``/etc/pam.d/sudo``.
+        vendor_stacks: The text of stand-in files in ``/usr/lib/pam.d``, by name.
+        refusal: The text that the refusal names, or None when the check passes.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_stack=sudo_stack, vendor_stacks=vendor_stacks)
+
+    if refusal is None:
+        assert done.returncode == 0, done.stderr
+    else:
+        assert done.returncode != 0
+        assert refusal in done.stderr
+        assert "loads pam_motd.so" in done.stderr
+
+
+@pytest.mark.parametrize(("length", "passes"), [(1022, True), (1023, False)], ids=["1022", "1023"])
+def test_the_path_script_takes_a_pam_line_of_up_to_1022_characters(tmp_path: Path, length: int, passes: bool) -> None:
+    """Linux-PAM 1.5 reads 1023-byte parts, so a 1022-character line passes and a 1023-character line fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        length: The length of the line, without its newline.
+        passes: Whether the script passes.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    line = "session optional pam_permit.so "
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_stack=line + "x" * (length - len(line)) + "\n")
+
+    if passes:
+        assert done.returncode == 0, done.stderr
+    else:
+        assert done.returncode != 0
+        assert "sudo has a line longer than 1022 characters" in done.stderr
+
+
+def test_the_path_script_lists_each_module_file_that_sudo_loads(tmp_path: Path) -> None:
+    """The script prints the exact module file that Linux-PAM opens, so the probe walks its owners (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path,
+        "",
+        "",
+        "",
+        sudo_stack="@include common-session\nsession optional pam_permit.so\n",
+        other_stacks={"common-session": "session required pam_unix.so\n", "login": "session optional pam_deny.so\n"},
+        modules={"pam_permit.so": "pam_unix.so", "pam_deny.so": "pam_warn.so"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    lines = set(done.stdout.split("\n"))
+    security = tmp_path / "lib" / "security"
+    assert {f"file {security / 'pam_unix.so'}", f"file {security / 'pam_permit.so'}"} <= lines
+    assert f"file {security / 'pam_deny.so'}" not in lines
+
+
+def test_the_probe_reads_the_vendor_pam_and_sudo_folders() -> None:
+    """Linux-PAM 1.7 reads /usr/etc/pam.d, and Tumbleweed's sudo reads /usr/etc/sudo.conf, so the probe does (SKY-912)."""
+    assert 'PAM_STACKS = ("/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d")' in repo_staging._PATH_SCRIPT
+    assert 'SUDO_CONFS = ("/etc/sudo.conf", "/usr/etc/sudo.conf")' in repo_staging._PATH_SCRIPT
+    assert "/usr/etc/pam.d" in repo_staging._SUDO_FOLDERS
+    assert "/usr/etc/sudo.conf" in repo_staging._SUDO_FILES
+    assert "/usr/etc/pam.d" in repo_staging.UNTRUSTED_PYTHON
+    assert "/usr/etc/sudo.conf" in repo_staging.UNTRUSTED_PYTHON
+
+
+def test_the_refusal_names_the_pam_content_rules() -> None:
+    """Name each PAM content rule in the refusal, because the probe's own reason never reaches the user (SKY-912)."""
+    assert "In every PAM file, a path may appear only" in repo_staging.UNTRUSTED_PYTHON
+    assert "plain PAM file name" in repo_staging.UNTRUSTED_PYTHON
+    assert "motd=/run/motd.dynamic" in repo_staging.UNTRUSTED_PYTHON
+    assert "conf= option" in repo_staging.UNTRUSTED_PYTHON
+
+
+_STOCK_SUDO_CONF = (
+    "# Default /etc/sudo.conf file\n"
+    "#\n"
+    "#Path askpass /usr/X11R6/bin/ssh-askpass\n"
+    "  # Plugin sudoers_policy sudoers.so\n"
+    "\n"
+    "Plugin sudoers_policy sudoers.so\n"
+    "Plugin sudoers_io /usr/libexec/sudo/sudoers.so\n"
+    "Path noexec /usr/libexec/sudo/sudo_noexec.so\n"
+    "Set disable_coredump false\n"
+    "set developer_mode Off\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("sudo_conf", "vendor_sudo_conf"),
+    [(None, None), (_STOCK_SUDO_CONF, None), (None, _STOCK_SUDO_CONF), ("", "")],
+    ids=["no-sudo-conf", "stock-sudo-conf", "stock-vendor-sudo-conf", "empty-sudo-confs"],
+)
+def test_the_path_script_passes_a_stock_or_missing_sudo_conf(
+    tmp_path: Path, sudo_conf: str | None, vendor_sudo_conf: str | None
+) -> None:
+    """Comments, stock Plugin and Path lines, other Set lines and developer_mode off pass, and so does no file (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``, or None when it is missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``, or None when it is missing.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(tmp_path, "", "", "", sudo_conf=sudo_conf, vendor_sudo_conf=vendor_sudo_conf)
+
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize(
+    ("sudo_conf", "vendor_sudo_conf", "folder", "reason"),
+    [
+        ("Set developer_mode true\n", None, False, "sudo.conf turns on developer_mode"),
+        ("SET Developer_Mode yes\n", None, False, "sudo.conf turns on developer_mode"),
+        (None, "Set developer_mode 1\n", False, "vendor-sudo.conf turns on developer_mode"),
+        ("Set developer_mode\n", None, False, "Set developer_mode, which is not a stock setting"),
+        ("Plugin sudoers_policy /home/box/p.so\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy ../../home/box/p.so\n", None, False, "which is not a stock setting"),
+        ("Plugin group_plugin group_file.so\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so sudoers_file=/home/box/s\n", None, False, "not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so sudoers_uid=1000\n", None, False, "not a stock setting"),
+        ("Path noexec /home/box/n.so\n", None, False, "Path noexec /home/box/n.so, which is not a stock"),
+        ("Path plugin_dir /home/box\n", None, False, "which is not a stock setting"),
+        ("Path sesh /home/box/sesh\n", None, False, "which is not a stock setting"),
+        ("Path askpass /usr/bin/ssh-askpass\n", None, False, "which is not a stock setting"),
+        ("Debug sudo /var/log/sudo_debug all@debug\n", None, False, "which is not a stock setting"),
+        ("Plugin sudoers_policy sudoers.so # stock\n", None, False, "has a # after a setting"),
+        ("Set disable_coredump \\\nfalse\n", None, False, "sudo.conf continues a line"),
+        ("# Set developer_mode false \\\nSet developer_mode true\n", None, False, "continues a line"),
+        ("Set developer_mode\rtrue\n", None, False, "not printable ASCII"),
+        (None, None, True, "the check cannot read"),
+    ],
+    ids=[
+        "developer-mode",
+        "developer-mode-any-case",
+        "vendor-developer-mode",
+        "developer-mode-without-a-value",
+        "box-plugin",
+        "relative-box-plugin",
+        "other-plugin",
+        "sudoers-file-option",
+        "sudoers-uid-option",
+        "box-noexec",
+        "box-plugin-dir",
+        "box-sesh",
+        "askpass",
+        "debug-log",
+        "comment-after-a-setting",
+        "continued-line",
+        "continued-comment",
+        "carriage-return",
+        "unreadable",
+    ],
+)
+def test_the_path_script_refuses_a_sudo_conf_that_could_load_a_box_file(
+    tmp_path: Path, sudo_conf: str | None, vendor_sudo_conf: str | None, folder: bool, reason: str
+) -> None:
+    """developer_mode, a line that is not stock, a line sudo could read otherwise, or an unreadable file fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        sudo_conf: The text of the stand-in ``/etc/sudo.conf``, or None when it is missing.
+        vendor_sudo_conf: The text of the stand-in ``/usr/etc/sudo.conf``, or None when it is missing.
+        folder: Whether the stand-in ``/etc/sudo.conf`` is a folder, which the script cannot read.
+        reason: Text that the script's error must contain.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    done = _run_path_script_with_pam_files(
+        tmp_path, "", "", "", sudo_conf=sudo_conf, vendor_sudo_conf=vendor_sudo_conf, sudo_conf_folder=folder
+    )
+
+    assert done.returncode != 0
+    assert reason in done.stderr
+
+
+def test_the_path_script_refuses_a_pam_environment_path_that_it_cannot_look_for(tmp_path: Path) -> None:
+    """A folder that the box user cannot search could hide a pam_env drop-in, so the script fails (SKY-912).
+
+    Args:
+        tmp_path: Pytest temporary folder.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the script reads /proc, as in the box images")
+    if os.geteuid() == 0:
+        pytest.skip("root can search every folder")
+    try:
+        done = _run_path_script_with_pam_files(tmp_path, "", "", "", locked=True)
+    finally:
+        (tmp_path / "locked").chmod(0o700)
+
+    assert done.returncode != 0
+    assert "cannot look for" in done.stderr
 
 
 @pytest.mark.parametrize("value", ["/dev/null", "/etc/box.cnf"], ids=["clean-run-value", "image-value"])

@@ -805,6 +805,138 @@ own commands in the setup box and in each candidate box:
   use the rule.
 - `/usr/local/bin/python3` must be a trusted Python. The error of the
   image check lists the file and folder rules.
+- The box user must not be able to change the `sudo` that runs root's
+  commands, or the files that `sudo` reads as root (SKY-912). Root must
+  own each `sudo` in a folder of root's `PATH` (the same folders as
+  `secure_path`), and the first `sudo` on the image `PATH`. Root must
+  also own each folder of the image `PATH` up to and with the folder
+  that holds that `sudo`. Root must own these files
+  when they exist: `/etc/sudo.conf`, `/usr/etc/sudo.conf`, `/etc/sudoers`,
+  `/etc/environment`,
+  `/etc/default/locale`, `/etc/pam.conf`, `/etc/passwd`, `/etc/group`,
+  `/etc/shadow`, `/etc/gshadow`, `/etc/login.defs` and
+  `/etc/default/login`. Ubuntu's `pam_umask` reads `/etc/login.defs` as
+  root in the `sudo` stack, and `/etc/default/login` when `login.defs`
+  sets no `UMASK`, so a box-writable copy could set the umask of root's
+  steps. Root must own
+  `/etc/sudoers.d`,
+  `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/etc/pam.d`, `/usr/lib/security` and
+  `/etc/security` when they exist, and every entry in them. Debian's
+  Linux-PAM reads a PAM file from `/usr/lib/pam.d` when `/etc/pam.d` does
+  not have it, and it also names `/usr/lib/security` as a module folder.
+  Linux-PAM 1.7 also reads `/usr/etc/pam.d`, as openSUSE does. Group and others
+  must not be able to write any of them. Linux-PAM does not check who
+  owns its files, so the image check does. Ubuntu's `sudo` PAM stack
+  reads `/etc/environment` and
+  `/etc/default/locale` into root's environment. So the check also reads
+  the variable names in those two files and in
+  `/etc/security/pam_env.conf`. It refuses there the same names that it
+  refuses in the image `ENV`, such as `LD_PRELOAD` or a locale that is not
+  C, POSIX or UTF-8. Any locale set in `pam_env.conf` is refused, because
+  its values can expand other variables. The check also refuses a line in
+  these files that ends in a backslash, a variable name that is not
+  letters, digits and underscores, and a line with a character that is not
+  printable ASCII, such as a carriage return, because such a character
+  could hide a path from the check. It refuses a PAM configuration line
+  longer than 1022 characters, because Linux-PAM 1.5 reads the rest of
+  that line as a new line.
+  It refuses an image that has a `pam_env` drop-in folder or a vendor
+  copy, such as
+  `/etc/security/pam_env.conf.d`, `/etc/environment.d` or
+  `/usr/etc/environment`, because it does not read them. It also refuses
+  an image when it cannot search the folder of one of those paths.
+  systemd ships `/usr/lib/environment.d` with only a link to
+  `/etc/environment`, so the check accepts that folder when root owns it,
+  group and others cannot write it, and each entry in it is a link that
+  root owns and that resolves to `/etc/environment`. Otherwise the box
+  user could add a file there later. In `/etc/pam.conf`, `/etc/pam.d`,
+  `/usr/lib/pam.d` and `/usr/etc/pam.d`, a `pam_env` line in a stack that `sudo` reaches
+  may name only those three files with `envfile=`, and only
+  `/etc/security/pam_env.conf` with `conffile=`. It may
+  not turn on `user_readenv`, which reads a file in the target user's
+  home (root's). The check reads these options on every line of those
+  stacks, also inside `[...]` brackets, because another module name can
+  load `pam_env`. Stock `sshd` turns on `user_readenv`, but `sudo` does
+  not reach it. The check splits words
+  as Linux-PAM does: only at a space or a tab, and a `[...]` argument ends
+  at its first `]` that has no `\` before it, even across spaces. The
+  check refuses a `[...]` argument with no closing bracket. It also
+  refuses a PAM line that ends in a backslash outside a comment, because
+  Linux-PAM versions join such a line with the next one in different ways.
+  It refuses a PAM line with a character that is not printable ASCII,
+  except a tab.
+  No line in these PAM files may name any other path, such as a module or
+  an `@include` file outside the module folders. The only other path
+  allowed is `/run/motd.dynamic`, and only as the `motd=` value, which
+  stock images name. An `include`, `substack` or `@include` target in a
+  stack that `sudo` reaches must be a plain file name, with no `/`.
+  Linux-PAM takes the brackets off every word, so the check follows
+  `include [name]` and `[include] name` to the file `name` in the PAM
+  folders. In those stacks
+  the check also refuses a `conf=` option, because `pam_limits` reads a
+  relative `conf=` file in the working folder of the box user. The check
+  refuses `pam_exec`, `pam_script`, `pam_python` and `pam_xauth`, which
+  run a program that an argument names, even by a relative name. It also refuses a
+  module name that is a link to one of them in a module folder.
+  In a stack that `sudo` reaches (the `sudo` and `sudo-i` stacks, `other`,
+  and every file that they include), each module must be on a short list
+  of stock modules, which the four stock images use:
+  - `pam_unix.so`: checks the account. It runs `unix_chkpwd` only when it
+    does not run as root.
+  - `pam_permit.so`, `pam_deny.so` and `pam_warn.so`: give a fixed answer
+    or write a syslog line.
+  - `pam_env.so`: reads the environment files above, with the options
+    above.
+  - `pam_limits.so`: reads `limits.conf` and `limits.d`, which the check
+    walks.
+  - `pam_umask.so`: reads `login.defs` and `default/login`, which the
+    check walks.
+  - `pam_keyinit.so`: makes keyring calls only.
+  - `pam_systemd.so`: makes a D-Bus call to logind.
+
+  The module word must be the exact name, with `.so`. Linux-PAM loads a
+  relative name as written and adds no `.so`, so a name such as `pam_evil`
+  could load a file that the loader-folder check does not walk. A module
+  file that a name resolves to must resolve to a stock module of the list,
+  and the check walks that exact file. The list leaves out `pam_exec`,
+  `pam_script`, `pam_python`, `pam_xauth`, `pam_motd`, `pam_mkhomedir` and
+  `pam_namespace`, because they run programs as root. Debian's `pam_motd`
+  runs the scripts in `/etc/update-motd.d`. `pam_mkhomedir` runs
+  `mkhomedir_helper`, and `pam_namespace` runs `namespace.init`. Stock
+  images name `pam_motd` only in `login` and `sshd`, which `sudo` does not
+  reach.
+  The `sudo.conf` files (`/etc/sudo.conf` and `/usr/etc/sudo.conf`) may
+  hold only comments, `Set` lines that do not turn on `developer_mode`,
+  `Plugin` lines that load the stock `sudoers.so` by its stock path, and
+  the stock `Path` lines of the stock images. `developer_mode` stops
+  `sudo` from checking who owns a plugin. The check refuses a `Debug`
+  line, an `askpass` path, a plugin with arguments, a line that ends in
+  a backslash, a `#` after a setting, and a character that is not
+  printable ASCII. It refuses a `sudo.conf` that exists but that it
+  cannot read. A missing `sudo.conf` passes.
+  A box user who can change the account files can join
+  the `sudo` group or set a root
+  password. Others need not read `/etc/shadow` or `/etc/gshadow`, which
+  are often mode 0640 or 0000. An image with no `/etc/pam.d` passes;
+  Linux-PAM then reads `/etc/pam.conf`, which the check reads too.
+- The check also needs these rules:
+  - Others must be able to read each `sudo`, and to search each folder of
+    the image `PATH` up to and with the folder that holds the first
+    `sudo`.
+  - Others must be able to run the first `sudo` on the image `PATH`. A
+    `PATH` lookup by a non-root user skips a file that the user cannot
+    run.
+  - Each `sudo` must resolve to an ELF file, not a script.
+  - Others must be able to list `/etc/sudoers.d`, `/etc/pam.d`,
+    `/usr/lib/pam.d`, `/usr/etc/pam.d`, `/usr/lib/security` and
+    `/etc/security`.
+  - Each entry in those folders must be a regular file, or a link to one.
+    `/etc/security` may also hold one level of such folders, for example
+    `limits.d`.
+
+  The Debian and Ubuntu `sudo` packages meet these rules. Red Hat images
+  do not: their `sudo` is mode 4111 and `/etc/sudoers.d` is 0750. Alpine
+  images with `sudo` do not either: their `/etc/sudoers.d` is 0750.
 
 The image check refuses an image that breaks one of these rules, before
 the first version. A minimal `[run]` image:
@@ -1159,8 +1291,47 @@ Residual risk:
   `/app/.venv/bin` would get root. The image puts a root-only guard folder,
   `/usr/local/libexec/skynet-path-guard`, first on its `PATH` and in its
   login shell `PATH`. That folder holds only a link to `/usr/bin/sudo`.
-  How the agent finds `sudo` is not verified on a real box. A real-box check
-  must confirm it before the sandbox image is pinned.
+  A real staging box (SKY-912, Debian 13) showed that the agent starts
+  `sudo` by its bare name, and the process ran `/usr/bin/sudo`. A
+  box-user `sudo` first on the command's own `PATH` did not run. A root
+  `sudo` in `/usr/local/bin` did not run either, although that folder
+  comes before `/usr/bin` on root's `PATH`. So the agent runs a fixed path
+  or looks `sudo` up on its own `PATH`, probably the image `PATH`. The
+  check did not prove which. So the image check walks both: every `sudo`
+  in a folder of root's `PATH`, and the image `PATH` up to its first
+  `sudo`. It also walks the `sudo`, PAM and account files:
+  `/etc/sudo.conf`, `/usr/etc/sudo.conf`, `/etc/sudoers`,
+  `/etc/environment`, `/etc/default/locale`, `/etc/pam.conf`,
+  `/etc/passwd`, `/etc/group`, `/etc/shadow`, `/etc/gshadow`,
+  `/etc/login.defs`, `/etc/default/login`, and each entry in
+  `/etc/sudoers.d`, `/etc/pam.d`, `/usr/lib/pam.d`, `/usr/etc/pam.d`,
+  `/usr/lib/security` and `/etc/security`. It does not walk a file that
+  sudoers includes from another folder. Sudo itself refuses such a file
+  when root does not own it, or when others can write it. The check
+  refuses a `sudo.conf` plugin with arguments, so `sudo.conf` cannot name
+  another `sudoers_file`. The check does not parse sudoers, so these
+  risks stay:
+  - It does not walk a file that a sudoers setting names, such as
+    `Defaults env_file=` or `restricted_env_file=`. Sudo reads such a file
+    with no owner check, so a box-owned `env_file` can put `LD_PRELOAD`
+    into root's command.
+  - It does not read `Defaults pam_service=`, which can make `sudo` use
+    another PAM stack. The check refuses the modules that run a program in
+    every PAM file, but the stock-module list covers only the stacks that
+    `sudo` reaches by default.
+  - A root-owned copy of `pam_exec.so` under a stock module name passes,
+    because the check compares names, not file contents. Only root can
+    write the module folders, so only the image build can plant it.
+
+  The PAM configuration may name no path outside a short stock list, so
+  PAM loads modules only from its module folders. The PAM modules below
+  the loader folders get only the loader-folder check, which needs others
+  to be able to read them. The `sudo` plugins, such as `sudoers.so` and
+  `libsudo_util`, also get only the loader-folder check. They get it when
+  the `sudo` RUNPATH names their folder, as on Debian
+  (`/usr/libexec/sudo`). Sudo refuses a plugin that root does not own or
+  that others can write, unless `sudo.conf` turns on `developer_mode`.
+  The check refuses `developer_mode`, so that owner check stays on.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).
