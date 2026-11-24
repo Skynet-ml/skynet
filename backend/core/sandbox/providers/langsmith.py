@@ -288,8 +288,10 @@ class LangSmithEnvironment(SandboxEnvironment):
             async with asyncio.timeout(self._startup_timeout) as deadline:
                 with _mapped_errors(start_timeout=self._startup_timeout):
                     box = await self._create(client)
-            if self._usage is not None and self._client is client:
-                # The confirm thread cannot be cancelled; the cleanup must see its mismatch flag.
+            if self._usage is not None:
+                # Also after a stop() during the create: the box exists, so its
+                # size check must run before the cleanup settles it. The confirm
+                # thread cannot be cancelled; the cleanup must see its mismatch flag.
                 confirming = asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, box))
                 await _wait_through_cancels(confirming)
                 confirming.result()
@@ -430,10 +432,11 @@ class LangSmithEnvironment(SandboxEnvironment):
             self._usage = await asyncio.shield(reserving)
         except asyncio.CancelledError:
             # The thread cannot be cancelled and may still reserve; keep its
-            # result so the cleanup settles it instead of leaking it.
+            # result so the cleanup settles it instead of leaking it. asyncio.wait
+            # does not raise the thread's error, so the cancel stays the error.
             while not reserving.done():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(reserving)
+                    await asyncio.wait([reserving])
             if not reserving.cancelled() and reserving.exception() is None:
                 self._usage = reserving.result()
             raise
@@ -791,14 +794,16 @@ async def _teardown(client: Any, name: str | None, *, proof_after: float | None 
             get proves the box gone; ``None`` trusts the delete alone.
 
     Returns:
-        The monotonic instant the last successful delete call returned, or
+        The end of the box's life: the instant the last successful delete
+        call returned, or a later instant at which the box was still seen.
         None when the delete failed or no proof came.
     """
     if name is None:
         return time.monotonic()
     deleted_at = await _delete(client, name)
-    if deleted_at is None or proof_after is None:
+    if proof_after is None:
         return deleted_at
+    # A failed delete is retried in the bounded poll, so it does not leave the hold pending at once.
     return await _gone(client, name, proof_after, deleted_at)
 
 
@@ -824,7 +829,7 @@ async def _delete(client: Any, name: str) -> float | None:
     return time.monotonic()
 
 
-async def _gone(client: Any, name: str, proof_after: float, deleted_at: float) -> float | None:
+async def _gone(client: Any, name: str, proof_after: float, deleted_at: float | None) -> float | None:
     """Poll by name until a get sent after ``proof_after`` returns 404, and delete a box that appears.
 
     The SDK does not say that billing stops when the delete returns, and a
@@ -834,11 +839,12 @@ async def _gone(client: Any, name: str, proof_after: float, deleted_at: float) -
         client: The SDK ``AsyncSandboxClient``.
         name: The sandbox name.
         proof_after: The instant after which a 404 proves the box gone.
-        deleted_at: The instant the first delete call returned.
+        deleted_at: The instant the first delete call returned, or None when it failed.
 
     Returns:
-        The instant the last successful delete call returned, on proof; None
-        when no proof came in the bounded time.
+        On proof, the latest of the successful delete returns and the
+        lookups that still found the box; the proof time when no delete
+        succeeded. None when no proof came in the bounded time.
     """
     give_up_at = max(proof_after, time.monotonic()) + _DELETE_TIMEOUT_SECONDS
     while time.monotonic() < give_up_at:
@@ -847,12 +853,16 @@ async def _gone(client: Any, name: str, proof_after: float, deleted_at: float) -
             await asyncio.wait_for(client.get_sandbox(name), _DELETE_TIMEOUT_SECONDS)
         except ResourceNotFoundError:
             if checked_at >= proof_after:
-                return deleted_at
+                return time.monotonic() if deleted_at is None else deleted_at
         except Exception as exc:
             logger.warning("Could not look up the LangSmith sandbox %s: %s.", name, type(exc).__name__)
         else:
-            # A late create made this box, or the first delete is still in progress.
-            deleted_at = await _delete(client, name) or deleted_at
+            # A late create made this box, a delete failed, or the first delete
+            # is still in progress. The box was alive now, whatever the next delete returns.
+            deleted_at = max(deleted_at or 0.0, time.monotonic())
+            deleted_again = await _delete(client, name)
+            if deleted_again is not None:
+                deleted_at = max(deleted_at, deleted_again)
         await asyncio.sleep(_GONE_POLL_SECONDS)
     return None
 

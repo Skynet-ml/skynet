@@ -303,6 +303,10 @@ class FakeServer:
         self.box_fields: dict[str, Any] = {}
         self.get_error: BaseException | None = None
         self.late_box_seconds: float | None = None
+        # Each delete takes the next step: "keep" returns but keeps the box,
+        # "fail" raises and keeps it, "lost" removes it and then raises.
+        self.delete_steps: list[str] = []
+        self.found_at: list[float] = []
 
 
 class FakeClient:
@@ -341,6 +345,14 @@ class FakeClient:
         self.server.delete_started.set()
         if self.server.delete_gate is not None:
             await self.server.delete_gate.wait()
+        step = self.server.delete_steps.pop(0) if self.server.delete_steps else None
+        if step == "keep":
+            return
+        if step == "fail":
+            raise FakeConnectionError("delete lost")
+        if step == "lost":
+            self.server.boxes.pop(name, None)
+            raise FakeConnectionError("delete answer lost")
         if self.server.boxes.pop(name, None) is None:
             raise FakeNotFoundError(name)
 
@@ -350,6 +362,7 @@ class FakeClient:
             raise self.server.get_error
         if name not in self.server.boxes:
             raise FakeNotFoundError(name)
+        self.server.found_at.append(time.monotonic())
         return self.server.boxes[name]
 
     async def aclose(self) -> None:
@@ -1176,6 +1189,23 @@ async def test_cancel_during_reserve_releases_the_hold(server: FakeServer, usage
     assert server.creates == []
 
 
+async def test_cancel_during_a_refused_reserve_keeps_the_cancel(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Raise the cancel, not the budget refusal, when the reservation fails after a cancel."""
+    usage.entered = threading.Event()
+    usage.gate = threading.Event()
+    usage.error = BudgetError("no headroom")
+    env = _protected(usage)
+    task = asyncio.create_task(env.start())
+    await asyncio.to_thread(usage.entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    usage.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert usage.events == []
+    assert server.creates == []
+
+
 async def test_stop_during_reserve_releases_the_hold(server: FakeServer, usage: type[FakeUsage]) -> None:
     """Release the hold when a stop() ends the start before the create call."""
     usage.entered = threading.Event()
@@ -1255,6 +1285,49 @@ async def test_answered_create_ends_at_the_delete_call(server: FakeServer, usage
     assert before <= ended_at <= proved - 0.05
 
 
+async def test_box_seen_after_the_delete_moves_the_end(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End the billed life no earlier than a lookup that still found the box after a delete."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["keep", "lost"]
+    await env.stop()
+    assert usage.events[-1] == ("settle", True)
+    [seen_at] = server.found_at
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert ended_at >= seen_at
+
+
+async def test_failed_first_delete_retries_until_proof(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Retry a failed first delete in the bounded poll, then settle on the 404 proof."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["fail"]
+    await env.stop()
+    assert server.boxes == {}
+    assert server.deletes == [env.name, env.name]
+    assert usage.events[-1] == ("settle", True)
+
+
+async def test_real_reservation_checks_the_size_after_a_stop_during_create(
+    server: FakeServer, ledger: BudgetRuntime
+) -> None:
+    """Run the size check when a stop() comes during a create that still makes a too-large box."""
+    server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
+    server.create_gate = asyncio.Event()
+    made: list[LangSmithUsageReservation] = []
+    env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert made[0].mismatch is True
+    assert server.boxes == {}
+    assert _operation(ledger, made).state == "pending"
+
+
 async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(
     server: FakeServer, usage: type[FakeUsage], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1295,12 +1368,16 @@ async def test_stop_during_create_settles_only_after_the_last_delete(
     server.create_gate.set()
     with pytest.raises(SandboxInfraError, match="stopped during start"):
         await task
-    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert usage.events == [("reserve", "op-1"), ("confirm", usage.events[1][1]), ("settle", True)]
     assert server.boxes == {}
 
 
-async def test_failed_delete_keeps_the_reservation_pending(server: FakeServer, usage: type[FakeUsage]) -> None:
+async def test_failed_delete_keeps_the_reservation_pending(
+    server: FakeServer, usage: type[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Settle without a confirmed delete, raise the pending error once, and keep later stops quiet."""
+    # The retry poll is bounded by the delete timeout; keep it short.
+    monkeypatch.setattr(langsmith, "_DELETE_TIMEOUT_SECONDS", 0.1)
     env = _protected(usage)
     await env.start()
 
