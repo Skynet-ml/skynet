@@ -9,11 +9,18 @@ import itertools
 import json
 import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
+from core.billing.budgets import BudgetService
+from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
@@ -22,6 +29,7 @@ from core.sandbox.pacing import ProviderAtCapacityError
 from core.sandbox.providers import kernel
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 pytest.importorskip("kernel", reason="The kernel extra is not installed.")
 
@@ -85,7 +93,35 @@ class FakeBrowser:
         self.cdp_ws_url = cdp_ws_url
         self.webdriver_ws_url = f"wss://wd.example.invalid/{session_id}"
         self.base_url = f"https://base.example.invalid/{session_id}"
+        self.headless = options.get("headless")
+        self.gpu = False
+        self.memory = options.get("memory", "8GiB")
+        self.timeout_seconds = options.get("timeout_seconds")
         self.files: dict[str, bytes] = {}
+
+
+class FakeDetails:
+    """Act as the SDK details of a deleted browser."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Keep the details.
+
+        Args:
+            data: The JSON form of the details.
+        """
+        self.data = data
+
+    def to_dict(self, *, mode: str) -> dict[str, Any]:
+        """Return the details as JSON data.
+
+        Args:
+            mode: The SDK dump mode.
+
+        Returns:
+            The details.
+        """
+        assert mode == "json"
+        return dict(self.data)
 
 
 class FakeResponse:
@@ -142,6 +178,10 @@ class FakeState:
     exec_responses: ClassVar[list[Any]] = []
     spawns: ClassVar[list[dict[str, Any]]] = []
     deleted: ClassVar[list[str]] = []
+    retrieves: ClassVar[list[str]] = []
+    retrieve_errors: ClassVar[list[BaseException]] = []
+    usage_statuses: ClassVar[list[str]] = []
+    uptime_ms: ClassVar[int] = 60_000
     closed: ClassVar[int] = 0
     # The real list pages by offset; a small page shows any skip.
     page_size: ClassVar[int] = 3
@@ -161,6 +201,10 @@ class FakeState:
         cls.exec_responses = []
         cls.spawns = []
         cls.deleted = []
+        cls.retrieves = []
+        cls.retrieve_errors = []
+        cls.usage_statuses = []
+        cls.uptime_ms = 60_000
         cls.closed = 0
 
     @classmethod
@@ -367,6 +411,33 @@ class FakeBrowsers:
         if FakeState.browsers.pop(session_id, None) is None:
             raise _status_error(kernel.NotFoundError, 404)
         FakeState.deleted.append(session_id)
+
+    async def retrieve(self, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Return the details of a deleted browser, or raise the next scripted error.
+
+        Args:
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Returns:
+            The details with the usage report.
+
+        Raises:
+            BaseException: The next scripted read error.
+        """
+        assert include_deleted is True
+        FakeState.retrieves.append(session_id)
+        if FakeState.retrieve_errors:
+            raise FakeState.retrieve_errors.pop(0)
+        status = FakeState.usage_statuses.pop(0) if FakeState.usage_statuses else "ready"
+        return FakeDetails(
+            {
+                "session_id": session_id,
+                "deleted_at": "2026-11-24T00:05:00Z",
+                "usage_status": status,
+                "usage": {"uptime_ms": FakeState.uptime_ms},
+            }
+        )
 
 
 class FakeKernel:
@@ -929,3 +1000,268 @@ async def test_real_sdk_exec_without_timeout_has_no_read_timeout(monkeypatch: py
         limited = server.timeouts["POST /browsers/ses-real/process/exec"]
     assert unlimited["read"] is None
     assert limited["read"] == 5 + kernel.EXEC_HTTP_MARGIN
+
+
+class FakeUsage:
+    """Record the calls that a protected box makes on its usage reservation."""
+
+    def __init__(self, request: dict[str, Any], operation_key: str, settle_error: Exception | None = None) -> None:
+        """Keep the funded request and start with the reserve call.
+
+        Args:
+            request: The usage request that the box reserved.
+            operation_key: The operation key of the box.
+            settle_error: The error that ``settle`` raises, or ``None``.
+        """
+        self.request = request
+        self.operation_key = operation_key
+        self.settle_error = settle_error
+        self.calls: list[str] = ["reserve"]
+        self.browser: Any = None
+        self.receipt: dict[str, Any] | None = None
+        self.measured_ms: int | None = None
+        self.error: BaseException | None = None
+
+    def confirm(self, browser: Any) -> None:
+        """Record the confirm call.
+
+        Args:
+            browser: The created browser.
+        """
+        self.calls.append("confirm")
+        self.browser = browser
+
+    def record(self, receipt: dict[str, Any], *, measured_ms: int | None) -> None:
+        """Record the usage evidence.
+
+        Args:
+            receipt: Kernel's details of the deleted browser.
+            measured_ms: The measured wall time.
+        """
+        self.calls.append("record")
+        self.receipt = receipt
+        self.measured_ms = measured_ms
+
+    def settle(self) -> None:
+        """Record the settle call, or raise the scripted error.
+
+        Raises:
+            Exception: The scripted settle error.
+        """
+        self.calls.append("settle")
+        if self.settle_error is not None:
+            raise self.settle_error
+
+    def fail(self, error: BaseException) -> None:
+        """Record the fail call.
+
+        Args:
+            error: The create failure.
+        """
+        self.calls.append("fail")
+        self.error = error
+
+
+def _protected(
+    spec: SandboxSpec | None = None, *, settle_error: Exception | None = None, **options: Any
+) -> tuple[kernel.KernelEnvironment, list[FakeUsage]]:
+    """Return a protected box and the list that collects its usage fakes.
+
+    Args:
+        spec: The spec, or ``None`` for a small spec with an operation key.
+        settle_error: The error that the fake settle raises.
+        **options: More provider options.
+
+    Returns:
+        The box and the usage list.
+    """
+    usages: list[FakeUsage] = []
+
+    def usage_factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make one recording usage fake.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake.
+        """
+        assert budget == "budget"
+        usages.append(FakeUsage(request, operation_key, settle_error))
+        return usages[-1]
+
+    env = kernel.KernelEnvironment(
+        spec or _spec(operation_key="box-op"), budget="budget", usage_factory=usage_factory, **options
+    )
+    return env, usages
+
+
+def test_protected_box_is_billable_and_needs_an_operation_key() -> None:
+    """Mark the provider billable, and refuse a protected box with no operation key."""
+    assert kernel.KERNEL_CAPABILITIES.billable is True
+    assert kernel.KernelEnvironment.capabilities.protected is False
+    env, _ = _protected()
+    assert env.capabilities.protected is True
+    with pytest.raises(SandboxSpecError):
+        kernel.KernelEnvironment(_spec(), budget="budget")
+
+
+async def test_protected_box_reserves_confirms_and_settles_on_stop() -> None:
+    """Reserve before the create, confirm after it, and settle from Kernel's report after the delete."""
+    env, usages = _protected(clock=FakeClock())
+    async with env:
+        (usage,) = usages
+        assert usage.calls == ["reserve", "confirm"]
+        assert FakeState.create_calls[0]["memory"] == "8GiB"
+    assert usage.operation_key == "box-op"
+    assert usage.request == {
+        "lifetime_ms": 300_000,
+        "timeout_seconds": 300,
+        "memory_gib": 8,
+        "headless": False,
+        "gpu": False,
+    }
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt is not None
+    assert usage.receipt["usage"] == {"uptime_ms": 60_000}
+    assert usage.measured_ms is not None
+    assert FakeState.retrieves == FakeState.deleted == [usage.browser.session_id]
+
+
+async def test_protected_box_settles_after_a_failed_start() -> None:
+    """Delete the browser and settle when the container setup fails."""
+    FakeState.exec_responses = [FakeResponse(1, "", "no network")]
+    env, usages = _protected(_spec(image="img", operation_key="box-op"))
+    with pytest.raises(SandboxInfraError, match="install"):
+        await env.start()
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert FakeState.browsers == {}
+
+
+async def test_protected_box_settles_after_a_cancelled_start() -> None:
+    """Delete the browser and settle when the caller cancels the start after the create."""
+    entered = asyncio.Event()
+
+    async def hang() -> Any:
+        """Never answer the exec call.
+
+        Returns:
+            Nothing; the call waits until it is cancelled.
+        """
+        entered.set()
+        await asyncio.Event().wait()
+
+    FakeState.exec_responses = [hang]
+    env, usages = _protected(_spec(image="img", operation_key="box-op"))
+    start = asyncio.ensure_future(env.start())
+    await entered.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+    assert FakeState.browsers == {}
+
+
+async def test_stop_during_a_protected_create_fails_the_reservation() -> None:
+    """Pass the reservation to ``fail`` when the stop ends the start before a browser exists."""
+    FakeState.create_delay = 0.05
+    env, usages = _protected()
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.01)
+    await env.stop()
+    with pytest.raises(SandboxInfraError):
+        await start
+    assert usages[0].calls == ["reserve", "fail"]
+
+
+async def test_protected_box_does_not_wait_for_capacity() -> None:
+    """Fail the start on a capacity answer, so no reservation waits for capacity."""
+    FakeState.create_errors = [_status_error(kernel.RateLimitError, 429)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    with pytest.raises(kernel.RateLimitError):
+        await env.start()
+    assert len(FakeState.create_calls) == 1
+    assert clock.sleeps == []
+    assert usages[0].calls == ["reserve", "fail"]
+    assert isinstance(usages[0].error, kernel.RateLimitError)
+
+
+async def test_usage_read_failure_settles_from_the_measured_time() -> None:
+    """Pass an empty report and the measured time when every usage read fails."""
+    FakeState.retrieve_errors = [_status_error(kernel.APIStatusError, 500) for _ in range(40)]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    async with env:
+        clock.now += 42
+    usage = usages[0]
+    assert usage.calls == ["reserve", "confirm", "record", "settle"]
+    assert usage.receipt == {}
+    assert usage.measured_ms == 42_000
+    assert len(FakeState.retrieves) == int(kernel.USAGE_WAIT / kernel.USAGE_POLL) + 1
+
+
+async def test_usage_read_waits_for_a_ready_report() -> None:
+    """Read the report again while Kernel still computes the uptime."""
+    FakeState.usage_statuses = ["pending", "ready"]
+    clock = FakeClock()
+    env, usages = _protected(clock=clock)
+    async with env:
+        pass
+    assert len(FakeState.retrieves) == 2
+    assert kernel.USAGE_POLL in clock.sleeps
+    assert usages[0].receipt is not None
+    assert usages[0].receipt["usage_status"] == "ready"
+
+
+async def test_settle_failure_is_raised_from_stop_once() -> None:
+    """Raise a pending-usage error from the first stop and return quietly from the next."""
+    env, _ = _protected(settle_error=RuntimeError("database detail"))
+    await env.start()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    await env.stop()
+
+
+async def test_protected_commands_stop_at_the_funded_end() -> None:
+    """Cap a command at the funded time left and refuse one after the funded end."""
+    clock = FakeClock()
+    env, _ = _protected(clock=clock)
+    async with env:
+        clock.now += 100
+        await env.exec("true", timeout_sec=1000)
+        assert FakeState.execs[-1]["timeout_sec"] == 200
+        clock.now += 200
+        with pytest.raises(SandboxInfraError, match="funded"):
+            await env.exec("true")
+
+
+async def test_protected_box_settles_on_a_real_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settle a protected box at Kernel's reported uptime through the real adapter and ledger.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    engine = create_engine(f"sqlite:///{tmp_path / 'kernel.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+    async with kernel.KernelEnvironment(_spec(operation_key="box-op"), budget=runtime, clock=FakeClock()):
+        pass
+    with Session(engine) as session:
+        operation = session.scalar(select(ExecutionOperationModel))
+        assert operation.state == "settled"
+    # 60 s x 8 GiB x $0.0000166667 = $0.0080000160.
+    assert service.get_operation(operation.id, "alice").actual_cents == Decimal("0.80000160")
+    assert runtime._pinned == {}
+    engine.dispose()

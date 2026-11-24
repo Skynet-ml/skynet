@@ -25,6 +25,11 @@ from there. Changes:
   is written. Harbor's ``playwright_execute``, directory transfers,
   profiles, proxies, viewports and other browser options are left out.
 - ``stop_job_sandboxes`` finds the browsers of a job by their tags.
+- With a budget the box is protected (SKY-553). It reserves a headful 8 or
+  16 GiB browser before the create call and confirms it after. A capacity
+  answer fails the start, because the capacity wait must not hold a
+  reservation. Commands stop at the funded end. After the delete, the box
+  reads Kernel's reported uptime and settles the reservation.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import logging
 import math
 import os
@@ -41,12 +47,15 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
-from ..capabilities import EnvironmentCapabilities
+from core.billing.kernel_usage import KernelUsageReservation
+
+from ..capabilities import EnvironmentCapabilities, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import SandboxSpec
 from ..telemetry import BoxTimings, current_output_sink
+from .vercel import _settle_failure
 
 try:
     from kernel import APIStatusError, APITimeoutError, AsyncKernel, NotFoundError, RateLimitError
@@ -83,7 +92,12 @@ DOCKERD_WAIT_TIMEOUT = 70
 DOCKERD_CONFIG = "/tmp/skynet-dockerd.json"
 DOCKERD_LOG = "/tmp/skynet-dockerd.log"
 
-KERNEL_CAPABILITIES = EnvironmentCapabilities(name="kernel", max_vcpus=8)
+# Kernel reports a deleted session's uptime a short time after the delete.
+USAGE_WAIT = 30.0
+USAGE_POLL = 2.0
+
+KERNEL_CAPABILITIES = EnvironmentCapabilities(name="kernel", billable=True, max_vcpus=8)
+UsageFactory = Callable[..., Any]
 
 DOCKER_INSTALL_SCRIPT = f"""set -eu
 [ "$(uname -m)" = x86_64 ] || {{ echo 'Kernel container mode needs x86_64' >&2; exit 1; }}
@@ -188,8 +202,8 @@ class KernelEnvironment(SandboxEnvironment):
     """Run commands in one Kernel browser VM through the async SDK.
 
     With ``spec.image`` set, the commands run in a Docker container inside
-    the VM. The provider is for development: the factory refuses it in
-    production, and Skynet does not meter or fund its usage.
+    the VM. With a budget the box is protected: it reserves its whole
+    possible uptime before the create call and settles after the delete.
     """
 
     capabilities: ClassVar[EnvironmentCapabilities] = KERNEL_CAPABILITIES
@@ -200,6 +214,8 @@ class KernelEnvironment(SandboxEnvironment):
         self,
         spec: SandboxSpec,
         *,
+        budget: Any | None = None,
+        usage_factory: UsageFactory = KernelUsageReservation,
         pacing: ProviderPacing | None = None,
         at_capacity: Callable[[], Awaitable[bool]] | None = None,
         clock: Clock | None = None,
@@ -208,11 +224,27 @@ class KernelEnvironment(SandboxEnvironment):
 
         Args:
             spec: The sandbox to open.
+            budget: The ``BudgetRuntime`` that funds the box, or ``None``.
+            usage_factory: Makes the usage reservation of a protected box.
             pacing: The read and create buckets of the provider.
             at_capacity: Returns True while the provider has no capacity.
             clock: The clock for waits and timings.
+
+        Raises:
+            SandboxSpecError: A protected box has no operation key.
         """
+        if budget is not None:
+            if spec.operation_key is None:
+                raise SandboxSpecError("A protected Kernel sandbox needs an operation key.")
+            self.capabilities = dataclasses.replace(KERNEL_CAPABILITIES, protected=True)
         super().__init__(spec)
+        self._budget = budget
+        self._usage_factory = usage_factory
+        self._usage: Any | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
+        self._settle_error: Exception | None = None
+        self._created_at: float | None = None
+        self._funded_until: float | None = None
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -267,7 +299,7 @@ class KernelEnvironment(SandboxEnvironment):
             await self._starting
         except BaseException as error:
             if self._stop_task is None:
-                self._stop_task = asyncio.ensure_future(self._teardown())
+                self._stop_task = asyncio.ensure_future(self._teardown(error))
             await asyncio.shield(self._stop_task)
             current = asyncio.current_task()
             if isinstance(error, asyncio.CancelledError) and current is not None and not current.cancelling():
@@ -282,8 +314,8 @@ class KernelEnvironment(SandboxEnvironment):
         self._client = self._new_client()
         with self.timings.phase("create"):
             await create_with_capacity(
-                lambda reservation: self._create(reservation, options),
-                _no_reservation,
+                lambda usage: self._create(usage, options),
+                self._reserve,
                 at_capacity=self._at_capacity,
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
@@ -309,23 +341,69 @@ class KernelEnvironment(SandboxEnvironment):
             "tags": {**spec.tags, BOX_TAG: self.name},
             "timeout": CREATE_TIMEOUT,
         }
-        memory = _memory_request(spec.resources.memory_mb, container=self._container)
+        # Kernel prices a headful browser at 8 or 16 GiB, so a protected box
+        # asks for one of those sizes explicitly.
+        memory = _memory_request(spec.resources.memory_mb, container=self._container or self._budget is not None)
         if memory is not None:
             options["memory"] = memory
         return options
 
-    async def _create(self, _reservation: None, options: dict[str, Any]) -> None:
-        """Send the create call and keep the browser.
+    def _usage_request(self, options: Mapping[str, Any]) -> dict[str, Any]:
+        """Build the usage request that the reservation prices.
 
         Args:
-            _reservation: Unused; the provider holds no budget reservation.
+            options: The create options.
+
+        Returns:
+            The funded lifetime, inactivity timeout, memory and browser mode.
+        """
+        return {
+            "lifetime_ms": math.ceil(self.spec.lifetime_seconds * 1000),
+            "timeout_seconds": options["timeout_seconds"],
+            "memory_gib": int(options["memory"].removesuffix("GiB")),
+            "headless": options["headless"],
+            "gpu": False,
+        }
+
+    @contextlib.asynccontextmanager
+    async def _reserve(self) -> AsyncIterator[Any | None]:
+        """Reserve the browser of a protected box once.
+
+        Yields:
+            The usage reservation, or ``None`` for an unprotected box.
+        """
+        if self._budget is not None and self._usage is None:
+            request = self._usage_request(self._create_options())
+            reserving = asyncio.ensure_future(
+                asyncio.to_thread(self._usage_factory, self._budget, request, operation_key=self.spec.operation_key)
+            )
+            try:
+                self._usage = await asyncio.shield(reserving)
+            except asyncio.CancelledError:
+                # The thread cannot be cancelled and may still reserve; keep
+                # its result so the teardown releases it instead of leaking it.
+                while not reserving.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(reserving)
+                if not reserving.cancelled() and reserving.exception() is None:
+                    self._usage = reserving.result()
+                raise
+        yield self._usage
+
+    async def _create(self, usage: Any | None, options: dict[str, Any]) -> None:
+        """Send the create call, keep the browser and confirm a protected one.
+
+        Args:
+            usage: The usage reservation, or ``None``.
             options: The create options.
 
         Raises:
-            ProviderAtCapacityError: Kernel answered with a rate limit, 429, 502 or 503.
+            ProviderAtCapacityError: Kernel answered an unprotected box with a
+                rate limit, 429, 502 or 503.
             StartTimeoutError: The create did not finish in time.
         """
         self._create_dispatched = True
+        self._created_at = self._clock.monotonic()
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._browser = await self._client.browsers.create(**options)
@@ -336,9 +414,14 @@ class KernelEnvironment(SandboxEnvironment):
         except Exception as error:
             if APITimeoutError is not None and isinstance(error, APITimeoutError):
                 raise StartTimeoutError(CREATE_TIMEOUT) from error
-            if _is_capacity_error(error):
+            if _is_capacity_error(error) and usage is None:
                 raise ProviderAtCapacityError(f"Kernel has no capacity: {type(error).__name__}") from error
             raise
+        if usage is not None:
+            self._funded_until = self._created_at + self.spec.lifetime_seconds
+            self._billing_call = asyncio.ensure_future(asyncio.to_thread(usage.confirm, self._browser))
+            # The teardown awaits the same call, so a settle never races it.
+            await asyncio.shield(self._billing_call)
 
     async def _start_container(self) -> None:
         """Install Docker, start dockerd and run the spec image.
@@ -356,7 +439,7 @@ class KernelEnvironment(SandboxEnvironment):
                 command="bash",
                 args=["-lc", DOCKERD_COMMAND],
                 as_root=True,
-                timeout_sec=DOCKERD_TIMEOUT,
+                timeout_sec=math.ceil(min(DOCKERD_TIMEOUT, self._funded_seconds() or DOCKERD_TIMEOUT)),
                 timeout=EXEC_HTTP_MARGIN,
             )
         except Exception as error:
@@ -391,7 +474,12 @@ class KernelEnvironment(SandboxEnvironment):
             raise SandboxInfraError(f"The Kernel Docker {step} step failed with exit {result.exit_code}: {tail}")
 
     async def stop(self) -> None:
-        """Stop the browser once. Safe to call again."""
+        """Stop the browser once and settle its reservation. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: The ledger refused the settlement.
+        """
         if self._stop_task is None and self._starting is None and self._browser is None:
             # A stop before any start does nothing. A stop task set here would
             # make the stop after a later start return without a delete.
@@ -399,40 +487,136 @@ class KernelEnvironment(SandboxEnvironment):
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._timed_teardown())
         await asyncio.shield(self._stop_task)
+        # Only one stop caller gets a settle failure, so a second stop returns quietly.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
 
     async def _timed_teardown(self) -> None:
         """Run the teardown inside the stop phase."""
         with self.timings.phase("stop"):
             await self._teardown()
 
-    async def _teardown(self) -> None:
-        """End the start, delete every browser of this environment and close the client."""
+    async def _teardown(self, error: BaseException | None = None) -> None:
+        """End the start, delete every browser, settle the reservation and close the client.
+
+        Args:
+            error: The start failure, or ``None`` for a normal stop.
+        """
         if self._starting is not None and not self._starting.done():
             # A stop during the start: end the start first, so no browser
             # appears after this teardown has looked for it.
             self._starting.cancel()
             with contextlib.suppress(BaseException):
                 await self._starting
+        if self._billing_call is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._billing_call)
         client, self._client = self._client, None
         browser, self._browser = self._browser, None
         if client is None:
             return
         known = None
+        measured_ms = None
         if browser is not None:
             known = browser.session_id
             try:
                 await asyncio.wait_for(client.browsers.delete_by_id(known), STOP_TIMEOUT)
-            except Exception as error:
-                logger.warning("Kernel browser %s did not stop: %s", self.name, type(error).__name__)
+            except Exception as delete_error:
+                if NotFoundError is not None and isinstance(delete_error, NotFoundError):
+                    measured_ms = self._measured_ms()
+                else:
+                    logger.warning("Kernel browser %s did not stop: %s", self.name, type(delete_error).__name__)
+            else:
+                measured_ms = self._measured_ms()
         if self._create_dispatched:
             # A create that timed out can leave a browser that this
             # environment never saw.
             try:
                 await asyncio.wait_for(_delete_tagged(client, {BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
-            except Exception as error:
-                logger.warning("Kernel browser %s sweep failed: %s", self.name, type(error).__name__)
+            except Exception as sweep_error:
+                logger.warning("Kernel browser %s sweep failed: %s", self.name, type(sweep_error).__name__)
+        if self._usage is not None:
+            await self._settle(client, known, measured_ms, error)
         with contextlib.suppress(Exception):
             await client.close()
+
+    def _measured_ms(self) -> int | None:
+        """Return the wall time from the create call until now.
+
+        Returns:
+            The milliseconds, or ``None`` when no create call went out.
+        """
+        if self._created_at is None:
+            return None
+        return math.ceil((self._clock.monotonic() - self._created_at) * 1000)
+
+    async def _settle(
+        self, client: Any, session_id: str | None, measured_ms: int | None, error: BaseException | None
+    ) -> None:
+        """Settle the reservation from Kernel's usage report, or keep it pending.
+
+        Args:
+            client: The SDK client.
+            session_id: The deleted browser, or ``None`` when none is known.
+            measured_ms: The measured wall time when the delete is confirmed.
+            error: The start failure, or ``None``.
+        """
+        usage = self._usage
+        try:
+            if session_id is None:
+                await asyncio.to_thread(usage.fail, error or SandboxInfraError("The browser was never created."))
+                return
+            receipt = await self._usage_receipt(client, session_id) if measured_ms is not None else {}
+            await asyncio.to_thread(usage.record, receipt, measured_ms=measured_ms)
+            await asyncio.to_thread(usage.settle)
+        except Exception as billing_error:
+            logger.warning("Kernel browser %s usage stays pending: %s", self.name, type(billing_error).__name__)
+            if session_id is not None:
+                self._settle_error = _settle_failure(billing_error)
+
+    async def _usage_receipt(self, client: Any, session_id: str) -> dict[str, Any]:
+        """Read Kernel's details of the deleted browser until its usage is ready.
+
+        Args:
+            client: The SDK client.
+            session_id: The deleted browser.
+
+        Returns:
+            The last details that Kernel returned, or an empty mapping when
+            every read failed. The settle checks whether the usage is final.
+        """
+        receipt: dict[str, Any] = {}
+        waited = 0.0
+        while True:
+            try:
+                await self._pace_read()
+                details = await asyncio.wait_for(
+                    client.browsers.retrieve(session_id, include_deleted=True), STOP_TIMEOUT
+                )
+                receipt = details.to_dict(mode="json")
+            except Exception as read_error:
+                logger.warning("Kernel browser %s usage read failed: %s", self.name, type(read_error).__name__)
+            if receipt.get("usage_status") == "ready" or waited >= USAGE_WAIT:
+                return receipt
+            await self._clock.sleep(USAGE_POLL)
+            waited += USAGE_POLL
+
+    def _funded_seconds(self) -> float | None:
+        """Return the funded time that a protected box has left.
+
+        Returns:
+            The seconds, or ``None`` for an unprotected box.
+
+        Raises:
+            SandboxInfraError: The funded lifetime is over.
+        """
+        if self._funded_until is None:
+            return None
+        remaining = self._funded_until - self._clock.monotonic()
+        if remaining <= 0:
+            raise SandboxInfraError("The Kernel sandbox has no funded lifetime left.")
+        return remaining
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
@@ -464,6 +648,7 @@ class KernelEnvironment(SandboxEnvironment):
         """
         if self._browser is None or self._client is None or self._stop_task is not None:
             raise SandboxInfraError("The Kernel sandbox is not running.")
+        self._funded_seconds()
         return self._client, self._browser
 
     async def _pace_read(self) -> None:
@@ -526,6 +711,10 @@ class KernelEnvironment(SandboxEnvironment):
             SandboxInfraError: The browser is not running or the API call failed.
         """
         self._require_browser()
+        funded = self._funded_seconds()
+        if funded is not None:
+            # A command must not keep a protected browser busy past its funded end.
+            timeout_sec = funded if timeout_sec is None else min(timeout_sec, funded)
         options: dict[str, Any] = {"command": "bash", "args": ["-lc", command], "as_root": sudo}
         if cwd is not None:
             options["cwd"] = cwd
@@ -728,13 +917,3 @@ async def _delete_tagged(client: Any, tags: Mapping[str, str], *, skip: str | No
             continue
         deleted += 1
     return deleted
-
-
-@contextlib.asynccontextmanager
-async def _no_reservation() -> AsyncIterator[None]:
-    """Hold no budget reservation, because Skynet does not fund Kernel browsers.
-
-    Yields:
-        ``None``.
-    """
-    yield None
