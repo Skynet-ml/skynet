@@ -234,6 +234,7 @@ class DaytonaUsageReservation:
         *,
         operation_key: str,
         reserved: OperationSnapshot | None = None,
+        box_label: Mapping[str, str] | None = None,
     ) -> None:
         """Reserve and claim one box before the create call.
 
@@ -242,6 +243,8 @@ class DaytonaUsageReservation:
             request: Final create parameters that :func:`quote_daytona_sandbox` prices.
             operation_key: Stable logical identity of the box.
             reserved: A pool lease slice already reserved for this box.
+            box_label: The label that only this box carries, so a reconciler
+                can find a box whose id never came back.
 
         Raises:
             BudgetConflictError: When the lease slice was reserved for a different request.
@@ -250,6 +253,8 @@ class DaytonaUsageReservation:
         """
         self.runtime = runtime
         self.request = dict(request)
+        # Kept out of the request, so equal boxes keep one fingerprint.
+        self.box_label = dict(box_label or {})
         self.quote = quote_daytona_sandbox(request)
         self.box = box_tag(operation_key)
         if reserved is None:
@@ -336,7 +341,12 @@ class DaytonaUsageReservation:
         """Keep the coverage when the box's existence or its end is uncertain."""
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
         if current.state in {"dispatched", "pending"}:
-            evidence = {"provider": "daytona", "sandbox_id": self.sandbox_id, "dispatched_at": self.dispatched_at}
+            evidence = {
+                "provider": "daytona",
+                "sandbox_id": self.sandbox_id,
+                "box_label": self.box_label or None,
+                "dispatched_at": self.dispatched_at,
+            }
             self.runtime.service.mark_pending(
                 self.operation.id,
                 self.runtime.username,

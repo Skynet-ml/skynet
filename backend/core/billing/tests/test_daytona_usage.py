@@ -390,6 +390,16 @@ def test_fail_releases_only_a_refusal(database: Engine, refused: bool, state: st
     assert _state(reservation).state == state
 
 
+def test_pending_evidence_names_the_box_label(database: Engine) -> None:
+    """Put the box label into the pending evidence, so a box whose id never came back can be matched."""
+    label = {"skynet-box": "abc123"}
+    reservation = DaytonaUsageReservation(_runtime(database), CREATE, operation_key="box-op", box_label=label)
+    reservation.fail(RuntimeError("create lost"), refused=False)
+    (evidence,) = reservation.runtime.service.get_reconciliation(reservation.operation.id, "alice").evidence
+    assert evidence["box_label"] == label
+    assert evidence["sandbox_id"] is None
+
+
 def test_extend_funds_a_longer_lifetime(database: Engine) -> None:
     """Raise the reserved maximum before the box gets a longer lifetime."""
     reservation = _started(database)

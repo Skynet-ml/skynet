@@ -98,6 +98,9 @@ DAYTONA_CAPABILITIES = EnvironmentCapabilities(
 DEFAULT_IMAGE = "python:3.12.15-slim"
 CREATE_TIMEOUT_SEC = 300.0
 DELETE_TIMEOUT_SEC = 60.0
+# The list call can lag a new box; a second lookup after this wait must
+# also find nothing before a refusal releases the hold.
+LOOKUP_RETRY_SEC = 3.0
 # Daytona's default box size, from https://www.daytona.io/docs/en/sandboxes
 # (read 2026-11-24). A protected box sends these sizes when the spec leaves
 # them open, so the box gets its usual size and the quote prices it exactly.
@@ -246,6 +249,7 @@ class DaytonaEnvironment(SandboxEnvironment):
                 self._budget,
                 self._usage_request(ttl_minutes),
                 operation_key=self.spec.operation_key,
+                box_label=dict(self._box_label),
             )
         )
         try:
@@ -565,6 +569,11 @@ async def _delete_and_settle(
         # look for the box by its own label before the hold is released.
         try:
             sandbox = await asyncio.wait_for(_find_box(client, box_label), DELETE_TIMEOUT_SEC)
+            if sandbox is None and create_error is not None and _refused(create_error):
+                # A refusal can also come from the status poll after the box
+                # exists, and the list can lag that box; look once more.
+                await asyncio.sleep(LOOKUP_RETRY_SEC)
+                sandbox = await asyncio.wait_for(_find_box(client, box_label), DELETE_TIMEOUT_SEC)
             looked_up = True
         except Exception as error:
             logger.warning("The sandbox lookup after a failed create failed: %s", type(error).__name__)

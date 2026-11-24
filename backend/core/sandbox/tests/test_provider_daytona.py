@@ -336,6 +336,8 @@ class FakeClient:
     create_times_out: ClassVar[bool] = False
     fail_after_box: ClassVar[Exception | None] = None
     list_error: ClassVar[Exception | None] = None
+    list_hidden: ClassVar[int] = 0
+    list_calls: ClassVar[int] = 0
     create_called: ClassVar[asyncio.Event] = asyncio.Event()
     _ids: ClassVar[Iterator[int]] = itertools.count()
 
@@ -401,6 +403,8 @@ class FakeClient:
     async def list(self, query: Any) -> Any:
         """Yield the live boxes whose labels match the query.
 
+        The first ``list_hidden`` calls yield nothing, as a lagging list does.
+
         Args:
             query: The list query.
 
@@ -410,8 +414,12 @@ class FakeClient:
         Raises:
             Exception: ``list_error`` is set.
         """
-        if type(self).list_error is not None:
-            raise type(self).list_error
+        cls = type(self)
+        cls.list_calls += 1
+        if cls.list_error is not None:
+            raise cls.list_error
+        if cls.list_calls <= cls.list_hidden:
+            return
         for box in list(type(self).boxes):
             if not box.deleted and all(box.labels.get(k) == v for k, v in query.labels.items()):
                 yield box
@@ -439,6 +447,9 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
     monkeypatch.setattr(FakeClient, "create_times_out", False)
     monkeypatch.setattr(FakeClient, "fail_after_box", None)
     monkeypatch.setattr(FakeClient, "list_error", None)
+    monkeypatch.setattr(FakeClient, "list_hidden", 0)
+    monkeypatch.setattr(FakeClient, "list_calls", 0)
+    monkeypatch.setattr(daytona, "LOOKUP_RETRY_SEC", 0.0)
     monkeypatch.setattr(FakeClient, "create_called", asyncio.Event())
     names = {
         "AsyncDaytona": FakeClient,
@@ -829,15 +840,17 @@ _PROTECTED = SandboxSpec(lifetime_seconds=125, operation_key="op-1")
 class FakeUsage:
     """Record the reservation calls that a protected box makes."""
 
-    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+    def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str, box_label: dict[str, str]) -> None:
         """Record the reserve call.
 
         Args:
             budget: The budget runtime.
             request: The priced create parameters.
             operation_key: The box's operation key.
+            box_label: The label that only the box carries.
         """
         self.calls: list[Any] = [("reserve", budget, request, operation_key)]
+        self.box_label = box_label
         self.settle_error: Exception | None = None
         FakeUsage.made.append(self)
 
@@ -942,7 +955,8 @@ async def test_protected_box_reserves_confirms_and_settles(fake_sdk: type[FakeCl
     )
     box_id = fake_sdk.boxes[0].id
     assert made.calls[1:] == [("confirm", box_id), ("bind", box_id), ("settle",)]
-    assert set(fake_sdk.boxes[0].labels) == {"skynet-box"}
+    assert fake_sdk.boxes[0].labels == made.box_label
+    assert set(made.box_label) == {"skynet-box"}
     (params,) = fake_sdk.created
     assert params.resources == {"cpu": 2, "memory": 1, "disk": 3}
     assert fake_sdk.boxes[0].deleted
@@ -991,6 +1005,32 @@ async def test_refusal_after_the_box_exists_settles_and_deletes_it(
     await env.stop()
     assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
     assert fake_sdk.boxes[0].deleted
+
+
+async def test_refusal_looks_again_when_the_list_lags(fake_sdk: type[FakeClient], usage: type[FakeUsage]) -> None:
+    """Find, delete and settle the box when only the second lookup lists it."""
+    fake_sdk.fail_after_box = FakeRateLimitError("status poll slowed")
+    fake_sdk.list_hidden = 1
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    await env.stop()
+    assert fake_sdk.list_calls == 2
+    assert _names(usage.made[0]) == ["reserve", "bind", "settle"]
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_refusal_releases_only_after_two_empty_lookups(
+    fake_sdk: type[FakeClient], usage: type[FakeUsage]
+) -> None:
+    """Release a refused create's hold only after two lookups find no box."""
+    fake_sdk.create_error = FakeRateLimitError("slow down")
+    env = DaytonaEnvironment(_PROTECTED, budget=object(), usage_factory=usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    await env.stop()
+    assert fake_sdk.list_calls == 2
+    assert usage.made[0].calls[1] == ("fail", SandboxTransientError, True)
 
 
 async def test_refusal_keeps_the_hold_when_the_box_lookup_fails(
