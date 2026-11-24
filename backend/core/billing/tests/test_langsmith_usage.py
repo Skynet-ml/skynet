@@ -202,12 +202,91 @@ def test_unconfirmed_delete_keeps_the_reservation_pending(database: Engine, cloc
         LangSmithUsageReservation(runtime, CREATE, operation_key="box-1")
 
 
-def test_confirm_refuses_a_box_larger_than_its_reservation(database: Engine, clock: Clock) -> None:
-    """Raise when the created box reports a size that the reservation did not fund."""
+def _settled_box(database: Engine, clock: Clock, box: SimpleNamespace, seconds: float) -> Any:
+    """Reserve, confirm, delete and settle one box, and return its ledger state and evidence.
+
+    Args:
+        database: Engine of the funded ledger.
+        clock: The fake monotonic clock.
+        box: What the created box reports.
+        seconds: Time from the reservation to the confirmed delete.
+
+    Returns:
+        The reconciliation snapshot of the settled operation.
+    """
     runtime = _runtime(database)
     reservation = LangSmithUsageReservation(runtime, CREATE, operation_key="box-1")
-    with pytest.raises(UsagePendingError, match="vcpus"):
-        reservation.confirm_created(SimpleNamespace(id="sandbox-uuid", vcpus=4))
+    reservation.confirm_created(box)
+    clock.now = seconds
+    reservation.mark_deleted()
+    reservation.settle()
+    settled = runtime.service.get_reconciliation(reservation.operation.id, "alice")
+    assert settled.operation.state == "settled"
+    return settled
+
+
+def _settle_evidence(settled: Any) -> dict[str, Any]:
+    """Return the evidence of the settle.
+
+    Args:
+        settled: The reconciliation snapshot of the settled operation.
+
+    Returns:
+        The evidence that has the priced sizes.
+    """
+    (evidence,) = [item for item in settled.evidence if "priced_sizes" in item]
+    return evidence
+
+
+def test_smaller_box_settles_at_the_funded_size(database: Engine, clock: Clock) -> None:
+    """Price a box that reports less memory than funded at the funded size."""
+    settled = _settled_box(database, clock, SimpleNamespace(id="sandbox-uuid", mem_bytes=GIB // 2), 29.2)
+    assert settled.operation.actual_cents == _usd(30) * 100
+    assert _settle_evidence(settled)["priced_sizes"]["mem_bytes"] == GIB
+
+
+def test_larger_box_settles_at_the_reported_size(database: Engine, clock: Clock) -> None:
+    """Price a box that reports more vCPUs than funded at the reported size, inside the coverage."""
+    settled = _settled_box(database, clock, SimpleNamespace(id="sandbox-uuid", vcpus=2), 29.2)
+    two_cpus = (Decimal("0.0576") * 2 + Decimal("0.01845") + Decimal("0.000123")) * 30 / 3600
+    assert settled.operation.actual_cents == two_cpus * 100
+    evidence = _settle_evidence(settled)
+    assert evidence["priced_sizes"]["vcpus"] == 2
+    assert evidence["reported_sizes"] == {"vcpus": 2}
+    assert evidence["clamped"] is False
+
+
+def test_larger_box_clamps_to_the_coverage(database: Engine, clock: Clock) -> None:
+    """Charge no more than the coverage when the larger size passes it, and record the clamp."""
+    settled = _settled_box(database, clock, SimpleNamespace(id="sandbox-uuid", vcpus=8), 10 * 3600.0)
+    assert settled.operation.actual_cents == settled.operation.max_cents
+    assert _settle_evidence(settled)["clamped"] is True
+
+
+def test_ttl_difference_does_not_block_a_proven_delete(database: Engine, clock: Clock) -> None:
+    """Settle at the funded size when only the reported TTLs differ and the delete is proven."""
+    box = SimpleNamespace(id="sandbox-uuid", idle_ttl_seconds=600, delete_after_stop_seconds=600)
+    settled = _settled_box(database, clock, box, 29.2)
+    assert settled.operation.actual_cents == _usd(30) * 100
+
+
+def test_failed_pending_mark_keeps_the_original_error(
+    database: Engine, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the settle error, not the error of the pending mark that follows it."""
+    reservation = LangSmithUsageReservation(_runtime(database), CREATE, operation_key="box-1")
+
+    def broken_pending() -> None:
+        """Fail like a lost database.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database lost")
+
+    monkeypatch.setattr(reservation, "pending", broken_pending)
+    with pytest.raises(UsagePendingError, match="not confirmed"):
+        reservation.settle()
 
 
 def test_extend_funds_a_longer_lifetime(database: Engine, clock: Clock) -> None:

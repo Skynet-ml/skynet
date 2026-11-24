@@ -22,7 +22,8 @@ With a budget the box is protected (SKY-552). It reserves its whole lifetime
 before the create call, confirms the created size, and stops itself when the
 lifetime ends. It settles the measured time only on proof that the box is
 gone: a get by name returns 404 after the delete, and, when the create had
-no answer, only after the time in which that create can still land. A
+no answer, only after the time in which that create can still land (so a
+stop can wait about 20 minutes; see ``LangSmithEnvironment.stop``). A
 create that never left, or that the server refused with no box by its name,
 releases the hold. Any other case keeps the hold pending. The box has no
 keepalive, so it never extends.
@@ -289,9 +290,9 @@ class LangSmithEnvironment(SandboxEnvironment):
                 with _mapped_errors(start_timeout=self._startup_timeout):
                     box = await self._create(client)
             if self._usage is not None:
-                # Also after a stop() during the create: the box exists, so its
-                # size check must run before the cleanup settles it. The confirm
-                # thread cannot be cancelled; the cleanup must see its mismatch flag.
+                # Also after a stop() during the create: the box exists, so the
+                # cleanup must price its reported size. The confirm thread cannot
+                # be cancelled, so wait for it before the cleanup settles.
                 confirming = asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, box))
                 await _wait_through_cancels(confirming)
                 confirming.result()
@@ -349,6 +350,15 @@ class LangSmithEnvironment(SandboxEnvironment):
         A cancel during the delete, also a repeated one, waits for the delete
         to finish, then passes one cancel on, so the sandbox never outlives
         ``stop``.
+
+        A protected box waits for a 404 proof. After an answered create this
+        takes about one poll. After a create without an answer (a timeout,
+        a cancel, a 5xx), the proof counts only after the create window, so
+        ``stop`` and a cancelled ``start`` can block for the start limit plus
+        60 s grace, plus the 60 s poll window, plus one last pass of up to
+        about 122 s (get, delete, poll pause). With the default 900 s start
+        limit that is about 20 minutes. This is deliberate: an earlier settle
+        could miss a box that the create still makes.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the delete.
@@ -842,27 +852,27 @@ async def _gone(client: Any, name: str, proof_after: float, deleted_at: float | 
         deleted_at: The instant the first delete call returned, or None when it failed.
 
     Returns:
-        On proof, the latest of the successful delete returns and the
-        lookups that still found the box; the proof time when no delete
-        succeeded. None when no proof came in the bounded time.
+        On proof, the return of the first delete; the time the 404 came back
+        when that delete failed or a later lookup still found the box. None
+        when no proof came in the bounded time.
     """
     give_up_at = max(proof_after, time.monotonic()) + _DELETE_TIMEOUT_SECONDS
+    seen = False
     while time.monotonic() < give_up_at:
         checked_at = time.monotonic()
         try:
             await asyncio.wait_for(client.get_sandbox(name), _DELETE_TIMEOUT_SECONDS)
         except ResourceNotFoundError:
             if checked_at >= proof_after:
-                return time.monotonic() if deleted_at is None else deleted_at
+                # A delete that returned while the box lived on proves nothing, so only this 404 bounds its life.
+                return time.monotonic() if deleted_at is None or seen else deleted_at
         except Exception as exc:
             logger.warning("Could not look up the LangSmith sandbox %s: %s.", name, type(exc).__name__)
         else:
             # A late create made this box, a delete failed, or the first delete
-            # is still in progress. The box was alive now, whatever the next delete returns.
-            deleted_at = max(deleted_at or 0.0, time.monotonic())
-            deleted_again = await _delete(client, name)
-            if deleted_again is not None:
-                deleted_at = max(deleted_at, deleted_again)
+            # is still in progress.
+            seen = True
+            await _delete(client, name)
         await asyncio.sleep(_GONE_POLL_SECONDS)
     return None
 

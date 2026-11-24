@@ -12,6 +12,7 @@ records the sandbox id, so a later check can compare it with the usage API.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -29,6 +30,8 @@ from .usage_tags import box_tag
 # was the first metered sandbox; LangSmith reuses it so both convert alike.
 from .vercel_usage import vercel_charge_policy
 
+logger = logging.getLogger(__name__)
+
 # Published LangSmith Sandbox rates, read on 2026-11-24 from
 # https://www.langchain.com/pricing ("All rates billed per second", 1 LSU = $1).
 # The page names no per-sandbox fee and no network charge.
@@ -38,6 +41,7 @@ _CPU_HOUR_USD = Decimal("0.0576")
 _MEMORY_GIB_HOUR_USD = Decimal("0.01845")
 _STORAGE_GIB_HOUR_USD = Decimal("0.000123")
 _BYTES_PER_GIB = Decimal(1024**3)
+_SIZE_FIELDS = ("vcpus", "mem_bytes", "fs_capacity_bytes")
 _MS_PER_HOUR = Decimal(3_600_000)
 _USAGE_API = "https://docs.langchain.com/langsmith/smith-api/sandboxes/list-hourly-sandbox-usage-costs"
 
@@ -183,29 +187,27 @@ class LangSmithUsageReservation:
         self.sandbox_id: str | None = None
         self.opened_at = time.monotonic()
         self.deleted_at: float | None = None
-        self.mismatch = False
+        # The sizes that the created box reports; the settle prices the larger of these and the funded ones.
+        self.reported: dict[str, int] = {}
 
     def confirm_created(self, box: Any) -> None:
-        """Record the sandbox id and check the created sizes against the funded ones.
+        """Record the sandbox id and the sizes that the created box reports.
+
+        The TTLs are not checked: they only bound a box whose delete is never
+        proven, and such a box never settles.
 
         Args:
             box: The SDK sandbox that the create call returned.
-
-        Raises:
-            UsagePendingError: When the box reports a size or a TTL beyond its coverage.
         """
         self.sandbox_id = getattr(box, "id", None)
         if self.sandbox_id:
             self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, self.sandbox_id)
-        for field in ("vcpus", "mem_bytes", "fs_capacity_bytes", "idle_ttl_seconds", "delete_after_stop_seconds"):
+        for field in _SIZE_FIELDS:
             # The SDK leaves a field None when the server omits it; the create
             # call sent the funded value.
             value = getattr(box, field, None)
-            if value is not None and value != self.request[field]:
-                # The measured time is priced at the funded size, so a larger
-                # box must never settle from it.
-                self.mismatch = True
-                raise UsagePendingError(f"The LangSmith sandbox did not confirm the funded {field}.")
+            if value is not None:
+                self.reported[field] = value
 
     def mark_deleted(self, at: float | None = None) -> None:
         """Record that the provider confirmed the sandbox is deleted, so its billed life is over.
@@ -261,7 +263,7 @@ class LangSmithUsageReservation:
                 evidence={"provider": "langsmith", "name": self.request.get("name"), "reason": reason},
             )
         except BudgetError:
-            self.pending()
+            self._keep_pending()
             raise
         self.runtime.unpin(self.operation.id)
 
@@ -277,11 +279,21 @@ class LangSmithUsageReservation:
                 evidence=evidence,
             )
 
+    def _keep_pending(self) -> None:
+        """Mark the coverage pending after a failure, and log a failure of that mark instead of raising it."""
+        try:
+            self.pending()
+        except Exception as exc:
+            # The caller re-raises its own error, which says more than this one.
+            logger.warning("Could not mark LangSmith operation %s pending: %s.", self.operation.id, type(exc).__name__)
+
     def settle(self) -> None:
         """Settle a deleted sandbox at its measured lifetime, inside its coverage.
 
+        Each size is priced at the larger of the funded and the reported one.
+
         Raises:
-            UsagePendingError: When the delete is not confirmed, or the box was larger than funded.
+            UsagePendingError: When the delete is not confirmed.
             BudgetError: When the ledger refuses the settlement.
         """
         try:
@@ -291,21 +303,21 @@ class LangSmithUsageReservation:
                 return
             if self.deleted_at is None:
                 raise UsagePendingError("The LangSmith sandbox delete is not confirmed; its coverage stays held.")
-            if self.mismatch:
-                raise UsagePendingError("The LangSmith sandbox was larger than funded; its coverage stays held.")
             # The vendor bills whole seconds, so round the measured time up.
             elapsed_ms = math.ceil(max(0.0, self.deleted_at - self.opened_at)) * 1000
+            # A smaller box still pays the funded size, so the charge never falls below the quote's basis.
+            sizes = {field: max(self.request[field], self.reported.get(field, 0)) for field in _SIZE_FIELDS}
             usd = _usd(
-                vcpus=self.request["vcpus"],
-                mem_bytes=self.request["mem_bytes"],
-                fs_bytes=self.request["fs_capacity_bytes"],
+                vcpus=sizes["vcpus"],
+                mem_bytes=sizes["mem_bytes"],
+                fs_bytes=sizes["fs_capacity_bytes"],
                 running_ms=elapsed_ms,
                 stored_ms=elapsed_ms,
             )
             # The shared sandbox policy applies the same markup and wallet split as Vercel boxes.
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
-            # A slow delete can pass the funded time; the vendor's own idle stop
-            # bounds the real bill, so the charge never leaves the coverage.
+            # A slow delete or a larger box can pass the funded cost; the vendor's
+            # own idle stop bounds the real bill, so the charge never leaves the coverage.
             total = min(charge.total, current.max_cents)
             wallet = min(charge.wallet, current.max_wallet_cents, total)
             self.runtime.service.settle(
@@ -321,13 +333,15 @@ class LangSmithUsageReservation:
                     "sandbox_id": self.sandbox_id,
                     "name": self.request.get("name"),
                     "measured_ms": elapsed_ms,
+                    "priced_sizes": sizes,
+                    "reported_sizes": self.reported,
                     "provider_usd": str(usd),
                     "clamped": total < charge.total,
                 },
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            self._keep_pending()
             raise
 
 

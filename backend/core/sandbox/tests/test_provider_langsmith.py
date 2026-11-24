@@ -307,6 +307,7 @@ class FakeServer:
         # "fail" raises and keeps it, "lost" removes it and then raises.
         self.delete_steps: list[str] = []
         self.found_at: list[float] = []
+        self.missing_at: list[float] = []
 
 
 class FakeClient:
@@ -361,6 +362,7 @@ class FakeClient:
         if self.server.get_error is not None:
             raise self.server.get_error
         if name not in self.server.boxes:
+            self.server.missing_at.append(time.monotonic())
             raise FakeNotFoundError(name)
         self.server.found_at.append(time.monotonic())
         return self.server.boxes[name]
@@ -1296,6 +1298,19 @@ async def test_box_seen_after_the_delete_moves_the_end(server: FakeServer, usage
     [ended_at] = usage.ends
     assert ended_at is not None
     assert ended_at >= seen_at
+    assert ended_at >= server.missing_at[-1]
+
+
+async def test_box_seen_after_a_good_delete_ends_at_the_404(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End at the 404 proof, not at a later delete's return, once a lookup found the box after a delete."""
+    env = _protected(usage)
+    await env.start()
+    server.delete_steps = ["keep"]
+    await env.stop()
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert server.deletes == [env.name, env.name]
+    assert ended_at >= server.missing_at[-1]
 
 
 async def test_failed_first_delete_retries_until_proof(server: FakeServer, usage: type[FakeUsage]) -> None:
@@ -1312,7 +1327,7 @@ async def test_failed_first_delete_retries_until_proof(server: FakeServer, usage
 async def test_real_reservation_checks_the_size_after_a_stop_during_create(
     server: FakeServer, ledger: BudgetRuntime
 ) -> None:
-    """Run the size check when a stop() comes during a create that still makes a too-large box."""
+    """Record the reported size when a stop() comes during a create that still makes a larger box."""
     server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
     server.create_gate = asyncio.Event()
     made: list[LangSmithUsageReservation] = []
@@ -1323,9 +1338,9 @@ async def test_real_reservation_checks_the_size_after_a_stop_during_create(
     server.create_gate.set()
     with pytest.raises(SandboxInfraError, match="stopped during start"):
         await task
-    assert made[0].mismatch is True
+    assert made[0].reported == {"vcpus": 4}
     assert server.boxes == {}
-    assert _operation(ledger, made).state == "pending"
+    assert _operation(ledger, made).state == "settled"
 
 
 async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(
@@ -1431,18 +1446,19 @@ async def test_real_reservation_settles_a_stopped_box(server: FakeServer, ledger
     assert operation.id not in ledger._pinned
 
 
-async def test_real_reservation_keeps_a_too_large_box_pending(server: FakeServer, ledger: BudgetRuntime) -> None:
-    """Delete a box larger than funded, keep its hold pending, and raise the settle error as the cause."""
+async def test_real_reservation_prices_a_larger_box_at_its_size(server: FakeServer, ledger: BudgetRuntime) -> None:
+    """Run a box larger than funded, then settle it at the reported size, inside the coverage."""
     server.box_fields = {"id": "sandbox-uuid", "vcpus": 4}
     made: list[LangSmithUsageReservation] = []
     env = _protected(_recording(made), budget=ledger, idle_ttl_seconds=60, delete_after_stop_seconds=60)
-    with pytest.raises(UsagePendingError, match="vcpus") as caught:
-        await env.start()
-    assert isinstance(caught.value.__cause__, UsagePendingError)
-    assert "larger than funded" in str(caught.value.__cause__)
-    assert server.boxes == {}
-    assert _operation(ledger, made).state == "pending"
+    await env.start()
     await env.stop()
+    operation = _operation(ledger, made)
+    assert operation.state == "settled"
+    assert operation.actual_cents <= operation.max_cents
+    settled = ledger.service.get_reconciliation(operation.id, "alice")
+    (evidence,) = [item for item in settled.evidence if "priced_sizes" in item]
+    assert evidence["priced_sizes"]["vcpus"] == 4
 
 
 async def test_real_reservation_releases_a_refused_create(server: FakeServer, ledger: BudgetRuntime) -> None:
