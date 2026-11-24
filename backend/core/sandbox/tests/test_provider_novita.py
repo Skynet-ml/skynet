@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -36,7 +37,15 @@ class RateLimitException(SandboxException):
 
 
 class NotFoundException(SandboxException):
+    """Stand in for the SDK's base not-found error."""
+
+
+class FileNotFoundException(NotFoundException):
     """Stand in for the SDK's missing-file error."""
+
+
+class SandboxNotFoundException(NotFoundException):
+    """Stand in for the SDK's missing-box error."""
 
 
 class CommandExitException(SandboxException):
@@ -158,6 +167,7 @@ class FakeFiles:
     def __init__(self) -> None:
         """Start with no files."""
         self.data: dict[str, bytes] = {}
+        self.read_error: BaseException | None = None
 
     async def write(self, path: str, data: bytes) -> None:
         """Store one file.
@@ -179,10 +189,12 @@ class FakeFiles:
             The content.
 
         Raises:
-            NotFoundException: The file does not exist.
+            FileNotFoundException: The file does not exist.
         """
+        if self.read_error is not None:
+            raise self.read_error
         if path not in self.data:
-            raise NotFoundException(f"404: {path}")
+            raise FileNotFoundException(f"404: {path}")
         return bytearray(self.data[path])
 
 
@@ -231,6 +243,7 @@ class FakeSandbox:
     info_gate: ClassVar[asyncio.Event | None] = None
     info_entered: ClassVar[asyncio.Event | None] = None
     list_error: ClassVar[BaseException | None] = None
+    kill_error: ClassVar[BaseException | None] = None
     info_size: ClassVar[tuple[int, int]] = (2, 2048)
     _ids: ClassVar[Iterator[int]] = itertools.count(1)
 
@@ -260,6 +273,7 @@ class FakeSandbox:
         cls.info_gate = None
         cls.info_entered = None
         cls.list_error = None
+        cls.kill_error = None
         cls.info_size = (2, 2048)
 
     @classmethod
@@ -323,7 +337,12 @@ class FakeSandbox:
 
         Returns:
             True when the box existed.
+
+        Raises:
+            BaseException: The configured kill error.
         """
+        if self.kill_error is not None:
+            raise self.kill_error
         return type(self).live.pop(self.sandbox_id, None) is not None
 
     async def get_info(self) -> SimpleNamespace:
@@ -368,6 +387,15 @@ class FakeUsage:
             name: The box tag.
         """
         self.calls.append(("start", at, name))
+
+    def created(self, at: float, timeout_seconds: int) -> None:
+        """Record the create return.
+
+        Args:
+            at: The clock time.
+            timeout_seconds: The Novita timeout.
+        """
+        self.calls.append(("created", at, timeout_seconds))
 
     def refused(self) -> None:
         """Record a refusal."""
@@ -541,6 +569,28 @@ def test_preflight_needs_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     novita.NovitaEnvironment.preflight()
 
 
+@pytest.mark.parametrize("resources", [ResourceRequest(cpus=3), ResourceRequest(cpus=2, memory_mb=1500)])
+def test_spec_that_novita_cannot_size_is_refused_before_create(resources: ResourceRequest) -> None:
+    """Refuse an odd CPU count or a memory size in part GiB, before any reserve or create.
+
+    Args:
+        resources: The size that Novita cannot give.
+    """
+    with pytest.raises(SandboxSpecError):
+        novita.NovitaEnvironment(_spec(resources=resources), budget=object())
+    assert FakeSandbox.calls == []
+
+
+async def test_spec_with_no_memory_keeps_the_template_memory() -> None:
+    """Send only the CPU count when the spec sets no memory, and fund Novita's largest memory."""
+    FakeSandbox.info_size = (1, 4096)
+    env, usages = _protected(FakeClock(), resources=ResourceRequest(cpus=1))
+    await env.start()
+    assert FakeSandbox.calls[0]["resources"] == {"cpu": 1}
+    assert usages[0].request["memory_mb"] == 8192
+    await env.stop()
+
+
 def test_protected_spec_needs_a_bounded_lifetime_and_a_key() -> None:
     """Refuse a protected box with no operation key, or a lifetime past Novita's cap."""
     with pytest.raises(SandboxSpecError):
@@ -562,6 +612,7 @@ async def test_create_sets_the_funded_lifetime_and_kill_on_timeout() -> None:
     assert options["metadata"][JOB_TAG] == "job-1"
     assert options["template"] == "base"
     assert options["envs"] == {"A": "1"}
+    assert options["resources"] == {"cpu": 2, "memory_gib": 2}
     (usage,) = usages
     assert usage.request == {
         "lifetime_ms": (601 + 120) * 1000,
@@ -788,3 +839,130 @@ async def test_stop_job_sandboxes_kills_tagged_boxes() -> None:
     FakeSandbox({JOB_TAG: "job-2"})
     assert await novita.NovitaEnvironment.stop_job_sandboxes("job-1") == 1
     assert [box.metadata[JOB_TAG] for box in FakeSandbox.live.values()] == ["job-2"]
+
+
+async def test_create_return_time_is_recorded_with_the_timeout() -> None:
+    """Record the create return and the timeout, so a late stop is not billed past the Novita kill."""
+    clock = FakeClock()
+    env, usages = _protected(clock)
+    clock.now = 7.0
+    await env.start()
+    assert ("created", 7.0, 601) in usages[0].calls
+    await env.stop()
+
+
+async def test_late_stop_bills_only_to_the_novita_timeout(database: Engine) -> None:
+    """Bill a box whose stop came after its timeout only up to the timeout.
+
+    Args:
+        database: The funded ledger.
+    """
+    runtime = _runtime(database)
+    clock = FakeClock()
+    env = novita.NovitaEnvironment(_spec(), clock=clock, budget=runtime)
+    await env.start()
+    clock.now = 601.0 + 115.0
+    await env.stop()
+    operation = _state(database, runtime)
+    # 601 seconds * (2 * 0.0000098 + 2 * 0.0000032) USD = 1.5626 cents.
+    assert operation.actual_cents == Decimal("1.5626")
+
+
+async def test_cancelled_exec_kills_the_command() -> None:
+    """Kill a running command when the caller cancels the exec, and let the cancel go on."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    box = next(iter(FakeSandbox.live.values()))
+    task = asyncio.ensure_future(env.exec("hang"))
+    while not box.commands.runs:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert box.commands.killed == [1]
+    await env.stop()
+
+
+async def test_missing_box_on_download_is_an_infra_error() -> None:
+    """Raise an infra error, not ``None``, when the box is gone during a read."""
+    env = novita.NovitaEnvironment(_spec(operation_key=None), clock=FakeClock())
+    await env.start()
+    box = next(iter(FakeSandbox.live.values()))
+    box.files.read_error = SandboxNotFoundException("404: sandbox gone")
+    with pytest.raises(SandboxInfraError):
+        await env.download_file("/tmp/a.txt")
+    await env.stop()
+
+
+async def test_stop_during_reserve_releases_the_late_hold(database: Engine) -> None:
+    """Release a hold whose reserve thread finished after a stop, with no create sent.
+
+    Args:
+        database: The funded ledger.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def slow_reserve(budget: Any, request: Mapping[str, Any], *, operation_key: str) -> Any:
+        """Reserve after the test opens the gate.
+
+        Args:
+            budget: The budget.
+            request: The funded request.
+            operation_key: The operation key.
+
+        Returns:
+            The real reservation.
+        """
+        entered.set()
+        gate.wait(5)
+        return novita.USAGE.reserve(budget, request, operation_key=operation_key)
+
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime, usage_factory=slow_reserve)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    stop = asyncio.ensure_future(env.stop())
+    await asyncio.sleep(0)
+    gate.set()
+    await stop
+    with pytest.raises(SandboxInfraError):
+        await start
+    assert FakeSandbox.calls == []
+    assert _state(database, runtime).state == "released"
+
+
+async def test_failed_kill_of_the_known_box_stays_pending(database: Engine) -> None:
+    """Keep the hold pending when the kill of the created box fails.
+
+    Args:
+        database: The funded ledger.
+    """
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    await env.start()
+    FakeSandbox.kill_error = SandboxException("500: down")
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert _state(database, runtime).state == "pending"
+
+
+async def test_cancel_during_create_with_an_empty_list_stays_pending(database: Engine) -> None:
+    """Keep the hold pending when the caller cancels a create and no box is listed.
+
+    Args:
+        database: The funded ledger.
+    """
+    FakeSandbox.create_gate = asyncio.Event()
+    runtime = _runtime(database)
+    env = novita.NovitaEnvironment(_spec(), clock=FakeClock(), budget=runtime)
+    task = asyncio.ensure_future(env.start())
+    while not FakeSandbox.calls:  # noqa: ASYNC110
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    assert _state(database, runtime).state == "pending"

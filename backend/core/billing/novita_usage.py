@@ -157,6 +157,7 @@ class NovitaUsageReservation:
         self.box_vcpus: int | None = None
         self.box_memory_mb: int | None = None
         self.started_at: float | None = None
+        self.ends_by: float | None = None
         self.stopped_at: float | None = None
         self.create_refused = False
         self.box_seen = False
@@ -172,6 +173,16 @@ class NovitaUsageReservation:
         """
         self.started_at = at
         self.box_name = name
+
+    def created(self, at: float, timeout_seconds: int) -> None:
+        """Record when the create returned, which bounds when Novita ends the box.
+
+        Args:
+            at: Monotonic time just after the create call returned.
+            timeout_seconds: The Novita timeout sent with the create. Novita
+                starts it before the create returns and kills the box at its end.
+        """
+        self.ends_by = at + timeout_seconds
 
     def refused(self) -> None:
         """Record that Novita refused the create with an answer that opens no box."""
@@ -229,11 +240,13 @@ class NovitaUsageReservation:
 
         Returns:
             0 when no create call went out, and otherwise the measured time,
-            rounded up. The settle caps it at the hold.
+            rounded up. A late stop counts only up to the Novita timeout, and
+            the settle caps the charge at the hold.
         """
         if self.started_at is None or self.stopped_at is None:
             return 0
-        return math.ceil(max(0.0, self.stopped_at - self.started_at))
+        end = self.stopped_at if self.ends_by is None else min(self.stopped_at, self.ends_by)
+        return math.ceil(max(0.0, end - self.started_at))
 
     def no_box(self) -> bool:
         """Tell whether no box can exist for this hold.
@@ -309,7 +322,11 @@ class NovitaUsageReservation:
             )
             self.runtime.unpin(self.operation.id)
         except BaseException:
-            self.pending()
+            try:
+                self.pending()
+            except Exception:
+                # The settle error explains the failure; keep it, not this one.
+                logger.exception("Novita sandbox %s could not be marked pending.", self.sandbox_id or self.box_name)
             raise
 
     def _release(self) -> None:
@@ -319,7 +336,7 @@ class NovitaUsageReservation:
             self.runtime.service.reject(
                 self.operation.id,
                 self.runtime.username,
-                evidence_key=f"novita-unsent:{self.operation.id}",
+                evidence_key=f"novita-release:{self.operation.id}",
                 evidence={"provider": "novita", "reason": reason, "box_name": self.box_name},
             )
         finally:

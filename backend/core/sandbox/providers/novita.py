@@ -170,8 +170,15 @@ class NovitaEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxSpecError: A protected box has no operation key, or its
-                lifetime or memory is more than Novita allows.
+                lifetime or memory is more than Novita allows, or Novita
+                cannot size a box to the requested CPU count or memory.
         """
+        # Novita takes 1 or an even number of vCPUs and whole GiB of memory
+        # when it resizes a template at create.
+        if spec.resources.cpus != 1 and spec.resources.cpus % 2:
+            raise SandboxSpecError("A Novita sandbox needs 1 or an even number of vCPUs.")
+        if (spec.resources.memory_mb or 0) % 1024:
+            raise SandboxSpecError("A Novita sandbox needs its memory in whole GiB.")
         if budget is not None and spec.operation_key is None:
             raise SandboxSpecError("A protected Novita sandbox needs an operation key.")
         if budget is not None and spec.lifetime_seconds > MAX_PROTECTED_LIFETIME:
@@ -260,6 +267,10 @@ class NovitaEnvironment(SandboxEnvironment):
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._box = await self.sandbox_cls.create(**self._create_options())
             self._create_unknown = False
+            if usage is not None:
+                # Novita starts the timeout before the create returns, so the
+                # box ends by this time plus the timeout.
+                usage.created(self._clock.monotonic(), self._timeout())
         except TimeoutError:
             if not deadline.expired():
                 raise
@@ -303,9 +314,9 @@ class NovitaEnvironment(SandboxEnvironment):
     def _usage_request(self) -> dict[str, Any]:
         """Build the request that the reservation prices.
 
-        The template sets the size of a Novita box, so the request funds the
-        spec's CPU count and memory, or Novita's largest memory when the spec
-        sets none. The reservation checks the created box against it.
+        The create sizes the box to the spec's CPU count and memory. With no
+        memory in the spec the template sets it, so the request funds Novita's
+        largest memory. The reservation checks the created box against it.
 
         Returns:
             The funded lifetime, the CPU count, the memory and the template.
@@ -353,6 +364,11 @@ class NovitaEnvironment(SandboxEnvironment):
         }
         if spec.image:
             options["template"] = spec.image
+        # The box gets its funded size, not the template's size.
+        sizes: dict[str, Any] = {"cpu": spec.resources.cpus}
+        if spec.resources.memory_mb:
+            sizes["memory_gib"] = spec.resources.memory_mb // 1024
+        options["resources"] = sizes
         if not spec.network_disabled and spec.allowed_hosts:
             options["network"] = {"allow_out": list(spec.allowed_hosts), "deny_out": [ALL_TRAFFIC]}
         return options
@@ -381,11 +397,11 @@ class NovitaEnvironment(SandboxEnvironment):
             # End the start first, so no box appears after this teardown has
             # looked for it.
             self._starting.cancel()
-            with contextlib.suppress(BaseException):
-                await self._starting
+            # asyncio.wait does not raise the start's own error or cancel, but
+            # a cancel of this teardown still reaches it.
+            await asyncio.wait({self._starting})
         if self._billing_call is not None:
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(self._billing_call)
+            await asyncio.wait({self._billing_call})
             call = self._billing_call
             # A reserve that finished after the start was cancelled, before any create.
             late = self._usage is None and not self._create_sent and call.done() and not call.cancelled()
@@ -583,6 +599,13 @@ class NovitaEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(box.commands.kill(handle.pid), STOP_TIMEOUT)
             return ExecResult(TIMEOUT_EXIT_CODE, "".join(stdout), "".join(stderr), timed_out=True)
+        except asyncio.CancelledError:
+            # A background command outlives the connection, so a cancelled
+            # caller kills it. The kill is best effort and the cancel goes on.
+            killing = asyncio.ensure_future(asyncio.wait_for(box.commands.kill(handle.pid), STOP_TIMEOUT))
+            with contextlib.suppress(Exception):
+                await asyncio.shield(killing)
+            raise
         except Exception as error:
             if "CommandExitException" in _error_names(error):
                 return ExecResult(error.exit_code, "".join(stdout), "".join(stderr))
@@ -622,7 +645,9 @@ class NovitaEnvironment(SandboxEnvironment):
         try:
             data = await box.files.read(path, format="bytes")
         except Exception as error:
-            if "NotFoundException" in _error_names(error):
+            # SandboxNotFoundException is also a NotFoundException; it means the
+            # box is gone, not the file.
+            if "FileNotFoundException" in _error_names(error):
                 return None
             raise SandboxInfraError(f"Novita could not read a file: {type(error).__name__}") from error
         try:

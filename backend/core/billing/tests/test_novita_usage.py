@@ -189,6 +189,43 @@ def test_settle_clamps_to_the_hold_and_records_it(database: Engine, caplog: pyte
     assert "ran past its hold" in caplog.text
 
 
+def test_late_stop_is_billed_only_to_the_novita_timeout(database: Engine) -> None:
+    """Stop the bill where Novita's timeout ends the box, not at a late kill."""
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    reservation.start(0.0, "skynet-box")
+    reservation.created(5.0, 600)
+    USAGE.confirm(reservation, _info())
+    reservation.stopped(900.0, confirmed=True, box_seen=True)
+    assert reservation.billed_seconds() == 605
+    USAGE.settle(reservation)
+    # 605 seconds * 0.000026 USD = 1.573 cents.
+    assert _operation(reservation).actual_cents == Decimal("1.573")
+
+
+def test_failed_pending_keeps_the_settle_error(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise the settle error, not the error of the pending mark that followed it.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: Breaks the pending mark.
+    """
+    reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
+    reservation.start(0.0, "skynet-box")
+    reservation.stopped(5.0, confirmed=False, box_seen=False)
+
+    def broken() -> None:
+        """Fail like a lost ledger.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(reservation, "pending", broken)
+    with pytest.raises(UsagePendingError):
+        USAGE.settle(reservation)
+
+
 def test_settle_prices_the_created_box_not_the_funded_size(database: Engine) -> None:
     """Charge the real box size when the template is smaller than the funding."""
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
