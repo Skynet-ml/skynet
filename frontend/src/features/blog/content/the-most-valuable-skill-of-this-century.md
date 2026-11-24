@@ -48,24 +48,14 @@ On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace us
 
 {{lever: 7}}
 
-Extra attempts only pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results: replacing a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria, pushed frontier coding and medical agents to new highs and beat specialized trained reward models zero-shot [19].
+Extra attempts pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results [19]. They replaced a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria. Frontier coding and medical agents reached new highs, and the same zero-shot model beat specialized trained reward models [19].
 
-{{figure: verifier | LLM-as-a-Verifier on coding and medical benchmarks [19]. Each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle.}}
-
-{{figure: scoring | RoboRewardBench preference accuracy [19]. Only the scoring method changes on the same zero-shot model, and it beats trained robotics reward models.}}
-
-## A benchmark score measures the harness too
-
-When the same model scores 62.7% or 98.6% depending on what wraps around it [15], a benchmark score no longer measures the model alone. After GPT-6.2 Astra became the first model to hit 100% on ARC-AGI-3 in a custom harness, ARC Prize president Greg Kamradt concluded that static task completion is no longer enough to measure frontier models [20].
-
-Sometimes all a harness adds is a small nudge. Nvidia researchers took Claude Opus 5 from 30% to 100% on ARC-AGI-3's public set with a supervisor agent that steers the main agent away from dead ends [21]. The right nudge can unlock a hard coding task, or maybe even a proof like the Riemann Hypothesis, though we still don't know how much Alpöge guided Claude [1].
-
-{{figure: nvidia | Claude Opus 5 on ARC-AGI-3's public set without and with Nvidia's harness, where a supervisor agent nudges the main agent away from dead ends and repeat paths [21].}}
+{{figure: verifier | LLM-as-a-Verifier [19]. Picking attempts: on coding and medical benchmarks, each row compares one try, the attempt the verifier picks from the same candidate pool, and a perfect oracle. Scoring method: on RoboRewardBench preference accuracy, only the scoring method changes on the same zero-shot model, and it beats trained robotics reward models.}}
 
 ## Problems come in three kinds
 
 1. Problems AI solves in one shot, with no special setup.
-2. Problems that need a bespoke setup before AI can solve them, like the ARC-AGI-3 harnesses above [15], [21].
+2. Problems that need a bespoke setup before AI can solve them, like the ARC-AGI-3 harnesses above [15], [20].
 3. Problems AI can't solve yet, where only more training can raise the ceiling.
 
 AI already handles the first kind, and only the labs can work on the third. The middle bucket is the big opportunity for everyone else, and it keeps growing: as models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable problems opens up from above.
@@ -74,9 +64,9 @@ AI already handles the first kind, and only the labs can work on the third. The 
 
 ## Intelligence is getting cheaper fast
 
-Epoch AI finds that since 2023, the cost of a fixed level of AI performance has fallen about 13x per year (47% per quarter) [22]. Reaching 75% on GPQA Diamond cost roughly $0.30 per question with o3 in January 2025, and about $0.0004 with GPT-5.6 Luna 18 months later, a 725-fold drop [22]. Even as the decline slows on older capabilities, cheap intelligence pulls more hard problems into reach every year.
+Epoch AI finds that since 2023, the cost of a fixed level of AI performance has fallen about 13x per year (47% per quarter) [21]. Reaching 75% on GPQA Diamond cost roughly $0.30 per question with o3 in January 2025, and about $0.0004 with GPT-5.6 Luna 18 months later, a 725-fold drop [21]. Even as the decline slows on older capabilities, cheap intelligence pulls more hard problems into reach every year.
 
-{{figure: price | How many times cheaper each technology became per year, on a log scale. The AI bar is the cost of a fixed level of performance on five benchmarks since 2023. The four comparisons and their periods are Epoch's [22].}}
+{{figure: price | How many times cheaper each technology became per year, on a log scale. The AI bar is the cost of a fixed level of performance on five benchmarks since 2023. The four comparisons and their periods are Epoch's [21].}}
 
 ## My bet is on first-principles thinking
 
@@ -92,13 +82,13 @@ With a clear metric, you can launch swarms of agents in parallel inside a divers
 
 Most real problems trace back to fixed rules you discover by running experiments against the world. Making models smarter matters less than orchestrating them to explore until they solve the problem or bring back useful insights.
 
-Agent Plasticity, a benchmark from UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington, tests this exact loop on Dwarkesh Patel's question [4]: can frozen models learn on the job? Each round starts fresh, carrying forward only notes, code, tools, and strategies from earlier rounds, then scores the agent on unseen games [23]. Experience alone drove huge gains without changing model weights, yet raw strength and learning efficiency came apart: some models stalled, and the best learner gained over five times more points per dollar than the top final scorer [23].
+Agent Plasticity, a benchmark from UC Berkeley, Meta Superintelligence Labs, Princeton, and the University of Washington, tests this exact loop on Dwarkesh Patel's question [4]: can frozen models learn on the job? Each round starts fresh, carrying forward only notes, code, tools, and strategies from earlier rounds, then scores the agent on unseen games [22]. Experience alone drove huge gains without changing model weights, yet raw strength and learning efficiency came apart: some models stalled, and the best learner gained over five times more points per dollar than the top final scorer [22].
 
-{{figure: gains | Agent Plasticity results with frozen model weights [23]. Held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20).}}
+{{figure: gains | Agent Plasticity results with frozen model weights [22]. Held-out unseen game scores before and after learning from experience (Hard Chess averages checkpoints 16 to 20; Go and Hex show checkpoint 20).}}
 
-{{figure: psat | Agent Plasticity learning efficiency [23]: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
+{{figure: psat | Agent Plasticity learning efficiency [22]: score points gained per $1,000 of learning cost across Chess, Go, and Hex combined.}}
 
-A lot of software was built under old constraints that no longer hold, so rebuilding from first principles with agent swarms will become common. The only hard limits are the laws of physics; as Elon Musk says, everything else is a recommendation [24].
+A lot of software was built under old constraints that no longer hold, so rebuilding from first principles with agent swarms will become common. The only hard limits are the laws of physics; as Elon Musk says, everything else is a recommendation [23].
 
 ## Real problems are black-box optimization
 
@@ -196,17 +186,13 @@ Skynet is model-agnostic and vendor-agnostic, running locally or on the web, bec
     - Continuous verification: computes expected scores over scoring-token logits rather than discrete judge outputs, scaled via score granularity, repeated checks, and criteria decomposition, with no extra training
     - Table 3 (candidate pool selection): Terminal-Bench V2 (GPT-5.5, 5 tries) rises from 83.1% Pass@1 to 86.5% (oracle 92.1%); SWE-bench Verified (Opus 4.5, Gemini 3 Flash, and MiniMax M2.5, 3 tries) rises from 76.1% mean Pass@1 to 78.2% (oracle 84.4%); MedAgentBench (Claude Opus 4.8, 5 tries) rises from 70.2% Pass@1 to 73.3% (oracle 75.0%)
     - Table 4 (RoboRewardBench, 500 trajectory pairs): same zero-shot Qwen 3.6 35B model jumps from 70.8% as a discrete LLM-as-a-Judge to 87.4% as LLM-as-a-Verifier, beating TOPReward (74.7%), Robometer-4B (78.8%), and RoboReward-8B (81.4%)
-20. G. Kamradt, "This is the first 100% we've seen on v3," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/GregKamradt/status/2122759751159447888>. Quoted post: ARC Prize, "GPT-6.2 Astra from OpenAI on ARC-AGI (Verified)," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/arcprize/status/2122751233442156678>
-    - 100%: GPT-6.2 Astra on ARC-AGI-3 with the OpenAI harness, about $4,100, the first 100% score ARC Prize reports on the benchmark
-    - 70.3%: the same model in the standard harness, about $24,200
-    - Not adequate anymore: static task completion as a measure of frontier models, in his view
-21. J. Bort, "Nvidia just showed that the harness, not the AI model, is now the real hero," *TechCrunch*, Aug. 21, 2026. [Online]. Available: <https://techcrunch.com/2026/08/21/nvidia-just-showed-that-the-harness-not-the-ai-model-is-now-the-real-hero>
+20. J. Bort, "Nvidia just showed that the harness, not the AI model, is now the real hero," *TechCrunch*, Aug. 21, 2026. [Online]. Available: <https://techcrunch.com/2026/08/21/nvidia-just-showed-that-the-harness-not-the-ai-model-is-now-the-real-hero>
     - 30% to 100%: Claude Opus 5 on ARC-AGI-3's public set (25 environments), with Nvidia's custom harness
     - AVO: Agentic Variation Operators, the name of the harness
     - Supervisor agent: nudges the main agent away from dead ends and from paths it already tried
     - Under 10%: OpenAI's models on ARC-AGI-3, about tripled after two changes to harness settings
     - 2x the cost: what the wrong harness can mean for the same model, in the words of Databricks' CEO
-22. L. Emberson and D. Roodman, "The plunging price of thought," *Epoch AI*, Sept. 22, 2026. [Online]. Available: <https://epoch.ai/publications/the-plunging-price-of-thought>
+21. L. Emberson and D. Roodman, "The plunging price of thought," *Epoch AI*, Sept. 22, 2026. [Online]. Available: <https://epoch.ai/publications/the-plunging-price-of-thought>
     - 47% per quarter: the fall in the cost of a fixed level of AI performance since 2023, on five benchmarks
     - 13x per year: the same rate, per year
     - About $0.30 to about $0.0004 per question: Epoch's estimate for 75% (adjusted for guessing) on GPQA Diamond, from o3 (January 2025) to GPT-5.6 Luna just under 18 months later. Epoch calls it a 725-fold drop
@@ -214,11 +200,11 @@ Skynet is model-agnostic and vendor-agnostic, running locally or on the web, bec
     - 32% per quarter: the fall two years later, on the same average; three of the five benchmarks show the slowdown
     - Average price decline per year of older technologies: DNA sequencing 1.84x (2001 to 2025), compute 1.51x (1940 to 2001), lithium-ion batteries 1.16x (1991 to 2024), US residential electricity 1.05x (1892 to 1973)
     - Caution: a benchmark score is not the same as useful work, the data cover about three years, and Epoch says the figures should not be read as exact
-23. H. Singh et al., "Agent Plasticity: Measuring Self-Improvement Through Experience," *arXiv:2610.08902*, Oct. 6, 2026. [Online]. Available: <https://arxiv.org/abs/2610.08902>. Summary thread: H. Singh, *X*, Nov. 2026. [Online]. Available: <https://x.com/harman26singh/status/2124911857064640826>
+22. H. Singh et al., "Agent Plasticity: Measuring Self-Improvement Through Experience," *arXiv:2610.08902*, Oct. 6, 2026. [Online]. Available: <https://arxiv.org/abs/2610.08902>. Summary thread: H. Singh, *X*, Nov. 2026. [Online]. Available: <https://x.com/harman26singh/status/2124911857064640826>
     - Frozen-weight self-improvement: each round starts fresh and inherits notes, code, tools, and strategies written after earlier rounds, scored on unseen Chess, Go, Hex, and NetHack games
     - Held-out unseen game gains: Claude Fable 5 rises from 20% to 80% on 5x5 Go (checkpoints 0 to 20) and 37.5% to 73.3% on Hard Chess (checkpoint 0 to checkpoints 16 to 20 average); Claude Opus 5 rises from 25.0% to 66.4% on Hard Chess; GPT-5.6 Sol rises from 40% to 77.5% on 6x6 Hex (checkpoints 0 to 20); Claude Opus 5.5 triples its NetHack mean score from about 2,000 to 6,000 (checkpoints 0 to 2 vs. 36 to 40)
     - Agent plasticity (score points gained per $1,000 of learning cost across Chess, Go, and Hex): GPT-5.6 Sol 298, Claude Opus 5 233, Claude Fable 5 57 (highest final score), Claude Opus 4.8 14, GPT-5.6 Luna 0 (no reliable gain)
-24. W. Isaacson, *Elon Musk*. New York, NY, USA: Simon & Schuster, 2023, ch. 46, "Fremont Factory Hell."
+23. W. Isaacson, *Elon Musk*. New York, NY, USA: Simon & Schuster, 2023, ch. 46, "Fremont Factory Hell."
     - The algorithm: Musk's rules for questioning requirements, which the book sets out in this chapter
     - The corollary: only the laws of physics are real rules, and every other requirement is a recommendation
 

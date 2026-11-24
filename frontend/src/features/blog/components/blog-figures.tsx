@@ -12,7 +12,7 @@
 
 import * as React from "react";
 
-/** Set the ARC-AGI-3 view to the choice of this toggle button. */
+/** Set the view of a figure toggle (ARC-AGI-3 or LLM-as-a-Verifier) to the choice of this button. */
 function pick(button: HTMLButtonElement) {
   const group = button.parentElement;
   const view = button.closest<HTMLElement>(".arcv");
@@ -187,6 +187,7 @@ export function BlogFigureBehavior() {
       closing = null;
       modal.classList.remove("on", "closing");
       modal.setAttribute("aria-hidden", "true");
+      modal.removeAttribute("aria-labelledby");
       if (zoomed) {
         zoomed.classList.remove("zoomed");
         setZoomButton(zoomed, false);
@@ -226,6 +227,8 @@ export function BlogFigureBehavior() {
       setZoomButton(card, true);
       modal.classList.remove("closing");
       modal.setAttribute("aria-hidden", "false");
+      const title = card.querySelector(".fh[id]");
+      if (title) modal.setAttribute("aria-labelledby", title.id);
       document.body.style.overflow = "hidden";
       zoomed = card;
       returnTo = card.querySelector<HTMLElement>(".zbtn");
@@ -252,7 +255,7 @@ export function BlogFigureBehavior() {
         return openZoom(zcard);
       const seg = target.closest<HTMLButtonElement>(".bf .arcv .seg button");
       if (seg) return pick(seg);
-      const legend = target.closest<HTMLButtonElement>(".bf .arcv .legend button");
+      const legend = target.closest<HTMLButtonElement>(".bf .arcv .legend button[data-h]");
       if (legend) {
         const view = legend.closest<HTMLElement>(".arcv")!;
         const h = view.dataset.h === legend.dataset.h ? "" : (legend.dataset.h ?? "");
@@ -273,6 +276,28 @@ export function BlogFigureBehavior() {
       if (e.key === "Escape" && zoomed) {
         e.preventDefault();
         return closeZoom();
+      }
+      // The dialog is modal, so Tab cycles through its own controls and never reaches the page behind it.
+      if (e.key === "Tab" && zoomed) {
+        const items = Array.from(
+          modal.querySelectorAll<HTMLElement>("button,a[href],[tabindex]"),
+        ).filter((el) => el.tabIndex >= 0 && el.getClientRects().length > 0);
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!first || !last) {
+          e.preventDefault();
+          return modal.focus();
+        }
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || active === modal || !modal.contains(active))) {
+          e.preventDefault();
+          return last.focus();
+        }
+        if (!e.shiftKey && (active === last || !modal.contains(active))) {
+          e.preventDefault();
+          return first.focus();
+        }
+        return;
       }
       const card = target.closest?.(".bf .card");
       if (e.key === "Escape" && card) {
@@ -364,6 +389,8 @@ export function BlogFigureBehavior() {
         aria-modal="true"
         aria-hidden="true"
         tabIndex={-1}
+        lang="en"
+        dir="ltr"
       >
         <div className="bf bf-zstage" />
       </div>
