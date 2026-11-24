@@ -31,7 +31,7 @@ from ..service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeR
 from .errors import SandboxFatalError
 from .factory import PROVIDERS, preflight
 from .image_registry import COPY_TIMEOUT_SECONDS, ImageCopier
-from .metering import USAGE_ADAPTERS
+from .metering import usage_adapter
 from .vcr_copy import VcrCopier
 
 # A fallback English label; the UI shows its own translated name when it has one.
@@ -261,7 +261,7 @@ def offered_providers(settings: Settings) -> list[dict[str, str]]:
     else:
         names = []
         for name, entry in PROVIDERS.items():
-            if not entry.production_allowed or name not in USAGE_ADAPTERS:
+            if not entry.production_allowed or usage_adapter(name) is None:
                 continue
             try:
                 preflight(name)
