@@ -233,20 +233,18 @@ def _protected_submission(payload, job_store, workflow: str, *, from_balance: bo
     if payload.seed is None:
         payload.seed = setup_seed(payload.execution_budget_id)
     try:
-        service = BudgetService(engine=job_store.engine)
-        budget = service.get(payload.execution_budget_id, payload.username)
+        budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
-        # The same gate as the wizard check: the setup check spends from this limit, so the first
-        # lease needs the room it left, and it draws on a balance that can fall after the check (SKY-923).
+        # The same gate as the wizard check: the first lease draws on a balance that can fall after the
+        # check, and the setup check billed that balance (SKY-923, SKY-925).
         spendable = (
             None
             if settings.local_mode
             else StripeBillingService(engine=job_store.engine).spendable_cents(payload.username)
         )
         if not budget.uncapped:
-            spent = service.spent_units(budget.id, payload.username)
-            require_funded_lease(budget.total_cents, spendable, spent_units=spent, from_balance=from_balance)
+            require_funded_lease(budget.total_cents, spendable, from_balance=from_balance)
         elif spendable is not None:
             require_one_lease(spendable, from_balance=True)
         canonical = _persistable_payload(payload, job_store)

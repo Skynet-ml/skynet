@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
-from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.budgets import AccountFundsError, BudgetService
 from core.billing.byok_upstreams import resolve_upstream
 from core.billing.model_dispatch import (
     BYOK_FUNDS_EXHAUSTED,
@@ -378,8 +378,15 @@ def test_each_physical_retry_has_separate_coverage_and_delivery_replay_is_dedupl
 
 
 def test_insufficient_setup_never_sends_inference_and_remains_editable(database: Engine) -> None:
-    """Leave the user able to increase setup allowance without silently truncating a request."""
-    runtime = _runtime(database, total=1)
+    """Leave the user able to add funds without silently truncating a request.
+
+    Setup work is bounded by the wallet, not by the run's limit (SKY-925), so
+    a 1-cent balance refuses a call bounded at about 3 cents.
+    """
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 1
+        session.commit()
+    runtime = _runtime(database)
 
     def provider(request: httpx.Request) -> httpx.Response:
         """Permit only free catalog retrieval when the operation is not covered."""
@@ -395,7 +402,7 @@ def test_insufficient_setup_never_sends_inference_and_remains_editable(database:
             policy=ChargePolicy("managed_model"),
             client=client,
         )
-        with pytest.raises(BudgetInsufficientError):
+        with pytest.raises(AccountFundsError):
             dispatcher.dispatch("/chat/completions", REQUEST)
     assert runtime.service.get(runtime.budget_id, "alice").state == "open"
 

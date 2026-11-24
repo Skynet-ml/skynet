@@ -153,6 +153,45 @@ def test_parallel_admission_cannot_overcommit(database: Engine, shared_budget: b
         assert session.scalar(select(func.count()).select_from(ExecutionOperationModel)) == 1
 
 
+def test_parallel_run_reservations_ignore_setup_settlements(database: Engine) -> None:
+    """Admit run work against the whole limit after setup spend, and still one race winner (SKY-925)."""
+    with Session(database) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="setup-then-run")
+    setup = _reserve(service, budget.id, "setup-check", maximum=30)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=30, evidence={"usage": "setup"})
+    service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    barrier = Barrier(2)
+
+    def run(key: str) -> str:
+        """Begin both run admissions together; each fits the limit only while setup spend is ignored."""
+        barrier.wait(timeout=5)
+        try:
+            return service.reserve(
+                budget.id,
+                "alice",
+                operation_key=key,
+                generation=0,
+                phase="run",
+                cost_kind="model",
+                request_fingerprint="fixture",
+                price_snapshot={"version": "fixture-v1"},
+                max_cents=40,
+            ).state
+        except BudgetInFlightError:
+            return "contended"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(run, ["one", "two"]))
+    assert sorted(outcomes) == ["contended", "reserved"]
+    snapshot = service.get(budget.id, "alice")
+    assert (snapshot.setup_spent_cents, snapshot.reserved_cents, snapshot.available_cents) == (30, 40, 10)
+    assert snapshot.billed_cents == 30
+
+
 def test_parallel_first_budgets_of_a_new_account_share_one_wallet(
     database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import AliasChoices, BaseModel, Field
 
-from ...billing.budget_amounts import CENT_SCALE, MAX_CENTS, ceil_cents
+from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import (
     CHUNK_CENTS,
     BudgetConflictError,
@@ -102,60 +102,51 @@ def budget_http_error(error: BudgetError) -> HTTPException:
     return DomainError(code, status=status)
 
 
-def require_one_lease(total_cents: int, *, from_balance: bool = False, spent_units: int = 0) -> None:
-    """Refuse a run limit whose unspent room cannot buy the run's first budget lease.
+def require_one_lease(total_cents: int, *, from_balance: bool = False) -> None:
+    """Refuse a run limit that cannot buy the run's first budget lease.
 
     A run takes its budget in leases of :data:`CHUNK_CENTS`, so a smaller
     limit ends the run before its first paid step (SKY-914). Setup checks
-    spend from the same limit, and the lease counts only the room they
-    leave (SKY-923).
+    bill only the wallet, so they leave the whole limit to the run (SKY-925).
 
     Args:
         total_cents: The run's approved spending limit.
         from_balance: Whether the account balance, not the user's own
             limit, sets this limit.
-        spent_units: Settled spending already charged to this limit, in
-            budget units.
 
     Raises:
         DomainError: 402 ``budget.insufficient`` when a balance-set limit is
             below one lease, or 409 ``budget.below_minimum`` when the user's
             own limit is.
     """
-    if total_cents * CENT_SCALE - spent_units >= CHUNK_CENTS * CENT_SCALE:
+    if total_cents >= CHUNK_CENTS:
         return
     # A higher limit cannot help when the balance sets it, so the refusal names the balance.
     if from_balance:
         raise DomainError("budget.insufficient", status=402)
-    raise DomainError(
-        "budget.below_minimum", status=409, minimum_total_cents=ceil_cents(spent_units + CHUNK_CENTS * CENT_SCALE)
-    )
+    raise DomainError("budget.below_minimum", status=409, minimum_total_cents=CHUNK_CENTS)
 
 
-def require_funded_lease(
-    total_cents: int, spendable_cents: int | None, *, spent_units: int = 0, from_balance: bool = False
-) -> None:
+def require_funded_lease(total_cents: int, spendable_cents: int | None, *, from_balance: bool = False) -> None:
     """Refuse a capped run whose balance or limit cannot buy the run's first budget lease.
 
     Args:
         total_cents: The run's approved spending limit.
         spendable_cents: The account's spendable balance, or ``None`` when no
             balance applies.
-        spent_units: Settled spending already charged to this limit, in
-            budget units.
         from_balance: Whether the account balance, not the user's own
             limit, sets this limit.
 
     Raises:
         DomainError: 402 ``budget.insufficient`` when the balance, or a limit
             the balance sets, is below one lease; or 409
-            ``budget.below_minimum`` when the user's own limit's room is.
+            ``budget.below_minimum`` when the user's own limit is.
     """
     # Every run's first lease holds one full lease of the balance, also for BYOK. A higher limit cannot help a
     # balance below that, so the balance is checked first (SKY-923).
     if spendable_cents is not None:
         require_one_lease(spendable_cents, from_balance=True)
-    require_one_lease(total_cents, from_balance=from_balance, spent_units=spent_units)
+    require_one_lease(total_cents, from_balance=from_balance)
 
 
 def create_execution_budgets_router(*, job_store: Any) -> APIRouter:

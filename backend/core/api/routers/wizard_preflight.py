@@ -169,7 +169,7 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
 
 
 def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any) -> None:
-    """Refuse a budget whose unspent room cannot buy the run's first lease, as submit would.
+    """Refuse a budget that cannot buy the run's first lease, as submit would.
 
     An uncapped budget has no limit floor, but its first lease still draws on the balance.
 
@@ -182,11 +182,8 @@ def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUs
         DomainError: The budget's lookup error, or the refusal of
             :func:`require_funded_lease`.
     """
-    service = BudgetService(engine=job_store.engine)
     try:
-        budget = service.get(request.execution_budget_id, user.username)
-        # Earlier setup checks spend from this limit, so the first lease needs the room they left (SKY-923).
-        spent = 0 if budget.uncapped else service.spent_units(budget.id, user.username)
+        budget = BudgetService(engine=job_store.engine).get(request.execution_budget_id, user.username)
     except BudgetError as error:
         raise budget_http_error(error) from error
     # As at submit, local mode has no balance gate.
@@ -194,7 +191,7 @@ def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUs
         None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
     )
     if not budget.uncapped:
-        require_funded_lease(budget.total_cents, spendable, spent_units=spent)
+        require_funded_lease(budget.total_cents, spendable)
     elif spendable is not None:
         require_one_lease(spendable, from_balance=True)
 

@@ -233,6 +233,45 @@ def usd_text(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
+def _setup_units(session: Session, budget_id: str) -> int:
+    """Sum the settled scope units of a budget's setup operations.
+
+    Setup is billed to the wallet only and never counts against the run's
+    limit (SKY-925), so readers of the limit subtract this from the budget's
+    settled units. Call it while the budget lock is held.
+
+    Args:
+        session: Transaction holding the budget lock.
+        budget_id: Budget whose setup spend to read.
+
+    Returns:
+        Settled setup scope units, as counted in the budget's settled units.
+    """
+    return int(
+        session.scalar(
+            select(func.coalesce(func.sum(ExecutionOperationModel.actual_units), 0)).where(
+                ExecutionOperationModel.budget_id == budget_id, ExecutionOperationModel.phase == "setup"
+            )
+        )
+    )
+
+
+def _run_reserved_units(budget: ExecutionBudgetModel) -> int:
+    """Return the reserved scope units that count against the run's limit.
+
+    Reserve takes setup work only before attach and run work only after it,
+    and attach refuses while setup work is active. So before attach every
+    reservation is setup work, and after it every reservation is run work.
+
+    Args:
+        budget: Locked budget.
+
+    Returns:
+        Reserved units of run work.
+    """
+    return int(budget.reserved_units) if budget.job_id is not None else 0
+
+
 def _admit(
     session: Session,
     wallet: BillingCustomerModel,
@@ -240,10 +279,12 @@ def _admit(
     username: str,
     scope: int,
     charge: int,
-    keep_units: int = 0,
-    keep_funds: bool = True,
+    phase: str,
 ) -> None:
     """Check that new coverage fits the budget's limit and the account's funds.
+
+    Setup coverage is bounded only by the account's funds; the limit is the
+    run's own, and setup spend does not count against it (SKY-925).
 
     Args:
         session: Transaction holding the account and budget locks.
@@ -252,26 +293,22 @@ def _admit(
         username: Authenticated owner.
         scope: Combined scope units the new coverage adds.
         charge: Wallet units the new coverage adds.
-        keep_units: Units of a capped limit, and of the account's funds for any budget, that the coverage must leave
-            unused.
-        keep_funds: Whether ``keep_units`` also applies to the account's funds.
+        phase: Setup or run attribution of the coverage.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
         BudgetInFlightError: When settling covered work may make the coverage fit.
     """
-    if not budget.uncapped:
-        remaining = budget.total_cents * CENT_SCALE - budget.settled_units
-        # The room to keep counts as part of what the operation needs, so the refusal keeps its known text.
-        needed = scope + keep_units
-        if needed > remaining:
+    if phase == "run" and not budget.uncapped:
+        remaining = budget.total_cents * CENT_SCALE - (budget.settled_units - _setup_units(session, budget.id))
+        if scope > remaining:
             raise BudgetInsufficientError(
-                f"The next operation needs up to {usd_text(ceil_cents(needed))}, but only "
+                f"The next operation needs up to {usd_text(ceil_cents(scope))}, but only "
                 f"{usd_text(max(remaining, 0) // CENT_SCALE)} of the {usd_text(budget.total_cents)} limit remain."
             )
-        if needed > remaining - budget.reserved_units:
+        if scope > remaining - budget.reserved_units:
             raise BudgetInFlightError(
-                "Covered work must settle before this operation can fit.", scope_units=needed, room_units=remaining
+                "Covered work must settle before this operation can fit.", scope_units=scope, room_units=remaining
             )
     held = account_committed_cents(session, username)
     wallet_balance = int(wallet.balance_cents) + int(wallet.grant_remaining or 0)
@@ -280,12 +317,9 @@ def _admit(
         - budget.billed_cents
         - budget_wallet_hold(budget)
     )
-    # Submit also needs one lease of the balance, also for an uncapped run, so the check keeps that room of the
-    # funds (SKY-923).
-    keep = ceil_cents(keep_units) if keep_funds else 0
-    if hold_delta + keep > wallet_balance - held:
+    if hold_delta > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
-        if after_release + keep <= wallet_balance:
+        if after_release <= wallet_balance:
             raise BudgetInFlightError("Other covered work currently holds the required wallet funds.")
         raise AccountFundsError("The account cannot fund the next operation.")
 
@@ -517,7 +551,7 @@ class BudgetService:
             Decimal(account_available)
             if budget.uncapped
             else cents_from_units(
-                max(0, budget.total_cents * CENT_SCALE - budget.settled_units - budget.reserved_units)
+                max(0, budget.total_cents * CENT_SCALE - (budget.settled_units - setup) - _run_reserved_units(budget))
             )
         )
         return BudgetSnapshot(
@@ -664,20 +698,6 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             return self._snapshot(session, budget, wallet)
 
-    def spent_units(self, budget_id: str, username: str) -> int:
-        """Read the settled spending that admission counts against the budget's limit.
-
-        Args:
-            budget_id: Envelope to read.
-            username: Authenticated owner.
-
-        Returns:
-            Settled scope units, the amount :class:`BudgetInsufficientError` counts.
-        """
-        with self._transaction() as session:
-            _, budget = self._locked(session, budget_id, username)
-            return int(budget.settled_units)
-
     def get_operation(self, operation_id: str, username: str) -> OperationSnapshot:
         """Recover an existing attempt without dispatching or reserving it again.
 
@@ -768,7 +788,7 @@ class BudgetService:
         total = _total(total_cents)
         with self._transaction() as session:
             wallet, budget = self._locked(session, budget_id, username)
-            minimum = ceil_cents(budget.settled_units + budget.reserved_units)
+            minimum = ceil_cents(budget.settled_units - _setup_units(session, budget.id) + _run_reserved_units(budget))
             if budget.revision != expected_revision:
                 raise BudgetTotalConflictError(
                     "The budget changed; refresh its current revision.",
@@ -854,8 +874,6 @@ class BudgetService:
         attempt: int = 0,
         role: str | None = None,
         session: Session | None = None,
-        keep_cents: int = 0,
-        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Admit one physical attempt under its verified scope and wallet bounds.
 
@@ -873,9 +891,6 @@ class BudgetService:
             attempt: Physical retry number; a new billable retry needs a new attempt.
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
-            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
-                this attempt must leave unused.
-            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -929,7 +944,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope, charge, keep_cents * CENT_SCALE, keep_funds)
+            _admit(session, wallet, budget, username, scope, charge, phase)
             now = datetime.now(UTC)
             operation = ExecutionOperationModel(
                 id=str(uuid4()),
@@ -1059,7 +1074,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope * slices, charge * slices)
+            _admit(session, wallet, budget, username, scope * slices, charge * slices, phase)
             now = datetime.now(UTC)
             operations = [
                 ExecutionOperationModel(
@@ -1416,8 +1431,6 @@ class BudgetService:
         max_cents: Decimal | str | int | float,
         max_wallet_cents: Decimal | str | int | float,
         evidence: Mapping[str, Any],
-        keep_cents: int = 0,
-        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Grow a running sandbox's coverage before the provider is asked to keep it alive longer.
 
@@ -1433,9 +1446,6 @@ class BudgetService:
             max_cents: Combined scope coverage the operation holds after the extension.
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
-            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
-                the extension must leave unused.
-            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The operation with its grown coverage and the budget totals.
@@ -1480,8 +1490,7 @@ class BudgetService:
                 username,
                 scope - operation.max_units,
                 charge - operation.max_wallet_units,
-                keep_cents * CENT_SCALE,
-                keep_funds,
+                operation.phase,
             )
             now = datetime.now(UTC)
             session.add(
@@ -1914,7 +1923,10 @@ class BudgetService:
             )
             if active is not None:
                 raise BudgetUnreconciledError("Previous paid work must reconcile before admission resumes.")
-            if not budget.uncapped and budget.settled_units >= budget.total_cents * CENT_SCALE:
+            if (
+                not budget.uncapped
+                and budget.settled_units - _setup_units(session, budget.id) >= budget.total_cents * CENT_SCALE
+            ):
                 raise BudgetInsufficientError("The total budget has no remaining allowance.")
             budget.state = "attached"
             budget.blocked_reason = None

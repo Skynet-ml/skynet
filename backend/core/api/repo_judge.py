@@ -849,8 +849,9 @@ def judge_call(
         )
     if not budget.uncapped:
         needed = _needed(job_store.engine, budget.id, payload)
-        # The session ends while the budget still pays for the final score.
-        if budget.total_cents - budget.setup_spent_cents - budget.run_spent_cents < needed:
+        # The session ends while the budget still pays for the final score. Setup bills only the wallet, so
+        # only run spend counts against the limit (SKY-925).
+        if budget.total_cents - budget.run_spent_cents < needed:
             if _unsettled_usage(job_store.engine, budget.id):
                 # The spend counts unsettled holds in full, so a high reading must not end the session for good.
                 raise JudgePendingError("Usage of an earlier call still settles. Call again with the same arguments.")

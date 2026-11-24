@@ -223,9 +223,16 @@ def test_unfunded_or_foreign_preview_never_dispatches(previews) -> None:
 
 
 def test_unaffordable_preview_is_rejected_before_physical_dispatch(previews) -> None:
-    """Keep the wallet untouched when the real operation bound cannot fit its allowance."""
+    """Keep the wallet untouched when the real operation bound cannot fit the balance.
+
+    A preview is setup work, so the wallet bounds it, not the run's limit (SKY-925).
+    The 1-cent balance cannot hold the 2-cent operation bound.
+    """
     harness, state = previews
-    budget = harness.budgets.create("alice", 1, idempotency_key="too-small")
+    budget = harness.budgets.create("alice", 50, idempotency_key="too-small")
+    with Session(harness.store.engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 1
+        session.commit()
     response = harness.client.post(
         "/workflows/dry-run",
         json={

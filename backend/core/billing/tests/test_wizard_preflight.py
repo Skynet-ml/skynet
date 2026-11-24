@@ -756,25 +756,23 @@ def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
     assert not calls
 
 
-def test_setup_check_refuses_before_it_spends_into_the_runs_first_lease(
-    setup_client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Refuse a setup charge that would leave less than one lease of the limit, before it spends (SKY-923)."""
-    client, _engine, calls = setup_client
-    # The 2-cent setup hold fits the 20-cent limit, but not with 19 cents kept for the run.
-    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 19)
+def test_setup_check_keeps_no_lease_of_the_limit_or_the_balance(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a setup check spend into the run's first lease, because setup bills only the wallet (SKY-925)."""
+    client, engine, calls = setup_client
+    # The balance and the limit each hold exactly one lease, so any setup charge spends into it.
+    monkeypatch.setattr(execution_budgets, "CHUNK_CENTS", 20)
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 20
+        session.commit()
     budget = _budget(client)
 
     response = client.post("/wizard/preflight", json=_request(budget))
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["status"] == "failed"
-    assert body["may_advance"] is False
-    assert [(check["key"], check["message_code"]) for check in body["checks"]] == [
-        ("budget", "submit.preflight.budget_limit")
-    ]
-    assert body["checks"][0]["message_params"]["needed"] == "$0.21"
-    assert body["budget"]["setup_spent_cents"] == "0"
-    assert body["budget"]["reserved_cents"] == "0"
+    assert (body["status"], body["may_advance"]) == ("succeeded", True)
+    assert body["budget"]["setup_spent_cents"] == "1"
+    assert body["budget"]["available_cents"] == "20"
+    with Session(engine) as session:
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 19
     assert len(calls) == 1

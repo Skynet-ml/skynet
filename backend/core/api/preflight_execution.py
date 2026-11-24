@@ -567,13 +567,6 @@ def _perform_preflight(
                 generation=snapshot.generation,
                 phase="setup",
                 wait_timeout=SETUP_WAIT_SECONDS,
-                # Submit needs one lease of the limit and of the balance left after the check, so the
-                # check must not spend into it and leave a run that submit refuses. Local mode checks
-                # no balance at submit, so there it keeps only the limit's lease (SKY-923). The lease is
-                # read through the router module, which submit reads too, so a test that patches it
-                # changes both rules.
-                keep_cents=execution_budgets.CHUNK_CENTS,
-                keep_funds=not settings.local_mode,
             )
         )
         # The box's hold is priced on its whole lifetime, so a check gets the

@@ -79,6 +79,12 @@ def _reserve(service: BudgetService, budget_id: str, key: str = "call", **kwargs
     return service.reserve(budget_id, "alice", **values)
 
 
+def _attached(service: BudgetService, total_cents: int, key: str = "draft", **kwargs: Any) -> Any:
+    """Create a budget and attach it to a run, so run-phase work can use its limit."""
+    budget = service.create("alice", total_cents, idempotency_key=key, **kwargs)
+    return service.attach_to_job(budget.id, "alice", f"job-{key}", expected_revision=budget.revision)
+
+
 def _balance(engine: Engine) -> int:
     """Read actual debited wallet balance independently of outstanding holds."""
     with Session(engine) as session:
@@ -269,15 +275,16 @@ def test_budget_creation_revision_and_owner(engine: Engine) -> None:
         service.create("alice", 21, idempotency_key="draft")
     with pytest.raises(BudgetNotFoundError):
         service.get(budget.id, "bob")
-    _reserve(service, budget.id, max_cents=12)
+    attached = service.attach_to_job(budget.id, "alice", "job", expected_revision=1)
+    _reserve(service, budget.id, max_cents=12, phase="run")
     with pytest.raises(BudgetTotalConflictError, match=r"minimum.*12") as rejected:
-        service.update_total(budget.id, "alice", 11, expected_revision=1)
+        service.update_total(budget.id, "alice", 11, expected_revision=attached.revision)
     assert rejected.value.current_total_cents == 20
     assert rejected.value.minimum_total_cents == 12
-    changed = service.update_total(budget.id, "alice", 30, expected_revision=1)
-    assert changed.revision == 2
+    changed = service.update_total(budget.id, "alice", 30, expected_revision=attached.revision)
+    assert changed.revision == attached.revision + 1
     with pytest.raises(BudgetTotalConflictError) as stale:
-        service.update_total(budget.id, "alice", 40, expected_revision=1)
+        service.update_total(budget.id, "alice", 40, expected_revision=attached.revision)
     assert stale.value.current_total_cents == 30
     assert stale.value.minimum_total_cents == 12
     assert service.get(budget.id, "alice").total_cents == 30
@@ -395,7 +402,7 @@ def test_partial_failure_and_replay_settle_once(engine: Engine) -> None:
     assert partial.state == "pending"
     assert partial.budget.setup_spent_cents == Decimal("2.2")
     assert partial.budget.reserved_cents == Decimal("7.8")
-    assert partial.budget.available_cents == 10
+    assert partial.budget.available_cents == 20
     assert partial.budget.billed_cents == 3
     assert partial.budget.wallet_reserved_cents == 7
     with pytest.raises(BudgetUnreconciledError):
@@ -405,7 +412,7 @@ def test_partial_failure_and_replay_settle_once(engine: Engine) -> None:
     )
     assert complete.state == "settled"
     assert complete.budget.reserved_cents == 0
-    assert complete.budget.available_cents == Decimal("16.9")
+    assert complete.budget.available_cents == 20
     assert complete.budget.billed_cents == 4
     assert (
         service.settle(
@@ -469,23 +476,55 @@ def test_byok_model_scope_settles_at_zero(engine: Engine) -> None:
 def test_contention_differs_from_exhaustion(engine: Engine) -> None:
     """Report reversible in-flight contention separately from insufficient coverage."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 20, idempotency_key="draft")
-    first = _reserve(service, budget.id, "first", max_cents=15)
+    budget = _attached(service, 20)
+    first = _reserve(service, budget.id, "first", max_cents=15, phase="run")
     with pytest.raises(BudgetInFlightError):
-        _reserve(service, budget.id, "second", max_cents=10)
+        _reserve(service, budget.id, "second", max_cents=10, phase="run")
     with pytest.raises(BudgetInsufficientError):
-        _reserve(service, budget.id, "oversize", max_cents=21)
+        _reserve(service, budget.id, "oversize", max_cents=21, phase="run")
     service.release(first.id, "alice")
-    assert _reserve(service, budget.id, "second", max_cents=10).state == "reserved"
+    assert _reserve(service, budget.id, "second", max_cents=10, phase="run").state == "reserved"
 
 
 def test_limit_refusal_states_its_amounts_in_dollars(engine: Engine) -> None:
     """The wizard shows the limit in dollars, so the refusal it relays does too."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 20, idempotency_key="draft")
+    budget = _attached(service, 20)
     with pytest.raises(BudgetInsufficientError) as refused:
-        _reserve(service, budget.id, "oversize", max_cents=21)
+        _reserve(service, budget.id, "oversize", max_cents=21, phase="run")
     assert str(refused.value) == "The next operation needs up to $0.21, but only $0.20 of the $0.20 limit remain."
+
+
+def test_setup_spend_bills_the_wallet_and_leaves_the_limit_to_the_run(engine: Engine) -> None:
+    """Bill the setup check to the wallet only, so the run keeps its whole limit (SKY-925)."""
+    with Session(engine) as session:
+        session.get(BillingCustomerModel, "alice").balance_cents = 500
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 100, idempotency_key="setup-wallet")
+    setup = _reserve(service, budget.id, "setup-check", max_cents=60)
+    service.mark_dispatched(setup.id, "alice")
+    service.settle(setup.id, "alice", evidence_key="setup-usage", actual_cents=60, evidence={"usage": "setup"})
+    attached = service.attach_to_job(budget.id, "alice", "job", expected_revision=budget.revision)
+    assert attached.available_cents == 100
+
+    run = _reserve(service, budget.id, "run-lease", phase="run", max_cents=100)
+
+    assert run.state == "reserved"
+    assert run.budget.billed_cents == 60
+    assert run.budget.setup_spent_cents == 60
+    with Session(engine) as session:
+        descriptions = session.scalars(select(WalletLedgerModel.description)).all()
+    assert [text.startswith("Optimization setup") for text in descriptions] == [True]
+
+
+def test_setup_admission_is_bounded_by_the_wallet_not_the_limit(engine: Engine) -> None:
+    """Admit setup work above the limit while the balance funds it (SKY-925)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 20, idempotency_key="setup-bound")
+    assert _reserve(service, budget.id, "above-limit", max_cents=30).state == "reserved"
+    with pytest.raises(AccountFundsError, match="cannot fund"):
+        _reserve(service, budget.id, "above-balance", max_cents=51)
 
 
 def test_wallet_holds_span_budgets_and_protect_against_legacy_debits(engine: Engine) -> None:
@@ -764,89 +803,6 @@ def test_amounts_reject_unrepresentable_values(amount: str) -> None:
         cent_units(amount)
 
 
-def test_kept_room_refuses_work_that_would_spend_into_it(engine: Engine) -> None:
-    """Count the room a setup check must leave as part of what its work needs (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 20, idempotency_key="keep")
-    with pytest.raises(BudgetInsufficientError) as refused:
-        _reserve(service, budget.id, "over", max_cents=11, keep_cents=10)
-    assert str(refused.value) == "The next operation needs up to $0.21, but only $0.20 of the $0.20 limit remain."
-    first = _reserve(service, budget.id, "fits", max_cents=6, keep_cents=10)
-    with pytest.raises(BudgetInFlightError) as waiting:
-        _reserve(service, budget.id, "second", max_cents=5, keep_cents=10)
-    assert waiting.value.scope_units == cent_units(15)
-    service.mark_dispatched(first.id, "alice", "request-one")
-    service.settle(first.id, "alice", evidence_key="done", actual_cents=6, actual_wallet_cents=6, evidence={})
-    with pytest.raises(BudgetInsufficientError):
-        _reserve(service, budget.id, "second", max_cents=5, keep_cents=10)
-    assert _reserve(service, budget.id, "second", max_cents=4, keep_cents=10).state == "reserved"
-
-
-def test_kept_room_refuses_a_coverage_extension_into_it(engine: Engine) -> None:
-    """Admit a setup box's extra slice only while the kept room stays unspent (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 20, idempotency_key="keep-slices")
-    box = _reserve(service, budget.id, "box", cost_kind="sandbox", max_cents=5, keep_cents=10)
-    service.mark_dispatched(box.id, "alice", "session-one")
-    with pytest.raises(BudgetInFlightError):
-        service.extend_coverage(
-            box.id, "alice", evidence_key="wait", max_cents=11, max_wallet_cents=11, evidence={}, keep_cents=10
-        )
-    with pytest.raises(BudgetInsufficientError):
-        service.extend_coverage(
-            box.id, "alice", evidence_key="over", max_cents=16, max_wallet_cents=16, evidence={}, keep_cents=10
-        )
-    service.extend_coverage(
-        box.id, "alice", evidence_key="fits", max_cents=10, max_wallet_cents=10, evidence={}, keep_cents=10
-    )
-    assert service.get(budget.id, "alice").reserved_cents == 10
-
-
-def test_uncapped_budget_keeps_no_room(engine: Engine) -> None:
-    """Keep no room of an uncapped budget, which has no limit to keep it from (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 5, idempotency_key="keep-uncapped", uncapped=True)
-    # The hold and the kept room pass the 5-cent total but fit the 50-cent balance.
-    assert _reserve(service, budget.id, "call", max_cents=10, keep_cents=40).state == "reserved"
-
-
-def test_setup_runtime_passes_its_kept_room_to_the_ledger(engine: Engine) -> None:
-    """Refuse a setup call at once when only the room the runtime keeps blocks it (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 20, idempotency_key="keep-runtime")
-    runtime = BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", keep_cents=10)
-    with pytest.raises(BudgetInsufficientError, match=r"needs up to \$0\.21"):
-        runtime.reserve(_quote(11), operation_key="call", cost_kind="model")
-    assert runtime.reserve(_quote(10), operation_key="fits", cost_kind="model").state == "reserved"
-
-
-def test_capped_reservation_keeps_one_lease_of_the_account_funds(engine: Engine) -> None:
-    """Refuse a capped hold that would leave the balance below the kept room (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 1000, idempotency_key="keep-wallet")
-    with pytest.raises(AccountFundsError, match="cannot fund"):
-        _reserve(service, budget.id, "over", max_cents=21, keep_cents=30)
-    assert _reserve(service, budget.id, "fits", max_cents=20, keep_cents=30).state == "reserved"
-
-
-def test_kept_funds_wait_for_covered_work_that_holds_them(engine: Engine) -> None:
-    """Report in-flight work when only a running hold blocks the kept room of the funds (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 1000, idempotency_key="keep-wallet-flight")
-    _reserve(service, budget.id, "running", max_cents=20)
-    with pytest.raises(BudgetInFlightError):
-        _reserve(service, budget.id, "setup", max_cents=20, keep_cents=20)
-
-
-def test_uncapped_budget_keeps_one_lease_of_the_account_funds(engine: Engine) -> None:
-    """Keep the room of the funds for an uncapped hold too, because submit checks its balance as well (SKY-923)."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 5, idempotency_key="keep-wallet-uncapped", uncapped=True)
-    with pytest.raises(AccountFundsError, match="cannot fund"):
-        _reserve(service, budget.id, "over", max_cents=21, keep_cents=30)
-    assert _reserve(service, budget.id, "fits", max_cents=20, keep_cents=30).state == "reserved"
-
-
 def test_uncapped_budget_admits_past_its_total_until_the_account_runs_dry(engine: Engine) -> None:
     """Skip the total checks for an uncapped budget while the wallet still gates admission."""
     service = BudgetService(engine=engine)
@@ -874,12 +830,13 @@ def test_uncapped_flag_is_versioned_like_the_total(engine: Engine) -> None:
     assert lifted.uncapped is True
     assert lifted.revision == 2
     assert lifted.available_cents == 50
-    _reserve(service, budget.id, max_cents=30)
+    attached = service.attach_to_job(budget.id, "alice", "job", expected_revision=2)
+    _reserve(service, budget.id, max_cents=30, phase="run")
     with pytest.raises(BudgetTotalConflictError):
-        service.update_total(budget.id, "alice", 20, expected_revision=2)
-    capped = service.update_total(budget.id, "alice", 30, expected_revision=2)
+        service.update_total(budget.id, "alice", 20, expected_revision=attached.revision)
+    capped = service.update_total(budget.id, "alice", 30, expected_revision=attached.revision)
     assert capped.uncapped is False
-    assert capped.revision == 3
+    assert capped.revision == attached.revision + 1
     assert capped.available_cents == 0
 
 
@@ -913,9 +870,9 @@ def test_recovered_generation_can_repeat_a_logical_operation(engine: Engine) -> 
 def test_sandbox_coverage_grows_only_through_admission(engine: Engine) -> None:
     """Admit each extra slice like new work, record it once, and keep settlement capped at the grown bound."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 30, idempotency_key="slices")
-    box = _reserve(service, budget.id, "box", cost_kind="sandbox", max_cents=10)
-    model = _reserve(service, budget.id, "model", max_cents=5)
+    budget = _attached(service, 30, "slices")
+    box = _reserve(service, budget.id, "box", cost_kind="sandbox", max_cents=10, phase="run")
+    model = _reserve(service, budget.id, "model", max_cents=5, phase="run")
     with pytest.raises(BudgetConflictError, match="running sandbox"):
         service.extend_coverage(
             box.id, "alice", evidence_key="early", max_cents=12, max_wallet_cents=12, evidence={"lifetime_ms": 2}
@@ -988,51 +945,26 @@ def _quote(cents: int) -> OperationQuote:
 def test_in_flight_refusal_carries_the_limit_arithmetic(engine: Engine) -> None:
     """A wait-for-room refusal says how much the work needs and how much of the limit is unspent."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 40, idempotency_key="arithmetic")
-    _reserve(service, budget.id, "box", cost_kind="sandbox", max_cents=10)
+    budget = _attached(service, 40, "arithmetic")
+    _reserve(service, budget.id, "box", cost_kind="sandbox", max_cents=10, phase="run")
     with pytest.raises(BudgetInFlightError) as refused:
-        _reserve(service, budget.id, "call", max_cents=35)
+        _reserve(service, budget.id, "call", max_cents=35, phase="run")
 
     assert refused.value.scope_units == cent_units(35)
     assert refused.value.room_units == cent_units(40)
 
 
-def test_setup_check_refuses_at_once_when_only_its_own_boxes_hold_the_room(engine: Engine) -> None:
-    """A check's open boxes never release while it waits, so it refuses instead of hanging."""
+def test_setup_check_is_bounded_by_the_balance_not_the_limit(engine: Engine) -> None:
+    """A setup check bills only the wallet, so its own boxes never make it wait for limit room (SKY-925)."""
     service = BudgetService(engine=engine)
     budget = service.create("alice", 40, idempotency_key="own-boxes")
-    runtime = _setup_runtime(service, budget.id)
-    box = runtime.reserve(_quote(10), operation_key="box", cost_kind="sandbox", role="runtime")
-    runtime.pin(box.id, cent_units(box.max_cents))
-
-    started = time.monotonic()
-    with pytest.raises(BudgetInsufficientError, match=r"needs up to \$0\.35, but this check's sandboxes hold \$0\.10"):
-        runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
-    assert time.monotonic() - started < 5
-
-
-def test_setup_check_waits_for_room_held_by_other_work(engine: Engine) -> None:
-    """Coverage the check did not open may settle, so the check waits for it."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 40, idempotency_key="other-work")
-    _reserve(service, budget.id, "other", cost_kind="sandbox", max_cents=10)
-    runtime = _setup_runtime(service, budget.id, wait=0)
-
-    with pytest.raises(UsagePendingError):
-        runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
-
-
-def test_setup_check_waits_again_once_its_box_is_unpinned(engine: Engine) -> None:
-    """A box that settled no longer counts against the room the check waits for."""
-    service = BudgetService(engine=engine)
-    budget = service.create("alice", 40, idempotency_key="unpinned")
     runtime = _setup_runtime(service, budget.id, wait=0)
     box = runtime.reserve(_quote(10), operation_key="box", cost_kind="sandbox", role="runtime")
     runtime.pin(box.id, cent_units(box.max_cents))
-    runtime.unpin(box.id)
 
-    with pytest.raises(UsagePendingError):
-        runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
+    assert runtime.reserve(_quote(35), operation_key="call", cost_kind="model").state == "reserved"
+    with pytest.raises(AccountFundsError, match="cannot fund"):
+        runtime.reserve(_quote(51), operation_key="unfunded", cost_kind="model")
 
 
 def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = True, parked: bool = False) -> Any:
@@ -1498,6 +1430,8 @@ def test_restart_waiver_keeps_the_setup_charge(engine: Engine) -> None:
     waived = service.waive_interrupted_work(fenced.id, "alice", generation=0, settled_after=None)
 
     assert waived.billed_cents == 3
+    # Only run work counts against the limit, so the waiver gives back the whole limit (SKY-925).
+    assert waived.available_cents == 40
     with Session(engine) as session:
         wallet = session.get(BillingCustomerModel, "alice")
         assert (wallet.grant_remaining, wallet.balance_cents) == (1, 50)
