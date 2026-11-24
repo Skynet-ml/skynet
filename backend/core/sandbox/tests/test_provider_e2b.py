@@ -1392,3 +1392,74 @@ async def test_longest_protected_box_stays_inside_the_quote_ceiling() -> None:
         assert max(extends) <= e2b.E2B_MAX_LIFETIME * 1000
     finally:
         await env.stop()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(lambda: e2b.SandboxException("bad template", status_code=400), id="400"),
+        pytest.param(lambda: e2b.SandboxException("no template", status_code=404), id="404"),
+        pytest.param(lambda: e2b.AuthenticationException("bad key"), id="401"),
+    ],
+)
+async def test_refused_create_bills_no_runtime(error: Callable[[], BaseException]) -> None:
+    """Clear the start time and confirm the stop when E2B refuses the create.
+
+    Args:
+        error: Makes the refusal that E2B answers.
+    """
+    FakeBox.create_errors = [error()]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(Exception):  # noqa: B017 - each refusal has its own SDK type
+        await env.start()
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_gateway_timeout_answer_keeps_the_outcome_unknown() -> None:
+    """Treat a 408 as unknown: a gateway can answer it after E2B opened the box."""
+    FakeBox.create_errors = [_status_error(408)]
+    made = UsageFactory()
+    env = _protected(made)
+    with pytest.raises(e2b.SandboxException):
+        await env.start()
+    (usage,) = made.made
+    assert usage.started_at is not None
+    assert usage.events[-2:] == [("stopped", False, 0), ("settle",)]
+
+
+async def test_capacity_wait_ends_when_the_hold_is_too_old() -> None:
+    """End a protected capacity wait that holds the funds past the time limit."""
+    FakeBox.create_errors = [_status_error(429)]
+    checks = 0
+
+    async def at_capacity() -> bool:
+        """Report capacity on the first check, then no capacity forever.
+
+        Returns:
+            False on the first check, then True.
+        """
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    made = UsageFactory()
+    clock = FakeClock()
+    env = e2b.E2BEnvironment(
+        _spec(operation_key="op-1"), budget=object(), usage_factory=made, clock=clock, at_capacity=at_capacity
+    )
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert clock.now >= e2b.PROTECTED_HOLD_WAIT
+    assert len(FakeBox.create_calls) == 1
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+def test_protected_memory_must_fit_e2b() -> None:
+    """Refuse a protected spec with more memory than E2B allows, before any reservation."""
+    with pytest.raises(SandboxSpecError):
+        _protected(UsageFactory(), resources=ResourceRequest(cpus=1, memory_mb=e2b.MAX_MEMORY_MB + 1))

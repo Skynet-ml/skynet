@@ -52,7 +52,14 @@ from core.billing.signals import BudgetReached
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
-from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
+from ..pacing import (
+    CAPACITY_WAIT_MAX,
+    SYSTEM_CLOCK,
+    Clock,
+    ProviderAtCapacityError,
+    ProviderPacing,
+    create_with_capacity,
+)
 from ..resources import SandboxSpec
 from ..telemetry import BoxTimings, current_output_sink
 
@@ -62,6 +69,7 @@ try:
     from e2b import (
         ALL_TRAFFIC,
         AsyncSandbox,
+        AuthenticationException,
         CommandExitException,
         NotFoundException,
         RateLimitException,
@@ -75,6 +83,7 @@ except ImportError:
     httpx = None
     ALL_TRAFFIC = None
     AsyncSandbox = None
+    AuthenticationException = None
     CommandExitException = None
     NotFoundException = None
     RateLimitException = None
@@ -119,8 +128,13 @@ MAX_PROTECTED_LIFETIME = E2B_MAX_LIFETIME - CREATE_TIMEOUT - RENEW_CALL_TIMEOUT 
 # A protected box keeps its hold during each rate-limit wait: the operation
 # key is the box's stable identity, so a new hold for each attempt would
 # need a new key and would break the resume of a settled box. This limit
-# bounds how long the hold stays with no box.
+# bounds how long the hold stays with no box. The time limit also bounds
+# an ``at_capacity`` wait, which can last with no create attempt at all.
 PROTECTED_RATE_LIMIT_ATTEMPTS = 5
+PROTECTED_HOLD_WAIT = PROTECTED_RATE_LIMIT_ATTEMPTS * CAPACITY_WAIT_MAX
+# Answers that prove E2B refused the create and opened no box. A gateway
+# 408 or 499, or a proxy 502 or 503, can come after E2B opened the box.
+REFUSAL_STATUSES = frozenset({400, 401, 403, 404, 422})
 TIMEOUT_EXIT_CODE = 124
 CAPACITY_STATUSES = frozenset({429, 502, 503})
 
@@ -202,17 +216,19 @@ def _is_rate_limit(error: BaseException) -> bool:
     )
 
 
-def _is_client_error(error: BaseException) -> bool:
-    """Tell whether E2B refused a create with a 4xx answer, which opens no box.
+def _is_refusal(error: BaseException) -> bool:
+    """Tell whether E2B refused a create in a way that proves it opened no box.
 
     Args:
         error: The error of the create call.
 
     Returns:
-        True for a status from 400 to 499.
+        True for an authentication error, which carries no status, or a
+        status in ``REFUSAL_STATUSES``.
     """
-    status = getattr(error, "status_code", None)
-    return isinstance(status, int) and 400 <= status < 500
+    if AuthenticationException is not None and isinstance(error, AuthenticationException):
+        return True
+    return getattr(error, "status_code", None) in REFUSAL_STATUSES
 
 
 def _is_dispatch_retryable(error: BaseException) -> bool:
@@ -300,13 +316,16 @@ class E2BEnvironment(SandboxEnvironment):
             usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: A protected box has no operation key, or its
-                lifetime is longer than its extensions can fund.
+            SandboxSpecError: A protected box has no operation key, its
+                lifetime is longer than its extensions can fund, or its memory
+                is larger than E2B allows.
         """
         if budget is not None and spec.operation_key is None:
             raise SandboxSpecError("A protected E2B sandbox needs an operation key.")
         if budget is not None and spec.lifetime_seconds > MAX_PROTECTED_LIFETIME:
             raise SandboxSpecError(f"A protected E2B sandbox can live at most {MAX_PROTECTED_LIFETIME:.0f} seconds.")
+        if budget is not None and (spec.resources.memory_mb or 0) > MAX_MEMORY_MB:
+            raise SandboxSpecError(f"A protected E2B sandbox can have at most {MAX_MEMORY_MB} MiB of memory.")
         super().__init__(spec)
         self._budget = budget
         self._usage_factory = usage_factory
@@ -322,6 +341,7 @@ class E2BEnvironment(SandboxEnvironment):
         # never saw, so an empty sweep does not prove that no box runs.
         self._create_unknown = False
         self._rate_limits = 0
+        self._held_since: float | None = None
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -379,7 +399,7 @@ class E2BEnvironment(SandboxEnvironment):
             await create_with_capacity(
                 self._create,
                 self._reserve,
-                at_capacity=self._at_capacity,
+                at_capacity=self._capacity_check if self._at_capacity is not None else None,
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
             )
@@ -391,6 +411,28 @@ class E2BEnvironment(SandboxEnvironment):
         if first_slice < self.spec.lifetime_seconds:
             deadline = self._clock.monotonic() + self.spec.lifetime_seconds
             self._renewer = asyncio.create_task(self._renew_loop(self._funded_until, deadline))
+
+    async def _capacity_check(self) -> bool:
+        """Ask ``at_capacity``, but end a protected wait that held its funds too long.
+
+        Returns:
+            True while the provider has no capacity.
+
+        Raises:
+            SandboxInfraError: The hold of a protected box passed ``PROTECTED_HOLD_WAIT``.
+        """
+        self._check_hold_wait()
+        assert self._at_capacity is not None, "only called when at_capacity is set"
+        return await self._at_capacity()
+
+    def _check_hold_wait(self) -> None:
+        """Fail the start when a protected box held its funds with no box for too long.
+
+        Raises:
+            SandboxInfraError: The hold is older than ``PROTECTED_HOLD_WAIT``.
+        """
+        if self._held_since is not None and self._clock.monotonic() - self._held_since >= PROTECTED_HOLD_WAIT:
+            raise SandboxInfraError("E2B had no capacity for this sandbox while its funds were held.")
 
     @contextlib.asynccontextmanager
     async def _reserve(self) -> AsyncIterator[Any | None]:
@@ -412,6 +454,7 @@ class E2BEnvironment(SandboxEnvironment):
             )
             try:
                 self._usage = await asyncio.shield(reserving)
+                self._held_since = self._clock.monotonic()
             except asyncio.CancelledError:
                 # The thread cannot be cancelled and may still reserve; keep
                 # its result so the teardown settles it instead of leaking it.
@@ -502,7 +545,7 @@ class E2BEnvironment(SandboxEnvironment):
         Raises:
             ProviderAtCapacityError: E2B answered 429, 502 or 503. A protected
                 box waits only after a rate limit.
-            SandboxInfraError: A protected box hit the rate-limit attempt limit.
+            SandboxInfraError: A protected box hit the rate-limit attempt or time limit.
             StartTimeoutError: The create did not finish in time.
             SandboxSpecError: The box is larger than its funding.
         """
@@ -524,18 +567,22 @@ class E2BEnvironment(SandboxEnvironment):
         except Exception as error:
             if _is_request_timeout(error):
                 raise StartTimeoutError(CREATE_TIMEOUT) from error
-            # A 502 or 503 can come after E2B opened the box. A protected box
-            # must not wait for capacity while that box runs unmetered, so it
-            # fails the start; the teardown sweeps the box and settles.
-            if _is_rate_limit(error) or _is_client_error(error):
-                # E2B refused the create, so it opened no box.
+            if _is_rate_limit(error) or _is_refusal(error):
+                # E2B refused the create, so it opened no box and the attempt
+                # must not count as runtime.
                 self._create_unknown = False
+                if usage is not None:
+                    usage.started_at = None
+            # A 502 or 503 (also ServiceBusyException) can come from a proxy
+            # after E2B opened the box, so it cannot prove that no box runs;
+            # the outcome stays unknown. A protected box must not wait for
+            # capacity while that box runs unmetered, so it fails the start;
+            # the teardown sweeps the box and settles.
             if usage is not None and _is_rate_limit(error):
-                # The refused attempt opened no box, so it must not count as runtime.
-                usage.started_at = None
                 self._rate_limits += 1
                 if self._rate_limits >= PROTECTED_RATE_LIMIT_ATTEMPTS:
                     raise SandboxInfraError("E2B kept refusing the create with a rate limit.") from error
+                self._check_hold_wait()
             if _is_capacity_error(error) and (usage is None or _is_rate_limit(error)):
                 raise ProviderAtCapacityError(f"E2B has no capacity: {type(error).__name__}") from error
             raise
