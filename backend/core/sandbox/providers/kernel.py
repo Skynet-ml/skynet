@@ -616,8 +616,7 @@ class KernelEnvironment(SandboxEnvironment):
             True when Kernel's details carry ``deleted_at``.
         """
         try:
-            await self._pace_read()
-            details = await asyncio.wait_for(client.browsers.retrieve(session_id, include_deleted=True), STOP_TIMEOUT)
+            details = await self._read_details(client, session_id, self._clock.monotonic() + STOP_TIMEOUT)
         except Exception as read_error:
             # With ``include_deleted`` Kernel returns a soft-deleted session
             # with ``deleted_at``, so a NotFound here does not prove a delete.
@@ -710,23 +709,45 @@ class KernelEnvironment(SandboxEnvironment):
             every read failed. The settle checks whether the usage is final.
         """
         receipt: dict[str, Any] = {}
-        # One deadline for reads and polls, so hung reads cannot stretch a stop.
+        # One deadline for bucket waits, reads and polls, so neither a busy
+        # bucket nor a hung read can stretch a stop past USAGE_WAIT.
         deadline = self._clock.monotonic() + USAGE_WAIT
         while True:
             try:
-                await self._pace_read()
-                left = max(deadline - self._clock.monotonic(), 0.0)
-                details = await asyncio.wait_for(
-                    client.browsers.retrieve(session_id, include_deleted=True), min(STOP_TIMEOUT, left)
-                )
+                details = await self._read_details(client, session_id, deadline)
                 receipt = details.to_dict(mode="json")
             except Exception as read_error:
                 logger.warning("Kernel browser %s usage read failed: %s", self.name, type(read_error).__name__)
-            # Stop when no read could start after the next poll, so no read
-            # gets a zero timeout.
+            # Stop when one poll interval or less is left: after the poll, the
+            # next bucket wait and read would have no time.
             if receipt.get("usage_status") == "ready" or deadline - self._clock.monotonic() <= USAGE_POLL:
                 return receipt
             await self._clock.sleep(USAGE_POLL)
+
+    async def _read_details(self, client: Any, session_id: str, deadline: float) -> Any:
+        """Wait for the read bucket, then read a browser's details, both before ``deadline``.
+
+        Args:
+            client: The SDK client.
+            session_id: The browser, deleted or not.
+            deadline: The clock instant when the bucket wait and the read stop.
+
+        Returns:
+            The SDK details, with soft-deleted sessions included.
+
+        Raises:
+            TimeoutError: The deadline passed before the read finished.
+        """
+        left = deadline - self._clock.monotonic()
+        if left <= 0:
+            raise TimeoutError
+        await asyncio.wait_for(self._pace_read(), left)
+        left = deadline - self._clock.monotonic()
+        if left <= 0:
+            raise TimeoutError
+        return await asyncio.wait_for(
+            client.browsers.retrieve(session_id, include_deleted=True), min(STOP_TIMEOUT, left)
+        )
 
     def _funded_seconds(self) -> float | None:
         """Return the funded time that a protected box has left.

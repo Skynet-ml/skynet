@@ -1451,36 +1451,110 @@ async def test_usage_read_failure_settles_from_the_measured_time() -> None:
     assert len(FakeState.retrieves) == int(kernel.USAGE_WAIT / kernel.USAGE_POLL)
 
 
-async def test_slow_usage_reads_stop_at_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End the usage reads at one overall deadline when each read hangs for a long time.
+def _clock_wait_for(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> list[tuple[str, float | None]]:
+    """Make ``asyncio.wait_for`` time out on the fake clock, and record each timeout.
 
     Args:
-        monkeypatch: Replaces the browser read with a slow one.
+        monkeypatch: Replaces ``asyncio.wait_for`` for the test.
+        clock: The fake clock of the box.
+
+    Returns:
+        The coroutine name and the timeout of each call, in order.
+    """
+    calls: list[tuple[str, float | None]] = []
+
+    async def wait_for(awaitable: Any, seconds: float | None) -> Any:
+        """Await the work, then time out when it used more fake time than allowed.
+
+        Args:
+            awaitable: The coroutine to await.
+            seconds: The allowed fake seconds.
+
+        Returns:
+            The result of the work.
+
+        Raises:
+            TimeoutError: The work used up the timeout; the clock stops at the timeout.
+        """
+        calls.append((awaitable.cr_code.co_name, seconds))
+        begin = clock.now
+        result = await awaitable
+        if seconds is not None and clock.now - begin >= seconds:
+            clock.now = begin + seconds
+            raise TimeoutError
+        return result
+
+    monkeypatch.setattr(kernel.asyncio, "wait_for", wait_for)
+    return calls
+
+
+def _reads(calls: list[tuple[str, float | None]], name: str) -> list[float | None]:
+    """Return the timeouts of the recorded calls to one coroutine.
+
+    Args:
+        calls: The recorded calls.
+        name: The coroutine name.
+
+    Returns:
+        The timeouts, in order.
+    """
+    return [timeout for called, timeout in calls if called == name]
+
+
+async def test_slow_usage_reads_stop_at_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each slow usage read only the time left, and end all reads at USAGE_WAIT.
+
+    Args:
+        monkeypatch: Replaces the browser read and ``asyncio.wait_for``.
     """
     clock = FakeClock()
-    reads: list[str] = []
+    calls = _clock_wait_for(monkeypatch, clock)
 
     async def slow_retrieve(self: FakeBrowsers, session_id: str, *, include_deleted: bool) -> FakeDetails:
-        """Use up fake time and then time out, as a hung read does.
+        """Use up 20 fake seconds and report the usage as not ready.
 
         Args:
             self: The fake browsers resource.
             session_id: The browser id.
             include_deleted: Must be True to read a deleted browser.
 
-        Raises:
-            TimeoutError: Always, after the slow read.
+        Returns:
+            Details with a pending usage report.
         """
-        reads.append(session_id)
         clock.now += 20
-        raise TimeoutError
+        return FakeDetails({"session_id": session_id, "usage_status": "pending"})
 
     monkeypatch.setattr(FakeBrowsers, "retrieve", slow_retrieve)
     env, usages = _protected(clock=clock)
-    async with env:
-        start = clock.now
-    assert len(reads) == 2
-    assert clock.now - start <= kernel.USAGE_WAIT + 20
+    await env.start()
+    start = clock.now
+    await env.stop()
+    # Read 1 gets the full 30 s and uses 20; after one 2 s poll, read 2 gets the 8 s left.
+    assert _reads(calls, "slow_retrieve") == [min(kernel.STOP_TIMEOUT, kernel.USAGE_WAIT), 8]
+    assert clock.now - start <= kernel.USAGE_WAIT
+    assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
+
+
+async def test_slow_bucket_wait_stays_inside_the_usage_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound the read bucket wait by the same USAGE_WAIT deadline as the reads.
+
+    Args:
+        monkeypatch: Replaces ``asyncio.wait_for``.
+    """
+    FakeState.usage_statuses = ["pending"] * 5
+    clock = FakeClock()
+    calls = _clock_wait_for(monkeypatch, clock)
+    pacing = _ClockPacing(clock)
+    env, usages = _protected(clock=clock, pacing=pacing)
+    await env.start()
+    pacing.reads.step = 25
+    start = clock.now
+    await env.stop()
+    # Bucket wait 1 uses 25 of 30 s, read 1 gets the 5 s left, and after one
+    # 2 s poll bucket wait 2 hits the deadline, so no second read starts.
+    assert _reads(calls, "_pace_read") == [kernel.USAGE_WAIT, 3]
+    assert _reads(calls, "retrieve") == [5]
+    assert clock.now - start <= kernel.USAGE_WAIT
     assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
 
 

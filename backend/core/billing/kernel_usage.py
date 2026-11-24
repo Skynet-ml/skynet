@@ -45,6 +45,16 @@ MAX_LIFETIME_MS = 259_200_000
 # Covers the provider's delete call (``STOP_TIMEOUT`` in the Kernel provider)
 # and the read wait of a last command that ends at the funded end.
 STOP_MARGIN_MS = 120_000
+RECEIPT_FIELDS = (
+    "session_id",
+    "deleted_at",
+    "usage_status",
+    "usage",
+    "memory",
+    "headless",
+    "gpu",
+    "timeout_seconds",
+)
 # Statuses on the create call that prove Kernel made no browser. A 408 or a
 # 409 can follow a create that Kernel still finishes, so they stay pending.
 # A 502 or 503 stays pending by choice: Kernel does not document whether a
@@ -264,7 +274,9 @@ class KernelUsageReservation:
             measured_ms: Wall time from the create call to the confirmed delete,
                 or ``None`` when the delete is not confirmed.
         """
-        self.receipt = dict(receipt)
+        # The full details carry connection URLs, tags and policies that can
+        # hold session credentials, so the ledger keeps only billing fields.
+        self.receipt = {key: receipt[key] for key in RECEIPT_FIELDS if key in receipt}
         self.measured_ms = measured_ms
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:

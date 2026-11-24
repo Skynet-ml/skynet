@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterator
 from decimal import Decimal
@@ -19,7 +20,7 @@ from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.config import settings
 from core.sandbox.metering import usage_adapter
-from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 REQUEST = {"lifetime_ms": 300_000, "timeout_seconds": 300, "memory_gib": 8, "headless": False, "gpu": False}
 RECEIPT = {
@@ -167,6 +168,32 @@ def test_reserve_then_settle_charges_the_reported_uptime(database: Engine) -> No
     # 60 s x $0.0001333336/s = $0.0080000160.
     assert _actual_cents(runtime, reservation) == Decimal("0.80000160")
     assert runtime._pinned == {}
+
+
+def test_ledger_keeps_only_billing_fields_of_the_details(database: Engine) -> None:
+    """Store no connection URLs, tags or policies, which can hold session credentials.
+
+    Args:
+        database: The ledger database.
+    """
+    runtime = _runtime(database)
+    reservation = USAGE.reserve(runtime, REQUEST, operation_key="box-one")
+    USAGE.confirm(reservation, _browser())
+    secret_fields = {
+        "cdp_ws_url": "wss://cdp.example/secret-token",
+        "webdriver_ws_url": "wss://webdriver.example/secret-token",
+        "browser_live_view_url": "https://live.example/secret-token",
+        "base_url": "https://base.example/secret-token",
+        "tags": {"skynet-box": "secret-token"},
+        "chrome_policy": {"secret": "secret-token"},
+    }
+    reservation.record({**RECEIPT, **secret_fields, "memory": "8GiB"}, measured_ms=90_000)
+    USAGE.settle(reservation)
+    assert reservation.receipt == {**RECEIPT, "memory": "8GiB"}
+    with Session(database) as session:
+        stored = json.dumps([row.evidence for row in session.scalars(select(ExecutionUsageEvidenceModel))])
+    assert "ses-1" in stored
+    assert "secret-token" not in stored
 
 
 def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCaptureFixture) -> None:
