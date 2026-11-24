@@ -2021,8 +2021,11 @@ async def test_a_reserve_that_ends_with_the_cancel_of_the_start_wait_releases_it
         create = env._starting
         assert create is not None
         assert env._billing_call is not None
-        # A create in its grace gets no cancel from the teardown, so the
-        # teardown stays in its start wait until the reserve returns.
+        # Staged state: production sets _settling only in the create grace,
+        # never while the reserve runs. It holds the teardown in its start
+        # wait here. That stands for the real window of one loop turn,
+        # between starting.cancel() and the end of the create task, where a
+        # reserve can return with no create left to take its hold.
         env._settling = True
         stopping = asyncio.ensure_future(env.stop())
         await asyncio.sleep(0)
@@ -2059,11 +2062,18 @@ async def test_a_reserve_that_ends_with_the_cancel_of_the_start_wait_releases_it
     assert fake_sdk.create_calls == 0
 
 
-async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(fake_sdk: FakeCloud) -> None:
+@pytest.mark.parametrize("retry_terminates", [True, False])
+async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(
+    fake_sdk: FakeCloud, retry_terminates: bool
+) -> None:
     """Mark the hold pending once, and pass the cancel on, when the teardown is cancelled in its terminate.
+
+    A later stop terminates the box and settles the pending hold. When that
+    terminate fails too, the hold stays pending with no second pending call.
 
     Args:
         fake_sdk: The fake Sail cloud.
+        retry_terminates: True when the terminate of the later stop works.
     """
     env, made = _protected()
     await env.start()
@@ -2076,12 +2086,17 @@ async def test_a_cancel_during_the_terminate_keeps_the_hold_pending_once(fake_sd
         await stopping
     assert made[0].names().count("pending") == 1
     assert "settle" not in made[0].names()
-    # A later stop terminates the box again but finds no usage to settle.
     fake_sdk.terminate_gate.set()
-    await env.stop()
-    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    if retry_terminates:
+        await env.stop()
+        assert [box.terminated for box in fake_sdk.boxes] == [True]
+        assert made[0].names()[-1] == "settle"
+    else:
+        fake_sdk.terminate_fails.add(fake_sdk.boxes[0].id)
+        with pytest.raises(UsagePendingError, match="did not terminate"):
+            await env.stop()
+        assert "settle" not in made[0].names()
     assert made[0].names().count("pending") == 1
-    assert "settle" not in made[0].names()
 
 
 async def test_a_cancel_during_the_release_call_keeps_the_hold_pending_once(fake_sdk: FakeCloud) -> None:
@@ -2113,6 +2128,9 @@ async def test_a_cancel_during_the_release_call_keeps_the_hold_pending_once(fake
 async def test_a_stop_after_a_cancelled_teardown_terminates_and_settles_once(fake_sdk: FakeCloud) -> None:
     """Run a fresh teardown in a later stop when the first one was cancelled in its start wait.
 
+    The create was sent, so the cancel marks the hold pending once, and the
+    fresh teardown still settles it.
+
     Args:
         fake_sdk: The fake Sail cloud.
     """
@@ -2128,6 +2146,7 @@ async def test_a_stop_after_a_cancelled_teardown_terminates_and_settles_once(fak
     env._stop_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await stopping
+    assert made[0].names().count("pending") == 1
     with contextlib.suppress(BaseException):
         await starting
     # The start's own cleanup may run the fresh teardown first; the later
@@ -2135,6 +2154,7 @@ async def test_a_stop_after_a_cancelled_teardown_terminates_and_settles_once(fak
     await env.stop()
     await env.stop()
     assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert made[0].names().count("pending") == 1
     assert made[0].names().count("settle") == 1
 
 

@@ -741,6 +741,10 @@ class SailEnvironment(SandboxEnvironment):
                 # Nothing is terminated or settled yet, so a later stop() can
                 # run a fresh teardown instead of the cancelled one.
                 self._stop_task = None
+                if self._usage is not None and self._create_task is not None:
+                    # A box can exist once the create is sent; keep its hold
+                    # pending until a later stop() settles it.
+                    await self._pend_after_cancel(self._usage)
                 raise
         billing, self._billing_call = self._billing_call, None
         if billing is not None:
@@ -772,12 +776,10 @@ class SailEnvironment(SandboxEnvironment):
             try:
                 self._terminated = await _bounded(sailbox.terminate.aio(), "terminate the Sailbox")
             except BaseException:
-                # The box can still run, so its hold stays pending, and a
-                # later stop() gets the handle to try the terminate again.
+                # The box can still run, so its hold stays pending. A later
+                # stop() gets the handle and the usage, to terminate and settle.
                 self._sailbox = sailbox
-                usage, self._usage = self._usage, None
-                self._pending_marked = False
-                await self._pend_after_cancel(usage)
+                await self._pend_after_cancel(self._usage)
                 raise
         try:
             await self._settle(sailbox, end)
@@ -799,7 +801,6 @@ class SailEnvironment(SandboxEnvironment):
         usage, self._usage = self._usage, None
         if usage is None:
             return
-        self._pending_marked = False
         try:
             if sailbox is None and self._create_failed:
                 sailbox = await self._find_failed_create(usage)
@@ -849,11 +850,17 @@ class SailEnvironment(SandboxEnvironment):
             raise
 
     async def _mark_pending(self, usage: Any) -> None:
-        """Keep the hold pending, and note it, so a failure path does not mark it twice.
+        """Keep the hold pending once, so no path marks it twice.
+
+        The ledger keeps the first pending evidence and refuses a change, and
+        a retried teardown can come here again, so the flag lives as long as
+        the box.
 
         Args:
             usage: The usage reservation of the box.
         """
+        if self._pending_marked:
+            return
         self._pending_marked = True
         await asyncio.to_thread(usage.pending)
 
@@ -864,7 +871,7 @@ class SailEnvironment(SandboxEnvironment):
             usage: The usage reservation of the box, or ``None`` when there is none.
         """
         # A cancelled task cannot run again, so a later stop() needs a new one.
-        # It finds no usage, so it cannot settle or mark the hold again.
+        # The pending flag stays set, so that teardown never marks the hold again.
         self._stop_task = None
         if usage is None or self._pending_marked:
             return
