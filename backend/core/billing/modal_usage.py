@@ -194,12 +194,13 @@ class ModalUsageReservation:
             raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile it by hand.")
-        # The funded lifetime: the Modal timeout plus the boot and terminate margin.
         self.lifetime_ms: int = self.request["lifetime_ms"] + _LIFETIME_MARGIN_MS
         self.sandbox_id: str | None = None
         self.sent_at: float | None = None
         self.stopped_at: float | None = None
         self._sent_wall: float | None = None
+        # True once a create returned a handle, so a sandbox surely existed.
+        self._returned = False
 
     def sent(self) -> None:
         """Start the runtime clock just before the create call goes to Modal."""
@@ -218,6 +219,7 @@ class ModalUsageReservation:
         Raises:
             UsagePendingError: When Modal returned no sandbox id.
         """
+        self._returned = True
         sandbox_id = getattr(sandbox, "object_id", None)
         if not isinstance(sandbox_id, str) or not sandbox_id:
             raise UsagePendingError("The Modal sandbox returned no sandbox id.")
@@ -270,31 +272,34 @@ class ModalUsageReservation:
                 evidence=evidence,
             )
 
-    def fail(self, refusal: BaseException | None = None) -> None:
+    def fail(self, absent: bool = False) -> None:
         """Release the hold when no sandbox can exist, otherwise retain it.
 
-        No sandbox exists when the create was never sent, or when Modal
-        refused the create itself. A create that was sent and failed in any
-        other way may still have made one, so its hold stays pending.
+        No sandbox exists when the create was never sent. A create that was
+        sent and failed may still have made one, so its hold is released
+        only when a lookup by the box tag proved that no sandbox exists and
+        no create ever returned a sandbox.
 
         Args:
-            refusal: The create error that proves no sandbox exists, or ``None``.
+            absent: True when a lookup by the box tag succeeded and found no sandbox.
         """
-        if self.sent_at is None or (refusal is not None and self.sandbox_id is None):
+        current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
+        if current.state in {"settled", "released"}:
+            self.runtime.unpin(self.operation.id)
+            return
+        if self.sent_at is None or (absent and self.sandbox_id is None and not self._returned):
             if self.sent_at is None:
                 key = f"modal-unsent:{self.operation.id}"
-                evidence = {"provider": "modal", "reason": "The create call was never sent."}
+                reason = "The create call was never sent."
             else:
-                key = f"modal-refusal:{self.operation.id}"
-                evidence = {
-                    "provider": "modal",
-                    "error": type(refusal).__name__,
-                    "message": str(refusal)[:1000],
-                    "sent_at": self._sent_wall,
-                }
+                key = f"modal-absent:{self.operation.id}"
+                reason = "The create failed and a lookup by the box tag found no sandbox."
             try:
                 self.runtime.service.reject(
-                    self.operation.id, self.runtime.username, evidence_key=key, evidence=evidence
+                    self.operation.id,
+                    self.runtime.username,
+                    evidence_key=key,
+                    evidence={"provider": "modal", "reason": reason, "sent_at": self._sent_wall},
                 )
                 self.runtime.unpin(self.operation.id)
                 return
@@ -307,11 +312,13 @@ class ModalUsageReservation:
 
         Modal ends a sandbox at its timeout, so the funded lifetime (the
         timeout plus the boot and terminate margin) bounds the bill of a box
-        whose terminate was not confirmed. The billed time
-        never exceeds the funded lifetime, so the charge stays inside the hold.
+        whose terminate was not confirmed. The billed time never exceeds the
+        funded lifetime, so the charge stays inside the hold.
+        A box whose id could not be confirmed still settles once its terminate
+        is confirmed, keyed by the operation id.
 
         Raises:
-            UsagePendingError: When the box has no sandbox id.
+            UsagePendingError: When the box has no sandbox id and no confirmed terminate.
             BudgetError: When the charge breaks the reserved bounds.
         """
         try:
@@ -319,8 +326,8 @@ class ModalUsageReservation:
             if current.state == "settled":
                 self.runtime.unpin(self.operation.id)
                 return
-            if self.sandbox_id is None:
-                raise UsagePendingError("The Modal sandbox has no sandbox id to settle.")
+            if self.sandbox_id is None and self.stopped_at is None:
+                raise UsagePendingError("The Modal sandbox has no sandbox id or confirmed terminate to settle.")
             evidence = self._evidence()
             measured = evidence["measured_ms"]
             billed_ms = self.lifetime_ms if measured is None else min(measured, self.lifetime_ms)
@@ -329,7 +336,7 @@ class ModalUsageReservation:
             self.runtime.service.settle(
                 self.operation.id,
                 self.runtime.username,
-                evidence_key=f"modal-stop:{self.sandbox_id}",
+                evidence_key=f"modal-stop:{self.sandbox_id or self.operation.id}",
                 actual_cents=charge.total,
                 actual_wallet_cents=charge.wallet,
                 evidence={**evidence, "billed_ms": billed_ms, "source": _PRICING_URL, "provider_usd": str(usd)},

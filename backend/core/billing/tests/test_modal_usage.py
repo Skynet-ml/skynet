@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from core.billing import modal_usage
 from core.billing.budget_amounts import cent_units
-from core.billing.budgets import BudgetService
+from core.billing.budgets import BudgetConflictError, BudgetService
 from core.billing.modal_usage import ModalUsageReservation, quote_modal_sandbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
@@ -35,7 +35,11 @@ FUNDED_MS = 120_000
 
 @pytest.fixture(autouse=True)
 def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the usage markup to 1.0 so these tests check settlement arithmetic, not pricing policy."""
+    """Pin the usage markup to 1.0 so these tests check settlement arithmetic, not pricing policy.
+
+    Args:
+        monkeypatch: Pytest fixture that restores the setting after the test.
+    """
     monkeypatch.setattr(settings, "usage_markup", 1.0)
 
 
@@ -216,24 +220,74 @@ def test_confirm_records_the_start_time_for_reconciliation(database: Engine) -> 
     assert evidence.evidence["funded_ms"] == FUNDED_MS
 
 
-def test_refused_create_releases_the_hold(database: Engine) -> None:
-    """Release the hold when Modal refused the create, because no sandbox exists."""
+def test_absent_box_releases_the_hold(database: Engine) -> None:
+    """Release the hold when a lookup by the box tag found no sandbox after a failed create."""
     runtime = _runtime(database)
     reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
-    reservation.fail(PermissionError("quota"))
+    reservation.fail(absent=True)
     assert _operation(database).state == "released"
     assert runtime._pinned == {}
 
 
-def test_refusal_after_a_confirmed_sandbox_keeps_the_hold(database: Engine) -> None:
-    """Keep the hold when a sandbox id exists, even if the error looks like a refusal."""
+def test_absent_after_a_confirmed_sandbox_keeps_the_hold(database: Engine) -> None:
+    """Keep the hold when a sandbox id exists, even if a later lookup found no sandbox."""
     runtime = _runtime(database)
     reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.sent()
     reservation.confirm_created(SimpleNamespace(object_id="sb-1"))
-    reservation.fail(PermissionError("quota"))
+    reservation.fail(absent=True)
     assert _operation(database).state == "pending"
+
+
+def test_absent_after_a_returned_handle_keeps_the_hold(database: Engine) -> None:
+    """Keep the hold when a create returned a handle with no id, because a sandbox surely existed."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent()
+    with pytest.raises(UsagePendingError):
+        reservation.confirm_created(SimpleNamespace(object_id=None))
+    reservation.fail(absent=True)
+    assert _operation(database).state == "pending"
+
+
+def test_confirmed_terminate_settles_a_box_with_no_id(database: Engine) -> None:
+    """Settle a box whose id was never confirmed once its terminate is confirmed, keyed by the operation id."""
+    runtime = _runtime(database)
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.sent()
+    with pytest.raises(UsagePendingError):
+        reservation.confirm_created(SimpleNamespace(object_id=None))
+    reservation.stopped()
+    reservation.settle()
+    assert _operation(database).state == "settled"
+    with Session(database) as session:
+        keys = set(session.scalars(select(ExecutionUsageEvidenceModel.evidence_key)))
+    assert f"modal-stop:{reservation.operation.id}" in keys
+    reservation.fail()
+    assert _operation(database).state == "settled"
+    assert runtime._pinned == {}
+
+
+def test_lease_slice_is_claimed_for_the_same_request(database: Engine) -> None:
+    """Claim a pool lease slice reserved for the same request, and settle it like a fresh hold."""
+    runtime = _runtime(database)
+    slice_ = runtime.reserve(quote_modal_sandbox(CREATE), operation_key="slice", cost_kind="sandbox", role="runtime")
+    reservation = ModalUsageReservation(runtime, CREATE, operation_key="slice", reserved=slice_)
+    assert reservation.operation.id == slice_.id
+    _run(reservation, measured_sec=5)
+    assert _operation(database).state == "settled"
+    assert runtime._pinned == {}
+
+
+def test_lease_slice_for_another_request_is_refused(database: Engine) -> None:
+    """Refuse a lease slice whose fingerprint belongs to a different sandbox request."""
+    runtime = _runtime(database)
+    slice_ = runtime.reserve(quote_modal_sandbox(CREATE), operation_key="slice", cost_kind="sandbox", role="runtime")
+    with pytest.raises(BudgetConflictError, match="different sandbox request"):
+        ModalUsageReservation(runtime, {**CREATE, "cpu_cores": 1}, operation_key="slice", reserved=slice_)
+    assert _operation(database).state == "reserved"
+    assert runtime._pinned == {}
 
 
 def test_failure_after_the_create_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
