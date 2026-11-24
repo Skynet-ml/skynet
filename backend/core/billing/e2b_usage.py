@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
+from ..sandbox.capabilities import SandboxSpecError
 from .budget_amounts import cent_units
 from .budgets import BudgetConflictError, OperationSnapshot
 from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, exact_nonnegative, operation_quote
@@ -170,12 +171,13 @@ class E2BUsageReservation:
             info: The SDK ``SandboxInfo`` of the created box.
 
         Raises:
-            UsagePendingError: When the box is larger than its funding.
+            SandboxSpecError: When the box is larger than its funding. The
+                outcome is final: the caller kills the box and settles.
         """
         self.sandbox_id = info.sandbox_id
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, info.sandbox_id)
         if info.cpu_count > self.vcpus or info.memory_mb > self.memory_mb:
-            raise UsagePendingError("The E2B template is larger than the funded CPU and memory size.")
+            raise SandboxSpecError("The E2B template is larger than the funded CPU and memory size.")
         self.box_vcpus = info.cpu_count
         self.box_memory_mb = info.memory_mb
 

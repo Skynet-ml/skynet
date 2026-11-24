@@ -12,6 +12,8 @@ Changes:
   also after a failed or cancelled start.
 - The create call goes through ``create_with_capacity``. A 429, 502 or 503
   answer is a capacity signal, and the capacity wait has no attempt limit.
+  A protected box waits only after a rate limit, at most
+  ``PROTECTED_RATE_LIMIT_ATTEMPTS`` times.
   The SDK's own create retries are off (``retries=0``), so the capacity wait
   is the only retry and other create errors are not retried.
 - Each box carries a box tag. A stop kills the known box and every other
@@ -43,7 +45,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 from core.billing.budgets import BudgetError
-from core.billing.e2b_usage import MAX_MEMORY_MB, USAGE
+from core.billing.e2b_usage import MAX_MEMORY_MB, MAX_VCPUS, USAGE
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 
@@ -108,12 +110,24 @@ RENEW_RETRY = 30.0
 # beyond each new timeout, because E2B starts the timeout when the call
 # arrives, which can be up to this long after it is sent.
 RENEW_CALL_TIMEOUT = 30.0
+# E2B ends every session after 24 hours, and the quote prices at most that.
+E2B_MAX_LIFETIME = 24 * 3600
+# The last extension of a protected box funds the time already used, so it
+# also covers the create time limit, the call time limit and the read pacing.
+# A longer spec would get an unpriced extension and end early.
+MAX_PROTECTED_LIFETIME = E2B_MAX_LIFETIME - CREATE_TIMEOUT - RENEW_CALL_TIMEOUT - RENEW_LEAD
+# A protected box keeps its hold during each rate-limit wait: the operation
+# key is the box's stable identity, so a new hold for each attempt would
+# need a new key and would break the resume of a settled box. This limit
+# bounds how long the hold stays with no box.
+PROTECTED_RATE_LIMIT_ATTEMPTS = 5
 TIMEOUT_EXIT_CODE = 124
 CAPACITY_STATUSES = frozenset({429, 502, 503})
 
 E2B_CAPABILITIES = EnvironmentCapabilities(
     name="e2b",
     billable=True,
+    max_vcpus=MAX_VCPUS,
     network_modes=frozenset(NetworkMode),
     dynamic_network_policy=True,
 )
@@ -186,6 +200,19 @@ def _is_rate_limit(error: BaseException) -> bool:
         and isinstance(error, SandboxException)
         and getattr(error, "status_code", None) == 429
     )
+
+
+def _is_client_error(error: BaseException) -> bool:
+    """Tell whether E2B refused a create with a 4xx answer, which opens no box.
+
+    Args:
+        error: The error of the create call.
+
+    Returns:
+        True for a status from 400 to 499.
+    """
+    status = getattr(error, "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500
 
 
 def _is_dispatch_retryable(error: BaseException) -> bool:
@@ -273,10 +300,13 @@ class E2BEnvironment(SandboxEnvironment):
             usage_factory: Makes the usage reservation of a protected box.
 
         Raises:
-            SandboxSpecError: A protected box has no operation key.
+            SandboxSpecError: A protected box has no operation key, or its
+                lifetime is longer than its extensions can fund.
         """
         if budget is not None and spec.operation_key is None:
             raise SandboxSpecError("A protected E2B sandbox needs an operation key.")
+        if budget is not None and spec.lifetime_seconds > MAX_PROTECTED_LIFETIME:
+            raise SandboxSpecError(f"A protected E2B sandbox can live at most {MAX_PROTECTED_LIFETIME:.0f} seconds.")
         super().__init__(spec)
         self._budget = budget
         self._usage_factory = usage_factory
@@ -288,6 +318,10 @@ class E2BEnvironment(SandboxEnvironment):
         self._funded_until: float | None = None
         self._budget_stop: BudgetReached | None = None
         self._create_sent_at: float | None = None
+        # True while a create may have opened a box that this environment
+        # never saw, so an empty sweep does not prove that no box runs.
+        self._create_unknown = False
+        self._rate_limits = 0
         self._pacing = pacing
         self._at_capacity = at_capacity
         self._clock = clock or SYSTEM_CLOCK
@@ -350,8 +384,10 @@ class E2BEnvironment(SandboxEnvironment):
                 clock=self._clock,
             )
         first_slice = self._first_slice()
+        sent_at = self._create_sent_at
+        assert sent_at is not None, "a successful create records its send time"
         # E2B starts the timeout when the create arrives, never before it was sent.
-        self._funded_until = self._create_sent_at + first_slice
+        self._funded_until = sent_at + first_slice
         if first_slice < self.spec.lifetime_seconds:
             deadline = self._clock.monotonic() + self.spec.lifetime_seconds
             self._renewer = asyncio.create_task(self._renew_loop(self._funded_until, deadline))
@@ -362,6 +398,8 @@ class E2BEnvironment(SandboxEnvironment):
 
         A protected box retries only a rate-limit refusal, which opens no
         box, so the retry reuses the reservation; the teardown settles it.
+        The hold stays during the wait; ``PROTECTED_RATE_LIMIT_ATTEMPTS``
+        bounds it.
 
         Yields:
             The usage reservation, or ``None`` for an unprotected box.
@@ -464,10 +502,12 @@ class E2BEnvironment(SandboxEnvironment):
         Raises:
             ProviderAtCapacityError: E2B answered 429, 502 or 503. A protected
                 box waits only after a rate limit.
+            SandboxInfraError: A protected box hit the rate-limit attempt limit.
             StartTimeoutError: The create did not finish in time.
-            UsagePendingError: The box is larger than its funding.
+            SandboxSpecError: The box is larger than its funding.
         """
         self._create_dispatched = True
+        self._create_unknown = True
         self._create_sent_at = self._clock.monotonic()
         if usage is not None:
             # Only a rate-limit refusal is retried for a protected box, and it
@@ -476,6 +516,7 @@ class E2BEnvironment(SandboxEnvironment):
         try:
             async with asyncio.timeout(CREATE_TIMEOUT) as deadline:
                 self._box = await self.sandbox_cls.create(**self._create_options())
+            self._create_unknown = False
         except TimeoutError:
             if not deadline.expired():
                 raise
@@ -486,6 +527,15 @@ class E2BEnvironment(SandboxEnvironment):
             # A 502 or 503 can come after E2B opened the box. A protected box
             # must not wait for capacity while that box runs unmetered, so it
             # fails the start; the teardown sweeps the box and settles.
+            if _is_rate_limit(error) or _is_client_error(error):
+                # E2B refused the create, so it opened no box.
+                self._create_unknown = False
+            if usage is not None and _is_rate_limit(error):
+                # The refused attempt opened no box, so it must not count as runtime.
+                usage.started_at = None
+                self._rate_limits += 1
+                if self._rate_limits >= PROTECTED_RATE_LIMIT_ATTEMPTS:
+                    raise SandboxInfraError("E2B kept refusing the create with a rate limit.") from error
             if _is_capacity_error(error) and (usage is None or _is_rate_limit(error)):
                 raise ProviderAtCapacityError(f"E2B has no capacity: {type(error).__name__}") from error
             raise
@@ -519,8 +569,11 @@ class E2BEnvironment(SandboxEnvironment):
                 continue
             sent = self._clock.monotonic()
             try:
+                # A call that times out here can still reach E2B later and
+                # run the box past its funding. The settle caps the charge at
+                # the reservation, so Skynet, not the user, pays that overrun.
                 async with asyncio.timeout(RENEW_CALL_TIMEOUT):
-                    await box.set_timeout(seconds)
+                    await box.set_timeout(seconds, request_timeout=RENEW_CALL_TIMEOUT)
             except Exception as error:
                 logger.warning("E2B sandbox %s did not extend: %s", self.name, type(error).__name__)
                 if self._clock.monotonic() + RENEW_RETRY >= expires_at:
@@ -629,10 +682,19 @@ class E2BEnvironment(SandboxEnvironment):
             # A create that timed out, or that answered 502 after the box
             # appeared, can leave a box that this environment never saw.
             try:
-                await asyncio.wait_for(self._kill_tagged({BOX_TAG: self.name}, skip=known), STOP_TIMEOUT)
+                killed, failed = await asyncio.wait_for(
+                    self._kill_tagged({BOX_TAG: self.name}, skip=known), STOP_TIMEOUT
+                )
             except Exception as error:
                 confirmed = False
                 logger.warning("E2B sandbox %s sweep failed: %s", self.name, type(error).__name__)
+            else:
+                if failed:
+                    confirmed = False
+                # The E2B list can lag behind a create, so an empty sweep after
+                # a create with an unknown outcome does not prove that no box runs.
+                if self._create_unknown and box is None and not killed:
+                    confirmed = False
         await self._settle(confirmed)
 
     async def _settle(self, confirmed: bool) -> None:
@@ -659,7 +721,7 @@ class E2BEnvironment(SandboxEnvironment):
                 self._settle_error = pending
 
     @classmethod
-    async def _kill_tagged(cls, metadata: Mapping[str, str], *, skip: str | None = None) -> int:
+    async def _kill_tagged(cls, metadata: Mapping[str, str], *, skip: str | None = None) -> tuple[int, int]:
         """Kill every listed box whose metadata matches.
 
         A failure on one box does not stop the sweep.
@@ -669,10 +731,12 @@ class E2BEnvironment(SandboxEnvironment):
             skip: A box id that is already stopped.
 
         Returns:
-            The number of boxes that E2B confirmed as killed.
+            The number of boxes that E2B confirmed as killed, and the number
+            of kill calls that failed.
         """
         paginator = cls.sandbox_cls.list(query=SandboxQuery(metadata=dict(metadata)))
         killed = 0
+        failed = 0
         while paginator.has_next:
             for item in await paginator.next_items():
                 if item.sandbox_id == skip:
@@ -681,8 +745,9 @@ class E2BEnvironment(SandboxEnvironment):
                     if await cls.sandbox_cls.kill(item.sandbox_id):
                         killed += 1
                 except Exception as error:
+                    failed += 1
                     logger.warning("E2B sandbox %s did not stop: %s", item.sandbox_id, type(error).__name__)
-        return killed
+        return killed, failed
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
@@ -696,7 +761,8 @@ class E2BEnvironment(SandboxEnvironment):
         """
         if cls.sandbox_cls is None:
             return 0
-        return await cls._kill_tagged({JOB_TAG: job_id})
+        killed, _ = await cls._kill_tagged({JOB_TAG: job_id})
+        return killed
 
     def _require_box(self) -> Any:
         """Return the running box.

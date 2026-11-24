@@ -17,6 +17,7 @@ from core.billing.e2b_usage import USAGE, E2BUsageReservation, quote_e2b_sandbox
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.config import settings
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.metering import usage_adapter
 from core.storage.models import Base, BillingCustomerModel
 
@@ -214,9 +215,9 @@ def test_extend_grows_the_coverage_and_the_charge_cap(database: Engine) -> None:
 def test_confirm_refuses_a_box_larger_than_its_funding(database: Engine) -> None:
     """Refuse a template with more CPU or memory than the reservation covers."""
     reservation = USAGE.reserve(_runtime(database), REQUEST, operation_key="box")
-    with pytest.raises(UsagePendingError):
+    with pytest.raises(SandboxSpecError):
         USAGE.confirm(reservation, _info(cpu_count=4))
-    with pytest.raises(UsagePendingError):
+    with pytest.raises(SandboxSpecError):
         USAGE.confirm(reservation, _info(memory_mb=4096))
 
 
