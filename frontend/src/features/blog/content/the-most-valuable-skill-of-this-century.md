@@ -32,9 +32,9 @@ On Terminal-Bench 4.1 (66 expert terminal tasks), running a second try already l
 
 {{lever: 4}}
 
-Google Research, Google DeepMind, and MIT compared a single agent against four team setups across six benchmarks with the same tools and budget: independent (no talk), centralized (a manager splits work and checks answers), decentralized (peers talk directly), and hybrid (manager plus peer talk) [17].
+Google Research, Google DeepMind, and MIT researchers compared a single agent against four team setups across six benchmarks with the same tools and budget [17]. In an independent setup, agents worked separately without talking to each other and combined their outputs only at the end. In a centralized setup, a manager agent split up the job, handed pieces to worker agents, and checked their answers. In a decentralized setup, agents talked directly to one another as peers with no manager. A hybrid setup combined both, pairing a manager with peer-to-peer talk between workers [17].
 
-The right setup depended on the job. Teams crushed a single agent on parallelizable work like financial research, but hurt performance on step-by-step planning where extra back-and-forth got in the way. Unchecked independent agents also amplified errors 17.2x, versus 4.4x with a manager [17].
+The right setup depended on the job. Teams crushed a single agent on parallelizable work like financial research, but hurt performance on step-by-step planning where extra back-and-forth got in the way [17].
 
 {{figure: comms | Mean benchmark score of a single agent versus all four team setups across all six benchmarks [17].}}
 
@@ -48,9 +48,9 @@ On AutomationBench (200 workplace tasks), EnvOpt built one improved workspace us
 
 {{lever: 7}}
 
-Extra tries only scale when a metric can tell which attempt worked [19]. Researchers at Stanford, Oxford, and Google DeepMind showed the gap clearly: with unit tests on SWE-bench Lite, more samples kept lifting the score; without an automatic verifier on MATH, voting and reward models stalled even as right answers piled up in the pool [19].
+Extra attempts only pay off when your metric can separate the right answer from a plausible wrong one [19]. Researchers at Stanford, UC Berkeley, and NVIDIA showed how much the scoring method itself moves results: replacing a coarse discrete judge with continuous probability scores, checked repeatedly across clear sub-criteria, pushed frontier coding and medical agents to new highs and beat specialized trained reward models zero-shot [19].
 
-{{figure: metric | Repeated sampling with and without an automatic verifier: SWE-bench Lite with unit tests, and MATH with an oracle verifier against majority voting or reward models [19].}}
+{{figure: metric | LLM-as-a-Verifier results across coding, medical, and robotics benchmarks [19]. Left: picking the best attempt from candidate pools versus one try and a perfect oracle. Right: RoboRewardBench preference accuracy, where changing only the scoring method on the same zero-shot model beats trained robotics reward models.}}
 
 ## A benchmark score measures the harness too
 
@@ -66,9 +66,7 @@ Sometimes all a harness adds is a small nudge. Nvidia researchers took Claude Op
 2. Problems that need a bespoke setup before AI can solve them, like the ARC-AGI-3 harnesses above [15], [21].
 3. Problems AI can't solve yet, where only more training can raise the ceiling.
 
-AI already handles the first kind, and only the labs can work on the third. The middle bucket is the big opportunity for everyone else.
-
-That bucket keeps growing. As models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable problems opens up from above.
+AI already handles the first kind, and only the labs can work on the third. The middle bucket is the big opportunity for everyone else, and it keeps growing: as models improve and inference gets cheaper, easier tasks move into one-shot work while a larger wave of previously unsolvable problems opens up from above.
 
 {{figure: shift | As models improve and intelligence gets cheaper, one-shot problems grow and previously unsolvable problems move into the bespoke-solution bucket, keeping the middle opportunity large.}}
 
@@ -190,10 +188,10 @@ Skynet is model-agnostic and vendor-agnostic, running locally or on the web, bec
     - AutomationBench (200 test tasks, Table 1): Claude Haiku 4.5 (target) rises from 2.33% to 16.67% pass rate while cost drops 72.73% ($42.36 to $11.55)
     - Transferred unchanged to four other models on AutomationBench: Claude Haiku 5.5 rises from 20.7% to 32.8% (-68.74% cost, $4.83 to $1.51); GPT-5.6 Luna rises from 19.17% to 24.67% (-88.63% cost, $17.42 to $1.98); Claude Opus 4.8 rises from 28.50% to 33.33% (-77.41% cost, $358.13 to $80.90); Claude Opus 5 rises from 33.83% to 35.17% (-68.13% cost, $236.18 to $75.26)
     - Stacked on top of Meta-Harness for Haiku 4.5 (Table 4): pass rate rises from 7.00% to 18.17% (+11.17 percentage points) while cost drops a further 83.4% ($75.33 to $12.47)
-19. B. Brown et al., "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling," *arXiv:2407.21787*, July 31, 2024, rev. Dec. 30, 2024. [Online]. Available: <https://arxiv.org/abs/2407.21787>
-    - SWE-bench Lite (unit tests verify each patch): DeepSeek-Coder-V2-Instruct rises from 15.9% at 1 sample to 56% at 250 samples, beating the 43% single-sample state of the art
-    - MATH (Llama-3-8B-Instruct, 100 to 10,000 samples): coverage with a perfect verifier rises from 82.9% to 98.44%
-    - Without an automatic verifier on MATH: across majority voting and reward models, the largest gain is only from 40.50% to 41.41% over the same 100 to 10,000 sample range
+19. J. Kwok, S. Li, P. Atreya, Y. Liu, Y. Jiang, C. Finn, M. Pavone, I. Stoica, and A. Mirhoseini, "LLM-as-a-Verifier: A General-Purpose Verification Framework," *arXiv:2607.05391*, July 7, 2026. [Online]. Available: <https://arxiv.org/abs/2607.05391>
+    - Continuous verification: computes expected scores over scoring-token logits rather than discrete judge outputs, scaled via score granularity, repeated checks, and criteria decomposition, with no extra training
+    - Table 3 (candidate pool selection): Terminal-Bench V2 (GPT-5.5, 5 tries) rises from 83.1% Pass@1 to 86.5% (oracle 92.1%); SWE-bench Verified (Opus 4.5, Gemini 3 Flash, and MiniMax M2.5, 3 tries) rises from 76.1% mean Pass@1 to 78.2% (oracle 84.4%); MedAgentBench (Claude Opus 4.8, 5 tries) rises from 70.2% Pass@1 to 73.3% (oracle 75.0%)
+    - Table 4 (RoboRewardBench, 500 trajectory pairs): same zero-shot Qwen 3.6 35B model jumps from 70.8% as a discrete LLM-as-a-Judge to 87.4% as LLM-as-a-Verifier, beating TOPReward (74.7%), Robometer-4B (78.8%), and RoboReward-8B (81.4%)
 20. G. Kamradt, "This is the first 100% we've seen on v3," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/GregKamradt/status/2122759751159447888>. Quoted post: ARC Prize, "GPT-6.2 Astra from OpenAI on ARC-AGI (Verified)," *X*, Nov. 17, 2026. [Online]. Available: <https://x.com/arcprize/status/2122751233442156678>
     - 100%: GPT-6.2 Astra on ARC-AGI-3 with the OpenAI harness, about $4,100, the first 100% score ARC Prize reports on the benchmark
     - 70.3%: the same model in the standard harness, about $24,200
