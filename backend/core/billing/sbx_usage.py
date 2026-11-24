@@ -82,10 +82,9 @@ def quote_sbx_sandbox(request: Mapping[str, Any]) -> OperationQuote:
     shape = (request.get("cpus"), request.get("memory_mib"))
     lifetime_ms = request.get("lifetime_ms")
     if (
-        shape not in SHAPE_USD_PER_HOUR
-        or any(type(value) is not int for value in shape)
-        or isinstance(lifetime_ms, bool)
-        or not isinstance(lifetime_ms, int)
+        any(type(value) is not int for value in shape)
+        or shape not in SHAPE_USD_PER_HOUR
+        or type(lifetime_ms) is not int
         or not 0 < lifetime_ms <= LIFETIME_CEILING_MS
     ):
         raise UnpricedOperationError("sbx requires a published shape and a lifetime of at most 12 hours.")
@@ -134,8 +133,8 @@ class SbxUsageReservation:
         """
         self.runtime = runtime
         self.request = dict(request)
-        self.lifetime_ms = request["lifetime_ms"]
         self.quote = quote_sbx_sandbox(request)
+        self.lifetime_ms = request.get("lifetime_ms")
         self.box = box_tag(operation_key)
         self._clock = clock
         if reserved is None:

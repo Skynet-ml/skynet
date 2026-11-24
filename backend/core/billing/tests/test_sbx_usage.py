@@ -132,6 +132,8 @@ def test_quote_covers_the_lifetime_and_grace_at_the_shape_rate(cpus: int, memory
         {"memory_mib": 8192},
         {"cpus": True, "memory_mib": 2048},
         {"cpus": 2.0},
+        {"cpus": [2]},
+        {"cpus": None},
         {"memory_mib": 4096.0},
         {"lifetime_ms": 0},
         {"lifetime_ms": 43_200_001},
@@ -298,3 +300,9 @@ def test_refused_release_keeps_the_hold_pending(database: Engine, monkeypatch: p
 def test_lifetime_ceiling_matches_the_provider_cap() -> None:
     """Keep the quote ceiling equal to the cap the sbx provider puts on every timeout."""
     assert LIFETIME_CEILING_MS == sbx._MAX_LIFETIME_SECONDS * 1000
+
+
+def test_request_without_a_lifetime_is_not_reserved(database: Engine) -> None:
+    """Refuse a request with no lifetime as unpriced, before any ledger write."""
+    with pytest.raises(UnpricedOperationError):
+        SbxUsageReservation(_runtime(database), {"cpus": 2, "memory_mib": 4096}, operation_key="box")

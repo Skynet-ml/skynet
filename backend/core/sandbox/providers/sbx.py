@@ -59,9 +59,6 @@ import httpx
 
 from core.billing.sbx_usage import SbxUsageReservation
 
-if TYPE_CHECKING:
-    from core.billing.runtime import BudgetRuntime
-
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
@@ -73,6 +70,9 @@ from ..errors import (
 )
 from ..resources import ResourceMode, SandboxSpec
 from ..timeouts import Phase, PhaseTimeouts
+
+if TYPE_CHECKING:
+    from core.billing.runtime import BudgetRuntime
 
 try:
     from python_multipart.multipart import MultipartParser, parse_options_header
@@ -1397,6 +1397,10 @@ class SbxEnvironment(SandboxEnvironment):
         finally:
             # The bill closes first and a cancel cannot cut it short, so a
             # cancel during the slow client closes never skips it.
+            if ended == "unknown" and self._orphan_found:
+                # A cancel hit the delete of a sandbox the stop found, so it
+                # exists and may run until its sbx timeout.
+                ended = "leaked"
             usage, self._usage = self._usage, None
             if usage is not None:
                 await _uncancellable(asyncio.ensure_future(asyncio.to_thread(self._close_usage, usage, ended)))

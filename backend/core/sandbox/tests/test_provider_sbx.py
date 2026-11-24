@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import itertools
 import json
 import shlex
@@ -1276,3 +1277,73 @@ async def test_cancel_during_the_client_closes_still_settles(monkeypatch: pytest
     with pytest.raises(asyncio.CancelledError):
         await env.stop()
     assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def _cancel_a_hanging_create(env: SbxEnvironment) -> asyncio.Future[None]:
+    """Start the box with a create that hangs, then cancel the start.
+
+    Args:
+        env: The box.
+
+    Returns:
+        The cancelled start task, which runs the stop.
+    """
+    CLOUD.create_hangs = True
+    task = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    return task
+
+
+async def test_found_orphan_whose_delete_fails_settles_the_whole_lifetime() -> None:
+    """Settle without a stop time when the stop finds the lost sandbox but cannot delete it."""
+    CLOUD.failures[("DELETE", "")] = (500, "internal")
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert RESERVED[0].calls == ["start", "settle"]
+
+
+async def test_orphan_not_found_after_a_cancelled_create_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the hold pending when the list never shows the sandbox of a cancelled create."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.list_hides = 10**6
+    task = await _cancel_a_hanging_create(_protected())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert CLOUD.calls("DELETE", "") == []
+    assert RESERVED[0].calls == ["start", "pending"]
+
+
+async def test_cancel_during_a_found_orphan_delete_settles_the_whole_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settle, not keep pending, a lost sandbox the stop found when a cancel hits its delete."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    deleting = asyncio.Event()
+
+    async def hanging_delete(request: httpx.Request) -> httpx.Response:
+        """Hang every delete, and serve every other call.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The fake answer.
+        """
+        if request.method == "DELETE":
+            deleting.set()
+            await asyncio.sleep(60)
+        return await _handle(request)
+
+    monkeypatch.setattr(sbx, "_make_transport", lambda: httpx.MockTransport(hanging_delete))
+    env = _protected()
+    task = await _cancel_a_hanging_create(env)
+    await asyncio.wait_for(deleting.wait(), 5)
+    assert env._stop_task is not None
+    env._stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with contextlib.suppress(asyncio.CancelledError):
+        await env._stop_task
+    assert RESERVED[0].calls == ["start", "settle"]
