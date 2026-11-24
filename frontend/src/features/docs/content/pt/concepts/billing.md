@@ -110,7 +110,7 @@ A computação da sandbox faz parte do limite de gastos da execução, mesmo qua
 
 ## Serviço
 
-Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Defina `max_cost_cents` na requisição para limitar uma chamada. Leia [Resultados](/docs/guides/results).
+Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Você pode definir `max_cost_cents` na requisição para registrar o máximo que aceita por uma chamada. O seu saldo limita a chamada. Leia [Resultados](/docs/guides/results).
 
 ## Planos
 

@@ -110,7 +110,7 @@ Sandbox compute is part of the run's spending limit, also when the model calls u
 
 ## Serving
 
-Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. Set `max_cost_cents` in the request to cap one call. Read [Results](/docs/guides/results).
+Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. You can set `max_cost_cents` in the request to record the most you accept for one call. Your balance bounds the call. Read [Results](/docs/guides/results).
 
 ## Plans
 

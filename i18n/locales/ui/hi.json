@@ -3607,7 +3607,7 @@
   "submit.blackbox.review.models": "मॉडल",
   "submit.blackbox.review.name_suggested": "आपके लक्ष्य से सुझाया गया",
   "submit.budget.label": "खर्च की सीमा",
-  "submit.budget.explainer": "सेटअप और ऑप्टिमाइज़ेशन को कवर करती है। सीमा पूरी होने पर रुक जाती है।",
+  "submit.budget.explainer": "ऑप्टिमाइज़ेशन को कवर करती है। सेटअप जाँचों का भुगतान आपके बैलेंस से होता है।",
   "submit.budget.error.empty": "जारी रखने के लिए खर्च की सीमा दर्ज करें।",
   "submit.budget.error.invalid": "डॉलर राशि दर्ज करें, उदाहरण के लिए {suggested}।",
   "submit.budget.error.fraction": "राशि सेंट तक जाती है — अधिकतम दो दशमलव स्थानों का उपयोग करें।",

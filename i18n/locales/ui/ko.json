@@ -3607,7 +3607,7 @@
   "submit.blackbox.review.models": "모델",
   "submit.blackbox.review.name_suggested": "목표에서 제안됨",
   "submit.budget.label": "지출 한도",
-  "submit.budget.explainer": "설정과 최적화를 포함합니다. 한도에 도달하면 중단됩니다.",
+  "submit.budget.explainer": "최적화를 포함합니다. 설정 확인 비용은 잔액에서 결제됩니다.",
   "submit.budget.error.empty": "계속하려면 지출 한도를 입력하세요.",
   "submit.budget.error.invalid": "달러 금액을 입력하세요(예: {suggested}).",
   "submit.budget.error.fraction": "금액은 센트 단위까지 가능합니다 — 소수점 이하 두 자리까지 사용하세요.",

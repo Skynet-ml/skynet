@@ -647,23 +647,16 @@ def test_failed_or_uncertain_paid_setup_never_queues(harness: _Harness, pending_
     assert budget.setup_spent_cents == (0 if pending_usage else 1)
 
 
-@pytest.mark.parametrize(
-    ("stop", "detail"),
-    [
-        (BudgetInsufficientError, "The spending limit is below the minimum this run needs."),
-        (AccountFundsError, "Payload validation failed."),
-    ],
-)
-def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, stop: type[Exception], detail: str
+@pytest.mark.parametrize("stop", [BudgetInsufficientError, AccountFundsError])
+def test_a_check_stopped_by_the_budget_names_the_balance(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, stop: type[Exception]
 ) -> None:
-    """Name a too-low limit, not the payload, when the limit stopped the setup check.
+    """Name the balance, not the payload or the limit, when a budget stop ends the setup check (SKY-925).
 
     Args:
         harness: Real legacy submission routes and spending authority.
         monkeypatch: Make the setup check stop on the budget.
         stop: The budget stop the check raises.
-        detail: Start of the expected refusal text.
     """
 
     def stopped(
@@ -685,8 +678,8 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
 
     monkeypatch.setattr(preflight_execution, "_verify_anything", stopped)
     response = harness.client.post(ROUTE, json=_payload(total=1))
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"].startswith(detail)
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
     assert harness.count(JobModel) == 0
 
 
@@ -770,6 +763,30 @@ def test_a_limit_the_balance_sets_needs_one_lease_of_balance_after_the_setup_che
     if status == 402:
         assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
     assert harness.count(JobModel) == (1 if status == 201 else 0)
+
+
+@pytest.mark.parametrize("field", [None, preflight_execution.BALANCE_FIELD], ids=["plain", "balance"])
+def test_a_setup_budget_stop_names_the_balance_not_the_limit(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, field: str | None
+) -> None:
+    """Refuse a run whose setup check the budget stopped as a balance problem, even under the user's own limit.
+
+    Setup bills the balance only (SKY-925), so a higher limit cannot fix it.
+
+    Args:
+        harness: Real legacy submission routes and spending authority.
+        monkeypatch: Stands in a setup check that the budget stopped.
+        field: The failed budget check's field.
+    """
+    check = preflight_execution.WizardPreflightCheck(key="budget", status="failed", message="stop", field=field)
+    checked = SimpleNamespace(status="failed", pending_reason=None, checks=[check])
+    monkeypatch.setattr(submissions, "run_preflight", lambda *args, **kwargs: checked)
+
+    response = harness.client.post(ROUTE, json=_payload(total=500))
+
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.insufficient"]
+    assert harness.count(JobModel) == 0
 
 
 def test_a_byok_run_with_a_balance_below_one_lease_is_refused(

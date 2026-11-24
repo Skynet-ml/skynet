@@ -176,9 +176,8 @@ def _canonical_execution_payload(request: WizardPreflightRequest, username: str,
 
 
 BUDGET_CHECK_KEY = "budget"
-# A failed budget check names the balance as what to fix when the account
-# balance refused the work. Setup bills the balance only (SKY-925), so raising
-# the spending limit cannot help then.
+# A failed budget check always names the balance as what to fix: setup bills
+# the balance only (SKY-925), so raising the spending limit cannot help.
 BALANCE_FIELD = "balance"
 # A runtime reports a budget stop only by its type name; these rebuild it.
 _BUDGET_STOPS = {stop.__name__: stop for stop in (BudgetInsufficientError, AccountFundsError)}
@@ -647,8 +646,9 @@ def _perform_preflight(
             ),
         )
     except BudgetInsufficientError as error:
-        field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
-        result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
+        # Setup bills the balance only (SKY-925), so a guest that relays a plain
+        # budget stop still ran out of balance, never out of limit.
+        result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), BALANCE_FIELD)]}
     except RepoGateError as error:
         result = {
             "checks": [

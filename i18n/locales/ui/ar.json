@@ -3607,7 +3607,7 @@
   "submit.blackbox.review.models": "النماذج",
   "submit.blackbox.review.name_suggested": "مقترح من هدفك",
   "submit.budget.label": "حد الإنفاق",
-  "submit.budget.explainer": "يغطي الإعداد والتحسين. يتوقف عند بلوغ الحد.",
+  "submit.budget.explainer": "يغطي التحسين. تُدفع فحوصات الإعداد من رصيدك.",
   "submit.budget.error.empty": "أدخل حدًا للإنفاق للمتابعة.",
   "submit.budget.error.invalid": "أدخل مبلغًا بالدولار، مثل {suggested}.",
   "submit.budget.error.fraction": "تصل دقّة المبالغ إلى السنت — استخدم منزلتين عشريتين كحد أقصى.",

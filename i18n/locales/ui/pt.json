@@ -3607,7 +3607,7 @@
   "submit.blackbox.review.models": "Modelos",
   "submit.blackbox.review.name_suggested": "Sugerido a partir do seu objetivo",
   "submit.budget.label": "Limite de gastos",
-  "submit.budget.explainer": "Cobre a configuração e a otimização. Para quando o limite é atingido.",
+  "submit.budget.explainer": "Cobre a otimização. As verificações de configuração são pagas com o seu saldo.",
   "submit.budget.error.empty": "Introduza um limite de gastos para continuar.",
   "submit.budget.error.invalid": "Introduza um montante em dólares, por exemplo {suggested}.",
   "submit.budget.error.fraction": "Os valores vão até ao cêntimo — use no máximo duas casas decimais.",

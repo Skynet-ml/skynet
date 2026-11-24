@@ -17,7 +17,7 @@ SPENT = "The next operation needs up to $1.35, but only $0.53 of the $0.53 limit
 @pytest.mark.parametrize(
     ("error", "key", "field"),
     [
-        (BudgetInsufficientError(SPENT), "budget", None),
+        (BudgetInsufficientError(SPENT), "budget", "balance"),
         (AccountFundsError("The account cannot fund the next operation."), "budget", "balance"),
         (RuntimeError(SPENT), "setup", None),
     ],
@@ -29,8 +29,9 @@ def test_preflight_reports_a_reservation_over_the_limit_as_a_budget_check(
 
     The sandbox supervisor reports every failure as an error event, so this
     drives the real ``_verify_anything`` through that event rather than
-    raising past it. A stop the account balance caused names the balance, so
-    the wizard does not offer to raise a limit that was never the problem.
+    raising past it. Setup bills the balance only (SKY-925), so every budget
+    stop names the balance, even a plain one the guest relays. The wizard then
+    does not offer to raise a limit that was never the problem.
     """
 
     class _Gateway:

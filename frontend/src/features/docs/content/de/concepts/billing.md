@@ -110,7 +110,7 @@ Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Mod
 
 ## Bereitstellung (Serving)
 
-Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Setzen Sie `max_cost_cents` in der Anfrage, um einen Aufruf zu begrenzen. Lesen Sie [Ergebnisse](/docs/guides/results).
+Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Mit `max_cost_cents` in der Anfrage können Sie festhalten, wie viel Sie für einen Aufruf höchstens akzeptieren. Ihr Guthaben begrenzt den Aufruf. Lesen Sie [Ergebnisse](/docs/guides/results).
 
 ## Tarife
 

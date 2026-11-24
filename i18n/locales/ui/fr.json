@@ -3607,7 +3607,7 @@
   "submit.blackbox.review.models": "Modèles",
   "submit.blackbox.review.name_suggested": "Suggéré à partir de votre objectif",
   "submit.budget.label": "Plafond de dépenses",
-  "submit.budget.explainer": "Couvre la configuration et l'optimisation. S'arrête dès que le plafond est atteint.",
+  "submit.budget.explainer": "Couvre l'optimisation. Les vérifications de configuration sont payées sur votre solde.",
   "submit.budget.error.empty": "Saisissez une limite de dépense pour continuer.",
   "submit.budget.error.invalid": "Saisissez un montant en dollars, par exemple {suggested}.",
   "submit.budget.error.fraction": "Les montants vont jusqu'au centime — utilisez au maximum deux décimales.",

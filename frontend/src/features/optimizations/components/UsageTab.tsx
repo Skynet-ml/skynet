@@ -245,11 +245,11 @@ function BudgetPace({ job }: { job: OptimizationStatusResponse }) {
   const budget = job.execution_budget;
   const pace = budgetPaceLine(job.latest_metrics ?? {});
   if (!budget && !pace) return null;
-  // Setup checks bill the balance, not the limit (SKY-925), so the bar counts
-  // only the run's own spend and holds, as the server does for the limit.
-  const spentCents = budget
-    ? Number(budget.run_spent_cents) + (budget.job_id ? Number(budget.reserved_cents) : 0)
-    : 0;
+  // Setup checks bill the balance, not the limit (SKY-925), so the block counts
+  // only the run's own spend. The bar adds the run's holds, as the server does
+  // for the limit; the text shows only what is spent.
+  const spentCents = budget ? Number(budget.run_spent_cents) : 0;
+  const usedCents = budget?.job_id ? spentCents + Number(budget.reserved_cents) : spentCents;
   const spent = formatCentsUsd(spentCents, locale);
   const capped = budget != null && !budget.uncapped;
   return (
@@ -273,7 +273,7 @@ function BudgetPace({ job }: { job: OptimizationStatusResponse }) {
           </span>
         )}
       </div>
-      {capped && <ProgressBar value={spentCents} max={budget.total_cents} />}
+      {capped && <ProgressBar value={usedCents} max={budget.total_cents} />}
       {pace && (
         <p className="text-xs text-muted-foreground" dir="auto" aria-live="polite">
           {pace.kind === "calibrating"

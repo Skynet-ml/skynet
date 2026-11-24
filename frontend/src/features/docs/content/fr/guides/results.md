@@ -103,7 +103,7 @@ Remplacez `message` par les champs d'entrée de votre exécution. Le **Code d'in
 La réponse contient `outputs`, les `input_fields`, les `output_fields`, le `model_used`, `cents_charged` et `budget`.
 
 > [!TIP]
-> Chaque appel est facturé séparément, sur le solde de l'appelant. `max_cost_cents` définit le coût maximal de cet appel, en centimes. Si vous renvoyez la même `Idempotency-Key`, Skynet ne facture pas l'appel une seconde fois.
+> Chaque appel est facturé séparément, sur le solde de l'appelant. `max_cost_cents` est facultatif. Il indique le maximum que vous acceptez pour cet appel, en centimes. Votre solde borne l'appel. Si vous renvoyez la même `Idempotency-Key`, Skynet ne facture pas l'appel une seconde fois.
 
 Lisez [API](/docs/api) pour l'authentification et les autres points de terminaison.
 

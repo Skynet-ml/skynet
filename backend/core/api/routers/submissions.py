@@ -92,7 +92,7 @@ from ..agent_engine import fill_proposer_host_cli
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, normalize_model_token_sources
-from ..preflight_execution import BALANCE_FIELD, BUDGET_CHECK_KEY, WizardPreflightRequest, run_preflight
+from ..preflight_execution import BUDGET_CHECK_KEY, WizardPreflightRequest, run_preflight
 from ..rate_limit import enforce_submission_rate
 from ..submission_idempotency import resolve_submission_replay_keys
 from ._helpers import (
@@ -187,15 +187,12 @@ def _ensure_api_budget(
         # a same-key retry reached a check another request is running.
         raise SubmissionInProgressError()
     if checked.status == "failed" and any(
-        check.key == BUDGET_CHECK_KEY and check.status == "failed" and check.field != BALANCE_FIELD
-        for check in checked.checks
+        check.key == BUDGET_CHECK_KEY and check.status == "failed" for check in checked.checks
     ):
-        # The limit, not the account balance, stopped the check, so name the
-        # limit rather than the optimizer or the columns. A higher limit cannot
-        # help when the balance set it, so that refusal names the balance (SKY-923).
-        if from_balance:
-            raise DomainError("budget.insufficient", status=402)
-        raise DomainError("budget.below_minimum", status=409)
+        # Setup bills the account balance only (SKY-925), so a budget stop in
+        # setup names the balance rather than the optimizer, the columns or a
+        # limit that a higher value could not fix.
+        raise DomainError("budget.insufficient", status=402)
     if checked.status == "pending":
         raise DomainError("budget.pending", status=409)
     if checked.status != "succeeded":

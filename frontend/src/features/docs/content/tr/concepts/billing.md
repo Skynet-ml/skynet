@@ -110,7 +110,7 @@ Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığınd
 
 ## Sunum
 
-Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Tek bir çağrıya üst sınır koymak için istekte `max_cost_cents` ayarlayın. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
+Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Bir çağrı için kabul ettiğiniz en yüksek tutarı kaydetmek için istekte `max_cost_cents` ayarlayabilirsiniz. Çağrıyı bakiyeniz sınırlar. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
 
 ## Planlar
 

@@ -110,7 +110,7 @@ Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche qua
 
 ## Serving
 
-Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Imposta `max_cost_cents` nella richiesta per limitare una chiamata. Leggi [Risultati](/docs/guides/results).
+Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Puoi impostare `max_cost_cents` nella richiesta per registrare il massimo che accetti per una chiamata. Il tuo saldo limita la chiamata. Leggi [Risultati](/docs/guides/results).
 
 ## Piani
 

@@ -110,7 +110,7 @@ Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y comp
 
 ## Service (serving)
 
-Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Définissez `max_cost_cents` dans la requête pour plafonner un appel. Lisez [Résultats](/docs/guides/results).
+Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Vous pouvez définir `max_cost_cents` dans la requête pour indiquer le maximum que vous acceptez pour un appel. Votre solde borne l'appel. Lisez [Résultats](/docs/guides/results).
 
 ## Offres
 

@@ -103,7 +103,7 @@ print(response.json()["outputs"])
 Yanıt `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged` ve `budget` değerlerini içerir.
 
 > [!TIP]
-> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents`, bu tek çağrının sent cinsinden en fazla ne kadar tutabileceğini belirler. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
+> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents` isteğe bağlıdır. Bu tek çağrı için kabul ettiğiniz en yüksek tutarı sent cinsinden kaydeder. Çağrıyı bakiyeniz sınırlar. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
 
 Kimlik doğrulama ve diğer uç noktalar için [API](/docs/api) sayfasını okuyun.
 
