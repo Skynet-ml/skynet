@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import shlex
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -1117,10 +1118,10 @@ async def test_a_usage_api_failure_settles_from_measured_time(fake_sdk: FakeClou
     assert reservation.usage is None
 
 
-async def test_an_unconfirmed_shutdown_settles_without_measured_time(
+async def test_an_unconfirmed_shutdown_still_asks_for_usage_and_raises_pending(
     fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Settle with no measured time when the shutdown fails, so the full reservation is charged."""
+    """Ask Runloop for usage after a failed shutdown, and raise a pending settle once from stop()."""
     env = _protected()
     await env.start()
 
@@ -1129,9 +1130,15 @@ async def test_an_unconfirmed_shutdown_settles_without_measured_time(
         raise FakeInternalServerError("500")
 
     monkeypatch.setattr(FakeDevbox, "shutdown", broken)
-    await env.stop()
     (reservation,) = FakeReservation.made
-    assert reservation.events[1:] == ["settle"]
+    error = UsagePendingError("no final usage")
+    reservation.settle_error = error
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert raised.value is error
+    assert reservation.events[1:] == ["usage", "settle"]
+    assert reservation.measured_ms is None
+    await env.stop()
 
 
 async def test_a_failed_settle_raises_once_from_stop(fake_sdk: FakeCloud) -> None:
@@ -1251,6 +1258,71 @@ async def test_a_cancelled_start_settles_the_orphan_devbox(fake_sdk: FakeCloud) 
     (reservation,) = FakeReservation.made
     assert box.status == "shutdown"
     assert reservation.events == [f"bind:{box.id}", "stop", "usage", "settle"]
+
+
+async def test_a_cancel_during_a_slow_reserve_releases_the_hold(fake_sdk: FakeCloud) -> None:
+    """Release the hold that a slow reserve made after the start was cancelled, and send no create."""
+    entered, finish = threading.Event(), threading.Event()
+
+    class SlowReservation(FakeReservation):
+        """Reserve only after the test lets it finish."""
+
+        def __init__(self, budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
+            """Block until the test lets the reserve finish.
+
+            Args:
+                budget: The budget runtime.
+                request: The usage request.
+                operation_key: The operation key.
+            """
+            entered.set()
+            finish.wait(5)
+            super().__init__(budget, request, operation_key=operation_key)
+
+    env = _protected()
+    env._usage_factory = SlowReservation
+    start = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    start.cancel()
+    await asyncio.sleep(0.01)
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    (reservation,) = FakeReservation.made
+    assert reservation.events == ["release"]
+    assert "create" not in fake_sdk.calls
+
+
+async def test_a_failed_bind_still_shuts_down_and_settles(fake_sdk: FakeCloud) -> None:
+    """Shut the devbox down and settle it when the bind after the create fails once."""
+
+    class FlakyBind(FakeReservation):
+        """Fail the first bind only."""
+
+        def bind(self, devbox_id: str) -> None:
+            """Fail once, then bind.
+
+            Args:
+                devbox_id: The devbox id.
+
+            Raises:
+                RuntimeError: On the first call.
+            """
+            if "bind-failed" not in self.events:
+                self.events.append("bind-failed")
+                raise RuntimeError("ledger down")
+            super().bind(devbox_id)
+
+    env = _protected()
+    env._usage_factory = FlakyBind
+    with pytest.raises(RuntimeError, match="ledger down"):
+        await env.start()
+    (box,) = fake_sdk.boxes.values()
+    (reservation,) = FakeReservation.made
+    assert box.status == "shutdown"
+    assert f"shutdown:{box.id}" in fake_sdk.calls
+    assert reservation.events == ["bind-failed", f"bind:{box.id}", "stop", "usage", "settle"]
+    await env.stop()
 
 
 async def test_an_unsized_protected_devbox_is_not_started(fake_sdk: FakeCloud) -> None:

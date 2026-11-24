@@ -784,12 +784,14 @@ class RunloopEnvironment(SandboxEnvironment):
                 await asyncio.to_thread(usage.bind, box_id)
             if stopped_at is not None and self._create_sent_at is not None:
                 usage.record_stop(math.ceil((stopped_at - self._create_sent_at) * 1000))
-                try:
-                    report = await asyncio.wait_for(client.api.devboxes.retrieve_resource_usage(box_id), STOP_TIMEOUT)
-                    usage.record_usage(report)
-                except Exception as error:
-                    # The measured time still bounds the bill from above.
-                    logger.warning("Runloop gave no usage report for devbox %s: %s", box_id, type(error).__name__)
+            # Ask even after an unconfirmed shutdown: a final report still
+            # settles the box at what it used.
+            try:
+                report = await asyncio.wait_for(client.api.devboxes.retrieve_resource_usage(box_id), STOP_TIMEOUT)
+                usage.record_usage(report)
+            except Exception as error:
+                # The measured time, if any, still bounds the bill from above.
+                logger.warning("Runloop gave no usage report for devbox %s: %s", box_id, type(error).__name__)
             await asyncio.to_thread(usage.settle)
         except Exception as error:
             logger.warning("Runloop devbox %s usage stays pending: %s", box_id, type(error).__name__)

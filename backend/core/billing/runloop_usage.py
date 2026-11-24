@@ -5,9 +5,8 @@ the create call. After the box stops, it settles at the vCPU, memory and disk
 seconds that Runloop's ``GET /v1/devboxes/{id}/usage`` reports. When that
 report is missing or not final, it settles from the measured time between the
 create call and the confirmed shutdown, which bounds the billed time from
-above. A box whose shutdown is not confirmed runs to its keep-alive at most,
-so it settles at the full reservation. Every settlement stays inside the
-reservation.
+above. With neither, the hold stays pending for reconciliation instead of
+charging the whole keep-alive. Every settlement stays inside the reservation.
 """
 
 from __future__ import annotations
@@ -254,8 +253,8 @@ class RunloopUsageReservation:
         """
         if self.devbox_id not in {None, devbox_id}:
             raise UsagePendingError("Runloop returned a second devbox for one admitted operation.")
-        self.devbox_id = devbox_id
         self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, devbox_id)
+        self.devbox_id = devbox_id
 
     def record_usage(self, usage: Any) -> None:
         """Keep Runloop's usage report of the stopped devbox.
@@ -325,6 +324,10 @@ class RunloopUsageReservation:
 
         Returns:
             The provider cost in USD and the evidence it came from.
+
+        Raises:
+            UsagePendingError: When there is no final report and no confirmed
+                shutdown, or the admitted price snapshot is unusable.
         """
         if self.usage is not None and self.devbox_id is not None:
             try:
@@ -335,13 +338,13 @@ class RunloopUsageReservation:
             except UsagePendingError:
                 pass
         if self.measured_ms is not None:
-            hourly = _hourly_usd(self.vcpus, self.memory_gb, self.disk_gb)
+            cpu_rate, memory_rate, disk_rate = _rates(self.quote.price_snapshot)
+            hourly = self.vcpus * cpu_rate + self.memory_gb * memory_rate + self.disk_gb * disk_rate
             seconds = math.ceil(self.measured_ms / 1000)
             return Decimal(seconds) * hourly / _SECONDS_PER_HOUR, "measured"
-        # No confirmed shutdown: the keep-alive ends the box inside its funded lifetime.
-        return Decimal(self.lifetime_ms) * _hourly_usd(self.vcpus, self.memory_gb, self.disk_gb) / _MS_PER_HOUR, (
-            "unconfirmed_stop"
-        )
+        # Charging the whole keep-alive here would bill a box that ran for a
+        # minute as if it ran for days, so the hold waits for reconciliation.
+        raise UsagePendingError("Runloop reported no final usage and the shutdown is not confirmed.")
 
     def pending(self) -> None:
         """Keep the hold for manual reconciliation when settlement fails."""
@@ -359,7 +362,8 @@ class RunloopUsageReservation:
         """Settle the stopped devbox, never above its reservation.
 
         Raises:
-            UsagePendingError: When the admitted price snapshot is unusable.
+            UsagePendingError: When there is no usable evidence or the admitted
+                price snapshot is unusable.
             BudgetError: When the ledger refuses the settlement.
         """
         try:

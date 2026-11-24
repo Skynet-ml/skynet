@@ -177,14 +177,69 @@ def test_a_missing_usage_report_falls_back_to_measured_time(database: Engine) ->
     assert operation.state == "settled"
 
 
-def test_an_unconfirmed_stop_settles_the_whole_reservation(database: Engine) -> None:
-    """Charge the full keep-alive when neither a report nor a confirmed shutdown exists."""
+def test_an_unconfirmed_stop_without_a_report_stays_pending(database: Engine) -> None:
+    """Keep the hold pending, not charge the full keep-alive, with no report and no confirmed shutdown."""
     runtime = _runtime(database)
     reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
     reservation.bind("dbx-1")
+    with pytest.raises(UsagePendingError, match="not confirmed"):
+        reservation.settle()
+    assert _state(database) == "pending"
+    assert runtime.service.get(runtime.budget_id, "alice").billed_cents == 0
+
+
+def test_an_unconfirmed_stop_with_a_final_report_settles_from_it(database: Engine) -> None:
+    """Settle from Runloop's final report even when the shutdown was not confirmed."""
+    runtime = _runtime(database)
+    reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.bind("dbx-1")
+    reservation.record_usage(REPORT)
     reservation.settle()
     operation = runtime.service.get_operation(reservation.operation.id, "alice")
-    assert operation.actual_cents == operation.max_cents
+    assert operation.state == "settled"
+    assert operation.actual_cents < operation.max_cents
+
+
+def test_measured_time_uses_the_admitted_rates(database: Engine) -> None:
+    """Price measured time from the admitted price snapshot, not the current module rates."""
+    runtime = _runtime(database)
+    reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
+    reservation.bind("dbx-1")
+    reservation.quote.price_snapshot["cpu_hour_usd"] = "0"
+    reservation.record_stop(3_600_000)
+    reservation.settle()
+    operation = runtime.service.get_operation(reservation.operation.id, "alice")
+    assert operation.actual_cents == (HOURLY_USD - 2 * Decimal("0.108")) * 100
+
+
+def test_a_failed_bind_leaves_the_devbox_unbound(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the devbox id unset when the ledger refuses the dispatch record, so a retry binds it.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    runtime = _runtime(database)
+    reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
+
+    def refuse(*args: Any) -> None:
+        """Fail the dispatch record.
+
+        Args:
+            *args: The mark_dispatched arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(runtime.service, "mark_dispatched", refuse)
+    with pytest.raises(RuntimeError):
+        reservation.bind("dbx-1")
+    assert reservation.devbox_id is None
+    monkeypatch.delattr(runtime.service, "mark_dispatched")
+    reservation.bind("dbx-1")
+    assert reservation.devbox_id == "dbx-1"
 
 
 def test_settle_clamps_to_the_reservation(database: Engine) -> None:
