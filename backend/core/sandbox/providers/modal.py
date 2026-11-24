@@ -45,24 +45,12 @@ except ImportError:
 
 try:
     from modal.exception import (
-        AlreadyExistsError,
-        AuthError,
         ExecTimeoutError,
-        InvalidError,
-        NotFoundError,
-        PermissionDeniedError,
         SandboxFilesystemNotFoundError,
-        UnimplementedError,
     )
 except ImportError:
-    AlreadyExistsError = None
-    AuthError = None
     ExecTimeoutError = None
-    InvalidError = None
-    NotFoundError = None
-    PermissionDeniedError = None
     SandboxFilesystemNotFoundError = None
-    UnimplementedError = None
 
 logger = logging.getLogger(__name__)
 
@@ -108,26 +96,11 @@ _EXEC_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = tuple(
     error for error in (ExecTimeoutError,) if error is not None
 )
 
-# Exact Modal errors after which one empty lookup releases the hold. In modal
-# 1.6.3 the default V2 create raises them only from client checks or from a
-# definite status of its single SandboxCreateV2 call, which then returns no
-# sandbox. The V1 create raises ResourceExhaustedError and ConflictError from
-# its task-id poll after SandboxCreate already made the box, so those two get
-# the second lookup. ServiceError, InternalError, timeouts, transport errors
-# and subclasses prove nothing, so they never count.
-_SERVER_ANSWER_ERRORS: frozenset[type[BaseException]] = frozenset(
-    error
-    for error in (
-        AlreadyExistsError,
-        AuthError,
-        InvalidError,
-        NotFoundError,
-        PermissionDeniedError,
-        UnimplementedError,
-    )
-    if error is not None
-)
-# A create that failed on the client side may still make its box on Modal.
+# A failed create may still have made its box, so an empty lookup never
+# releases the hold at once. No error type proves that no box exists: modal
+# 1.6.3 picks the V1 or V2 create from the "sandbox_v2" config setting, which
+# MODAL_SANDBOX_V2 or ~/.modal.toml can turn off, and the V1 create can raise
+# any error from its task-id poll after SandboxCreate already made the box.
 # The second lookup waits longer than a create takes to land. 30 s is an
 # estimate, not a measured bound: a box that Modal makes later than this is
 # the documented residual case, and it runs unbilled until its timeout.
@@ -259,8 +232,7 @@ class ModalEnvironment(SandboxEnvironment):
                 )
                 raise
             if create.cancelled() or create.exception() is not None:
-                error = None if create.cancelled() else create.exception()
-                await _fail_usage_through_cancels(usage, self._app_name, error)
+                await _fail_usage_through_cancels(usage, self._app_name)
                 raise
             terminate = asyncio.ensure_future(_terminate_and_settle(create.result(), usage))
             await _wait_through_cancels(terminate, _CANCEL_GRACE_SEC)
@@ -275,7 +247,7 @@ class ModalEnvironment(SandboxEnvironment):
             raise
         except Exception as error:
             self._usage = None
-            if await _fail_usage_through_cancels(usage, self._app_name, error):
+            if await _fail_usage_through_cancels(usage, self._app_name):
                 # A cancel is never swallowed; the create error stays as its cause.
                 raise asyncio.CancelledError from error
             raise
@@ -775,26 +747,25 @@ async def _find_boxes(usage: Any, app_name: str) -> list[Any] | None:
         return None
 
 
-async def _fail_usage(usage: Any | None, app_name: str | None = None, error: BaseException | None = None) -> None:
+async def _fail_usage(usage: Any | None, app_name: str | None = None) -> None:
     """Release or keep the hold of a protected box whose create returned no sandbox.
 
     A sent create may still have made a sandbox. A lookup by the box tag
     then decides: a found box is terminated and settled; a failed lookup
-    keeps the hold pending. When the create error does not prove that Modal
-    answered, the box may still appear, so a second lookup runs after a
-    delay. The hold is released only when every lookup found no box.
+    keeps the hold pending. An empty lookup is repeated once after
+    ``_RECHECK_DELAY_SEC``, because the box may still appear. The hold is
+    released only when both lookups found no box.
 
     Args:
         usage: The usage reservation, or ``None``.
         app_name: The Modal app of the box; ``None`` skips the lookup and keeps a sent hold pending.
-        error: The create error, or ``None`` for a cancelled create.
     """
     if usage is None:
         return
     absent = False
     if app_name is not None and usage.sent_at is not None and usage.sandbox_id is None:
         found = await _find_boxes(usage, app_name)
-        if found == [] and type(error) not in _SERVER_ANSWER_ERRORS:
+        if found == []:
             await asyncio.sleep(_RECHECK_DELAY_SEC)
             found = await _find_boxes(usage, app_name)
         if found:
@@ -815,9 +786,7 @@ async def _fail_usage(usage: Any | None, app_name: str | None = None, error: Bas
         logger.exception("Could not release the usage hold of a modal sandbox that was never created.")
 
 
-async def _fail_usage_through_cancels(
-    usage: Any | None, app_name: str | None = None, error: BaseException | None = None
-) -> bool:
+async def _fail_usage_through_cancels(usage: Any | None, app_name: str | None = None) -> bool:
     """Run :func:`_fail_usage` so that a cancel cannot stop it halfway.
 
     The cleanup waits at most ``_CANCEL_GRACE_SEC``, also through repeat
@@ -826,12 +795,11 @@ async def _fail_usage_through_cancels(
     Args:
         usage: The usage reservation, or ``None``.
         app_name: The Modal app of the box, for the lookup after a failed create.
-        error: The create error, or ``None`` for a cancelled create.
 
     Returns:
         True when a cancel arrived during the wait, so the caller must raise it.
     """
-    cleanup = asyncio.ensure_future(_fail_usage(usage, app_name, error))
+    cleanup = asyncio.ensure_future(_fail_usage(usage, app_name))
     cancelled = await _wait_through_cancels(cleanup, _CANCEL_GRACE_SEC)
     if not cleanup.done():
         _keep_late_terminate(cleanup)
@@ -899,8 +867,7 @@ def _terminate_late_sandbox(
     try:
         if create.cancelled() or create.exception() is not None:
             if usage is not None:
-                error = None if create.cancelled() else create.exception()
-                _keep_late_terminate(asyncio.ensure_future(_fail_usage(usage, app_name, error)))
+                _keep_late_terminate(asyncio.ensure_future(_fail_usage(usage, app_name)))
             return
         terminate = asyncio.ensure_future(_terminate_and_settle(create.result(), usage))
     except Exception:

@@ -350,8 +350,7 @@ class FakeModal:
 def fake_modal(monkeypatch: pytest.MonkeyPatch) -> FakeModal:
     """Replace the Modal SDK in the provider module with a fresh fake.
 
-    The fake ``InvalidError`` counts as a server answer, and the second
-    lookup after a client-side create error runs at once.
+    The second lookup after a failed create runs at once.
 
     Args:
         monkeypatch: Pytest fixture that restores the module after the test.
@@ -360,7 +359,6 @@ def fake_modal(monkeypatch: pytest.MonkeyPatch) -> FakeModal:
     for name in ("App", "Image", "Secret", "Sandbox"):
         monkeypatch.setattr(modal_provider, name, getattr(sdk, name))
     monkeypatch.setattr(modal_provider, "_EXEC_TIMEOUT_ERRORS", (FakeExecTimeoutError,))
-    monkeypatch.setattr(modal_provider, "_SERVER_ANSWER_ERRORS", frozenset({FakeInvalidError}))
     monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0)
     return sdk
 
@@ -1199,23 +1197,38 @@ class FakeInvalidError(Exception):
     """Stand in for modal.exception.InvalidError."""
 
 
-class FakeSubclassedInvalidError(FakeInvalidError):
-    """Stand in for an InvalidError subclass, such as modal.exception.ConflictError."""
+class FakeResourceExhaustedError(Exception):
+    """Stand in for modal.exception.ResourceExhaustedError, which the V1 create raises after its box exists."""
 
 
-async def test_protected_box_releases_only_after_a_lookup_finds_no_box(fake_modal: FakeModal) -> None:
-    """Report the box as absent when a create failed and a lookup by the box tag found no sandbox."""
-    fake_modal.create_error = FakeInvalidError("bad")
+_CREATE_ERRORS = [
+    FakeInvalidError("bad"),
+    FakeResourceExhaustedError("Insufficient capacity to create sandbox."),
+    RuntimeError("client timeout"),
+]
+
+
+@pytest.mark.parametrize("error", _CREATE_ERRORS)
+async def test_protected_box_releases_only_after_two_lookups_find_no_box(
+    fake_modal: FakeModal, error: Exception
+) -> None:
+    """Report the box as absent only when both lookups by the box tag found no sandbox, whatever the error type.
+
+    Args:
+        fake_modal: The fake SDK.
+        error: The create error.
+    """
+    fake_modal.create_error = error
     env, budget = _protected()
-    with pytest.raises(FakeInvalidError):
+    with pytest.raises(type(error)):
         await env.start()
     (usage,) = budget.reservations
     assert usage.calls == ["sent", "fail"]
     assert usage.absent is True
-    assert fake_modal.list_calls == 1
+    assert fake_modal.list_calls == 2
 
 
-@pytest.mark.parametrize("error", [FakeInvalidError("bad"), FakeSubclassedInvalidError("conflict"), RuntimeError("x")])
+@pytest.mark.parametrize("error", _CREATE_ERRORS)
 async def test_protected_box_settles_a_box_made_before_the_create_error(
     fake_modal: FakeModal, error: Exception
 ) -> None:
@@ -1465,27 +1478,15 @@ async def test_confirm_failure_settles_the_real_reservation(fake_modal: FakeModa
         engine.dispose()
 
 
-@pytest.mark.parametrize("error", [RuntimeError("connection lost"), FakeSubclassedInvalidError("conflict")])
-async def test_client_side_create_error_looks_up_the_box_twice(fake_modal: FakeModal, error: Exception) -> None:
-    """Release the hold after a client-side create error only when two lookups found no box.
+@pytest.mark.parametrize("error", _CREATE_ERRORS)
+async def test_box_that_appears_after_a_create_error_is_settled(fake_modal: FakeModal, error: Exception) -> None:
+    """Terminate and settle, not release, a box that only the second lookup finds, whatever the error type.
 
     Args:
         fake_modal: The fake SDK.
-        error: A create error that does not prove that Modal answered.
+        error: The create error.
     """
     fake_modal.create_error = error
-    env, budget = _protected()
-    with pytest.raises(type(error)):
-        await env.start()
-    (usage,) = budget.reservations
-    assert fake_modal.list_calls == 2
-    assert usage.calls == ["sent", "fail"]
-    assert usage.absent is True
-
-
-async def test_box_that_appears_after_a_client_side_error_is_settled(fake_modal: FakeModal) -> None:
-    """Terminate and settle a box that Modal made after the first lookup found none."""
-    fake_modal.create_error = RuntimeError("client timeout")
     env, budget = _protected()
 
     def make_box_late() -> None:
@@ -1496,12 +1497,29 @@ async def test_box_that_appears_after_a_client_side_error_is_settled(fake_modal:
             fake_modal.boxes.append(FakeSandbox(fake_modal, ("sleep",), {"app": app, "tags": {BOX_KEY: usage.box}}))
 
     fake_modal.list_hook = make_box_late
-    with pytest.raises(RuntimeError, match="client timeout"):
+    with pytest.raises(type(error)):
         await env.start()
     (usage,) = budget.reservations
     assert fake_modal.list_calls == 2
     assert _box(fake_modal).terminated
     assert usage.calls == ["sent", "confirm", "stopped", "settle"]
+
+
+async def test_failed_create_does_not_wait_for_the_second_lookup(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the create error after the cancel grace time and finish the delayed lookup in the background."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    monkeypatch.setattr(modal_provider, "_RECHECK_DELAY_SEC", 0.5)
+    fake_modal.create_error = FakeInvalidError("bad")
+    env, budget = _protected()
+    with pytest.raises(FakeInvalidError):
+        await asyncio.wait_for(env.start(), 0.4)
+    (usage,) = budget.reservations
+    assert usage.calls == ["sent"]
+    await _until(lambda: usage.calls == ["sent", "fail"])
+    assert fake_modal.list_calls == 2
+    await _until(lambda: not modal_provider._LATE_TERMINATES)
 
 
 async def test_cancel_during_the_box_lookup_still_fails_the_usage(
@@ -1526,35 +1544,3 @@ async def test_cancel_during_the_box_lookup_still_fails_the_usage(
     await _until(lambda: usage.calls == ["sent", "fail"])
     assert usage.absent is True
     await _until(lambda: not modal_provider._LATE_TERMINATES)
-
-
-class FakeResourceExhaustedError(Exception):
-    """Stand in for modal.exception.ResourceExhaustedError, which the V1 create raises after its box exists."""
-
-
-async def test_resource_exhausted_create_settles_a_box_found_on_the_second_lookup(fake_modal: FakeModal) -> None:
-    """Settle, not release, a box that the second lookup finds after an "insufficient capacity" create error."""
-    fake_modal.create_error = FakeResourceExhaustedError("Insufficient capacity to create sandbox.")
-    env, budget = _protected()
-
-    def list_box_late() -> None:
-        """Make the box visible only to the second lookup."""
-        if fake_modal.list_calls == 2:
-            (usage,) = budget.reservations
-            app = SimpleNamespace(app_id=f"ap-{env._app_name}")
-            fake_modal.boxes.append(FakeSandbox(fake_modal, ("sleep",), {"app": app, "tags": {BOX_KEY: usage.box}}))
-
-    fake_modal.list_hook = list_box_late
-    with pytest.raises(FakeResourceExhaustedError):
-        await env.start()
-    (usage,) = budget.reservations
-    assert fake_modal.list_calls == 2
-    assert _box(fake_modal).terminated
-    assert usage.calls == ["sent", "confirm", "stopped", "settle"]
-    assert "fail" not in usage.calls
-
-
-def test_server_answer_errors_leave_out_errors_raised_after_a_v1_box_exists() -> None:
-    """Keep the V1 post-create errors out of the one-lookup release set."""
-    names = {error.__name__ for error in modal_provider._SERVER_ANSWER_ERRORS}
-    assert not names & {"ResourceExhaustedError", "ConflictError"}
