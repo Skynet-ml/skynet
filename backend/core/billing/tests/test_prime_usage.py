@@ -190,12 +190,12 @@ def test_a_record_with_no_end_keeps_the_hold_pending(database: Engine) -> None:
     [
         {"id": "sbx-other"},
         {"status": "RUNNING"},
-        {"created_at": "2026-11-24T12:00:00"},
+        {"created_at": "not a time"},
         {"terminated_at": "2026-11-24T11:00:00+00:00"},
     ],
 )
 def test_measured_time_needs_a_consistent_ended_record(change: dict[str, Any]) -> None:
-    """Refuse another sandbox, a running one, a naive time or an end before the create.
+    """Refuse another sandbox, a running one, a bad time or an end before the create.
 
     Args:
         change: The field that makes the record unusable.
@@ -203,6 +203,40 @@ def test_measured_time_needs_a_consistent_ended_record(change: dict[str, Any]) -
     snapshot = quote_prime_sandbox(REQUEST).price_snapshot
     with pytest.raises(UsagePendingError):
         prime_actual_usd({**RECORD, **change}, sandbox_id="sbx-1", price_snapshot=snapshot)
+
+
+def test_a_time_with_no_zone_is_read_as_utc() -> None:
+    """Read a Prime time with no offset as UTC, so the hold can settle."""
+    snapshot = quote_prime_sandbox(REQUEST).price_snapshot
+    naive = {**RECORD, "created_at": "2026-11-24T12:00:00", "terminated_at": "2026-11-24T12:30:00"}
+    assert prime_actual_usd(naive, sandbox_id="sbx-1", price_snapshot=snapshot) == HOURLY_USD / 2
+
+
+def test_a_measured_lifetime_settles_a_record_with_no_end(database: Engine) -> None:
+    """Charge the lifetime the provider measured when Prime shows no end time, clamped to the hold."""
+    reservation = _created(database)
+    reservation.settle({}, seconds=15 * 60)
+    assert _state(reservation) == "settled"
+    assert _billed(reservation) == HOURLY_USD * 25
+    other = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-2")
+    other.confirm_created({**RECORD, "id": "sbx-2"})
+    other.settle({}, seconds=5 * 60 * 60)
+    assert _billed(other) == other.operation.max_cents == HOURLY_USD * 100
+
+
+def test_a_larger_sandbox_settles_at_its_own_size(database: Engine) -> None:
+    """Price a box larger than funded at its larger size, and never above the hold."""
+    hourly = Decimal("0.142")  # 2 x 0.02 + 8 x 0.0125 + 10 x 0.0002 USD
+    larger = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-1")
+    with pytest.raises(UsagePendingError):
+        larger.confirm_created({**RECORD, "memory_gb": 8.0})
+    larger.settle({**RECORD, "memory_gb": 8.0})
+    assert _billed(larger) == hourly * 50
+    full = USAGE.reserve(_runtime(database), REQUEST, operation_key="box-2")
+    with pytest.raises(UsagePendingError):
+        full.confirm_created({**RECORD, "id": "sbx-2", "memory_gb": 8.0})
+    full.settle({**RECORD, "id": "sbx-2", "memory_gb": 8.0, "terminated_at": "2026-11-24T13:00:00+00:00"})
+    assert _billed(full) == full.operation.max_cents == HOURLY_USD * 100
 
 
 def test_a_larger_sandbox_than_funded_is_not_confirmed(database: Engine) -> None:

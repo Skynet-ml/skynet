@@ -9,9 +9,10 @@ rates. The settlement never goes above the reserved quote.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -138,28 +139,54 @@ def _timestamp(value: Any, name: str) -> datetime:
         The aware datetime.
 
     Raises:
-        UsagePendingError: When the timestamp is missing or has no time zone.
+        UsagePendingError: When the timestamp is missing or not valid.
     """
     try:
         parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
-        parsed = None
-    if parsed is None or parsed.tzinfo is None:
-        raise UsagePendingError(f"The Prime sandbox record has no valid {name}.")
-    return parsed
+        raise UsagePendingError(f"The Prime sandbox record has no valid {name}.") from None
+    # Prime's API keeps its times in UTC and can send them with no offset.
+    # Refusing such a time would keep every hold pending for good.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def prime_actual_usd(record: Mapping[str, Any], *, sandbox_id: str, price_snapshot: Mapping[str, Any]) -> Decimal:
+def _billed_size(request: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
+    """Take the larger of the funded size and the sandbox's own size.
+
+    Args:
+        request: The funded create request.
+        record: The sandbox record; a missing or invalid size keeps the funded one.
+
+    Returns:
+        The request with each size at the larger of the two values.
+    """
+    billed = dict(request)
+    for name in _SIZE_FIELDS:
+        with contextlib.suppress(UnpricedOperationError):
+            billed[name] = max(_positive(request.get(name), name), _positive(record.get(name), name))
+    return billed
+
+
+def prime_actual_usd(
+    record: Mapping[str, Any],
+    *,
+    sandbox_id: str,
+    price_snapshot: Mapping[str, Any],
+    seconds: int | None = None,
+) -> Decimal:
     """Price an ended sandbox from its measured lifetime at the admitted rates.
 
     The time counts from ``created_at``, not ``started_at``, so the
     provisioning time is charged too: Prime does not say whether it bills
-    it, and undercharging is the worse error. The quote caps the result.
+    it, and undercharging is the worse error. Each size is the larger of
+    the funded size and the record's size. The quote caps the result.
 
     Args:
         record: The sandbox record that Prime returned after the delete.
         sandbox_id: The one admitted sandbox.
         price_snapshot: The admitted quote's price snapshot.
+        seconds: A lifetime that the caller measured when Prime shows no
+            end time; ``None`` reads the lifetime from the record.
 
     Returns:
         The USD cost of the measured seconds, capped at the admitted timeout.
@@ -167,19 +194,23 @@ def prime_actual_usd(record: Mapping[str, Any], *, sandbox_id: str, price_snapsh
     Raises:
         UsagePendingError: When the sandbox has not ended or the record is not usable.
     """
-    if record.get("id") != sandbox_id or record.get("status") not in _ENDED_STATUSES:
-        raise UsagePendingError("Prime has not confirmed that the admitted sandbox ended.")
-    created = _timestamp(record.get("created_at"), "created_at")
-    ended = _timestamp(record.get("terminated_at"), "terminated_at")
-    if ended < created:
-        raise UsagePendingError("The Prime sandbox record has inconsistent timestamps.")
+    if seconds is None:
+        if record.get("id") != sandbox_id or record.get("status") not in _ENDED_STATUSES:
+            raise UsagePendingError("Prime has not confirmed that the admitted sandbox ended.")
+        created = _timestamp(record.get("created_at"), "created_at")
+        ended = _timestamp(record.get("terminated_at"), "terminated_at")
+        if ended < created:
+            raise UsagePendingError("The Prime sandbox record has inconsistent timestamps.")
+        seconds = math.ceil((ended - created).total_seconds())
+    elif isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
+        raise UsagePendingError("The measured Prime sandbox lifetime is not valid.")
     try:
         request = price_snapshot["request"]
         rates = price_snapshot["rates"]
         if price_snapshot.get("provider") != "prime":
             raise ValueError("Unsupported historical billing policy")
-        seconds = min(math.ceil((ended - created).total_seconds()), request["timeout_minutes"] * 60)
-        return _hourly_usd(request, rates) * Decimal(seconds) / _SECONDS_PER_HOUR
+        seconds = min(seconds, request["timeout_minutes"] * 60)
+        return _hourly_usd(_billed_size(request, record), rates) * Decimal(seconds) / _SECONDS_PER_HOUR
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Prime sandbox admission has no usable price snapshot.") from error
 
@@ -328,12 +359,14 @@ class PrimeUsageReservation:
                 pass
         self.pending()
 
-    def settle(self, record: Mapping[str, Any] | None = None) -> None:
+    def settle(self, record: Mapping[str, Any] | None = None, *, seconds: int | None = None) -> None:
         """Settle an ended sandbox at its measured cost, never above the reservation.
 
         Args:
             record: The sandbox record that Prime returned after the delete;
                 ``None`` uses the record kept from an earlier call.
+            seconds: The lifetime to charge when Prime shows no end time,
+                for example the whole funded timeout; ``None`` reads it from the record.
 
         Raises:
             UsagePendingError: When the end or the usage is uncertain, or the
@@ -350,9 +383,12 @@ class PrimeUsageReservation:
                 return
             if self.sandbox_id is None:
                 raise UsagePendingError("The Prime create call returned no sandbox identity.")
-            usd = prime_actual_usd(record, sandbox_id=self.sandbox_id, price_snapshot=self.quote.price_snapshot)
+            usd = prime_actual_usd(
+                record, sandbox_id=self.sandbox_id, price_snapshot=self.quote.price_snapshot, seconds=seconds
+            )
             charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
-            # The rounding to cents can pass the quote by a fraction of a cent.
+            # A box larger than funded prices above the quote; the charge
+            # still never goes above the hold that the budget gave.
             total = min(charge.total, current.max_cents)
             wallet = min(charge.wallet, current.max_wallet_cents, total)
             self.runtime.service.settle(
@@ -365,6 +401,7 @@ class PrimeUsageReservation:
                     "provider": "prime",
                     "source": _PRICING_URL,
                     "sandbox": dict(record),
+                    "seconds": seconds,
                     "provider_usd": str(usd),
                 },
             )

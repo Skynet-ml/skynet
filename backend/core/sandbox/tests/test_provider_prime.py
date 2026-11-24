@@ -926,6 +926,7 @@ class FakeUsage:
     calls: list[tuple[str, Any]] = field(default_factory=list)
     sandbox_id: str | None = None
     settle_error: Exception | None = None
+    seconds: list[int | None] = field(default_factory=list)
 
     def confirm_created(self, record: dict[str, Any]) -> None:
         """Bind the created sandbox.
@@ -936,16 +937,18 @@ class FakeUsage:
         self.sandbox_id = record["id"]
         self.calls.append(("confirm", record))
 
-    def settle(self, record: dict[str, Any] | None = None) -> None:
+    def settle(self, record: dict[str, Any] | None = None, *, seconds: int | None = None) -> None:
         """Record the settle, or fail it.
 
         Args:
             record: The final sandbox record.
+            seconds: The lifetime to charge when the record has no end.
 
         Raises:
             Exception: The ``settle_error`` the test set.
         """
         self.calls.append(("settle", record))
+        self.seconds.append(seconds)
         if self.settle_error is not None:
             raise self.settle_error
 
@@ -1074,7 +1077,7 @@ async def test_a_refused_create_releases_the_hold(fake_sdk: FakeCloud) -> None:
 
 
 async def test_a_transient_create_error_keeps_the_hold_pending(fake_sdk: FakeCloud) -> None:
-    """Keep the hold when a 5xx answer leaves it unknown whether Prime made a sandbox."""
+    """Keep the hold when a 5xx answer and an empty search leave it unknown whether Prime made a sandbox."""
     fake_sdk.create_error = FakeAPIError("HTTP 503: unavailable")
     recorder = UsageRecorder()
     with pytest.raises(SandboxTransientError):
@@ -1093,12 +1096,90 @@ async def test_a_failed_settle_is_raised_once_by_stop(fake_sdk: FakeCloud) -> No
     assert [name for name, _ in recorder.made[0].calls] == ["confirm", "settle", "pending"]
 
 
-async def test_a_sandbox_with_no_end_time_settles_with_no_end(fake_sdk: FakeCloud) -> None:
-    """Stop waiting after the stop timeout, so the settle sees no end and stays pending."""
+async def test_a_sandbox_with_no_end_time_settles_at_its_whole_lifetime(fake_sdk: FakeCloud) -> None:
+    """Stop waiting after the stop timeout and settle the whole funded timeout, since Prime ends the box then."""
     fake_sdk.run_seconds = None
     recorder = UsageRecorder()
     async with _protected(recorder):
         pass
-    record = recorder.made[0].calls[-1][1]
-    assert record["terminated_at"] is None
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1]["terminated_at"] is None
+    assert usage.seconds == [5 * 60]
     assert fake_sdk.calls.count("get:sbx-1") > 1
+
+
+async def test_a_failed_delete_is_tried_again(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Try the delete again after a 5xx answer, then settle the ended record."""
+    original = FakeClient.delete
+    tries = 0
+
+    async def flaky(self: FakeClient, sandbox_id: str) -> None:
+        """Fail the first delete with a 5xx answer.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: On the first try.
+        """
+        nonlocal tries
+        tries += 1
+        if tries == 1:
+            raise FakeAPIError("HTTP 503: unavailable")
+        await original(self, sandbox_id)
+
+    monkeypatch.setattr(FakeClient, "delete", flaky)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert tries == 2
+    assert usage.calls[-1][1]["terminated_at"] is not None
+    assert usage.seconds == [None]
+
+
+async def test_a_sandbox_that_prime_no_longer_knows_settles_on_local_time(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settle on the local time since the create when the read after the delete gets a 404."""
+
+    async def gone(self: FakeClient, sandbox_id: str) -> SimpleNamespace:
+        """Answer that the sandbox does not exist.
+
+        Args:
+            sandbox_id: The sandbox id.
+
+        Raises:
+            FakeAPIError: Always, with HTTP 404.
+        """
+        raise FakeAPIError("HTTP 404: not found")
+
+    monkeypatch.setattr(FakeClient, "get", gone)
+    recorder = UsageRecorder()
+    async with _protected(recorder):
+        pass
+    (usage,) = recorder.made
+    assert [name for name, _ in usage.calls] == ["confirm", "settle"]
+    assert usage.calls[-1][1] == {}
+    (seconds,) = usage.seconds
+    assert isinstance(seconds, int)
+    assert 0 <= seconds <= 5
+
+
+@pytest.mark.parametrize("error", [FakeUnauthorizedError("no key"), FakePaymentRequiredError("no funds")])
+async def test_a_create_refused_with_401_or_402_releases_even_when_the_search_fails(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Release the hold of a create that Prime refused with 401 or 402, though the label search timed out.
+
+    Args:
+        error: The SDK refusal.
+    """
+    monkeypatch.setattr(prime, "STOP_TIMEOUT", 0.05)
+    fake_sdk.create_error = error
+    fake_sdk.list_hangs = True
+    recorder = UsageRecorder()
+    with pytest.raises(SandboxFatalError):
+        await _protected(recorder).start()
+    assert recorder.made[0].calls == [("release", "SandboxFatalError")]
