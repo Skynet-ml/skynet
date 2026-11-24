@@ -1558,6 +1558,47 @@ async def test_slow_bucket_wait_stays_inside_the_usage_wait(monkeypatch: pytest.
     assert usages[0].calls == ["reserve", "confirm", "record", "settle"]
 
 
+async def test_delete_check_stays_inside_the_stop_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound the delete check's bucket wait and read by one STOP_TIMEOUT, and keep the hold when it times out.
+
+    Args:
+        monkeypatch: Replaces the browser read and ``asyncio.wait_for``.
+    """
+    clock = FakeClock()
+    calls = _clock_wait_for(monkeypatch, clock)
+
+    async def slow_retrieve(self: FakeBrowsers, session_id: str, *, include_deleted: bool) -> FakeDetails:
+        """Use up 20 fake seconds and report the browser as deleted.
+
+        Args:
+            self: The fake browsers resource.
+            session_id: The browser id.
+            include_deleted: Must be True to read a deleted browser.
+
+        Returns:
+            Details with ``deleted_at``, which the timeout must discard.
+        """
+        clock.now += 20
+        return FakeDetails({"session_id": session_id, "deleted_at": "2026-11-24T00:05:00Z"})
+
+    monkeypatch.setattr(FakeBrowsers, "retrieve", slow_retrieve)
+    pacing = _ClockPacing(clock)
+    env, usages = _protected(clock=clock, pacing=pacing)
+    await env.start()
+    FakeState.list_hidden = True
+    FakeState.delete_errors = [_status_error(kernel.APIStatusError, 500)]
+    pacing.reads.step = 50
+    start = clock.now
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    # The bucket wait uses 50 of 60 s, so the read gets the 10 s left and times out.
+    assert _reads(calls, "_pace_read") == [kernel.STOP_TIMEOUT]
+    assert _reads(calls, "slow_retrieve") == [kernel.STOP_TIMEOUT - 50]
+    assert clock.now - start <= kernel.STOP_TIMEOUT
+    assert usages[0].calls == ["reserve", "confirm", "pending"]
+    assert usages[0].measured_ms is None
+
+
 async def test_usage_read_waits_for_a_ready_report() -> None:
     """Read the report again while Kernel still computes the uptime."""
     FakeState.usage_statuses = ["pending", "ready"]
