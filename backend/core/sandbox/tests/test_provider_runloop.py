@@ -286,10 +286,15 @@ class FakeDevbox:
             raise FakeNotFoundError(path)
         return self._box.files[path].encode("utf-8")
 
-    async def shutdown(self) -> None:
-        """Shut the box down."""
+    async def shutdown(self) -> SimpleNamespace:
+        """Shut the box down.
+
+        Returns:
+            The final box view, like ``DevboxView``.
+        """
         CLOUD.calls.append(f"shutdown:{self.id}")
         self._box.status = "shutdown"
+        return SimpleNamespace(id=self.id, launch_parameters=SimpleNamespace(**self._box.launch))
 
     async def get_info(self) -> SimpleNamespace:
         """Return the box view, like ``DevboxView``.
@@ -1032,6 +1037,7 @@ class FakeReservation:
         self.calls_before = list(CLOUD.calls)
         self.events: list[str] = []
         self.devbox_id: str | None = None
+        self.actual_sizes: Any = None
         self.usage: Any = None
         self.measured_ms: int | None = None
         self.settle_error: BaseException | None = None
@@ -1053,8 +1059,8 @@ class FakeReservation:
             devbox_id: The devbox id.
             launch: The launch parameters of the created devbox.
         """
+        self.actual_sizes = self.launch = launch
         self.bind(devbox_id)
-        self.launch = launch
 
     def record_sizes(self, launch: Any) -> None:
         """Record the launch parameters of a devbox that the tag search found.
@@ -1063,7 +1069,7 @@ class FakeReservation:
             launch: The launch parameters.
         """
         self.events.append("sizes")
-        self.launch = launch
+        self.actual_sizes = self.launch = launch
 
     def record_stop(self, measured_ms: int) -> None:
         """Record the measured time.
@@ -1101,9 +1107,13 @@ class FakeReservation:
         """
         self.events.append("release")
 
-    def pending(self) -> None:
-        """Record that the hold stays pending."""
-        self.events.append("pending")
+    def pending(self, devbox_id: str | None = None) -> None:
+        """Record that the hold stays pending.
+
+        Args:
+            devbox_id: The devbox id for the evidence, when one is given.
+        """
+        self.events.append("pending" if devbox_id is None else f"pending:{devbox_id}")
 
 
 def _protected(**overrides: Any) -> RunloopEnvironment:
@@ -1406,6 +1416,60 @@ async def test_a_cancel_during_a_failing_reserve_raises_the_cancel(fake_sdk: Fak
         await start
     assert FakeReservation.made == []
     assert "create" not in fake_sdk.calls
+
+
+async def test_a_bind_refused_twice_keeps_the_hold_pending_with_the_devbox_id(fake_sdk: FakeCloud) -> None:
+    """Mark the hold pending with the devbox id when the ledger refuses both binds."""
+
+    class RefusedBind(FakeReservation):
+        """Fail every bind."""
+
+        def bind(self, devbox_id: str) -> None:
+            """Refuse the dispatch record.
+
+            Args:
+                devbox_id: The devbox id.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            self.events.append("refused")
+            raise RuntimeError("ledger down")
+
+    env = _protected()
+    env._usage_factory = RefusedBind
+    with pytest.raises(RuntimeError, match="ledger down"):
+        await env.start()
+    (box,) = fake_sdk.boxes.values()
+    with pytest.raises(UsagePendingError):
+        await env.stop()
+    (reservation,) = FakeReservation.made
+    assert box.status == "shutdown"
+    assert reservation.events == ["refused", "refused", f"pending:{box.id}"]
+
+
+async def test_the_shutdown_view_gives_an_unknown_size(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record the size from the shutdown view when the read after the create failed.
+
+    Args:
+        fake_sdk: The fake cloud.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+
+    async def broken(self: FakeDevbox) -> SimpleNamespace:
+        """Fail the read of the devbox view."""
+        raise FakeInternalServerError("500")
+
+    monkeypatch.setattr(FakeDevbox, "get_info", broken)
+    env = _protected()
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    (box,) = fake_sdk.boxes.values()
+    await env.stop()
+    (reservation,) = FakeReservation.made
+    assert reservation.events[0] == "sizes"
+    assert reservation.launch.custom_cpu_cores == box.launch["custom_cpu_cores"]
+    assert reservation.events[-1] == "settle"
 
 
 async def test_a_failed_bind_still_shuts_down_and_settles(fake_sdk: FakeCloud) -> None:

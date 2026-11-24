@@ -18,7 +18,7 @@ from core.billing.runloop_usage import USAGE, RunloopUsageReservation, quote_run
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.config import settings
 from core.sandbox.metering import usage_adapter
-from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 CREATE = {"lifetime_ms": 3_600_000, "vcpus": 2, "memory_gb": 4, "disk_gb": 16, "network_disabled": True}
 # 2 x 0.108 + 4 x 0.0252 + 16 x 0.00034236 USD for each hour.
@@ -381,6 +381,40 @@ def test_a_failed_bind_leaves_the_devbox_unbound(database: Engine, monkeypatch: 
     monkeypatch.delattr(runtime.service, "mark_dispatched")
     reservation.bind("dbx-1")
     assert reservation.devbox_id == "dbx-1"
+
+
+def test_a_bind_refused_twice_stays_pending_with_the_devbox_id(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the devbox id in the pending evidence when the ledger refused both binds.
+
+    Args:
+        database: The funded ledger.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    runtime = _runtime(database)
+    reservation = RunloopUsageReservation(runtime, CREATE, operation_key="box-one")
+
+    def refuse(*args: Any) -> None:
+        """Fail the dispatch record.
+
+        Args:
+            *args: The mark_dispatched arguments.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(runtime.service, "mark_dispatched", refuse)
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            reservation.bind("dbx-1")
+    reservation.pending("dbx-1")
+    assert _state(database) == "pending"
+    with Session(database) as session:
+        evidence = session.scalar(select(ExecutionUsageEvidenceModel)).evidence
+    assert evidence["devbox_id"] == "dbx-1"
 
 
 def test_settle_clamps_to_the_reservation(database: Engine) -> None:

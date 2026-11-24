@@ -760,19 +760,25 @@ class RunloopEnvironment(SandboxEnvironment):
             return
         box_id = devbox.id if devbox is not None else None
         stopped = False
+        launch = None
         try:
             if devbox is not None:
-                stopped = await _bounded(devbox.shutdown(), "shut the devbox down")
+                shutdown = asyncio.ensure_future(devbox.shutdown())
+                stopped = await _bounded(shutdown, "shut the devbox down")
+                if stopped:
+                    # The final view carries the size when the read after
+                    # the create failed.
+                    launch = getattr(shutdown.result(), "launch_parameters", None)
             elif self._create_dispatched:
                 stopped = await _bounded(self._shut_down_orphan(client), "shut the lost devbox down")
-                box_id = self._orphan_id
+                box_id, launch = self._orphan_id, self._orphan_launch
             stopped_at = time.monotonic()
             if self._usage is not None:
-                await self._settle(client, box_id, stopped_at if stopped else None)
+                await self._settle(client, box_id, stopped_at if stopped else None, launch)
         finally:
             await _bounded(client.aclose(), "close the client")
 
-    async def _settle(self, client: Any, box_id: str | None, stopped_at: float | None) -> None:
+    async def _settle(self, client: Any, box_id: str | None, stopped_at: float | None, launch: Any = None) -> None:
         """Settle or release the budget hold of a protected devbox.
 
         A failure to bind or settle a devbox that exists is kept for
@@ -785,11 +791,14 @@ class RunloopEnvironment(SandboxEnvironment):
             stopped_at: ``time.monotonic()`` of the confirmed shutdown or the
                 clean tag search, or ``None`` when neither is confirmed. A
                 refused create POST releases the hold without it.
+            launch: The ``launch_parameters`` from the shutdown view or the
+                tag search, used when the size is still unknown.
         """
         usage = self._usage
         if self._binding is not None:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(self._binding)
+        settling = False
         try:
             if box_id is None:
                 if not self._create_dispatched:
@@ -803,9 +812,8 @@ class RunloopEnvironment(SandboxEnvironment):
                     # search did not find, so the hold waits for reconciliation.
                     await asyncio.to_thread(usage.pending)
                 return
-            if self._orphan_launch is not None:
-                # A lost create never returned the view; the tag search did.
-                usage.record_sizes(self._orphan_launch)
+            if launch is not None and usage.actual_sizes is None:
+                usage.record_sizes(launch)
             if usage.devbox_id is None:
                 await asyncio.to_thread(usage.bind, box_id)
             if stopped_at is not None and self._create_sent_at is not None:
@@ -818,11 +826,21 @@ class RunloopEnvironment(SandboxEnvironment):
             except Exception as error:
                 # The measured time, if any, still bounds the bill from above.
                 logger.warning("Runloop gave no usage report for devbox %s: %s", box_id, type(error).__name__)
+            settling = True
             await asyncio.to_thread(usage.settle)
         except Exception as error:
             logger.warning("Runloop devbox %s usage stays pending: %s", box_id, type(error).__name__)
             if box_id is not None:
                 self._settle_error = _settle_failure(error)
+                if not settling:
+                    # Settle marks its own failures pending; a failed bind
+                    # does not, so mark it here with the box id.
+                    try:
+                        await asyncio.to_thread(usage.pending, box_id)
+                    except Exception as pending_error:
+                        logger.warning(
+                            "Runloop devbox %s could not be marked pending: %s", box_id, type(pending_error).__name__
+                        )
 
     async def _shut_down_orphan(self, client: Any) -> None:
         """Shut down the devbox of a create that ended before it returned.

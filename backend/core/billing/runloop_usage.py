@@ -453,11 +453,16 @@ class RunloopUsageReservation:
             # would replace it with a less useful one.
             logger.warning("Runloop hold %s could not be marked pending: %s", self.operation.id, type(error).__name__)
 
-    def pending(self) -> None:
-        """Keep the hold for manual reconciliation when settlement fails."""
+    def pending(self, devbox_id: str | None = None) -> None:
+        """Keep the hold for manual reconciliation when settlement fails.
+
+        Args:
+            devbox_id: The devbox id for the evidence when the bind failed,
+                so reconciliation still finds the box.
+        """
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
         if current.state in {"dispatched", "pending"}:
-            evidence = {"provider": "runloop", "devbox_id": self.devbox_id, "usage": self.usage}
+            evidence = {"provider": "runloop", "devbox_id": self.devbox_id or devbox_id, "usage": self.usage}
             self.runtime.service.mark_pending(
                 self.operation.id,
                 self.runtime.username,
