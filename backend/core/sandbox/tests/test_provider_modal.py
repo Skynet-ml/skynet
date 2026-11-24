@@ -1093,7 +1093,7 @@ class FakeUsage:
         """Record a failure with no sandbox.
 
         Args:
-            absent: True when a lookup by the box tag found no sandbox.
+            absent: True when Modal refused the create, and no box was found or the lookup failed.
         """
         self.calls.append("fail")
         self.absent = absent
@@ -1349,7 +1349,24 @@ async def test_protected_box_build_failure_is_an_unsent_create(fake_modal: FakeM
         await env.start()
     (usage,) = budget.reservations
     assert usage.calls == ["fail"]
+    assert "sent" not in usage.calls
     assert usage.absent is False
+    assert fake_modal.create_calls == 0
+
+
+@pytest.mark.parametrize("key", ["BAD-KEY", "1ST", ""])
+def test_env_name_that_modal_refuses_fails_before_any_hold(fake_modal: FakeModal, key: str) -> None:
+    """Refuse an env name that Modal refuses before any hold or create, so no hold stays pending.
+
+    Args:
+        fake_modal: The fake SDK.
+        key: An env name that does not match Modal's rule.
+    """
+    budget = SimpleNamespace(reservations=[])
+    spec = SandboxSpec(lifetime_seconds=60, operation_key="op-1", network_disabled=True, env={key: "x"})
+    with pytest.raises(SandboxSpecError, match="env names"):
+        ModalEnvironment(spec, budget=budget, usage_factory=FakeUsage)
+    assert budget.reservations == []
     assert fake_modal.create_calls == 0
 
 

@@ -19,6 +19,7 @@ import ipaddress
 import logging
 import math
 import os
+import re
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
@@ -129,6 +130,12 @@ _REFUSAL_ERRORS: frozenset[type[BaseException]] = frozenset(
 # it runs until its timeout while its hold stays pending.
 _RECHECK_DELAY_SEC = 30.0
 
+# modal 1.6.3 refuses other env names (sandbox/_common.py, _SECRET_KEYNAME_REGEX).
+# The check runs here, before any hold, because the V2 create does not check
+# the keys of a Secret.from_dict and a server refusal of the sent create would
+# leave the hold pending.
+_ENV_KEY = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
 
 
@@ -166,8 +173,8 @@ class ModalEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxSpecError: The spec asks for a lifetime, a disk size or a
-                GPU type that Modal cannot apply, or for another unsupported
-                feature. A protected box also needs an operation key and a
+                GPU type that Modal cannot apply, for an env name that Modal
+                refuses, or for another unsupported feature. A protected box also needs an operation key and a
                 priced size, and cannot use a GPU or any egress.
         """
         super().__init__(spec)
@@ -176,6 +183,9 @@ class ModalEnvironment(SandboxEnvironment):
         if spec.resources.disk_mb is not None and spec.resources.mode is not ResourceMode.IGNORE:
             raise SandboxSpecError("The modal sandbox cannot set a disk size.")
         modal_gpu_type(spec)
+        bad_keys = sorted(key for key in (spec.env or {}) if not _ENV_KEY.match(key))
+        if bad_keys:
+            raise SandboxSpecError(f"The modal sandbox refuses these env names: {', '.join(bad_keys)}.")
         self._app_name = app_name
         self._idle_timeout_sec = idle_timeout_sec
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts is not None else None
@@ -533,6 +543,9 @@ class ModalEnvironment(SandboxEnvironment):
             # Modal's docs do not say if a build is billed, so the clock counts it.
             usage.building()
             await image.build.aio(app)
+            # Sandbox.create still does local work before its one RPC (option
+            # checks, the auth token fetch). An error there made no box, but
+            # nothing outside the SDK can tell it apart, so its hold stays pending.
             usage.sent()
         self._v2_create = kwargs.get("gpu") is None and bool(modal_config.get("sandbox_v2"))
         sandbox = await Sandbox.create.aio(

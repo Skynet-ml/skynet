@@ -162,6 +162,11 @@ def test_reserve_then_settle_charges_the_measured_runtime(database: Engine) -> N
     assert row.actual_units == cent_units(charge.total)
     assert row.actual_units < row.max_units
     assert runtime._pinned == {}
+    with Session(database) as session:
+        settled = session.scalars(
+            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.evidence_key == "modal-stop:sb-1")
+        ).one()
+    assert settled.evidence["over_funded"] is False
 
 
 def test_runtime_clock_starts_before_the_image_build(database: Engine) -> None:

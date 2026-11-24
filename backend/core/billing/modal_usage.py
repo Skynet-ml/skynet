@@ -298,11 +298,11 @@ class ModalUsageReservation:
 
         No sandbox exists when the create was never sent. A create that was
         sent and failed may still have made one, so its hold is released
-        only when Modal refused the create, no lookup found a sandbox and no
-        create ever returned a sandbox.
+        only when Modal refused the create, no box was found or the lookup
+        failed, and no create ever returned a sandbox.
 
         Args:
-            absent: True when no sandbox exists: Modal refused the create, and no lookup found a sandbox.
+            absent: True when Modal refused the create, and no box was found or the lookup failed.
         """
         current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
         if current.state in {"settled", "released"}:
