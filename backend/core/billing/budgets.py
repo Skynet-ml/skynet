@@ -125,7 +125,8 @@ class BudgetInFlightError(BudgetError):
 
         Args:
             message: Internal diagnostic for logs and focused tests.
-            scope_units: Coverage the refused operation needs.
+            scope_units: Coverage the refused operation needs: scope units
+                for the limit, or wallet units when ``funds`` is set.
             room_units: The unspent units of the limit, or of the account's
                 funds when ``funds`` is set, this budget's reserved work included.
             funds: Whether the account's funds, not the limit, refused the operation.
@@ -267,6 +268,9 @@ def _run_reserved_units(budget: ExecutionBudgetModel) -> int:
     Reserve takes setup work only before attach and run work only after it,
     and attach refuses while setup work is active. So before attach every
     reservation is setup work, and after it every reservation is run work.
+    A budget detached from a deleted job (``close_for_deleted_jobs``) keeps
+    its dispatched run holds, but it is closed, so they no longer count
+    against a limit.
 
     Args:
         budget: Locked budget.

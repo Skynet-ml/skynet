@@ -22,7 +22,7 @@ The amount you choose is the amount that goes into your balance. The top-up fee 
 
 ## Run budgets
 
-Each run has a spending limit. The limit is the most the run may spend. It covers setup and optimization.
+Each run has a spending limit. The limit is the most the run may spend. It covers the optimization. Setup checks are paid from your balance.
 
 A run has no cost estimate before it starts. It spends up to its limit, stops at the budget, and keeps its best version. Read [Runs](/docs/concepts/runs) to see how Skynet decides when to stop.
 

@@ -22,7 +22,7 @@ Le montant que vous choisissez est le montant crédité sur votre solde. Les fra
 
 ## Budgets d'exécution
 
-Chaque exécution a un plafond de dépenses. Ce plafond est le maximum que l'exécution peut dépenser. Il couvre la configuration et l'optimisation.
+Chaque exécution a un plafond de dépenses. Ce plafond est le maximum que l'exécution peut dépenser. Il couvre l'optimisation. Les vérifications de configuration sont payées sur votre solde.
 
 Une exécution n'a pas d'estimation de coût avant de démarrer. Elle dépense jusqu'à son plafond, s'arrête au budget et conserve sa meilleure version. Lisez [Exécutions](/docs/concepts/runs) pour voir comment Skynet décide quand s'arrêter.
 

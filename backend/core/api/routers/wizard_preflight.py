@@ -66,6 +66,8 @@ FIXED_MESSAGE_CODES = {
     "Provider or sandbox usage is awaiting final confirmation.": "submit.preflight.usage_pending",
     "Provider or sandbox usage is still awaiting final confirmation.": "submit.preflight.usage_still_pending",
     "Previous provider or sandbox usage is awaiting final confirmation.": "submit.preflight.previous_usage_pending",
+    # New checks no longer emit this text: setup bills the balance (SKY-925).
+    # The entry stays so stored older results still localize.
     "The spending limit cannot cover setup.": "submit.preflight.budget_setup",
     "The total budget has no remaining allowance.": "submit.preflight.budget_exhausted",
     "The account has no available funds.": "submit.preflight.no_funds",

@@ -22,7 +22,7 @@ La cantidad que eliges es la cantidad que entra en tu saldo. La tarifa de recarg
 
 ## Presupuestos de ejecución
 
-Cada ejecución tiene un límite de gasto. El límite es lo máximo que puede gastar la ejecución. Cubre la configuración y la optimización.
+Cada ejecución tiene un límite de gasto. El límite es lo máximo que puede gastar la ejecución. Cubre la optimización. Las comprobaciones de configuración se pagan con tu saldo.
 
 Una ejecución no tiene una estimación de coste antes de empezar. Gasta hasta su límite, se detiene al llegar al presupuesto y conserva su mejor versión. Lee [Ejecuciones](/docs/concepts/runs) para ver cómo decide Skynet cuándo detenerse.
 

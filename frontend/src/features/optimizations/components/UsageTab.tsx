@@ -240,11 +240,16 @@ function Summary({
  * The live budget block: what the run has spent against its limit and, once
  * the first scorer runs have priced a call, how far the rest of the limit goes.
  */
-function BudgetPace({ job, spentCents }: { job: OptimizationStatusResponse; spentCents: number }) {
+function BudgetPace({ job }: { job: OptimizationStatusResponse }) {
   const locale = getActiveIntlLocale();
   const budget = job.execution_budget;
   const pace = budgetPaceLine(job.latest_metrics ?? {});
   if (!budget && !pace) return null;
+  // Setup checks bill the balance, not the limit (SKY-925), so the bar counts
+  // only the run's own spend and holds, as the server does for the limit.
+  const spentCents = budget
+    ? Number(budget.run_spent_cents) + (budget.job_id ? Number(budget.reserved_cents) : 0)
+    : 0;
   const spent = formatCentsUsd(spentCents, locale);
   const capped = budget != null && !budget.uncapped;
   return (
@@ -519,7 +524,7 @@ export function UsageTab({ job }: { job: OptimizationStatusResponse }) {
   return (
     <FadeIn>
       <div className="space-y-4">
-        {running && <BudgetPace job={job} spentCents={total.chargedCents} />}
+        {running && <BudgetPace job={job} />}
         <Summary
           job={job}
           usage={usage}
