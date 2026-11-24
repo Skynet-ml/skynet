@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +22,7 @@ from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.sail_usage import SailUsageReservation, quote_sail_sandbox, sail_actual_usd
 from core.config import settings
 from core.sandbox.metering import usage_adapter
-from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 CREATE = {
     "lifetime_ms": 3_600_000,
@@ -88,13 +89,16 @@ def _runtime(database: Engine) -> BudgetRuntime:
 class FakeSpend:
     """Answer spend reads from a script and count the waits."""
 
-    def __init__(self, *answers: Any) -> None:
+    def __init__(self, *answers: Any, rates: Mapping[str, int] | None = None) -> None:
         """Keep the answers in order; the last one repeats.
 
         Args:
             *answers: Spend lines, ``None`` for a report without the box, or an error to raise.
+            rates: The ``rates`` object of the report, or ``None`` for none.
         """
         self.answers = list(answers)
+        self.rates = rates
+        self.waits: list[float] = []
         self.reads: list[tuple[str, dt.datetime]] = []
         self.now = 0.0
 
@@ -118,15 +122,17 @@ class FakeSpend:
         return {
             "pricing_configured": True,
             "creation_fees_waived": False,
+            "rates": self.rates,
             "sailboxes": [] if answer is None else [answer],
         }
 
-    def sleep(self, seconds: float) -> None:
+    async def sleep(self, seconds: float) -> None:
         """Move the fake clock instead of waiting.
 
         Args:
             seconds: The wait.
         """
+        self.waits.append(seconds)
         self.now += seconds
 
     def clock(self) -> float:
@@ -229,8 +235,24 @@ def test_quote_refuses_an_unbounded_box(change: dict[str, Any]) -> None:
         quote_sail_sandbox({**CREATE, **change})
 
 
+def _status_error(status: int, retry_after: str | None = None) -> httpx.HTTPStatusError:
+    """Build the error that ``raise_for_status`` raises for a refused spend read.
+
+    Args:
+        status: The HTTP status.
+        retry_after: The ``Retry-After`` header, or ``None`` for none.
+
+    Returns:
+        The status error.
+    """
+    request = httpx.Request("GET", "https://api.sailresearch.com/v1/sailboxes/spend")
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    response = httpx.Response(status, headers=headers, request=request)
+    return httpx.HTTPStatusError("refused", request=request, response=response)
+
+
 def test_reserve_then_settle_charges_sails_reported_cost(database: Engine) -> None:
-    """Settle at Sail's cost once two spend reads agree, and free the rest of the hold."""
+    """Settle at Sail's cost once the box's line stays the same for a minute, and free the rest of the hold."""
     spend = FakeSpend(None, SPEND)
     reservation = _reservation(database, spend)
     _created(reservation)
@@ -239,9 +261,23 @@ def test_reserve_then_settle_charges_sails_reported_cost(database: Engine) -> No
     assert _state(database) == "settled"
     assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("1.20")
     assert reservation.operation.id not in runtime._pinned
-    assert [read[0] for read in spend.reads] == ["sb-1", "sb-1", "sb-1"]
+    assert [read[0] for read in spend.reads] == ["sb-1"] * 4
     assert spend.reads[0][1] < reservation.create_sent_at
-    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 2 * sail_usage.SPEND_POLL_SECONDS
+    # The line first shows at the second read; two equal reads 30 s apart
+    # are not enough, so the settle waits until it held for 60 s.
+    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 3 * sail_usage.SPEND_POLL_SECONDS
+
+
+def test_a_changed_line_restarts_the_agreement_wait(database: Engine) -> None:
+    """Wait a new minute when a late usage batch changes the box's line."""
+    late = {**SPEND, "cost_usd_nanos": 13_000_000}
+    spend = FakeSpend(SPEND, SPEND, late)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    reservation.settle()
+    settled = reservation.runtime.service.get_operation(reservation.operation.id, "alice")
+    assert settled.actual_cents == Decimal("1.30")
+    assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 4 * sail_usage.SPEND_POLL_SECONDS
 
 
 def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
@@ -253,27 +289,74 @@ def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
 
 
-def test_settle_clamps_to_the_reservation(database: Engine) -> None:
-    """Charge no more than the hold when Sail reports more than the funded ceiling."""
+def test_settle_uses_the_reported_creation_rate_of_the_box_size() -> None:
+    """Price the creation at the report's rate for the box's size, not at the published flat fee."""
+    snapshot = quote_sail_sandbox(CREATE).price_snapshot
+    line = {
+        **SPEND,
+        "pricing_configured": False,
+        "creation_fees_waived": False,
+        "rates": {"s_creation_usd_nanos": 5_000_000, "l_creation_usd_nanos": 40_000_000},
+    }
+    usage = (600 * Decimal("0.015") + 1200 * Decimal("0.008") + 2400 * Decimal("0.0007")) / 3600
+    assert sail_actual_usd(line, snapshot) == usage + Decimal("0.005")
+
+
+def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCaptureFixture) -> None:
+    """Charge no more than the hold when Sail reports more, and record the unclamped charge.
+
+    Args:
+        database: Engine of the funded ledger.
+        caplog: Captures the clamp warning.
+    """
     spend = FakeSpend({**SPEND, "cost_usd_nanos": 5_000_000_000})
     reservation = _reservation(database, spend)
     _created(reservation)
-    reservation.settle()
+    with caplog.at_level(logging.WARNING, logger=sail_usage.__name__):
+        reservation.settle()
     runtime = reservation.runtime
     assert _state(database) == "settled"
     settled = runtime.service.get_operation(reservation.operation.id, "alice")
     assert settled.actual_cents == settled.max_cents == Decimal("17.54")
+    with Session(database) as session:
+        evidence = session.scalar(select(ExecutionUsageEvidenceModel)).evidence
+    assert evidence["clamped"] is True
+    assert Decimal(evidence["unclamped_cents"]) == Decimal(500)
+    assert "clamped" in caplog.text
 
 
-def test_a_spend_api_failure_keeps_the_hold_pending(database: Engine) -> None:
-    """Keep the hold pending and raise when the spend report cannot be read."""
+def test_a_spend_api_failure_keeps_polling_until_the_deadline(database: Engine) -> None:
+    """Read again after a transport error, and keep the hold pending when the reads never work."""
     spend = FakeSpend(httpx.ConnectError("down"))
     reservation = _reservation(database, spend)
     _created(reservation)
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(UsagePendingError, match="final spend"):
         reservation.settle()
+    assert len(spend.reads) > 1
     assert _state(database) == "pending"
     assert reservation.operation.id in reservation.runtime._pinned
+
+
+def test_a_rate_limited_or_unavailable_read_is_tried_again(database: Engine) -> None:
+    """Honor Retry-After on a 429, poll again after a 503 or a transport error, then settle."""
+    spend = FakeSpend(_status_error(429, "5"), _status_error(503), httpx.ReadTimeout("slow"), SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    reservation.settle()
+    assert _state(database) == "settled"
+    poll = sail_usage.SPEND_POLL_SECONDS
+    assert spend.waits[:4] == [sail_usage.SPEND_DELAY_SECONDS, 5.0, poll, poll]
+
+
+def test_a_refused_spend_read_keeps_the_hold_pending(database: Engine) -> None:
+    """Stop at once and keep the hold when Sail refuses the read for good, as with a wrong key."""
+    spend = FakeSpend(_status_error(403))
+    reservation = _reservation(database, spend)
+    _created(reservation)
+    with pytest.raises(httpx.HTTPStatusError):
+        reservation.settle()
+    assert len(spend.reads) == 1
+    assert _state(database) == "pending"
 
 
 def test_a_spend_that_never_arrives_stays_pending(database: Engine) -> None:
@@ -311,3 +394,12 @@ def test_a_cancelled_create_keeps_the_hold_pending(database: Engine) -> None:
     assert _state(database) == "pending"
     with pytest.raises(UsagePendingError, match="no box identity"):
         reservation.settle()
+
+
+def test_a_refused_create_releases_the_hold(database: Engine) -> None:
+    """Return the hold when Sail clearly refused the create, so no box can exist."""
+    reservation = _reservation(database, FakeSpend(SPEND))
+    reservation.begin_create()
+    reservation.release(refused=True)
+    assert _state(database) == "released"
+    assert reservation.runtime._pinned == {}

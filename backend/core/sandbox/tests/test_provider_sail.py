@@ -39,6 +39,23 @@ class FakeSailError(Exception):
     """Stand in for an SDK error whose class the provider does not know."""
 
 
+class FakeApiError(Exception):
+    """Stand in for an SDK error that carries the HTTP status of the call."""
+
+    def __init__(self, status_code: int) -> None:
+        """Keep the status.
+
+        Args:
+            status_code: The HTTP status that Sail answered.
+        """
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+class InvalidArgumentError(Exception):
+    """Stand in for the SDK error of a call that the client refused before any request."""
+
+
 def _aio(fn: Any) -> SimpleNamespace:
     """Wrap a coroutine function like an SDK method with an ``.aio`` form.
 
@@ -876,6 +893,7 @@ class FakeUsage:
         self.sailbox_id: str | None = None
         self.confirm_error: BaseException | None = None
         self.settle_error: BaseException | None = None
+        self.spending: list[int] | None = None
 
     def begin_create(self) -> None:
         """Record the create call, with the boxes that existed before it."""
@@ -891,7 +909,7 @@ class FakeUsage:
         self.calls.append(("bind", sailbox_id))
 
     def confirm_created(self, sailbox: Any) -> None:
-        """Record the checked box, or fail as the test sets.
+        """Bind the box, then record the checked box, or fail as the test sets.
 
         Args:
             sailbox: The full fake box.
@@ -899,27 +917,49 @@ class FakeUsage:
         Raises:
             BaseException: The error that the test sets.
         """
+        self.bind(sailbox.sailbox_id)
         self.calls.append(("confirm", sailbox.memory_mib))
         if self.confirm_error is not None:
             raise self.confirm_error
 
-    def release(self) -> None:
-        """Record a release."""
-        self.calls.append(("release", None))
+    def release(self, *, refused: bool = False) -> None:
+        """Record a release, and whether Sail refused the create.
+
+        Args:
+            refused: True when the provider saw a refused create.
+        """
+        self.calls.append(("release", refused))
 
     def pending(self) -> None:
         """Record a pending hold."""
         self.calls.append(("pending", None))
 
-    def settle(self) -> None:
-        """Record a settle, with the box state at that time, or fail as the test sets.
+    async def final_spend(self) -> dict[str, Any]:
+        """Wait a moment for the spend, or fail as the test sets.
+
+        Returns:
+            A fake spend line.
 
         Raises:
             BaseException: The error that the test sets.
         """
-        self.calls.append(("settle", [box.terminated for box in CLOUD.boxes]))
+        if self.spending is not None:
+            # Shared by the boxes of one test, to see how many waits overlap.
+            self.spending[0] += 1
+            self.spending[1] = max(self.spending[1], self.spending[0])
+            await asyncio.sleep(0.02)
+            self.spending[0] -= 1
         if self.settle_error is not None:
             raise self.settle_error
+        return {"sailbox_id": self.sailbox_id}
+
+    def settle_spend(self, spend: dict[str, Any]) -> None:
+        """Record a settle, with the box state at that time.
+
+        Args:
+            spend: The spend line from ``final_spend``.
+        """
+        self.calls.append(("settle", [box.terminated for box in CLOUD.boxes]))
 
     def names(self) -> list[str]:
         """Return the names of the recorded calls.
@@ -1026,7 +1066,35 @@ async def test_a_failed_create_releases_the_reservation(fake_sdk: FakeCloud) -> 
     env, made = _protected()
     with pytest.raises(SandboxInfraError):
         await env.start()
-    assert made[0].names() == ["begin_create", "release"]
+    # An unknown SDK error can come after Sail made the box, so the hold is not freed.
+    assert made[0].calls[-1] == ("release", False)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [FakeApiError(429), FakeApiError(403), InvalidArgumentError("bad size"), TypeError("bad keyword")],
+)
+async def test_a_refused_create_frees_the_reservation(fake_sdk: FakeCloud, error: BaseException) -> None:
+    """Free the hold when Sail or the SDK clearly refused the create, so no box exists.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        error: The refusal of the create.
+    """
+    fake_sdk.create_error = error
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert made[0].calls[-1] == ("release", True)
+
+
+async def test_a_server_error_on_the_create_keeps_the_hold(fake_sdk: FakeCloud) -> None:
+    """Keep the hold for a 5xx create, because Sail may have made the box."""
+    fake_sdk.create_error = FakeApiError(502)
+    env, made = _protected()
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert made[0].calls[-1] == ("release", False)
 
 
 async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) -> None:
@@ -1040,6 +1108,49 @@ async def test_a_cancelled_protected_start_settles_the_box(fake_sdk: FakeCloud) 
         await starting
     assert made[0].names() == ["begin_create", "bind", "settle"]
     assert made[0].calls[-1] == ("settle", [True])
+
+
+async def test_a_settle_failure_does_not_hide_the_start_error(fake_sdk: FakeCloud) -> None:
+    """Raise the start error from a failed start, and keep the settle failure for the next stop."""
+    env, made = _protected()
+
+    def failing(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation whose confirm and settle fail.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        made.append(FakeUsage(request, operation_key))
+        made[-1].confirm_error = SandboxInfraError("confirm failed")
+        made[-1].settle_error = RuntimeError("spend API down")
+        return made[-1]
+
+    env._usage_factory = failing
+    with pytest.raises(SandboxInfraError, match="confirm failed"):
+        await env.start()
+    assert made[0].names()[-1] == "pending"
+    with pytest.raises(UsagePendingError, match="not yet settled"):
+        await env.stop()
+    await env.stop()
+
+
+async def test_a_settle_failure_does_not_hide_a_cancel(fake_sdk: FakeCloud) -> None:
+    """Let a cancelled start end as a cancel even when its settle fails."""
+    fake_sdk.create_delay = 0.05
+    env, made = _protected()
+    starting = asyncio.ensure_future(env.start())
+    await fake_sdk.create_started.wait()
+    made[0].settle_error = UsagePendingError("late spend")
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    with pytest.raises(UsagePendingError, match="late spend"):
+        await env.stop()
 
 
 async def test_a_box_that_did_not_terminate_stays_pending(fake_sdk: FakeCloud) -> None:
@@ -1062,7 +1173,7 @@ async def test_a_settle_failure_is_raised_once(fake_sdk: FakeCloud) -> None:
         await env.stop()
     assert isinstance(raised.value.__cause__, RuntimeError)
     await env.stop()
-    assert made[0].names().count("settle") == 1
+    assert made[0].names() == ["begin_create", "bind", "confirm", "pending"]
 
 
 async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud) -> None:
@@ -1074,3 +1185,15 @@ async def test_the_job_sweep_goes_on_after_a_pending_settle(fake_sdk: FakeCloud)
     made_first[0].settle_error = UsagePendingError("late spend")
     assert await SailEnvironment.stop_job_sandboxes("job-1") == 2
     assert [box.terminated for box in fake_sdk.boxes] == [True, True]
+
+
+async def test_the_job_sweep_waits_for_all_spends_at_the_same_time(fake_sdk: FakeCloud) -> None:
+    """Stop the job's boxes together, so their minutes-long spend waits overlap."""
+    envs = [_protected(tags={JOB_TAG: "job-2"}, name=f"box-{index}") for index in range(3)]
+    spending = [0, 0]
+    for env, made in envs:
+        await env.start()
+        made[0].spending = spending
+    assert await SailEnvironment.stop_job_sandboxes("job-2") == 3
+    assert spending[1] == 3
+    assert all(made[0].names()[-1] == "settle" for _, made in envs)

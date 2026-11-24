@@ -4,16 +4,20 @@ Sail bills the CPU, memory and disk that a Sailbox uses, sampled each
 second, and not its limits. The quote funds the limits of the box for its
 whole lifetime, so it is a ceiling. After the box stops, the settle reads
 the box's spend from ``GET /v1/sailboxes/spend``. Sail reports usage in
-batches of about one minute, so the settle waits, then polls until two
-reads agree. A box whose spend does not arrive stays pending. The settled
-amount never passes the reservation.
+batches of about one minute, so the settle waits, then polls until the
+box's line stays the same for at least a minute. The waits are async, so a
+settle holds no worker thread. A box whose spend does not arrive stays
+pending. The settled amount never passes the reservation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import email.utils
+import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -31,10 +35,15 @@ try:
 except ImportError:
     Config = None
 
+logger = logging.getLogger(__name__)
+
 # Published usage rates, read on 2026-11-24 from
 # https://docs.sailresearch.com/pricing.md and
 # https://docs.sailresearch.com/sailboxes-billing.md. The creation charge
-# applies on the Free plan only; Pro and Enterprise waive it.
+# applies on the Free plan only; Pro and Enterprise waive it. The spend API
+# has a creation rate for each size (``rates.<size>_creation_usd_nanos``),
+# but the pricing page publishes only one fee, so the quote funds that fee
+# and the measured settle uses the reported rate of the size when present.
 _PRICING_URL = "https://docs.sailresearch.com/pricing.md"
 _SPEND_URL = "https://docs.sailresearch.com/sailboxes-billing.md"
 _PRICE_VERSION = "sail-public-2026-11-24"
@@ -45,9 +54,11 @@ _CREATION_USD = Decimal("0.01")
 _SECONDS_PER_HOUR = Decimal(3600)
 _MS_PER_HOUR = Decimal(3_600_000)
 _NANOS_PER_USD = Decimal(1_000_000_000)
-# The size ladder of the sail SDK 0.17.2 core: vCPUs, then the default and
-# the most memory and disk in GiB. Sail rounds a limit up to the next power
-# of two. A create without a size gets "l". The ultra size is not funded.
+# The size ladder of the sail SDK 0.17.2 core, the version that uv.lock
+# pins: vCPUs, then the default and the most memory and disk in GiB. Sail
+# rounds a limit up to the next power of two. A create without a size gets
+# "l". A size that is not in this table (ultra, or a size of a newer SDK)
+# raises UnpricedOperationError at the reserve, before the create call.
 _SIZES = {
     "s": (1, 16, 64, 32, 128),
     "m": (4, 32, 128, 128, 512),
@@ -62,6 +73,12 @@ _LIFETIME_CEILING_MS = 24 * 3_600_000
 SPEND_DELAY_SECONDS = 90.0
 SPEND_POLL_SECONDS = 30.0
 SPEND_DEADLINE_SECONDS = 360.0
+# Two equal reads close together can both come before the last usage
+# batch, so a line counts as final only after it stays the same this long.
+SPEND_AGREE_SECONDS = 60.0
+# Sail documents these as retryable: the request never started (429) or
+# Sail is briefly unavailable (503).
+_TRANSIENT_STATUSES = frozenset({429, 503})
 _SPEND_TIMEOUT_SECONDS = 30.0
 # The spend window opens before the create, so clock drift between this
 # worker and Sail cannot drop the box's first samples.
@@ -75,6 +92,31 @@ _SPEND_FIELDS = (
     "state_disk_gib_seconds",
     "creation_count",
 )
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Read the wait that a ``Retry-After`` header asks for.
+
+    Args:
+        response: The refused spend response.
+
+    Returns:
+        The wait in seconds, or ``None`` when the header is missing or unreadable.
+    """
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.UTC)
+    return max(0.0, (when - dt.datetime.now(dt.UTC)).total_seconds())
 
 
 def _power_of_two(value: int) -> int:
@@ -220,6 +262,7 @@ def _box_spend(report: Mapping[str, Any], sailbox_id: str) -> dict[str, Any] | N
             spend = {name: line.get(name) for name in _SPEND_FIELDS}
             spend["pricing_configured"] = report.get("pricing_configured")
             spend["creation_fees_waived"] = report.get("creation_fees_waived")
+            spend["rates"] = report.get("rates")
             return spend
     return None
 
@@ -228,7 +271,9 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
     """Price one box from its spend line.
 
     Sail's own cost is used when Sail has prices set for the account.
-    Otherwise the measured usage is priced at the admitted rates.
+    Otherwise the measured usage is priced at the admitted rates, and the
+    creation at the reported rate of the box's size, or at the admitted fee
+    when the report has no rate.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -251,7 +296,15 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
         ) / _SECONDS_PER_HOUR
         creation = Decimal(0)
         if spend.get("creation_fees_waived") is not True:
-            creation = exact_nonnegative(spend["creation_count"]) * exact_nonnegative(price_snapshot["creation_usd"])
+            size = price_snapshot["request"].get("size") or _DEFAULT_SIZE
+            rates = spend.get("rates")
+            rate = rates.get(f"{size}_creation_usd_nanos") if isinstance(rates, Mapping) else None
+            fee = (
+                exact_nonnegative(price_snapshot["creation_usd"])
+                if rate is None
+                else exact_nonnegative(rate) / _NANOS_PER_USD
+            )
+            creation = exact_nonnegative(spend["creation_count"]) * fee
         return usage + creation
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Sail spend report has no usable cost for the box.") from error
@@ -268,7 +321,7 @@ class SailUsageReservation:
         operation_key: str,
         reserved: OperationSnapshot | None = None,
         fetch: Callable[[str, dt.datetime], Mapping[str, Any]] = fetch_sail_spend,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Reserve and claim one box before any network call.
@@ -279,7 +332,7 @@ class SailUsageReservation:
             operation_key: Stable logical identity of the box.
             reserved: A pool lease slice already reserved for this box.
             fetch: Reads the spend report of one box.
-            sleep: Waits between spend reads.
+            sleep: Waits between spend reads, without holding a thread.
             clock: Monotonic clock for the spend deadline.
 
         Raises:
@@ -394,49 +447,136 @@ class SailUsageReservation:
                 evidence={"provider": "sail", "sailbox_id": self.sailbox_id, "spend": self.spend},
             )
 
-    def release(self) -> None:
-        """Return the hold when no create call went out, otherwise keep it pending.
+    def release(self, *, refused: bool = False) -> None:
+        """Return the hold when no box can exist, otherwise keep it pending.
 
         A box can exist once the create call is sent, even when its handle
-        never arrived, so only a box that was never requested is released.
+        never arrived. So only a box that was never requested, or whose
+        create Sail clearly refused, is released.
+
+        Args:
+            refused: True when the create failed before Sail could make a box.
         """
-        if self.create_sent_at is not None or self.sailbox_id is not None:
+        if self.sailbox_id is not None or (self.create_sent_at is not None and not refused):
             self.pending()
             return
+        reason = "Sail refused the create call" if refused else "the create call was never sent"
         self.runtime.service.reject(
             self.operation.id,
             self.runtime.username,
             evidence_key=f"sail-unsent:{self.operation.id}",
-            evidence={"provider": "sail", "reason": "the create call was never sent"},
+            evidence={"provider": "sail", "reason": reason},
         )
         self.runtime.unpin(self.operation.id)
 
-    def _final_spend(self) -> dict[str, Any]:
-        """Poll the spend report until the box's line stops changing.
+    def _identity(self) -> tuple[str, dt.datetime]:
+        """Return the box id and the start of its spend window.
+
+        Returns:
+            The Sail id of the box and the window start.
+
+        Raises:
+            UsagePendingError: When the create returned no box identity.
+        """
+        if self.sailbox_id is None or self.create_sent_at is None:
+            raise UsagePendingError("The Sail create returned no box identity to settle.")
+        return self.sailbox_id, self.create_sent_at - _WINDOW_MARGIN
+
+    async def final_spend(self) -> dict[str, Any]:
+        """Poll the spend report until the box's line stays the same for a minute.
+
+        Only the short spend reads run in threads; the waits do not hold one.
+        A 429 or 503 answer, or a transport error, is read again later.
 
         Returns:
             The box's final spend line.
 
         Raises:
-            UsagePendingError: When the line does not settle before the deadline.
+            UsagePendingError: When there is no box identity, or the line does
+                not settle before the deadline.
+            httpx.HTTPStatusError: When Sail refuses the read for good.
         """
-        since = self.create_sent_at - _WINDOW_MARGIN
+        sailbox_id, since = self._identity()
         give_up = self._clock() + SPEND_DEADLINE_SECONDS
-        self._sleep(SPEND_DELAY_SECONDS)
-        previous = None
+        wait = SPEND_DELAY_SECONDS
+        previous: dict[str, Any] | None = None
+        first_seen = 0.0
         while True:
-            line = _box_spend(self._fetch(self.sailbox_id, since), self.sailbox_id)
-            if line is not None:
-                self.spend = line
-                if line == previous:
-                    return line
-            previous = line
-            if self._clock() + SPEND_POLL_SECONDS > give_up:
+            if self._clock() + wait > give_up:
                 raise UsagePendingError("Sail did not report a final spend for the box in time.")
-            self._sleep(SPEND_POLL_SECONDS)
+            await self._sleep(wait)
+            wait = SPEND_POLL_SECONDS
+            try:
+                report = await asyncio.to_thread(self._fetch, sailbox_id, since)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code not in _TRANSIENT_STATUSES:
+                    raise
+                retry_after = _retry_after(error.response)
+                if retry_after is not None:
+                    wait = retry_after
+                continue
+            except httpx.TransportError:
+                continue
+            line = _box_spend(report, sailbox_id)
+            if line is None:
+                continue
+            self.spend = line
+            now = self._clock()
+            if line != previous:
+                previous, first_seen = line, now
+            elif now - first_seen >= SPEND_AGREE_SECONDS:
+                return line
+
+    def settle_spend(self, spend: Mapping[str, Any]) -> None:
+        """Settle the stopped box at its final spend, inside the reservation.
+
+        Args:
+            spend: The box's final spend line from :meth:`final_spend`.
+
+        Raises:
+            UsagePendingError: When the spend is unusable.
+            BudgetError: When the ledger refuses the settlement.
+        """
+        try:
+            current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
+            if current.state == "settled":
+                self.runtime.unpin(self.operation.id)
+                return
+            usd = sail_actual_usd(spend, self.quote.price_snapshot)
+            charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
+            # Sail's per-second samples and its own rates can pass the funded
+            # ceiling by a little; the charge must stay inside the reservation.
+            total = min(charge.total, current.max_cents)
+            wallet = min(charge.wallet, current.max_wallet_cents, total)
+            evidence: dict[str, Any] = {
+                "provider": "sail",
+                "source": _SPEND_URL,
+                "spend": dict(spend),
+                "provider_usd": str(usd),
+            }
+            if total < charge.total or wallet < charge.wallet:
+                evidence["clamped"] = True
+                evidence["unclamped_cents"] = str(charge.total)
+                evidence["unclamped_wallet_cents"] = str(charge.wallet)
+                logger.warning(
+                    "Sail spend of box %s passed its reservation; the charge is clamped to the reservation.",
+                    self.sailbox_id,
+                )
+            self.runtime.service.settle(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"sail-spend:{self.sailbox_id}",
+                actual_cents=total,
+                actual_wallet_cents=wallet,
+                evidence=evidence,
+            )
+            self.runtime.unpin(self.operation.id)
+        except BaseException:
+            self.pending()
+            raise
 
     def settle(self) -> None:
-        """Settle the stopped box at its reported spend, inside the reservation.
+        """Wait for the final spend, then settle the box, from a thread with no event loop.
 
         Raises:
             UsagePendingError: When the spend is missing, late or unusable.
@@ -444,31 +584,11 @@ class SailUsageReservation:
             httpx.HTTPError: When the spend report cannot be read.
         """
         try:
-            current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
-            if current.state == "settled":
-                self.runtime.unpin(self.operation.id)
-                return
-            if self.sailbox_id is None or self.create_sent_at is None:
-                raise UsagePendingError("The Sail create returned no box identity to settle.")
-            spend = self._final_spend()
-            usd = sail_actual_usd(spend, self.quote.price_snapshot)
-            charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
-            # Sail's per-second samples and its own rates can pass the funded
-            # ceiling by a little; the charge must stay inside the reservation.
-            total = min(charge.total, current.max_cents)
-            wallet = min(charge.wallet, current.max_wallet_cents, total)
-            self.runtime.service.settle(
-                self.operation.id,
-                self.runtime.username,
-                evidence_key=f"sail-spend:{self.sailbox_id}",
-                actual_cents=total,
-                actual_wallet_cents=wallet,
-                evidence={"provider": "sail", "source": _SPEND_URL, "spend": spend, "provider_usd": str(usd)},
-            )
-            self.runtime.unpin(self.operation.id)
+            spend = asyncio.run(self.final_spend())
         except BaseException:
             self.pending()
             raise
+        self.settle_spend(spend)
 
 
 class SailUsage:
@@ -528,7 +648,7 @@ class SailUsage:
         reservation.extend(lifetime_ms, deadline=deadline)
 
     def settle(self, reservation: SailUsageReservation) -> None:
-        """Settle the stopped box at its reported spend.
+        """Settle the stopped box at its reported spend, from a thread with no event loop.
 
         Args:
             reservation: The box's claimed reservation.
