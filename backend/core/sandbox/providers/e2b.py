@@ -409,7 +409,10 @@ class E2BEnvironment(SandboxEnvironment):
         # E2B starts the timeout when the create arrives, never before it was sent.
         self._funded_until = sent_at + first_slice
         if first_slice < self.spec.lifetime_seconds:
-            deadline = self._clock.monotonic() + self.spec.lifetime_seconds
+            # The deadline counts from the create call, like the funded
+            # runtime, so the size check and read pacing after the create
+            # cannot push the last extension past the 24-hour quote.
+            deadline = sent_at + self.spec.lifetime_seconds
             self._renewer = asyncio.create_task(self._renew_loop(self._funded_until, deadline))
 
     async def _capacity_check(self) -> bool:
@@ -545,10 +548,14 @@ class E2BEnvironment(SandboxEnvironment):
         Raises:
             ProviderAtCapacityError: E2B answered 429, 502 or 503. A protected
                 box waits only after a rate limit.
-            SandboxInfraError: A protected box hit the rate-limit attempt or time limit.
+            SandboxInfraError: A protected box hit the rate-limit attempt or
+                time limit, also before a resent create.
             StartTimeoutError: The create did not finish in time.
             SandboxSpecError: The box is larger than its funding.
         """
+        if usage is not None and self._rate_limits:
+            # The create-bucket wait after a rate limit also holds the funds.
+            self._check_hold_wait()
         self._create_dispatched = True
         self._create_unknown = True
         self._create_sent_at = self._clock.monotonic()

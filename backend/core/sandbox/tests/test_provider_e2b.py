@@ -18,7 +18,7 @@ from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.metering import usage_adapter
-from core.sandbox.pacing import ProviderAtCapacityError
+from core.sandbox.pacing import ProviderAtCapacityError, ProviderPacing
 from core.sandbox.providers import e2b
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
@@ -1463,3 +1463,72 @@ def test_protected_memory_must_fit_e2b() -> None:
     """Refuse a protected spec with more memory than E2B allows, before any reservation."""
     with pytest.raises(SandboxSpecError):
         _protected(UsageFactory(), resources=ResourceRequest(cpus=1, memory_mb=e2b.MAX_MEMORY_MB + 1))
+
+
+class SlowCreateBucket:
+    """Act as a create bucket whose second wait moves the clock past the hold limit."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        """Keep the clock.
+
+        Args:
+            clock: The fake clock of the environment.
+        """
+        self.clock = clock
+        self.calls = 0
+
+    async def acquire(self) -> None:
+        """Wait for a create token; the second wait takes the whole hold limit."""
+        self.calls += 1
+        if self.calls > 1:
+            self.clock.now += e2b.PROTECTED_HOLD_WAIT
+
+
+class FreeBucket:
+    """Act as a read bucket that never waits."""
+
+    async def acquire(self) -> None:
+        """Return at once."""
+
+
+async def test_create_bucket_wait_counts_against_the_hold_limit() -> None:
+    """Fail before a resent create when the create-bucket wait used up the hold limit."""
+    FakeBox.create_errors = [_status_error(429)]
+    made = UsageFactory()
+    clock = FakeClock()
+    pacing = ProviderPacing(reads=FreeBucket(), creates=SlowCreateBucket(clock))
+    env = e2b.E2BEnvironment(
+        _spec(operation_key="op-1"), budget=object(), usage_factory=made, clock=clock, pacing=pacing
+    )
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert len(FakeBox.create_calls) == 1
+    (usage,) = made.made
+    assert usage.started_at is None
+    assert usage.events[-2:] == [("stopped", True, 0), ("settle",)]
+
+
+async def test_slow_confirm_does_not_push_the_last_extension_past_the_quote() -> None:
+    """Count the renew deadline from the create call, so a slow confirm cannot pass 24 hours."""
+    made = UsageFactory()
+    env = _protected(made, lifetime_seconds=e2b.MAX_PROTECTED_LIFETIME)
+    clock = env._clock
+    slow = True
+
+    async def pace_read() -> None:
+        """Make the first read wait, which runs before the size check, take 1000 seconds."""
+        nonlocal slow
+        if slow:
+            slow = False
+            clock.now += 1000
+
+    env._pace_read = pace_read
+    await env.start()
+    try:
+        await asyncio.wait_for(env._renewer, 5)
+        (usage,) = made.made
+        extends = [event[1] for event in usage.events if event[0] == "extend"]
+        assert extends
+        assert max(extends) <= e2b.E2B_MAX_LIFETIME * 1000
+    finally:
+        await env.stop()
