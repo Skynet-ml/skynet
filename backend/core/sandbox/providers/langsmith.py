@@ -44,7 +44,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from core.billing.langsmith_usage import LangSmithUsageReservation
 from core.billing.operation_pricing import json_fingerprint
@@ -205,7 +205,11 @@ class LangSmithEnvironment(SandboxEnvironment):
             # worker would leave a box with no cost bound.
             if not self._idle_ttl or not self._delete_after_stop:
                 raise SandboxSpecError("A protected LangSmith sandbox needs nonzero idle and delete TTLs.")
-            self.capabilities = dataclasses.replace(LANGSMITH_CAPABILITIES, protected=True)
+            # Only this box is protected, so it shadows the class value. The base
+            # class declares a ClassVar, which pyright cannot express per instance.
+            self.capabilities = dataclasses.replace(  # pyright: ignore[reportAttributeAccessIssue]
+                LANGSMITH_CAPABILITIES, protected=True
+            )
         self._budget = budget
         self._usage_factory = usage_factory
         self._usage: Any | None = None
@@ -215,6 +219,8 @@ class LangSmithEnvironment(SandboxEnvironment):
         # None until the create call leaves; then the instant after which a 404 proves the box gone.
         self._proof_after: float | None = None
         self._refused: int | None = None
+        # True when the server answered the create, so the delete-call time ends the billed life.
+        self._answered = False
         self._api_key = api_key
         self._api_url = api_url or os.environ.get(_API_URL_ENV) or None
         self._snapshot = snapshot or spec.image
@@ -271,7 +277,9 @@ class LangSmithEnvironment(SandboxEnvironment):
         self._create_running = True
         self._proof_after = None
         self._refused = None
+        self._answered = False
         deadline: asyncio.Timeout | None = None
+        box: Any = None
         error: BaseException | None = None
         try:
             await self._reserve()
@@ -322,12 +330,15 @@ class LangSmithEnvironment(SandboxEnvironment):
             box = await client.create_sandbox(**self._create_kwargs())
         except Exception as exc:
             status = _http_status(exc)
-            if status is not None:
-                # The server answered, so a delete after this sees every box it made.
+            # Only a refusal proves the origin made no box. A gateway 5xx, a 408
+            # or a 499 can come while the origin still makes it.
+            if status in _REFUSED_STATUSES:
                 self._proof_after = sent_at
-                self._refused = status if status in _REFUSED_STATUSES else None
+                self._refused = status
+                self._answered = True
             raise
         self._proof_after = sent_at
+        self._answered = True
         return box
 
     async def stop(self) -> None:
@@ -387,11 +398,13 @@ class LangSmithEnvironment(SandboxEnvironment):
                 if self._proof_after is None:
                     await asyncio.to_thread(usage.release, "create-not-sent")
                     return
-                if self._refused is not None and await _absent(client, name):
+                if self._refused is not None and name is not None and await _absent(client, name):
                     await asyncio.to_thread(usage.release, f"create-refused-{self._refused}")
                     return
-                if await _teardown(client, name, proof_after=self._proof_after):
-                    usage.mark_deleted()
+                ended_at = await _teardown(client, name, proof_after=self._proof_after)
+                if ended_at is not None:
+                    # Without a create answer, the box can have lived until the proof.
+                    usage.mark_deleted(ended_at if self._answered else None)
                 await asyncio.to_thread(usage.settle)
             except Exception as error:
                 logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(error).__name__)
@@ -495,6 +508,8 @@ class LangSmithEnvironment(SandboxEnvironment):
         merged = {**self.spec.env, **(env or {})}
         sink = on_output or current_output_sink()
         handle: Any = None
+        deadline: asyncio.Timeout | None = None
+        result: Any = None
         finished = False
         timed_out = False
         try:
@@ -518,16 +533,18 @@ class LangSmithEnvironment(SandboxEnvironment):
         except TimeoutError:
             # The output sink can raise its own TimeoutError; only an expired
             # deadline is a run timeout.
-            if not deadline.expired():
+            if deadline is None or not deadline.expired():
                 raise
             timed_out = True
-        except CommandTimeoutError:
+        # The name is None only without the SDK, and then no box can run.
+        except cast("type[BaseException]", CommandTimeoutError):
             timed_out = True
         finally:
             if handle is not None and not finished:
                 await asyncio.shield(_kill(handle))
         if timed_out:
             return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
+        assert result is not None
         return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
@@ -764,7 +781,7 @@ def _http_status(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-async def _teardown(client: Any, name: str | None, *, proof_after: float | None = None) -> bool:
+async def _teardown(client: Any, name: str | None, *, proof_after: float | None = None) -> float | None:
     """Delete one sandbox by name, and log a failure instead of raising it.
 
     Args:
@@ -774,18 +791,18 @@ async def _teardown(client: Any, name: str | None, *, proof_after: float | None 
             get proves the box gone; ``None`` trusts the delete alone.
 
     Returns:
-        True when the sandbox is gone, False when the delete failed or no proof came.
+        The monotonic instant the last successful delete call returned, or
+        None when the delete failed or no proof came.
     """
     if name is None:
-        return True
-    if not await _delete(client, name):
-        return False
-    if proof_after is None:
-        return True
-    return await _gone(client, name, proof_after)
+        return time.monotonic()
+    deleted_at = await _delete(client, name)
+    if deleted_at is None or proof_after is None:
+        return deleted_at
+    return await _gone(client, name, proof_after, deleted_at)
 
 
-async def _delete(client: Any, name: str) -> bool:
+async def _delete(client: Any, name: str) -> float | None:
     """Send one delete by name, and log a failure instead of raising it.
 
     Args:
@@ -793,20 +810,21 @@ async def _delete(client: Any, name: str) -> bool:
         name: The sandbox name.
 
     Returns:
-        True when the server deleted the box or has none by that name.
+        The monotonic instant the call returned when the server deleted the
+        box or has none by that name, else None.
     """
     try:
         await asyncio.wait_for(client.delete_sandbox(name), _DELETE_TIMEOUT_SECONDS)
     except ResourceNotFoundError:
-        return True
+        return time.monotonic()
     except Exception as exc:
         # Only the class name: SDK messages can carry request details.
         logger.warning("Could not delete the LangSmith sandbox %s: %s.", name, type(exc).__name__)
-        return False
-    return True
+        return None
+    return time.monotonic()
 
 
-async def _gone(client: Any, name: str, proof_after: float) -> bool:
+async def _gone(client: Any, name: str, proof_after: float, deleted_at: float) -> float | None:
     """Poll by name until a get sent after ``proof_after`` returns 404, and delete a box that appears.
 
     The SDK does not say that billing stops when the delete returns, and a
@@ -816,9 +834,11 @@ async def _gone(client: Any, name: str, proof_after: float) -> bool:
         client: The SDK ``AsyncSandboxClient``.
         name: The sandbox name.
         proof_after: The instant after which a 404 proves the box gone.
+        deleted_at: The instant the first delete call returned.
 
     Returns:
-        True on proof, False when no proof came in the bounded time.
+        The instant the last successful delete call returned, on proof; None
+        when no proof came in the bounded time.
     """
     give_up_at = max(proof_after, time.monotonic()) + _DELETE_TIMEOUT_SECONDS
     while time.monotonic() < give_up_at:
@@ -827,14 +847,14 @@ async def _gone(client: Any, name: str, proof_after: float) -> bool:
             await asyncio.wait_for(client.get_sandbox(name), _DELETE_TIMEOUT_SECONDS)
         except ResourceNotFoundError:
             if checked_at >= proof_after:
-                return True
+                return deleted_at
         except Exception as exc:
             logger.warning("Could not look up the LangSmith sandbox %s: %s.", name, type(exc).__name__)
         else:
             # A late create made this box, or the first delete is still in progress.
-            await _delete(client, name)
+            deleted_at = await _delete(client, name) or deleted_at
         await asyncio.sleep(_GONE_POLL_SECONDS)
-    return False
+    return None
 
 
 async def _absent(client: Any, name: str) -> bool:

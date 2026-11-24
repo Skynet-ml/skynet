@@ -10,6 +10,7 @@ import asyncio
 import json
 import shlex
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -949,6 +950,7 @@ class FakeUsage:
     """Stand in for ``LangSmithUsageReservation``: record each billing call in order."""
 
     events: list[Any]
+    ends: list[float | None]
     error: BaseException | None = None
     entered: threading.Event | None = None
     gate: threading.Event | None = None
@@ -982,9 +984,14 @@ class FakeUsage:
         """
         self.events.append(("confirm", box))
 
-    def mark_deleted(self) -> None:
-        """Record the confirmed delete."""
+    def mark_deleted(self, at: float | None = None) -> None:
+        """Record the confirmed delete and the end instant that the provider passed.
+
+        Args:
+            at: The end of the billed life; ``None`` means the proof time.
+        """
         self.deleted = True
+        self.ends.append(at)
 
     def release(self, reason: str) -> None:
         """Record the release of the hold.
@@ -1012,7 +1019,7 @@ def usage() -> type[FakeUsage]:
     Returns:
         A ``FakeUsage`` subclass.
     """
-    return type("BoundFakeUsage", (FakeUsage,), {"events": []})
+    return type("BoundFakeUsage", (FakeUsage,), {"events": [], "ends": []})
 
 
 def _protected(usage: Any, spec: SandboxSpec = _PROTECTED_SPEC, **kwargs: Any) -> LangSmithEnvironment:
@@ -1217,6 +1224,35 @@ async def test_box_that_lands_late_is_deleted_before_the_settle(server: FakeServ
     assert server.boxes == {}
     assert server.deletes.count(env.name) >= 2
     assert usage.events == [("reserve", "op-1"), ("settle", True)]
+
+
+async def test_gateway_error_on_create_waits_for_a_late_box(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """Treat a gateway 504 as no answer: keep polling, delete the late box, and end at the proof."""
+    server.create_error = _caused_by_status(FakeAPIError("gateway timeout"), 504)
+    server.late_box_seconds = 0.05
+    env = _protected(usage)
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert server.boxes == {}
+    assert server.deletes.count(env.name) >= 2
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert usage.ends == [None]
+
+
+async def test_answered_create_ends_at_the_delete_call(server: FakeServer, usage: type[FakeUsage]) -> None:
+    """End the billed life of an answered create at the delete call, not at the later 404 proof."""
+    env = _protected(usage)
+    await env.start()
+    server.get_error = FakeConnectionError("lookup lost")
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, setattr, server, "get_error", None)
+    before = time.monotonic()
+    await env.stop()
+    proved = time.monotonic()
+    assert usage.events[-1] == ("settle", True)
+    [ended_at] = usage.ends
+    assert ended_at is not None
+    assert before <= ended_at <= proved - 0.05
 
 
 async def test_no_proof_keeps_the_hold_pending_and_the_start_error_carries_it(

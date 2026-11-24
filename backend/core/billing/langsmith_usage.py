@@ -207,10 +207,14 @@ class LangSmithUsageReservation:
                 self.mismatch = True
                 raise UsagePendingError(f"The LangSmith sandbox did not confirm the funded {field}.")
 
-    def mark_deleted(self) -> None:
-        """Record that the provider confirmed the sandbox is deleted, so its billed life is over."""
+    def mark_deleted(self, at: float | None = None) -> None:
+        """Record that the provider confirmed the sandbox is deleted, so its billed life is over.
+
+        Args:
+            at: The monotonic instant the billed life ended; ``None`` means now.
+        """
         if self.deleted_at is None:
-            self.deleted_at = time.monotonic()
+            self.deleted_at = time.monotonic() if at is None else at
 
     def extend(self, lifetime_ms: int, *, deadline: float) -> None:
         """Fund a longer lifetime before the box may run that long.
