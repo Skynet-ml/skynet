@@ -101,7 +101,7 @@ from ._helpers import (
     stable_seed,
     strip_api_key,
 )
-from .execution_budgets import budget_http_error
+from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,8 @@ def _ensure_api_budget(
     workflow: str,
     budget_creation_key: str | None,
     user: AuthenticatedUser,
+    *,
+    from_balance: bool = False,
 ) -> None:
     """Give older API requests the same durable setup and run authority as the wizard.
 
@@ -137,6 +139,8 @@ def _ensure_api_budget(
         workflow: Request family used for setup evidence.
         budget_creation_key: Stable account-scoped identity for budget creation.
         user: Authenticated submitter.
+        from_balance: Whether the account balance, not the user's own limit,
+            set the request's limit.
     """
     if payload.execution_budget_id is not None:
         return
@@ -158,6 +162,7 @@ def _ensure_api_budget(
             total = payload.max_cost_cents
             if total is None:
                 total = cost_ceiling_budget(spendable or 0, payload.token_source)
+            require_funded_lease(total, spendable, from_balance=from_balance)
             budget = service.create(user.username, total, idempotency_key=budget_creation_key)
     except BudgetError as error:
         raise budget_http_error(error) from error
@@ -186,7 +191,10 @@ def _ensure_api_budget(
         for check in checked.checks
     ):
         # The limit, not the account balance, stopped the check, so name the
-        # limit rather than the optimizer or the columns.
+        # limit rather than the optimizer or the columns. A higher limit cannot
+        # help when the balance set it, so that refusal names the balance (SKY-923).
+        if from_balance:
+            raise DomainError("budget.insufficient", status=402)
         raise DomainError("budget.below_minimum", status=409)
     if checked.status == "pending":
         raise DomainError("budget.pending", status=409)
@@ -207,13 +215,15 @@ def _ensure_api_budget(
     payload.preflight_fingerprint = checked.fingerprint
 
 
-def _protected_submission(payload, job_store, workflow: str) -> dict | None:
+def _protected_submission(payload, job_store, workflow: str, *, from_balance: bool = False) -> dict | None:
     """Require current complete setup evidence before accepting a protected submission.
 
     Args:
         payload: Typed public run request.
         job_store: Authoritative storage for budget and evidence ownership.
         workflow: Request family used for setup evidence.
+        from_balance: Whether the account balance, not the user's own limit,
+            set the run's limit.
 
     Returns:
         Canonical verified inputs for the atomic attachment transaction, or None for a legacy request.
@@ -223,9 +233,22 @@ def _protected_submission(payload, job_store, workflow: str) -> dict | None:
     if payload.seed is None:
         payload.seed = setup_seed(payload.execution_budget_id)
     try:
-        budget = BudgetService(engine=job_store.engine).get(payload.execution_budget_id, payload.username)
+        service = BudgetService(engine=job_store.engine)
+        budget = service.get(payload.execution_budget_id, payload.username)
         if budget.revision != payload.execution_budget_revision:
             raise DomainError("budget.conflict", status=409)
+        # The same gate as the wizard check: the setup check spends from this limit, so the first
+        # lease needs the room it left, and it draws on a balance that can fall after the check (SKY-923).
+        spendable = (
+            None
+            if settings.local_mode
+            else StripeBillingService(engine=job_store.engine).spendable_cents(payload.username)
+        )
+        if not budget.uncapped:
+            spent = service.spent_units(budget.id, payload.username)
+            require_funded_lease(budget.total_cents, spendable, spent_units=spent, from_balance=from_balance)
+        elif spendable is not None:
+            require_one_lease(spendable, from_balance=True)
         canonical = _persistable_payload(payload, job_store)
         PreflightStore(job_store.engine).require_current(
             username=payload.username,
@@ -497,7 +520,7 @@ def _enforce_submission_admission(job_store, username: str) -> None:
         raise DomainError("quota.concurrent_reached", status=429, limit=limit)
 
 
-def _cap_cost_ceiling_to_balance(payload: BlackboxRunRequest, spendable: int | None, token_source: str) -> None:
+def _cap_cost_ceiling_to_balance(payload: BlackboxRunRequest, spendable: int | None, token_source: str) -> bool:
     """Pin a run's cost ceiling to what the account's spendable balance can back.
 
     With model-tier gating gone, any model is runnable and the balance is the only
@@ -516,12 +539,16 @@ def _cap_cost_ceiling_to_balance(payload: BlackboxRunRequest, spendable: int | N
         spendable: The account's spendable cents from
             :func:`_enforce_balance`, or ``None`` to leave the cap as-is.
         token_source: ``"managed"`` or ``"byok"`` — sets the balance→budget conversion.
+
+    Returns:
+        Whether the balance, not the user's own cap, set ``max_cost_cents``.
     """
     if spendable is None:
-        return
+        return False
     budget = cost_ceiling_budget(spendable, token_source)
     current = payload.max_cost_cents
     payload.max_cost_cents = budget if current is None else min(current, budget)
+    return current is None or budget < current
 
 
 def _enforce_byok_connections(job_store, username: str, model_configs: list[ModelConfig]) -> dict[str, str | None]:
@@ -823,10 +850,11 @@ def submit_repo_payload(
     _model_configs, _token_sources_by_model = normalize_model_token_sources(payload)
     fill_proposer_host_cli(job_store, payload.username, payload)
     enforce_local_mode_sources(payload, _requested_source, _model_configs)
+    from_balance = False
     if not settings.local_mode:
         _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
         if payload.execution_budget_id is None:
-            _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
+            from_balance = _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
     _admit_byok_models(
         job_store,
         payload.username,
@@ -841,8 +869,9 @@ def submit_repo_payload(
         _BLACKBOX_WORKFLOW,
         replay_keys.budget,
         current_user,
+        from_balance=from_balance,
     )
-    verified = _protected_submission(payload, job_store, _BLACKBOX_WORKFLOW)
+    verified = _protected_submission(payload, job_store, _BLACKBOX_WORKFLOW, from_balance=from_balance)
     try:
         if verified is None:
             validate_blackbox_payload(payload)

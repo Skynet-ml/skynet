@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import Counter
@@ -25,6 +26,8 @@ from .operation_pricing import ChargePolicy, OperationQuote, json_fingerprint
 from .signals import BudgetStopLatch
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 _OPERATION_KEY_LIMIT = 128
 
@@ -97,6 +100,8 @@ class BudgetRuntime:
         phase: str,
         stop: BudgetStopLatch | None = None,
         wait_timeout: float = 600,
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> None:
         """Bind the spending context without passing database credentials to guest code.
 
@@ -108,6 +113,9 @@ class BudgetRuntime:
             phase: Setup or run attribution.
             stop: Optional shared stop latch for all concurrent optimizer lanes.
             wait_timeout: Maximum wait for covered work before reporting uncertainty.
+            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
+                this runtime's work must leave unused.
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
         """
         self.service = service
         self.username = username
@@ -116,6 +124,8 @@ class BudgetRuntime:
         self.phase = phase
         self.stop = stop or BudgetStopLatch()
         self.wait_timeout = wait_timeout
+        self.keep_cents = keep_cents
+        self.keep_funds = keep_funds
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
@@ -344,6 +354,8 @@ class BudgetRuntime:
                     max_wallet_cents=quote.maximum.wallet,
                     attempt=attempt,
                     role=role,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetUnreconciledError as error:
                 raise UsagePendingError(
@@ -409,6 +421,8 @@ class BudgetRuntime:
                     max_cents=quote.maximum.total,
                     max_wallet_cents=quote.maximum.wallet,
                     evidence=evidence,
+                    keep_cents=self.keep_cents,
+                    keep_funds=self.keep_funds,
                 )
             except BudgetInFlightError as error:
                 refusal = self._wait_cannot_help(error)
@@ -533,7 +547,44 @@ class BudgetRuntime:
                     )
                 else:
                     self.service.mark_pending(operation.id, self.username)
+                    if cost_kind == "model" and (result is None or not result.provider_request_id):
+                        # Without a request id no lookup can confirm the bill. For an OpenRouter hold, the sweep
+                        # releases it at no charge after one minute (SKY-914). The reason shows which path loses
+                        # the bill.
+                        # Only OpenRouter names each generation; another route never does, so its missing id
+                        # is normal and stays at debug (SKY-923).
+                        logger.log(
+                            logging.WARNING if quote.price_snapshot.get("provider") == "openrouter" else logging.DEBUG,
+                            "Model operation %s is held with no provider request id: %s "
+                            "(role=%s, state=%s, interrupted=%s, status=%s).",
+                            operation.id,
+                            _missing_request_id_reason(result, exc),
+                            role,
+                            current.state,
+                            result.evidence.get("interrupted") if result is not None else None,
+                            result.evidence.get("status") if result is not None else None,
+                        )
             raise
         finally:
             with self._changed:
                 self._changed.notify_all()
+
+
+def _missing_request_id_reason(result: PaidResult[Any] | None, error: BaseException) -> str:
+    """Say why a held model call has no provider request id, with no secret and no prompt text.
+
+    Args:
+        result: The dispatch's result, or ``None`` when the dispatch raised.
+        error: The error that ends the execution.
+
+    Returns:
+        A short reason built only from the error type and the answer's status fields.
+    """
+    if result is None:
+        return f"dispatch raised {type(error).__name__} before any answer"
+    if result.evidence.get("interrupted") is True:
+        return "the answer ended before it was complete"
+    status = result.evidence.get("status")
+    if isinstance(status, int) and status >= 400:
+        return f"the provider sent an error answer (HTTP {status})"
+    return "the provider answer carried no request id"

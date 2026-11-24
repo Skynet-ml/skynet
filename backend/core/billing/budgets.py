@@ -50,6 +50,8 @@ USER_STOP_REASONS = frozenset({"user_cancelled", "user_paused"})
 # One lease row lock covers every slice insert, so a bound keeps a single
 # transaction short.
 MAX_LEASE_SLICES = 256
+# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
+CHUNK_CENTS = 100
 # The cost kind of a worker agent's lease slice (core/worker/actors.py). No provider reconciler reads it back, so
 # only the worker or a fence settles it (SKY-829).
 AGENT_LEASE_COST_KIND = "agent_lease"
@@ -238,6 +240,8 @@ def _admit(
     username: str,
     scope: int,
     charge: int,
+    keep_units: int = 0,
+    keep_funds: bool = True,
 ) -> None:
     """Check that new coverage fits the budget's limit and the account's funds.
 
@@ -248,6 +252,9 @@ def _admit(
         username: Authenticated owner.
         scope: Combined scope units the new coverage adds.
         charge: Wallet units the new coverage adds.
+        keep_units: Units of a capped limit, and of the account's funds for any budget, that the coverage must leave
+            unused.
+        keep_funds: Whether ``keep_units`` also applies to the account's funds.
 
     Raises:
         BudgetInsufficientError: When the coverage cannot fit without a budget or funding change.
@@ -255,14 +262,16 @@ def _admit(
     """
     if not budget.uncapped:
         remaining = budget.total_cents * CENT_SCALE - budget.settled_units
-        if scope > remaining:
+        # The room to keep counts as part of what the operation needs, so the refusal keeps its known text.
+        needed = scope + keep_units
+        if needed > remaining:
             raise BudgetInsufficientError(
-                f"The next operation needs up to {usd_text(ceil_cents(scope))}, but only "
+                f"The next operation needs up to {usd_text(ceil_cents(needed))}, but only "
                 f"{usd_text(max(remaining, 0) // CENT_SCALE)} of the {usd_text(budget.total_cents)} limit remain."
             )
-        if scope > remaining - budget.reserved_units:
+        if needed > remaining - budget.reserved_units:
             raise BudgetInFlightError(
-                "Covered work must settle before this operation can fit.", scope_units=scope, room_units=remaining
+                "Covered work must settle before this operation can fit.", scope_units=needed, room_units=remaining
             )
     held = account_committed_cents(session, username)
     wallet_balance = int(wallet.balance_cents) + int(wallet.grant_remaining or 0)
@@ -271,9 +280,12 @@ def _admit(
         - budget.billed_cents
         - budget_wallet_hold(budget)
     )
-    if hold_delta > wallet_balance - held:
+    # Submit also needs one lease of the balance, also for an uncapped run, so the check keeps that room of the
+    # funds (SKY-923).
+    keep = ceil_cents(keep_units) if keep_funds else 0
+    if hold_delta + keep > wallet_balance - held:
         after_release = ceil_cents(budget.wallet_settled_units + charge) - budget.billed_cents
-        if after_release <= wallet_balance:
+        if after_release + keep <= wallet_balance:
             raise BudgetInFlightError("Other covered work currently holds the required wallet funds.")
         raise AccountFundsError("The account cannot fund the next operation.")
 
@@ -652,6 +664,20 @@ class BudgetService:
             wallet, budget = self._locked(session, budget_id, username)
             return self._snapshot(session, budget, wallet)
 
+    def spent_units(self, budget_id: str, username: str) -> int:
+        """Read the settled spending that admission counts against the budget's limit.
+
+        Args:
+            budget_id: Envelope to read.
+            username: Authenticated owner.
+
+        Returns:
+            Settled scope units, the amount :class:`BudgetInsufficientError` counts.
+        """
+        with self._transaction() as session:
+            _, budget = self._locked(session, budget_id, username)
+            return int(budget.settled_units)
+
     def get_operation(self, operation_id: str, username: str) -> OperationSnapshot:
         """Recover an existing attempt without dispatching or reserving it again.
 
@@ -828,6 +854,8 @@ class BudgetService:
         attempt: int = 0,
         role: str | None = None,
         session: Session | None = None,
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Admit one physical attempt under its verified scope and wallet bounds.
 
@@ -845,6 +873,9 @@ class BudgetService:
             attempt: Physical retry number; a new billable retry needs a new attempt.
             role: Optional task, judge, proposer or runtime attribution.
             session: Optional caller transaction for atomic lifecycle publication.
+            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
+                this attempt must leave unused.
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The reserved operation or its existing identical attempt.
@@ -898,7 +929,7 @@ class BudgetService:
             )
             if unresolved is not None:
                 raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
-            _admit(session, wallet, budget, username, scope, charge)
+            _admit(session, wallet, budget, username, scope, charge, keep_cents * CENT_SCALE, keep_funds)
             now = datetime.now(UTC)
             operation = ExecutionOperationModel(
                 id=str(uuid4()),
@@ -1081,7 +1112,10 @@ class BudgetService:
                 _identifier(provider_request_id, maximum=255)
                 if operation.provider_request_id not in {None, provider_request_id}:
                     raise BudgetConflictError("The operation already has a different provider request identity.")
+                identified = operation.provider_request_id is None
                 operation.provider_request_id = provider_request_id
+            else:
+                identified = False
             if operation.state == "reserved":
                 if budget.state == "blocked":
                     raise BudgetConflictError("This budget is quarantined pending usage reconciliation.")
@@ -1094,7 +1128,10 @@ class BudgetService:
                 claimed = True
             else:
                 claimed = False
-            operation.updated_at = datetime.now(UTC)
+            # A replay that changes nothing must not move the last change: the
+            # 404 release counts its window from the return (SKY-923).
+            if claimed or identified:
+                operation.updated_at = datetime.now(UTC)
             return replace(self._operation_snapshot(session, operation, budget, wallet), dispatch_claimed=claimed)
 
     def mark_pending(
@@ -1150,8 +1187,11 @@ class BudgetService:
                             created_at=datetime.now(UTC),
                         )
                     )
-            operation.state = "pending"
-            operation.updated_at = datetime.now(UTC)
+            # Only the return moves the last change; a repeated call keeps the
+            # 404 release window that counts from it (SKY-923).
+            if operation.state != "pending":
+                operation.state = "pending"
+                operation.updated_at = datetime.now(UTC)
             return self._operation_snapshot(session, operation, budget, wallet)
 
     def release(self, operation_id: str, username: str) -> OperationSnapshot:
@@ -1295,6 +1335,7 @@ class BudgetService:
         *,
         dispatched_before: datetime,
         reason: str,
+        returned_before: datetime | None = None,
     ) -> OperationSnapshot:
         """Release, at no further charge, the hold of started work whose final bill never came.
 
@@ -1308,16 +1349,22 @@ class BudgetService:
             username: Authenticated owner.
             dispatched_before: Only work dispatched before this time is released.
             reason: Why the final usage is still unknown; recorded as evidence.
+            returned_before: Also require the operation's last change before
+                this time; ``None`` for no such check. A pending operation's
+                last change is its return or later.
 
         Returns:
             The released operation, or the unchanged one when it is not
-            unconfirmed pending work older than ``dispatched_before``.
+            unconfirmed pending work older than ``dispatched_before`` and
+            ``returned_before``.
         """
         with self._transaction() as session:
             wallet, budget, operation = self._operation(session, operation_id, username)
             started = operation.dispatched_at or operation.created_at
             # SQLite returns naive datetimes; every stored time is UTC.
             started = started if started.tzinfo else started.replace(tzinfo=UTC)
+            changed = operation.updated_at
+            changed = changed if changed.tzinfo else changed.replace(tzinfo=UTC)
             # A known bill held for a funding or bound problem is not unconfirmed.
             quarantined = session.scalar(
                 select(ExecutionUsageEvidenceModel.id)
@@ -1330,7 +1377,12 @@ class BudgetService:
             )
             # Only "pending" work has returned; "dispatched" work may still be a
             # live stream or batch that outlasts the release window.
-            if operation.state != "pending" or started >= dispatched_before or quarantined is not None:
+            if (
+                operation.state != "pending"
+                or started >= dispatched_before
+                or (returned_before is not None and changed >= returned_before)
+                or quarantined is not None
+            ):
                 return self._operation_snapshot(session, operation, budget, wallet)
             now = datetime.now(UTC)
             document = {"reason": reason[:500], "dispatched_at": started.isoformat()}
@@ -1364,6 +1416,8 @@ class BudgetService:
         max_cents: Decimal | str | int | float,
         max_wallet_cents: Decimal | str | int | float,
         evidence: Mapping[str, Any],
+        keep_cents: int = 0,
+        keep_funds: bool = True,
     ) -> OperationSnapshot:
         """Grow a running sandbox's coverage before the provider is asked to keep it alive longer.
 
@@ -1379,6 +1433,9 @@ class BudgetService:
             max_cents: Combined scope coverage the operation holds after the extension.
             max_wallet_cents: Wallet coverage the operation holds after the extension.
             evidence: The extended request bound, recorded for audit.
+            keep_cents: Cents of a capped limit, and of the account's funds for any budget, that
+                the extension must leave unused.
+            keep_funds: Whether ``keep_cents`` also applies to the account's funds.
 
         Returns:
             The operation with its grown coverage and the budget totals.
@@ -1423,6 +1480,8 @@ class BudgetService:
                 username,
                 scope - operation.max_units,
                 charge - operation.max_wallet_units,
+                keep_cents * CENT_SCALE,
+                keep_funds,
             )
             now = datetime.now(UTC)
             session.add(

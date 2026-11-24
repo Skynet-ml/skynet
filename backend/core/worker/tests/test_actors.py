@@ -27,6 +27,7 @@ from core.billing.budgets import (
     BudgetService,
     BudgetUnreconciledError,
 )
+from core.billing.signals import BudgetReached
 from core.storage import storage_version
 from core.storage.models import (
     AgentStepModel,
@@ -317,7 +318,15 @@ def test_an_agent_takes_a_new_chunk_only_when_its_lease_runs_low(engine: Engine,
 
 
 def test_an_agent_with_no_lease_stops_before_paid_work(engine: Engine, step_log: StepLogStore) -> None:
-    """When the budget cannot give a chunk, the work never starts and no step is committed."""
+    """When the budget's room is below one chunk, the run stops on its budget and the work never starts (SKY-914).
+
+    A capped run whose cap has less room than one lease must end as a budget stop with the ledger's message, not
+    as an internal ``LeaseExhaustedError`` failure.
+
+    Args:
+        engine: Real SQLite ledger engine.
+        step_log: Durable step log for the run.
+    """
     run, budgets, budget_id = _start_run(engine, step_log, total_cents=1, chunk_cents=2, lease_slices=4)
     agent = run.spawn("agent-a")
     calls: list[int] = []
@@ -331,7 +340,10 @@ def test_an_agent_with_no_lease_stops_before_paid_work(engine: Engine, step_log:
         calls.append(1)
         return _model_step()
 
-    with pytest.raises(LeaseExhaustedError):
+    with pytest.raises(BudgetReached, match="limit remain"):
+        agent.step("model", 1, work)
+    # The stop does not block the run, so each later step gets the same budget stop.
+    with pytest.raises(BudgetReached):
         agent.step("model", 1, work)
     run.close()
     step_log.flush()
@@ -1940,7 +1952,12 @@ def test_a_restarted_run_keeps_its_generation_records(engine: Engine, step_log: 
 
 
 def test_a_thousand_agents_never_spend_past_the_workspace_budget(engine: Engine, step_log: StepLogStore) -> None:
-    """1,000 agents of one run spend in parallel from one budget; the total stays within its limit."""
+    """1,000 agents of one run spend in parallel from one budget; the total stays within its limit.
+
+    Args:
+        engine: Real SQLite ledger engine.
+        step_log: Durable step log for the run.
+    """
     total_cents = 300
     run, budgets, budget_id = _start_run(engine, step_log, total_cents=total_cents, chunk_cents=2, lease_slices=8)
     agents = [run.spawn(f"agent-{index}") for index in range(1000)]
@@ -1969,7 +1986,8 @@ def test_a_thousand_agents_never_spend_past_the_workspace_budget(engine: Engine,
         try:
             for _ in range(4):
                 agent.step("model", 1, work)
-        except LeaseExhaustedError:
+        # The spent cap gives BudgetReached; holds of other agents in flight give LeaseExhaustedError (SKY-914).
+        except (LeaseExhaustedError, BudgetReached):
             with lock:
                 stopped.append(agent.agent_id)
         finally:

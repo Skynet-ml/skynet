@@ -25,6 +25,7 @@ from core.billing.budgets import (
     BudgetInFlightError,
     BudgetService,
 )
+from core.billing.signals import BudgetReached
 from core.config import app_env, settings
 from core.storage.models import (
     AgentConversationModel,
@@ -816,7 +817,12 @@ def test_a_later_non_user_stop_keeps_the_user_stop_reason_on_postgres(database: 
 
 
 def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engine, tmp_path: Path) -> None:
-    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717)."""
+    """Run 1,000 agents of one run in parallel against one workspace budget, under real row locks (SKY-717).
+
+    Args:
+        database: Real PostgreSQL engine.
+        tmp_path: Holds the step log's objects.
+    """
     service = BudgetService(engine=database)
     budget = service.create("alice", 40, idempotency_key="workspace")
     budget = service.attach_to_job(budget.id, "alice", "run-1", expected_revision=budget.revision)
@@ -858,7 +864,8 @@ def test_a_thousand_agents_spend_chunked_leases_within_one_budget(database: Engi
         try:
             for _ in range(3):
                 agent.step("model", 1, work)
-        except LeaseExhaustedError:
+        # The spent cap gives BudgetReached; holds of other agents in flight give LeaseExhaustedError (SKY-914).
+        except (LeaseExhaustedError, BudgetReached):
             pass
         finally:
             agent.close()

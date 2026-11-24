@@ -37,11 +37,18 @@ import httpx
 import litellm
 from sqlalchemy.engine import Engine
 
-from ..billing.budgets import BudgetService
+from ..billing.budgets import CHUNK_CENTS, BudgetService
 from ..billing.byok_upstreams import resolve_upstream
 from ..billing.data_policy import DEFAULT_DATA_POLICY, DataPolicy, apply_data_policy
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
-from ..billing.model_dispatch import data_policy_refusal, response_usage, usage_charge
+from ..billing.model_dispatch import (
+    GENERATION_ID,
+    GENERATION_LOOKUP_DELAYS,
+    data_policy_refusal,
+    lookup_generation,
+    response_usage,
+    usage_charge,
+)
 from ..billing.openrouter_quotes import fetch_endpoint_prices, price_text_request, resolve_model_slug
 from ..billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from ..config import settings
@@ -83,8 +90,6 @@ from .subprocess_runner import run_service_in_subprocess, safe_queue_put
 logger = logging.getLogger(__name__)
 
 LOOP_HOST_KEY = "_loop_host"
-# One lease is one ledger hold. A dollar keeps the ledger calls few, and a stopped run gives back what it held.
-CHUNK_CENTS = 100
 # The bound of one model call must fit in one lease. A reply that costs more stops the loop.
 MODEL_MAX_CENTS = 100
 # The longest that one command or metric box lives.
@@ -222,11 +227,12 @@ class LeaseModelClient:
             tools: The tool definitions, or ``None`` for no tools.
 
         Returns:
-            The reply, with the provider's cost in ledger cents; 0 for a BYOK call.
+            The reply, with the provider's cost in ledger cents; 0 for a BYOK call. A managed reply that gives
+            no complete cost pays its generation's looked-up bill, or 0 with a warning when no bill is confirmed.
 
         Raises:
-            ServiceError: When a managed or custom endpoint call fails, or a managed reply gives no complete cost.
-                The loop then records a failed call with no cost.
+            ServiceError: When a managed or custom endpoint call fails. The loop then records a failed call with
+                no cost.
             ModelCallBilledError: When a managed reply that gave its cost cannot be read. The loop records a
                 failed call with that cost.
             UnpricedOperationError: When no provider meets the owner's data policy, the model has no verified
@@ -254,16 +260,47 @@ class LeaseModelClient:
             body = answer.json()
         except (httpx.HTTPError, ValueError) as error:
             raise self._failed(error, answer) from error
-        usd = usage_charge(body.get("usage") or {})
+        usd, reason = usage_charge(body.get("usage") or {}), "a complete usage receipt"
         if usd is None:
-            raise ServiceError("The model reply gave no complete cost.")
-        cents = ChargePolicy("managed_model").convert(usd).total
+            usd, reason = self._looked_up_charge(body.get("id"))
+        if usd is not None:
+            cents = ChargePolicy("managed_model").convert(usd).total
+        else:
+            # Skynet absorbs a bill it cannot confirm rather than charge the user an estimate; the warning lets
+            # operators count that gap (Gilad, SKY-914).
+            logger.warning(
+                "A managed model reply (generation %s) gave no complete cost, and the lookup gave %s; "
+                "the call is charged 0 cents.",
+                body.get("id") if GENERATION_ID.fullmatch(str(body.get("id"))) else "unknown",
+                reason,
+            )
+            cents = Decimal(0)
         try:
             message = body["choices"][0]["message"]
             return ModelReply(str(message.get("content") or ""), cents, tool_calls_from_openai(message))
         except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
             # The provider billed the call, so the lease pays its cost even with no reply to read.
             raise ModelCallBilledError(cents) from error
+
+    def _looked_up_charge(self, identity: Any) -> tuple[Decimal | None, str]:
+        """Look up the confirmed bill of a managed reply that gave no complete cost.
+
+        Args:
+            identity: The reply's ``id`` field.
+
+        Returns:
+            The provider's USD charge, or ``None``; and a short reason with no secret or prompt text.
+        """
+        if not isinstance(identity, str) or not GENERATION_ID.fullmatch(identity):
+            return None, "nothing, because the reply has no generation id"
+        found, reason, retry = lookup_generation(self._client, self._key, identity, self._model)
+        # OpenRouter can answer 404 for a short time while it indexes the bill (SKY-657).
+        for delay in GENERATION_LOOKUP_DELAYS:
+            if found is not None or not retry:
+                break
+            time.sleep(delay)
+            found, reason, retry = lookup_generation(self._client, self._key, identity, self._model)
+        return (found[0] if found is not None else None), reason
 
     def _bounded(self, request: Mapping[str, Any], catalog: Mapping[str, Any]) -> dict[str, Any]:
         """Give the request the largest output limit whose price bound fits one call's bound.

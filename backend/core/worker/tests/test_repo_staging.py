@@ -2675,6 +2675,7 @@ def _evaluation_check(monkeypatch: pytest.MonkeyPatch, scorer: dict[str, Any]) -
         raise HTTPException(status_code=418, detail="recorded")
 
     monkeypatch.setattr(wizard_preflight, "run_preflight", run)
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
     app = FastAPI()
     app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))

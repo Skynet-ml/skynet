@@ -145,8 +145,16 @@ def _fixed_text_response(message: str) -> WizardPreflightResponse:
 def test_fixed_english_texts_are_worded_in_the_callers_locale(
     monkeypatch: pytest.MonkeyPatch, message: str, key: str, locale: str
 ) -> None:
-    """A known fixed English text gets its catalog code and reads in the caller's language."""
+    """A known fixed English text gets its catalog code and reads in the caller's language.
+
+    Args:
+        monkeypatch: Stands in the setup check and the lease check.
+        message: The fixed English text.
+        key: Its catalog code.
+        locale: The caller's language.
+    """
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     payload = _post("/wizard/preflight", _body(locale=locale)).json()
@@ -169,13 +177,18 @@ def test_every_fixed_text_has_a_catalog_entry_in_english() -> None:
 
 
 def test_stream_error_reads_in_the_callers_locale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unexpected failure streams its error in the caller's language, English by default."""
+    """An unexpected failure streams its error in the caller's language, English by default.
+
+    Args:
+        monkeypatch: Stands in a failing setup check.
+    """
 
     def fail(*args: Any) -> WizardPreflightResponse:
         """Fail as an unexpected setup error does."""
         raise RuntimeError("boom")
 
     monkeypatch.setattr(wizard_preflight, "run_preflight", fail)
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     for headers, locale in (({}, "en"), ({"Accept-Language": "he"}, "he")):
@@ -200,8 +213,14 @@ BUDGET_TEXT = "The next operation needs up to $1.35, but only $0.53 of the $0.53
     ],
 )
 def test_setup_fallback_texts_are_worded_in_the_callers_locale(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
-    """The setup fallback texts have catalog codes and read in Hebrew for a Hebrew caller."""
+    """The setup fallback texts have catalog codes and read in Hebrew for a Hebrew caller.
+
+    Args:
+        monkeypatch: Stands in the setup check and the lease check.
+        message: The fallback English text.
+    """
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     payload = _post("/wizard/preflight", _body(locale="he")).json()
@@ -213,8 +232,13 @@ def test_setup_fallback_texts_are_worded_in_the_callers_locale(monkeypatch: pyte
 
 
 def test_budget_limit_text_keeps_its_amounts_in_the_callers_locale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The spending limit text is coded with its amounts as params, on the check and the pending reason."""
+    """The spending limit text is coded with its amounts as params, on the check and the pending reason.
+
+    Args:
+        monkeypatch: Stands in the setup check and the lease check.
+    """
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(BUDGET_TEXT))
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     english = _post("/wizard/preflight", _body()).json()
@@ -235,8 +259,13 @@ SANDBOXES_TEXT = "The next operation needs up to $0.35, but this check's sandbox
 
 
 def test_sandbox_budget_text_keeps_its_amounts_in_the_callers_locale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The setup refusal for budget held by the check's own sandboxes is coded with its amounts as params."""
+    """The setup refusal for budget held by the check's own sandboxes is coded with its amounts as params.
+
+    Args:
+        monkeypatch: Stands in the setup check and the lease check.
+    """
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(SANDBOXES_TEXT))
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     english = _post("/wizard/preflight", _body()).json()
@@ -254,10 +283,15 @@ def test_sandbox_budget_text_keeps_its_amounts_in_the_callers_locale(monkeypatch
 
 
 def test_ui_locale_wins_then_the_browser_language_then_english(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The body locale wins over ``Accept-Language``, which wins over the English default."""
+    """The body locale wins over ``Accept-Language``, which wins over the English default.
+
+    Args:
+        monkeypatch: Stands in the setup check and the lease check.
+    """
     message = "Provider or sandbox usage is awaiting final confirmation."
     key = "submit.preflight.usage_pending"
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
+    monkeypatch.setattr(wizard_preflight, "_require_budget_lease", lambda *args: None)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
     def usage(body: dict[str, Any], headers: dict[str, str] | None = None) -> str:

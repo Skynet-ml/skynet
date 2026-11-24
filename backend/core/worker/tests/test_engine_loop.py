@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import ProviderFailedError, UsagePendingError
+from core.billing.signals import BudgetReached
 from core.billing.usage_tags import LANE_KEY, current_tags, usage_scope
 from core.models.blackbox import BlackboxStrategy
 from core.sandbox.grants import METRIC_BOX_GRANTS, Grant, resolve_grants
@@ -802,6 +803,36 @@ def test_a_negative_model_bound_is_refused(
     """No model cost can be below 0, so the loop does not start."""
     with pytest.raises(ValueError, match="not between 0 and one lease"):
         _loop(owner, engine, step_log, trees, tmp_path, generation=1, model_max_cents=-1)
+
+
+def test_a_cap_below_one_lease_ends_the_run_on_its_budget(
+    engine: Engine, step_log: StepLogStore, trees: TreeStore, tmp_path: Path
+) -> None:
+    """A cap with less room than one lease gives a budget stop, not a ``LeaseExhaustedError`` failure (SKY-914).
+
+    A staging run with an 80-cent cap and a 100-cent lease failed after its first 2 cents with an internal
+    error. The engine must get :class:`BudgetReached`, so the run ends with the normal budget outcome.
+
+    Args:
+        engine: The database.
+        step_log: The step log.
+        trees: The tree store.
+        tmp_path: Pytest's temporary folder.
+    """
+    budgets = BudgetService(engine=engine)
+    budget = budgets.create("alice", 5, idempotency_key="workspace-budget")
+    budget = budgets.attach_to_job(budget.id, "alice", RUN_ID, expected_revision=budget.revision)
+    alice = User("alice", engine=engine, budgets=budgets)
+    WorkspaceStore(engine).set_budget(alice.workspace().id, budget.id)
+    loop, model, _ = _loop((alice, budget.generation), engine, step_log, trees, tmp_path, generation=1)
+
+    with pytest.raises(BudgetReached, match="limit remain"):
+        loop.model("improve seed")
+    # The loop keeps no failure, so a later call gets the same budget stop.
+    with pytest.raises(BudgetReached):
+        loop.model("improve seed")
+    assert model.prompts == []
+    assert _steps(engine) == []
 
 
 @pytest.mark.parametrize(

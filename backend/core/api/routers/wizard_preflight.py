@@ -16,8 +16,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from ...billing import StripeBillingService
+from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import _model_config_dicts
 from ...billing.byok_vault import safe_connection_params
+from ...config import settings
 from ...i18n import request_locale, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
 from ...models.blackbox import BLACKBOX_TARGET_REPO, TARGET_RETIRED
@@ -37,6 +40,7 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
+from .execution_budgets import budget_http_error, require_funded_lease, require_one_lease
 from .submissions import (
     _admit_byok_models,
     _materialize_repo_cases,
@@ -164,6 +168,37 @@ def localize_preflight(response: WizardPreflightResponse, locale: str) -> Wizard
     return response.model_copy(update=update)
 
 
+def _require_budget_lease(request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any) -> None:
+    """Refuse a budget whose unspent room cannot buy the run's first lease, as submit would.
+
+    An uncapped budget has no limit floor, but its first lease still draws on the balance.
+
+    Args:
+        request: The check request, with its budget.
+        user: Budget owner.
+        job_store: Store whose engine holds the budget and the wallet.
+
+    Raises:
+        DomainError: The budget's lookup error, or the refusal of
+            :func:`require_funded_lease`.
+    """
+    service = BudgetService(engine=job_store.engine)
+    try:
+        budget = service.get(request.execution_budget_id, user.username)
+        # Earlier setup checks spend from this limit, so the first lease needs the room they left (SKY-923).
+        spent = 0 if budget.uncapped else service.spent_units(budget.id, user.username)
+    except BudgetError as error:
+        raise budget_http_error(error) from error
+    # As at submit, local mode has no balance gate.
+    spendable = (
+        None if settings.local_mode else StripeBillingService(engine=job_store.engine).spendable_cents(user.username)
+    )
+    if not budget.uncapped:
+        require_funded_lease(budget.total_cents, spendable, spent_units=spent)
+    elif spendable is not None:
+        require_one_lease(spendable, from_balance=True)
+
+
 def checked_preflight(
     request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any
 ) -> WizardPreflightResponse:
@@ -244,6 +279,9 @@ def checked_preflight(
         shinka = payload.get("shinka")
         novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
         _admit_byok_models(job_store, user.username, configs, reflection, novelty)
+    # Submit refuses this run, so it must not pay for a setup check first (SKY-923). Like submit, the
+    # check comes after the rate limit and the request checks, so both routes give the same refusal.
+    _require_budget_lease(request, user, job_store)
     return run_preflight(request.model_copy(update={"payload": payload}), user, job_store)
 
 

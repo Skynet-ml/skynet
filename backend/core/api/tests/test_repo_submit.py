@@ -254,7 +254,12 @@ class _CapturedError(Exception):
 def test_evaluation_check_reads_the_staged_dataset(
     client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The evaluation setup check dry-runs the scorer on the staged rows, not on no case."""
+    """The evaluation setup check dry-runs the scorer on the staged rows, not on no case.
+
+    Args:
+        client_and_store: Funded client and its fake job store.
+        monkeypatch: Captures the setup check's payload.
+    """
     client, store = client_and_store
     seen: dict[str, Any] = {}
 
@@ -273,6 +278,7 @@ def test_evaluation_check_reads_the_staged_dataset(
 
     monkeypatch.setattr(_preflight, "enforce_submission_rate", lambda *_: None)
     monkeypatch.setattr(_preflight, "run_preflight", capture)
+    monkeypatch.setattr(_preflight, "_require_budget_lease", lambda *args: None)
     client.app.include_router(_preflight.create_wizard_preflight_router(job_store=store))
     staged_id = store.stage_dataset("alice", "pages.csv", [{"url": "/", "note": "home"}])
     body = {

@@ -979,12 +979,91 @@ def test_a_prompt_that_alone_passes_the_bound_stops_the_loop() -> None:
         _managed_client(_reply, catalog=costly)("hello " * 50, None)
 
 
-def test_a_managed_reply_with_no_cost_fails_the_call() -> None:
-    """A reply that gives no complete cost cannot be billed, so the call fails."""
-    reply = {"choices": [{"message": {"content": "hi"}}], "usage": {}}
+def _no_cost_provider(lookup: Any, lookups: list[str]) -> Any:
+    """Answer chat calls with a billed reply that gives no cost, and generation lookups with ``lookup``.
 
-    with pytest.raises(ServiceError, match="no complete cost"):
-        _managed_client(lambda request: httpx.Response(200, json=reply))("hello", None)
+    Args:
+        lookup: Gives the lookup's answer for a generation id.
+        lookups: Records each looked-up generation id.
+
+    Returns:
+        The fake provider.
+    """
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Answer one chat call or one generation lookup.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The reply with no cost, or the lookup's answer.
+        """
+        if request.url.path == "/api/v1/generation":
+            lookups.append(request.url.params["id"])
+            return lookup(request.url.params["id"])
+        return httpx.Response(200, json={"id": "gen-nocost", "choices": [{"message": {"content": "hi"}}], "usage": {}})
+
+    return provider
+
+
+def test_a_managed_reply_with_no_cost_bills_the_generation_lookup_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenRouter billed a reply with no cost, so its generation's confirmed bill pays the call (SKY-914).
+
+    Before, the call failed with cost 0: Skynet paid OpenRouter, the lease billed nothing, and the run's cap
+    did not count it.
+
+    Args:
+        monkeypatch: Skips the lookup's waits.
+    """
+    monkeypatch.setattr(loop_host, "GENERATION_LOOKUP_DELAYS", (0.0, 0.0, 0.0))
+    lookups: list[str] = []
+    answers = iter([httpx.Response(404), {"total_cost": "0.003", "is_byok": False}])
+
+    def lookup(identity: str) -> httpx.Response:
+        """Answer 404 once, as OpenRouter does while it indexes the bill, then the bill.
+
+        Args:
+            identity: The generation id.
+
+        Returns:
+            The lookup answer.
+        """
+        answer = next(answers)
+        if isinstance(answer, httpx.Response):
+            return answer
+        return httpx.Response(200, json={"data": {"id": identity, "model": "openai/gpt-4o", **answer}})
+
+    reply = _managed_client(_no_cost_provider(lookup, lookups))("hello", None)
+
+    assert reply.text == "hi"
+    assert reply.cost_cents == ChargePolicy("managed_model").convert(Decimal("0.003")).total
+    assert lookups == ["gen-nocost", "gen-nocost"]
+
+
+def test_a_managed_reply_with_no_cost_and_no_bill_is_charged_zero(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When no lookup confirms the bill, the call is charged 0 and a warning records the gap (SKY-914).
+
+    Args:
+        monkeypatch: Skips the lookup's waits.
+        caplog: Captures the warning.
+    """
+    monkeypatch.setattr(loop_host, "GENERATION_LOOKUP_DELAYS", (0.0, 0.0, 0.0))
+    lookups: list[str] = []
+    caplog.set_level(logging.WARNING, logger="core.worker.loop_host")
+
+    reply = _managed_client(_no_cost_provider(lambda identity: httpx.Response(404), lookups))("hello", None)
+
+    assert reply.text == "hi"
+    assert reply.cost_cents == 0
+    assert lookups == ["gen-nocost"] * 4
+    [record] = [record for record in caplog.records if "no complete cost" in record.getMessage()]
+    assert "gen-nocost" in record.getMessage()
+    assert "HTTP 404" in record.getMessage()
+    assert "hello" not in record.getMessage()
+    assert _FAKE_KEY not in record.getMessage()
 
 
 def test_a_billed_reply_that_cannot_be_read_gives_its_cost() -> None:
