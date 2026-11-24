@@ -36,8 +36,16 @@ SHAPE_USD_PER_HOUR = {
 # Skynet's sbx provider caps every sandbox timeout at 12 hours
 # (``_MAX_LIFETIME_SECONDS``); sbx itself allows 24. A test keeps the two equal.
 LIFETIME_CEILING_MS = 43_200_000
-# sbx bills from start to stop, but does not publish how long the create and
-# the delete take outside the box timeout. The hold funds this much more, and
+# The sbx timeout is a deadline, not an idle timeout: the API calls it "the
+# initial TTL" of "deadline behavior"
+# (https://docs.docker.com/reference/api/sandboxes/latest/schemas/TimeoutOptions),
+# and the CLI says expiry cannot pass 24 hours "from creation"
+# (https://docs.docker.com/reference/cli/sbx/create/), both read 2026-11-24.
+# Neither says when the server starts that clock, so this assumes it starts
+# no later than this grace after the create call. A sandbox whose delete fails
+# then bills at most its lifetime plus the grace, and settle never charges
+# more than the hold. sbx bills from start to stop, but does not publish how
+# long the create and the delete take outside the box timeout. The hold funds this much more, and
 # a box that runs longer than its lifetime plus this grace settles at the cap.
 BILLING_GRACE_MS = 600_000
 _MS_PER_HOUR = Decimal(3_600_000)
@@ -262,7 +270,10 @@ class SbxUsageReservation:
             snapshot = self.quote.price_snapshot
             ceiling_ms = snapshot["maximum_billable_ms"]
             measured = self.stopped_at is not None
-            runtime_ms = math.ceil((self.stopped_at - self.started_at) * 1000) if measured else ceiling_ms
+            if self.stopped_at is not None:
+                runtime_ms = math.ceil((self.stopped_at - self.started_at) * 1000)
+            else:
+                runtime_ms = ceiling_ms
             billed_ms = min(max(runtime_ms, 0), ceiling_ms)
             usd = _billed_usd(billed_ms, Decimal(snapshot["usd_per_hour"]))
             charge = vercel_charge_policy(snapshot).convert(usd)

@@ -100,6 +100,9 @@ _INT32 = (-(2**31), 2**31 - 1)
 _UINT64_MAX = 2**64 - 1
 _STARTING_STATUSES = frozenset({"creating", "starting"})
 _CLIENT_ERRORS = frozenset(range(400, 500))
+# Create answers that prove sbx made no sandbox. Any other 4xx (408, 499 and
+# the rest) can come after the server acted, so the create stays unknown.
+_CREATE_REFUSALS = frozenset({400, 401, 403, 404, 409, 422, 429})
 _PRECONDITION_FAILED = frozenset({409, 412})
 _SAFE_CODE = re.compile(r"[A-Za-z_]+")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
@@ -441,6 +444,27 @@ def _upload_body(path: str, data: bytes, boundary: str) -> bytes:
         + data
         + f"\r\n--{boundary}--\r\n".encode()
     )
+
+
+async def _uncancellable(future: asyncio.Future[Any]) -> Any:
+    """Wait for a worker-thread call that a cancel cannot stop.
+
+    A thread keeps running after a cancel, so on a cancel this waits for it to
+    end before it raises the cancel again. The caller then never races it.
+
+    Args:
+        future: The ``asyncio.to_thread`` call, wrapped in a future.
+
+    Returns:
+        The result of the call.
+    """
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(future)
+        raise
 
 
 async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
@@ -1013,13 +1037,10 @@ class SbxEnvironment(SandboxEnvironment):
                 )
             )
             try:
-                self._usage = await asyncio.shield(reserving)
+                self._usage = await _uncancellable(reserving)
             except asyncio.CancelledError:
-                # The thread cannot be cancelled and may still reserve; keep
-                # its result so the teardown releases it instead of leaking it.
-                while not reserving.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(reserving)
+                # The reservation may finish after the cancel; keep it so the
+                # teardown releases it instead of leaking it.
                 if not reserving.cancelled() and reserving.exception() is None:
                     self._usage = reserving.result()
                 raise
@@ -1049,9 +1070,10 @@ class SbxEnvironment(SandboxEnvironment):
                     headers={"Idempotency-Key": self._create_key},
                 )
                 if not response.is_success:
-                    # A 4xx answer is definite: sbx made no sandbox, so a stop
+                    # A refusal is definite: sbx made no sandbox, so a stop
                     # has no lost sandbox to look for.
-                    self._create_dispatched = False
+                    if response.status_code in _CREATE_REFUSALS:
+                        self._create_dispatched = False
                     raise _status_error(response, "create the sandbox")
                 sandbox = _json(response, "create the sandbox")
                 # Kept here, not in start(), so a stop that cancels the start
@@ -1062,7 +1084,9 @@ class SbxEnvironment(SandboxEnvironment):
                     raise SandboxInfraError("sbx gave no sandbox uid.")
                 self._uid = uid
                 if self._usage is not None:
-                    await asyncio.to_thread(self._usage.confirm_created, uid, self._create_body)
+                    await _uncancellable(
+                        asyncio.ensure_future(asyncio.to_thread(self._usage.confirm_created, uid, self._create_body))
+                    )
                 while _status(sandbox) in _STARTING_STATUSES:
                     await asyncio.sleep(POLL_INTERVAL)
                     response = await _call(client, "GET", self._path, action="read the sandbox")

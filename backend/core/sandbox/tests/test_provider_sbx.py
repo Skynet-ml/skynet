@@ -12,6 +12,7 @@ import base64
 import itertools
 import json
 import shlex
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1130,7 +1131,7 @@ async def test_cancelled_create_settles_the_sandbox_it_made() -> None:
     assert RESERVED[0].calls == ["start", "stop", "settle"]
 
 
-async def test_cancel_during_the_reservation_releases_it(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cancel_during_the_reservation_releases_it() -> None:
     """Release a reservation that finished after a cancel, and send no create."""
     reserving = asyncio.Event()
     finish = asyncio.Event()
@@ -1183,3 +1184,46 @@ async def test_measured_runtime_ends_before_the_clients_close(monkeypatch: pytes
     monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_close)
     await env.stop()
     assert RESERVED[0].calls == ["start", "confirm", "stop", "close", "close", "settle"]
+
+
+async def test_cancel_during_the_confirm_waits_for_it_before_the_settle() -> None:
+    """Finish the confirm thread before the teardown settles, so the two never race."""
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class SlowConfirm(FakeUsage):
+        """Hold the confirm until the test cancels the start."""
+
+        def confirm_created(self, uid: str, body: dict[str, Any]) -> None:
+            """Wait for the test, then record the confirm.
+
+            Args:
+                uid: The sandbox uid.
+                body: The create body.
+            """
+            entered.set()
+            proceed.wait(5)
+            super().confirm_created(uid, body)
+
+    RESERVED.clear()
+    env = SbxEnvironment(_spec(operation_key="box-1"), budget=object(), usage_factory=SlowConfirm)
+    task = asyncio.ensure_future(env.start())
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert RESERVED[0].calls == ["start", "confirm", "stop", "settle"]
+
+
+async def test_timed_out_create_answer_keeps_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat a 408 create answer as unknown: look for the sandbox and keep the hold."""
+    monkeypatch.setattr(sbx, "STOP_TIMEOUT", 60.0)
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (408, "requestTimeout")
+    env = _protected()
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert CLOUD.calls("GET", "/v1/sandboxes")
+    assert RESERVED[0].calls == ["start", "pending"]
