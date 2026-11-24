@@ -197,9 +197,8 @@ def _refusal(error: BaseException | None) -> str | None:
 
     Returns:
         The sandbox error group of a 400/422 or shape answer, or a refused
-        token, or
-        ``None`` for any other outcome. A refusal alone does not prove that
-        no box exists; only an empty list after it does.
+        token, or ``None`` for any other outcome. A refusal alone does not
+        prove that no box exists; only an empty list after it does.
     """
     # The SDK retries a dropped answer, a 429 and a 5xx under the same
     # idempotency key, so a final 429 can follow an attempt that started a
@@ -514,6 +513,13 @@ class MosaicEnvironment(SandboxEnvironment):
 
         Raises:
             StartTimeoutError: The create did not finish within the start timeout.
+            UnpricedOperationError: The box's shape or lifetime has no price.
+            BudgetConflictError: The operation key was reused for other work.
+            OperationCompletedError: The box's operation already completed.
+            UsagePendingError: The operation was already dispatched, or
+                Mosaic did not confirm the funded shape.
+            BudgetError: The budget cannot fund the box, or a write failed.
+            SandboxError: The create or confirm call failed; see ``_mapped``.
         """
         limit = self._start_limit
         usage = await self._reserve()
@@ -706,6 +712,9 @@ class MosaicEnvironment(SandboxEnvironment):
     async def stop(self) -> None:
         """Destroy the sandbox once and settle its hold. Safe to call again.
 
+        A cleanup that runs past ``STOP_TIMEOUT`` goes on in the background.
+        Its settle error is then only logged, and the hold stays pending.
+
         Raises:
             UsagePendingError: The settle failed, so the hold stays pending.
             BudgetError: The settle write failed.
@@ -728,28 +737,51 @@ class MosaicEnvironment(SandboxEnvironment):
                 await self._starting
         if self._expiry is not None:
             self._expiry.cancel()
-        if self._billing_call is not None:
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(self._billing_call)
         box, box_id, call = self._box, self._box_id, self._create_call
         self._box = self._box_id = self._create_call = None
         usage, self._usage = self._usage, None
+        destroyed = False
         if box is not None:
+            # Destroy before waiting for a slow confirm, so the box stops
+            # running, and billing, first.
             destroyed = await _bounded(box.destroy(), "destroy the sandbox")
-            if usage is not None:
-                await self._close_usage(usage, [(box_id, None, destroyed)])
+            if usage is None:
+                return
+            if destroyed:
+                usage.stopped()
+        elif not self._create_dispatched and usage is None:
+            return
+        action = "settle the sandbox hold" if box is not None else "destroy the lost sandbox"
+        cleanup = asyncio.ensure_future(self._close(box_id if box is not None else None, destroyed, call, usage))
+        _BACKGROUND_CLEANUPS.add(cleanup)
+        cleanup.add_done_callback(functools.partial(_cleanup_done, action))
+        # The create thread, the confirm and the usage history read cannot be
+        # cancelled and can outlive the stop limit, so the cleanup goes on in
+        # the background after the wait.
+        done, _pending = await asyncio.wait({cleanup}, timeout=STOP_TIMEOUT)
+        if not done:
+            logger.warning("Mosaic did not %s in time; it goes on in the background.", action)
+
+    async def _close(
+        self, box_id: str | None, destroyed: bool, call: asyncio.Future[Any] | None, usage: Any | None
+    ) -> None:
+        """Wait for a running confirm, then settle the kept box or close the lost create.
+
+        Args:
+            box_id: The id of the kept box, or ``None`` when the provider kept no box.
+            destroyed: True when Mosaic confirmed the kept box's destroy.
+            call: The create thread future, or ``None``.
+            usage: The usage reservation of a protected box, or ``None``.
+        """
+        if self._billing_call is not None:
+            # The settle needs the id that the confirm binds. ``wait`` does not
+            # raise the confirm's error, but it does pass on a cancel.
+            await asyncio.wait({self._billing_call})
+        if box_id is not None:
+            await self._close_usage(usage, [(box_id, None, destroyed)])
         elif self._create_dispatched:
-            action = "destroy the lost sandbox"
-            cleanup = asyncio.ensure_future(self._close_lost_create(call, usage))
-            _BACKGROUND_CLEANUPS.add(cleanup)
-            cleanup.add_done_callback(functools.partial(_cleanup_done, action))
-            # The create thread cannot be cancelled and can outlive the stop
-            # limit, so the cleanup, and the settle after it, go on in the
-            # background after the wait.
-            done, _pending = await asyncio.wait({cleanup}, timeout=STOP_TIMEOUT)
-            if not done:
-                logger.warning("Mosaic did not %s in time; it goes on in the background.", action)
-        elif usage is not None:
+            await self._close_lost_create(call, usage)
+        else:
             error = self._start_error
             await self._close_usage(usage, [], type(error).__name__ if error is not None else "no_box_created")
 

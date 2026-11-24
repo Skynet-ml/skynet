@@ -2,15 +2,15 @@
 
 Mosaic bills one rate for each billing unit-hour of awake time. A box's
 units are ``max(ceil(vcpu / 2), ceil(memory_mb / 4096))``. Hibernation and
-egress are free, and no creation fee is published. The quote funds the box's whole lifetime at
-its units, so the funded hold is a ceiling. The settle reads Mosaic's
-per-sandbox usage history. When that history is not final and complete,
-the settle charges the measured wall time from the create call to the
-confirmed destroy, plus a two-second margin for Mosaic's whole-second
-timestamps, which is never less than the awake time. A known box
-without a confirmed destroy, or whose shape Mosaic did not confirm, is
-charged the whole hold, because it may still run or run larger. Every charge
-is clamped to the reserved hold.
+egress are free, and no creation fee is published. The quote funds the box's
+whole lifetime at its units, so the funded hold is a ceiling. The settle
+reads Mosaic's per-sandbox usage history. When that history is not final and
+complete, the settle charges the measured wall time from the create call to
+the confirmed destroy, plus a two-second margin for Mosaic's whole-second
+timestamps, which is never less than the awake time. A known box without a
+confirmed destroy, or whose shape Mosaic did not confirm, is charged the
+whole hold, because it may still run or run larger. Every charge is clamped
+to the reserved hold.
 """
 
 from __future__ import annotations
@@ -45,10 +45,9 @@ _HISTORY_LIMIT = 500
 # Mosaic's create accepts 1 to 64 vCPUs and 128 MiB to 256 GiB of memory.
 _MAX_VCPU = 64
 _MEMORY_MB_RANGE = (128, 262_144)
-# Mosaic stamps a usage segment in whole seconds, and opens it at the create's
-# accounting intent, which can come before this worker reads its clock. The
-# DELETE answers 204 only after the destroy, so one second of rounding at each
-# end covers the gap. The settle still clamps the charge to the hold.
+# Mosaic stamps a usage segment's start and end in whole seconds, so rounding
+# can widen the segment by up to one second at each end. The settle still
+# clamps the charge to the hold.
 _WALL_MARGIN_MS = 2_000
 
 _clock = time.monotonic

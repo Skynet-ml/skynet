@@ -1010,6 +1010,7 @@ class FakeUsage:
         self.calls: list[str] = []
         self.confirm_delay = 0.0
         self.confirm_error: Exception | None = None
+        self.settle_delay = 0.0
         self.sandbox_id: str | None = None
         USAGES.append(self)
 
@@ -1044,8 +1045,9 @@ class FakeUsage:
         self.calls.append(f"bind:{sandbox_id}")
 
     def stopped(self) -> None:
-        """Record the confirmed destroy."""
-        self.calls.append("stopped")
+        """Record the confirmed destroy once, like the real reservation keeps the first instant."""
+        if "stopped" not in self.calls:
+            self.calls.append("stopped")
 
     def settle(self) -> None:
         """Record the settle, and fail it like the real one when no box id is known.
@@ -1053,6 +1055,8 @@ class FakeUsage:
         Raises:
             UsagePendingError: No box id is known.
         """
+        if self.settle_delay:
+            time.sleep(self.settle_delay)
         self.calls.append("settle")
         if self.sandbox_id is None:
             raise UsagePendingError("no known box")
@@ -1241,6 +1245,70 @@ async def test_a_cancelled_start_still_destroys_and_settles(fake_sdk: FakeCloud,
         await start
     (box,) = fake_sdk.boxes.values()
     assert box.state == "destroyed"
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_a_stop_during_a_hanging_confirm_destroys_the_box_first(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Destroy the box before waiting for a hanging confirm, then settle in the background.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.05)
+
+    def factory(*args: Any, **kwargs: Any) -> FakeUsage:
+        """Make a reservation whose confirm hangs past the stop limit.
+
+        Args:
+            *args: The reserve arguments.
+            **kwargs: The reserve keyword arguments.
+
+        Returns:
+            The reservation.
+        """
+        usage = FakeUsage(*args, **kwargs)
+        usage.confirm_delay = 0.5
+        return usage
+
+    env = MosaicEnvironment(_spec(operation_key="op-1"), budget=object(), usage_factory=factory)
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.1)
+    assert usages[0].calls[-1].startswith("confirm:")
+    await env.stop()
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert "settle" not in usages[0].calls
+    with pytest.raises(SandboxInfraError):
+        await start
+    await _wait_for_the_background_cleanup()
+    assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
+
+
+async def test_a_slow_settle_goes_on_after_the_stop_limit(
+    fake_sdk: FakeCloud, usages: list[FakeUsage], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return from the stop at its limit while a slow settle goes on in the background.
+
+    Args:
+        fake_sdk: The fake Mosaic account.
+        usages: The fake reservations of the test.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.05)
+    env = _protected()
+    await env.start()
+    usages[0].settle_delay = 0.5
+    stopping = time.monotonic()
+    await env.stop()
+    assert time.monotonic() - stopping < 0.4
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "destroyed"
+    assert "settle" not in usages[0].calls
+    await _wait_for_the_background_cleanup()
     assert usages[0].calls == ["dispatched", f"confirm:{box.id}", "stopped", "settle"]
 
 
