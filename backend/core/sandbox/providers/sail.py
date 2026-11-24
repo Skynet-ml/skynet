@@ -82,7 +82,9 @@ CREATE_GRACE = 30.0
 # hung SDK call.
 EXEC_GRACE = 30.0
 # A session close gives one stop 240 s (``_ASYNC_CLOSE_BUDGET_SECONDS`` in the
-# blackbox sandbox runtime). The teardown keeps 15 s of it for the ledger calls.
+# blackbox sandbox runtime). The teardown keeps 15 s of it for the ledger
+# calls (bind, release, pending and settle). Those calls have no own bound:
+# they are short database writes, and the 15 s margin assumes they stay short.
 TEARDOWN_SECONDS = 225.0
 OUTPUT_BUFFER_BYTES = 64 * 1024 * 1024
 # The provider contract reports a timeout as exit code 124, like GNU timeout.
@@ -380,6 +382,7 @@ class SailEnvironment(SandboxEnvironment):
         # A stop before the start leaves a finished stop task; drop it so the
         # stop after this start terminates the box.
         self._stop_task = None
+        self._box_gone.clear()
         self.preflight()
         self._starting = asyncio.ensure_future(self._create())
         try:
@@ -799,10 +802,13 @@ class SailEnvironment(SandboxEnvironment):
             UsagePendingError: The lookup failed, or it found more than one box.
         """
         try:
-            found = await asyncio.wait_for(Sailbox.list.aio(name=self._name), STOP_TIMEOUT)
+            listed = await asyncio.wait_for(Sailbox.list.aio(name=self._name), STOP_TIMEOUT)
         except Exception as error:
             await asyncio.to_thread(usage.pending)
             raise UsagePendingError("Sail could not list boxes after a failed create, so the hold stays.") from error
+        # Only a box with this exact name can belong to this create; never
+        # terminate another box that the list returns.
+        found = [box for box in list(listed) if box.name == self._name]
         if not found:
             return None
         # Together, so several boxes still take one STOP_TIMEOUT.

@@ -44,9 +44,9 @@ logger = logging.getLogger(__name__)
 # has a creation rate for each size (``rates.<size>_creation_usd_nanos``),
 # but the pricing page publishes only one fee, so the quote and the measured
 # settle use that fee. Without account prices the reported rates are likely
-# zero, so they would drop the creation charge; with account prices Sail's
-# own cost is used, plus the creation charge at Sail's rate for the size.
-# The rates go into the settle evidence for audit.
+# zero, so they would drop the creation charge. With account prices, the
+# settle recomputes the cost from the measured seconds and Sail's rates; see
+# ``sail_actual_usd``. The rates go into the settle evidence for audit.
 _PRICING_URL = "https://docs.sailresearch.com/pricing.md"
 _SPEND_URL = "https://docs.sailresearch.com/api-reference/usage/get-sailbox-spend.md"
 _PRICE_VERSION = "sail-public-2026-11-24"
@@ -57,6 +57,12 @@ _CREATION_USD = Decimal("0.01")
 _SECONDS_PER_HOUR = Decimal(3600)
 _MS_PER_HOUR = Decimal(3_600_000)
 _NANOS_PER_USD = Decimal(1_000_000_000)
+# The spend report's per-second rates for each measured counter.
+_SAIL_SECOND_RATES = {
+    "vcpu_seconds": "vcpu_second_usd_nanos",
+    "memory_gib_seconds": "memory_gib_second_usd_nanos",
+    "state_disk_gib_seconds": "state_disk_gib_second_usd_nanos",
+}
 # The size ladder of the sail SDK 0.17.2 core, the version that uv.lock
 # pins: vCPUs, then the default and the most memory and disk in GiB. The
 # public docs do not list it; it comes from the size checks in that SDK's
@@ -295,9 +301,10 @@ def _creation_usd(spend: Mapping[str, Any], fee: Any) -> Decimal:
 def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any]) -> Decimal:
     """Price one box from its spend line.
 
-    Sail's own cost is used when Sail has prices set for the account.
-    Otherwise the measured usage is priced at the admitted rates. The
-    creation charge is added in both cases, unless Sail waives it.
+    The measured usage is priced per second, plus the creation charge
+    unless Sail waives it. With account prices, Sail's reported rates are
+    used and the result is never below Sail's own cost. Otherwise the
+    admitted rates are used.
 
     Args:
         spend: The box's spend line with the report's pricing flags.
@@ -310,27 +317,33 @@ def sail_actual_usd(spend: Mapping[str, Any], price_snapshot: Mapping[str, Any])
         UsagePendingError: When the line or the snapshot has no usable numbers.
     """
     try:
-        if spend.get("pricing_configured") is True:
-            # The spend docs call cost_usd_nanos the cost of the box's usage
-            # and list creation_count and the creation rates apart from it.
-            # They do not say if the cost includes the creation charge, so
-            # the charge is added; the settle clamps the total to the hold.
+        per_second = {
+            "vcpu_seconds": exact_nonnegative(price_snapshot["vcpu_hour_usd"]) / _SECONDS_PER_HOUR,
+            "memory_gib_seconds": exact_nonnegative(price_snapshot["memory_gib_hour_usd"]) / _SECONDS_PER_HOUR,
+            "state_disk_gib_seconds": exact_nonnegative(price_snapshot["disk_gib_hour_usd"]) / _SECONDS_PER_HOUR,
+        }
+        fee = price_snapshot["creation_usd"]
+        configured = spend.get("pricing_configured") is True
+        rates = spend.get("rates")
+        if configured and isinstance(rates, Mapping):
+            for counter, name in _SAIL_SECOND_RATES.items():
+                if rates.get(name) is not None:
+                    per_second[counter] = exact_nonnegative(rates[name]) / _NANOS_PER_USD
             size = (price_snapshot.get("request") or {}).get("size") or _DEFAULT_SIZE
-            rates = spend.get("rates")
-            rate = rates.get(f"{size}_creation_usd_nanos") if isinstance(rates, Mapping) else None
-            fee = (
-                exact_nonnegative(rate) / _NANOS_PER_USD
-                if rate is not None and exact_nonnegative(rate) > 0
-                else price_snapshot["creation_usd"]
-            )
-            return exact_nonnegative(spend["cost_usd_nanos"]) / _NANOS_PER_USD + _creation_usd(spend, fee)
-        usage = (
-            exact_nonnegative(spend["vcpu_seconds"]) * exact_nonnegative(price_snapshot["vcpu_hour_usd"])
-            + exact_nonnegative(spend["memory_gib_seconds"]) * exact_nonnegative(price_snapshot["memory_gib_hour_usd"])
-            + exact_nonnegative(spend["state_disk_gib_seconds"])
-            * exact_nonnegative(price_snapshot["disk_gib_hour_usd"])
-        ) / _SECONDS_PER_HOUR
-        return usage + _creation_usd(spend, price_snapshot["creation_usd"])
+            rate = rates.get(f"{size}_creation_usd_nanos")
+            if rate is not None and exact_nonnegative(rate) > 0:
+                fee = exact_nonnegative(rate) / _NANOS_PER_USD
+        cost = sum(
+            (exact_nonnegative(spend[counter]) * price for counter, price in per_second.items()), Decimal(0)
+        ) + _creation_usd(spend, fee)
+        if configured:
+            # The spend docs (_SPEND_URL) call cost_usd_nanos "the cost of the
+            # Sailbox's usage" and list creation_count apart from it; they do
+            # not say if the cost holds the creation charge. The recomputed
+            # cost holds it once. Sail's own cost is the floor, for rates that
+            # this code does not know ("New rates can appear over time").
+            cost = max(cost, exact_nonnegative(spend["cost_usd_nanos"]) / _NANOS_PER_USD)
+        return cost
     except (KeyError, TypeError, ValueError) as error:
         raise UsagePendingError("The Sail spend report has no usable cost for the box.") from error
 
@@ -531,6 +544,7 @@ class SailUsageReservation:
             # The last read starts before the deadline and can take its timeout.
             wait_for = min(wait_for, budget - _SPEND_TIMEOUT_SECONDS)
         give_up = self._clock() + wait_for
+        reads_end = give_up + _SPEND_TIMEOUT_SECONDS
         wait = SPEND_DELAY_SECONDS
         previous: dict[str, Any] | None = None
         first_seen = 0.0
@@ -540,7 +554,12 @@ class SailUsageReservation:
             await self._sleep(wait)
             wait = SPEND_POLL_SECONDS
             try:
-                report = await asyncio.to_thread(self._fetch, sailbox_id, since)
+                # The httpx timeout bounds each phase, so a slow trickle could
+                # pass it; this bounds the whole read inside the budget.
+                report = await asyncio.wait_for(
+                    asyncio.to_thread(self._fetch, sailbox_id, since),
+                    max(0.0, min(_SPEND_TIMEOUT_SECONDS, reads_end - self._clock())),
+                )
             except httpx.HTTPStatusError as error:
                 if error.response.status_code not in _TRANSIENT_STATUSES:
                     raise
@@ -548,7 +567,7 @@ class SailUsageReservation:
                 if retry_after is not None:
                     wait = retry_after
                 continue
-            except httpx.TransportError:
+            except (httpx.TransportError, TimeoutError):
                 continue
             line = _box_spend(report, sailbox_id)
             if line is None:

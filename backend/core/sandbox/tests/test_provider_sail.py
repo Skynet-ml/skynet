@@ -284,6 +284,7 @@ class FakeSailbox:
             box: The box state.
         """
         self.sailbox_id = box.id
+        self.name = box.params.get("name")
         self._box = box
         self.run = _aio(self._run)
         self.terminate = _aio(self._terminate)
@@ -1645,6 +1646,71 @@ async def test_a_lookup_that_finds_two_boxes_keeps_the_hold(fake_sdk: FakeCloud)
         await env.stop()
     assert [box.terminated for box in fake_sdk.boxes] == [True, True]
     assert made[0].names() == ["begin_create", "pending"]
+
+
+async def test_a_lookup_never_terminates_a_box_with_another_name(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate and settle only the box with the exact name, when the list returns more.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+        monkeypatch: Makes the list return every box.
+    """
+
+    async def list_all(*, name: str) -> list[FakeSailbox]:
+        """List every fake box, whatever its name.
+
+        Args:
+            name: The box name, which this list ignores.
+
+        Returns:
+            The handles of all boxes.
+        """
+        return [FakeSailbox(box) for box in fake_sdk.boxes]
+
+    monkeypatch.setattr(FakeSailbox, "list", _aio(list_all), raising=False)
+    fake_sdk.create_error = FakeApiError(429)
+    fake_sdk.create_makes_box = True
+    env, made = _protected()
+    fake_sdk.boxes.append(BoxState(id="sb-other", params={"name": "someone-else"}))
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    await env.stop()
+    terminated = {box.id: box.terminated for box in fake_sdk.boxes}
+    assert terminated == {"sb-1": True, "sb-other": False}
+    assert "settle" in made[0].names()
+
+
+async def test_a_start_after_an_early_stop_waits_for_its_box_to_go(fake_sdk: FakeCloud) -> None:
+    """Return a failed start only after its box is gone, also after a stop before the start.
+
+    Args:
+        fake_sdk: The fake Sail cloud.
+    """
+    env, made = _protected()
+    await env.stop()
+
+    def gated(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Make a fake reservation whose confirm fails.
+
+        Args:
+            budget: The budget runtime.
+            request: The priced request.
+            operation_key: The box's operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        made.append(FakeUsage(request, operation_key))
+        made[-1].confirm_error = SandboxInfraError("confirm failed")
+        return made[-1]
+
+    env._usage_factory = gated
+    with pytest.raises(SandboxInfraError, match="confirm failed"):
+        await env.start()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    await env.stop()
 
 
 async def test_protected_boxes_with_one_spec_name_get_different_sail_names(fake_sdk: FakeCloud) -> None:

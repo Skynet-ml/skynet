@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import threading
+import time
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +45,15 @@ SPEND = {
     "memory_gib_seconds": 1_200,
     "state_disk_gib_seconds": 2_400,
     "creation_count": 1,
+}
+
+# Sail's account rates in the spend report, in billionths of a dollar.
+RATES = {
+    "vcpu_second_usd_nanos": 10_000,
+    "memory_gib_second_usd_nanos": 5_000,
+    "state_disk_gib_second_usd_nanos": 1_000,
+    "s_creation_usd_nanos": 20_000_000,
+    "l_creation_usd_nanos": 50_000_000,
 }
 
 
@@ -254,19 +265,19 @@ def _status_error(status: int, retry_after: str | None = None) -> httpx.HTTPStat
 
 
 def test_reserve_then_settle_charges_sails_reported_cost(database: Engine) -> None:
-    """Settle at Sail's cost plus the creation fee once the line stays the same for a minute.
+    """Settle at Sail's rates plus one creation charge once the line stays the same for a minute.
 
     Args:
         database: Engine of the funded ledger.
     """
-    spend = FakeSpend(None, SPEND)
+    spend = FakeSpend(None, SPEND, rates=RATES)
     reservation = _reservation(database, spend)
     _created(reservation)
     reservation.settle()
     runtime = reservation.runtime
     assert _state(database) == "settled"
-    # 1.2 cents of usage and the published 1-cent creation fee.
-    assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("2.20")
+    # 1.44 cents of usage at Sail's rates and its 2-cent creation rate.
+    assert runtime.service.get_operation(reservation.operation.id, "alice").actual_cents == Decimal("3.44")
     assert reservation.operation.id not in runtime._pinned
     assert {read[0] for read in spend.reads} == {"sb-1"}
     assert reservation.create_sent_at is not None
@@ -283,13 +294,13 @@ def test_a_changed_line_restarts_the_agreement_wait(database: Engine) -> None:
     Args:
         database: Engine of the funded ledger.
     """
-    late = {**SPEND, "cost_usd_nanos": 13_000_000}
-    spend = FakeSpend(SPEND, SPEND, late)
+    late = {**SPEND, "vcpu_seconds": 700, "cost_usd_nanos": 13_000_000}
+    spend = FakeSpend(SPEND, SPEND, late, rates=RATES)
     reservation = _reservation(database, spend)
     _created(reservation)
     reservation.settle()
     settled = reservation.runtime.service.get_operation(reservation.operation.id, "alice")
-    assert settled.actual_cents == Decimal("2.30")
+    assert settled.actual_cents == Decimal("3.54")
     assert spend.now == sail_usage.SPEND_DELAY_SECONDS + 6 * sail_usage.SPEND_POLL_SECONDS
 
 
@@ -302,18 +313,19 @@ def test_settle_prices_measured_usage_when_sail_has_no_prices() -> None:
     assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
 
 
-def test_settle_adds_sails_creation_rate_to_its_cost() -> None:
-    """Add Sail's creation rate for the size to its cost, because the docs do not say the cost holds it."""
+def test_settle_recomputes_sails_cost_with_one_creation_charge() -> None:
+    """Price the counters at Sail's rates plus one creation charge, with Sail's cost as the floor."""
     snapshot = quote_sail_sandbox(CREATE).price_snapshot
-    line = {
-        **SPEND,
-        "pricing_configured": True,
-        "creation_fees_waived": False,
-        "rates": {"s_creation_usd_nanos": 20_000_000, "l_creation_usd_nanos": 50_000_000},
-    }
-    assert sail_actual_usd(line, snapshot) == Decimal("0.012") + Decimal("0.02")
-    assert sail_actual_usd({**line, "rates": None}, snapshot) == Decimal("0.012") + Decimal("0.01")
-    assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == Decimal("0.012")
+    line = {**SPEND, "pricing_configured": True, "creation_fees_waived": False, "rates": RATES}
+    usage = 600 * Decimal("0.00001") + 1200 * Decimal("0.000005") + 2400 * Decimal("0.000001")
+    assert sail_actual_usd(line, snapshot) == usage + Decimal("0.02")
+    # A cost that already holds the creation charge does not get it twice.
+    assert sail_actual_usd({**line, "cost_usd_nanos": 34_400_000}, snapshot) == Decimal("0.0344")
+    # A rate that this code does not know shows only in Sail's own cost.
+    assert sail_actual_usd({**line, "cost_usd_nanos": 50_000_000}, snapshot) == Decimal("0.05")
+    assert sail_actual_usd({**line, "creation_fees_waived": True}, snapshot) == usage
+    published = (600 * Decimal("0.015") + 1200 * Decimal("0.008") + 2400 * Decimal("0.0007")) / 3600
+    assert sail_actual_usd({**line, "rates": None}, snapshot) == published + Decimal("0.01")
 
 
 def test_settle_ignores_zero_creation_rates_when_sail_has_no_prices() -> None:
@@ -348,7 +360,8 @@ def test_settle_clamps_to_the_reservation(database: Engine, caplog: pytest.LogCa
     with Session(database) as session:
         evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence
     assert evidence["clamped"] is True
-    assert Decimal(evidence["unclamped_cents"]) == Decimal(501)
+    # Sail's own cost is above the recomputed cost, so it is the charge.
+    assert Decimal(evidence["unclamped_cents"]) == Decimal(500)
     assert "clamped" in caplog.text
 
 
@@ -429,6 +442,53 @@ def test_a_short_budget_ends_the_spend_wait_with_its_last_read(database: Engine)
     # 100 s less the 30 s read timeout leaves room for the first read only.
     assert len(spend.reads) == 1
     assert spend.now + sail_usage._SPEND_TIMEOUT_SECONDS <= 100.0
+
+
+def test_a_read_slower_than_the_time_left_ends_inside_the_budget(
+    database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop waiting for a spend read at the end of the budget, and keep the hold.
+
+    Args:
+        database: Engine of the funded ledger.
+        monkeypatch: Shortens the read timeout.
+    """
+    monkeypatch.setattr(sail_usage, "_SPEND_TIMEOUT_SECONDS", 0.05)
+    gate = threading.Event()
+    spend = FakeSpend(SPEND)
+    reservation = _reservation(database, spend)
+    _created(reservation)
+
+    def slow(sailbox_id: str, since: dt.datetime) -> Mapping[str, Any]:
+        """Trickle the answer until the test opens the gate.
+
+        Args:
+            sailbox_id: The box to report.
+            since: The start of the report window.
+
+        Returns:
+            The scripted spend report.
+        """
+        gate.wait(5)
+        return spend.fetch(sailbox_id, since)
+
+    reservation._fetch = slow
+
+    async def settle() -> float:
+        """Run the spend wait and time it.
+
+        Returns:
+            The seconds that the wait took.
+        """
+        started = time.monotonic()
+        try:
+            with pytest.raises(UsagePendingError, match="final spend"):
+                await reservation.final_spend(budget=sail_usage.SPEND_DELAY_SECONDS + 0.1)
+            return time.monotonic() - started
+        finally:
+            gate.set()
+
+    assert asyncio.run(settle()) < 1.0
 
 
 def test_a_line_that_never_settles_stays_pending_with_its_last_read(database: Engine) -> None:
