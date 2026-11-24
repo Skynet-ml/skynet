@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shlex
 import threading
 import time
@@ -1651,6 +1652,53 @@ async def test_cancel_of_the_background_wait_marks_the_hold_pending_once(
     assert not langsmith._SETTLE_TASKS
 
 
+async def test_cancel_during_the_background_settle_logs_its_error_and_closes(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Re-raise a cancel that comes while the settle thread runs, log the settle error and close the client once."""
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def settle(self: FakeUsage) -> None:
+        """Hold the settle thread until the test lets it fail.
+
+        Raises:
+            UsagePendingError: Always, after the gate opens.
+        """
+        self.events.append(("settle", self.deleted))
+        entered.set()
+        gate.wait(5)
+        raise UsagePendingError("not settled")
+
+    usage.settle = settle  # type: ignore[method-assign]
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    task = await _handed_off(server, env)
+    clock.offset = _PAST_THE_WINDOW
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    gate.set()
+    with caplog.at_level(logging.WARNING, logger=langsmith.logger.name), pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert usage.events == [("reserve", "op-1"), ("settle", True)]
+    assert server.closed == 1
+    assert "usage stays pending: UsagePendingError" in caplog.text
+
+
+async def test_settle_error_after_a_hand_off_is_only_logged(
+    server: FakeServer, usage: type[FakeUsage], clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the settle error of the background wait, and raise nothing into the stop that handed it off."""
+    env = _protected(usage, startup_timeout_seconds=_LONG_STARTUP_SECONDS)
+    await _handed_off(server, env)
+    server.get_error = FakeConnectionError("lookup lost")
+    clock.offset = _PAST_THE_POLL
+    with caplog.at_level(logging.WARNING, logger=langsmith.logger.name):
+        await _settled()
+    assert usage.events == [("reserve", "op-1"), ("settle", False)]
+    assert f"LangSmith sandbox {env.name} usage stays pending: UsagePendingError." in caplog.text
+    assert not langsmith._SETTLE_TASKS
+
+
 async def test_later_stops_and_the_job_sweep_leave_a_handed_off_hold_alone(
     server: FakeServer, usage: type[FakeUsage], clock: FakeClock
 ) -> None:
@@ -1662,7 +1710,7 @@ async def test_later_stops_and_the_job_sweep_leave_a_handed_off_hold_alone(
     assert await asyncio.wait_for(LangSmithEnvironment.stop_job_sandboxes("job-1"), 5) == 0
     assert usage.events == [("reserve", "op-1")]
     assert len(langsmith._SETTLE_TASKS) == 1
-    # A new start reserves its own hold instead of reusing the handed-off one.
+    # A new start does not reuse the handed-off usage object.
     server.create_error = None
     await asyncio.wait_for(env.start(), 5)
     assert await asyncio.wait_for(LangSmithEnvironment.stop_job_sandboxes("job-1"), 5) == 1

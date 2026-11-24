@@ -359,8 +359,9 @@ class LangSmithEnvironment(SandboxEnvironment):
 
         A protected box waits for a 404 proof. After an answered create, a
         refused create or a create window that already ended, the proof can
-        come at once, so ``stop`` waits for it: the delete (up to 60 s), the
-        60 s poll window, one last pass of up to about 122 s (get, delete,
+        come at once, so ``stop`` waits for it: for a refused create the
+        lookup by name (up to 60 s), the delete (up to 60 s), the 60 s poll
+        window, one last pass of up to about 122 s (get, delete,
         poll pause), the client close (up to 60 s) and the ledger calls. An
         answered create usually takes one poll.
 
@@ -874,7 +875,8 @@ async def _settle_late(
 
     Raises:
         asyncio.CancelledError: The event loop cancelled the wait; the hold
-            is marked pending first.
+            is marked pending first, except a cancel before the task starts,
+            which leaves the hold dispatched and is only logged.
     """
     settling: asyncio.Future[None] | None = None
     try:
@@ -897,20 +899,26 @@ async def _settle_late(
                     name,
                     type(marking.exception()).__name__,
                 )
+        elif settling.done() and not settling.cancelled() and settling.exception() is not None:
+            # The cancel replaces the settle error, so log it here or nobody reads it.
+            logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(settling.exception()).__name__)
         raise
     finally:
         await _close(client)
 
 
 def _on_settle_done(name: str, task: asyncio.Future[None]) -> None:
-    """Forget a finished proof wait and log its failure.
+    """Forget a finished proof wait and log its failure or its cancel.
 
     Args:
         name: The sandbox name.
         task: The finished proof wait.
     """
     _SETTLE_TASKS.discard(task)
-    if not task.cancelled() and task.exception() is not None:
+    if task.cancelled():
+        # A cancel before the first step skips the pending mark, so this log is the only trace of that hold.
+        logger.warning("LangSmith sandbox %s proof wait was cancelled; check its usage hold.", name)
+    elif task.exception() is not None:
         logger.warning("LangSmith sandbox %s usage stays pending: %s.", name, type(task.exception()).__name__)
 
 
